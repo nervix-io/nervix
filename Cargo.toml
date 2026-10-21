@@ -287,6 +287,7 @@ rstest = { workspace = true }
 rumqttc = { workspace = true }
 sqlx = { workspace = true }
 tempfile = { workspace = true }
+tokio-util = { workspace = true, features = ["codec"] }
 zeromq = { workspace = true }
 
 [[test]]
@@ -657,8 +658,10 @@ prost-reflect = "0.15.3"
 prost-types = "0.13"
 protox = "0.8.0"
 # 6.9.0 with the broker's announced maxMessageSize kept per connection, a larger message refused
-# before it is written, and a broker SendError resolved with its server error.
-pulsar = { git = "https://github.com/nervix-io/pulsar-rs.git", branch = "nervix-max-message-size", default-features = false, features = [
+# before it is written, and a broker SendError resolved with its server error; acknowledgements
+# that wait for the broker's answer when a consumer enables ack receipts, and a negative
+# acknowledgement that reports a redelivery request it could not send.
+pulsar = { git = "https://github.com/nervix-io/pulsar-rs.git", branch = "nervix-message-size-ack-receipts", default-features = false, features = [
   "compression",
   "tokio-rustls-runtime",
 ] }
@@ -732,6 +735,7 @@ shuttle-tokio-util = { package = "shuttle-tokio-util", version = "0.7" }
 signal-hook = "0.4"
 simd-json = { version = "0.17.0", features = ["known-key"] }
 simdutf8 = "0.1.5"
+socket2 = "0.6"
 sorted-vec = "0.8"
 sqlx = { version = "0.9", default-features = false, features = [
   "postgres",

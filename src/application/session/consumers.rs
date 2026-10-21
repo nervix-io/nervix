@@ -29,6 +29,7 @@ use nervix_primitives::sync::{
     blocking::Mutex,
     mpsc,
 };
+use tracing::debug;
 
 use super::{QueuedReply, SessionShared};
 use crate::{
@@ -135,15 +136,34 @@ impl SessionConsumers {
         in_transaction: bool,
     ) {
         let consumer = ConsumerId::opened_by(request_id);
+        let domain = open.domain.clone();
+        let emitter = open.emitter.clone();
         let outcome = match self.attach(shared, consumer, open, in_transaction).await {
-            Ok(opened) => OpenEmitterOutcome {
-                disposition: OpenEmitterDisposition::Opened(Box::new(opened)),
-                message: "consumer attached".to_string(),
-            },
-            Err((refusal, message)) => OpenEmitterOutcome {
-                disposition: OpenEmitterDisposition::Refused(refusal),
-                message,
-            },
+            Ok(opened) => {
+                debug!(
+                    domain = domain.as_str(),
+                    emitter = emitter.as_str(),
+                    %consumer,
+                    "a consumer attached"
+                );
+                OpenEmitterOutcome {
+                    disposition: OpenEmitterDisposition::Opened(Box::new(opened)),
+                    message: "consumer attached".to_string(),
+                }
+            }
+            Err((refusal, message)) => {
+                debug!(
+                    domain = domain.as_str(),
+                    emitter = emitter.as_str(),
+                    refusal = ?refusal,
+                    message = message.as_str(),
+                    "a consumer open was refused"
+                );
+                OpenEmitterOutcome {
+                    disposition: OpenEmitterDisposition::Refused(refusal),
+                    message,
+                }
+            }
         };
         let announced = shared
             .finish_with(request_id, ReplyBody::OpenEmitter(outcome))
@@ -320,6 +340,10 @@ impl SessionConsumers {
                 message: String::new(),
             },
             None => {
+                debug!(
+                    consumer = %request.consumer,
+                    "a consumer read found its delivery stream ended"
+                );
                 self.close_handle(request.consumer);
                 ReadEmitterBatchOutcome {
                     disposition: ReadEmitterDisposition::Ended,

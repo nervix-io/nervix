@@ -17,7 +17,7 @@ use meticulous::OptionExt as _;
 use nervix_connector_websockets::CompiledSignalingProtocol;
 use nervix_primitives::{
     publication::{ArcSwap, ArcSwapOption, Guard},
-    sync::{Arc, StdArc},
+    sync::{Arc, CancellationToken, StdArc},
 };
 
 use super::{
@@ -37,6 +37,7 @@ struct EndpointBindingLifetime<T> {
     )]
     identity: DomainNodeRef,
     intake: ArcSwapOption<T>,
+    ending: CancellationToken,
 }
 
 impl<T> Clone for EndpointBinding<T> {
@@ -58,7 +59,13 @@ impl<T> EndpointBinding<T> {
     }
 
     fn end(&self) {
+        self.inner.ending.cancel();
         self.inner.intake.store(None);
+    }
+
+    /// Resolves when this exact source lifetime ends, including through a retained route.
+    pub(super) async fn ended(&self) {
+        self.inner.ending.cancelled().await;
     }
 }
 
@@ -224,6 +231,7 @@ impl<T> EndpointIntakeRoutes<T> {
             inner: Arc::new(EndpointBindingLifetime {
                 identity,
                 intake: ArcSwapOption::from(Some(StdArc::new(intake))),
+                ending: CancellationToken::new(),
             }),
         };
         self.current.rcu(|current| {

@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     fs::{OpenOptions, create_dir_all},
@@ -15,8 +16,8 @@ use std::{
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    Array, BooleanArray, Int64Array, LargeStringArray, RecordBatch, StringArray, StringViewArray,
-    TimestampMicrosecondArray, UInt64Array,
+    Array, BooleanArray, FixedSizeListArray, Int64Array, LargeListArray, LargeStringArray,
+    ListArray, RecordBatch, StringArray, StringViewArray, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{
@@ -90,11 +91,7 @@ use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
 use sqlx::{
-    AssertSqlSafe as SqlxAssertSqlSafe, Row as _,
-    postgres::{
-        PgConnectOptions as SqlxPgConnectOptions, PgPool as SqlxPgPool,
-        PgPoolOptions as SqlxPgPoolOptions, PgSslMode as SqlxPgSslMode,
-    },
+    AssertSqlSafe as SqlxAssertSqlSafe, Connection as _, Row as _, postgres::PgPool as SqlxPgPool,
 };
 use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt as _;
@@ -108,50 +105,60 @@ use crate::common::{
     },
     cluster::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
-        HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
-        TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
-        WebsocketExchangeAction, client_connect_options, client_domain, observe_kafka_through,
+        HttpsPublishLoopOutcome, InterconnectCredentialFault, TEST_AUTH_PASSWORD,
+        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
+        assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
+        observe_kafka_through, publish_kafka_record_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
+    command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
         MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR,
-        MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
-        RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
-        TestDependencies,
+        MYSQL_ADDR, MYSQL_TLS_ADDR, NATS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR,
+        REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
-        CapturedRequest, ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET,
+        CapturedRequest, ClientCertificatePolicy, HttpReceiver, LengthPolicy, RECEIVER_STOP_BUDGET,
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
+    iceberg_catalog_gate::IcebergCatalogGate,
     kafka_group_member::ExternalKafkaGroupMember,
     kafka_mock_broker::KafkaMockBroker,
     mqtt_publish_filter::MqttPublishFilter,
+    nats_endpoint::NatsEndpoint,
+    node_bound_address::{NodeBoundAddress, NodeBoundListener, bind_as_its_node},
+    node_startup::StartupPorts,
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{
-        TestUpload, TestUploadPart, WireOutcome as _, flatten_command_messages,
-        fresh_execution_reference, outcome_not_leader, outcome_succeeded, outcome_unknown,
+        SessionScope, TestUpload, TestUploadPart, WireOutcome as _, command_output,
+        fresh_execution_reference, outcome_awaits_leader,
     },
     runner_lag::RunnerLagObserver,
     scenario_phase::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         begin_suite_measurement, suite_summary,
     },
-    scenario_schedule::{FeatureLimit, ScenarioAdmission, ScenarioRunSlots, prioritize_features},
+    scenario_schedule::{
+        FeatureLimit, ScenarioAdmission, ScenarioLength, ScenarioRunSlots, prioritize_features,
+    },
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
     },
     server_process_cluster::ServerProcessCluster,
+    sqs_answer_hold::SqsAnswerHold,
+    stallable_tcp_proxy::StallableTcpProxy,
     status_request::{STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, StatusRequestError},
     suite_watchdog::{
         RUNTIME_SHUTDOWN_BUDGET, SuiteOutcome, SuiteRun, SuiteTeardown, SuiteWatchdogArgs,
     },
     tcp_forwarder::TcpForwarders,
+    unaccepted_address::UnacceptedAddress,
 };
 
 mod backup;
@@ -163,13 +170,23 @@ mod database_batches;
 mod deadlock_diagnostics;
 mod deadlock_reports;
 mod domain_clock_attachment;
+mod domain_resume;
 mod endpoint_intake;
+mod generated_http_payloads;
+mod iceberg_delivery;
 mod ingestion_time;
+mod mqtt_fixtures;
+mod mqtt_sessions;
+mod mysql_isolation;
 mod paced_replication;
 mod paced_simulation;
+mod postgres_fixtures;
 mod process_cluster;
+mod pulsar_delivery;
+mod pulsar_subscriptions;
 mod restarted_voter;
 mod session_protocol;
+mod standalone_transaction;
 mod websocket_lifecycle;
 
 const SCENARIOS_PATH: &str = "tests/features";
@@ -299,6 +316,9 @@ struct CliClockProcess {
 
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
+    mqtt_fixture_publication: Option<mqtt_fixtures::Publication>,
+    postgres_fixture_locks: Option<postgres_fixtures::HeldLocks>,
+    postgres_fixture_observations: Option<postgres_fixtures::Observations>,
     scenario_admission: Option<ScenarioAdmission>,
     /// Publishes which phase this scenario is in for as long as its world lives, so a reader of
     /// the registry sees the work in flight rather than the last work that finished.
@@ -308,6 +328,7 @@ struct ScenarioWorld {
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
+    endpoint_requests: endpoint_intake::requests::EndpointRequests,
     websocket_peer: Option<websocket_lifecycle::WebsocketPeer>,
     transaction_clients: BTreeMap<String, Client>,
     /// The paced simulation drivers a scenario ran, and the files their runs share.
@@ -364,6 +385,11 @@ struct ScenarioWorld {
     /// instant and the arrival together, which is what makes such an assertion hold on a
     /// busy machine where a fixed wall-clock window does not.
     last_publish_at: Option<Instant>,
+    pulsar_stop_timing: Option<pulsar_delivery::StopTiming>,
+    /// When the scenario first posted an HTTP payload to a node. An input collector's window
+    /// opens no earlier than the first record that reaches it, so a collection-delay assertion
+    /// measures its collected output from this instant.
+    first_http_post_at: Option<Instant>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
     last_command_disposition: Option<nervix_client_wire::CommandDisposition>,
@@ -401,20 +427,32 @@ struct ScenarioWorld {
     /// Releases the Postgres table lock a contention scenario is holding, if one is held. The
     /// lock lives in a spawned task because it must outlive the step that took it.
     postgres_lock_release: Option<nervix_primitives::sync::oneshot::Sender<()>>,
+    /// Releases each lock a scenario holds on a Postgres table it names, by table.
+    postgres_named_lock_releases: BTreeMap<String, nervix_primitives::sync::oneshot::Sender<()>>,
     mysql_table: Option<String>,
     mysql_tls: bool,
     mysql_insert_command_baseline: Option<u64>,
+    /// Independent MySQL sessions holding the table locks of this scenario's pool contention.
+    mysql_table_locks: BTreeMap<String, mysql_isolation::HeldTableLock>,
     mongodb_collection: Option<String>,
     mongodb_tls: bool,
     domain: String,
     test_id: String,
-    zeromq_ingest_addr: String,
+    /// The address this scenario's nodes bind a ZeroMQ PULL socket to.
+    zeromq_ingest: NodeBoundSlot,
     zeromq_emit_addr: String,
-    syslog_ingest_addr: String,
+    /// The socket holding the ZeroMQ emission port without listening, so connections there are
+    /// refused until a peer starts listening on it.
+    zeromq_emit_refusal: Option<nervix_primitives::net::TcpSocket>,
+    /// The address this scenario's nodes bind a syslog listener to.
+    syslog_ingest: NodeBoundSlot,
     syslog_emit_addr: String,
-    /// Every port this scenario drew for fixtures of its own: the ZeroMQ and syslog addresses its
-    /// nodes and its observers bind. Given back once cleanup has stopped both.
+    /// Every other port this scenario drew for fixtures of its own: the ZeroMQ and syslog
+    /// addresses its observers bind. Given back once cleanup has stopped them.
     scenario_ports: Vec<u16>,
+    /// Sockets a scenario bound to a port it drew for its own nodes, standing in for whatever else
+    /// on the host takes such a port. Closed at cleanup.
+    port_takers: Vec<PortTaker>,
     syslog_udp_observer: Option<nervix_primitives::net::UdpSocket>,
     /// A Syslog stream connection holding back the end of a frame it began, until a step writes
     /// the rest.
@@ -466,8 +504,19 @@ struct ScenarioWorld {
     kafka_mock_broker: Option<KafkaMockBroker>,
     /// The forwarder a scenario stood in front of the MQTT broker to drop chosen PUBLISH packets.
     mqtt_publish_filter: Option<MqttPublishFilter>,
+    /// The forwarder a scenario stood in front of the SQS service to hold the answer that carries a
+    /// chosen message.
+    sqs_answer_hold: Option<SqsAnswerHold>,
+    /// The gate a scenario stood in front of the Iceberg REST catalog to hold, refuse or pass the
+    /// commits to one table.
+    iceberg_catalog_gate: Option<IcebergCatalogGate>,
+    /// The endpoint a scenario stood in front of the NATS server to take it away from the clients
+    /// that connect through it.
+    nats_endpoint: Option<NatsEndpoint>,
     /// The forwarders a scenario stood in front of a dependency at addresses its DNS answers name.
     tcp_forwarders: Option<TcpForwarders>,
+    /// The addresses a scenario holds where no connection completes, for as long as it runs.
+    unaccepted_addresses: Vec<UnacceptedAddress>,
     /// The HTTP receivers a scenario started, by the name its steps give them.
     http_receivers: BTreeMap<String, HttpReceiver>,
     /// The gRPC receivers a scenario started, by the name its steps give them.
@@ -479,6 +528,9 @@ struct ScenarioWorld {
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
     server_process_cluster: Option<ServerProcessCluster>,
+    /// The listeners whose ports another socket is to hold from the moment the next server process,
+    /// or the bootstrap member of the next real-process cluster, draws them.
+    server_process_held_ports: Option<StartupPorts>,
     deadlock_report: Option<deadlock_reports::ReportFixture>,
     node_trace_export: Option<NodeTraceExport>,
     server_process_http_load: Option<ServerProcessHttpLoad>,
@@ -492,6 +544,8 @@ struct ScenarioWorld {
     producers: client_producers::ScenarioProducers,
     /// Native and console consumers and the Arrow attempts they received.
     consumers: client_consumers::ScenarioConsumers,
+    /// The distinct-tenant payloads the last generating step posted and no assertion has received.
+    generated_payloads: generated_http_payloads::GeneratedPayloads,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -543,6 +597,10 @@ impl fmt::Debug for ScenarioWorld {
             .field("postgres_table", &self.postgres_table)
             .field("postgres_tls", &self.postgres_tls)
             .field("postgres_lock_held", &self.postgres_lock_release.is_some())
+            .field(
+                "postgres_named_locks_held",
+                &self.postgres_named_lock_releases.keys().collect::<Vec<_>>(),
+            )
             .field("mysql_table", &self.mysql_table)
             .field("mysql_tls", &self.mysql_tls)
             .field(
@@ -589,7 +647,11 @@ impl fmt::Debug for ScenarioWorld {
             )
             .field("kafka_mock_broker", &self.kafka_mock_broker)
             .field("mqtt_publish_filter", &self.mqtt_publish_filter)
+            .field("sqs_answer_hold", &self.sqs_answer_hold)
+            .field("iceberg_catalog_gate", &self.iceberg_catalog_gate)
+            .field("nats_endpoint", &self.nats_endpoint)
             .field("tcp_forwarders", &self.tcp_forwarders)
+            .field("unaccepted_addresses", &self.unaccepted_addresses)
             .field("http_receivers", &self.http_receivers)
             .field("grpc_receivers", &self.grpc_receivers)
             .field("otlp_receivers", &self.otlp_receivers)
@@ -602,6 +664,7 @@ impl fmt::Debug for ScenarioWorld {
                 &self.last_interconnect_attempt_error,
             )
             .field("server_process", &self.server_process)
+            .field("server_process_held_ports", &self.server_process_held_ports)
             .field("server_process_http_load", &self.server_process_http_load)
             .field("held_resource_upload", &self.held_resource_upload.is_some())
             .field("last_server_signal_at", &self.last_server_signal_at)
@@ -676,6 +739,18 @@ impl ScenarioWorld {
         self.cluster
             .as_mut()
             .expect("cluster must be created before using it")
+    }
+
+    /// Forgets the scenario's own session and what it last observed, which a restart of every node
+    /// ends.
+    fn forget_session_observations(&mut self) {
+        self.active_session = None;
+        self.active_session_node = None;
+        self.active_session_has_subscription = false;
+        self.last_subscription_payload = None;
+        self.last_command_error = None;
+        self.last_command_output = None;
+        self.last_server_error = None;
     }
 
     fn cluster(&self) -> &Cluster {
@@ -772,15 +847,12 @@ fn initialize_scenario_identity(world: &mut ScenarioWorld) {
     }
     world.domain = format!("d{}", Uuid::now_v7().as_simple());
     world.test_id = format!("t{}", Uuid::now_v7().as_simple());
-    world.zeromq_ingest_addr = format!(
-        "tcp://127.0.0.1:{}",
-        draw_scenario_port(world, "ZeroMQ ingest")
-    );
+    world.zeromq_ingest.draw(NodeBoundListener::ZeroMqPull);
     world.zeromq_emit_addr = format!(
         "tcp://127.0.0.1:{}",
         draw_scenario_port(world, "ZeroMQ emit")
     );
-    world.syslog_ingest_addr = format!("127.0.0.1:{}", draw_scenario_port(world, "Syslog ingest"));
+    world.syslog_ingest.draw(NodeBoundListener::Syslog);
     world.syslog_emit_addr = format!("127.0.0.1:{}", draw_scenario_port(world, "Syslog emit"));
 }
 
@@ -793,6 +865,90 @@ fn draw_scenario_port(world: &mut ScenarioWorld, purpose: &str) -> u16 {
     };
     world.scenario_ports.push(port);
     port
+}
+
+/// An address a scenario's own nodes bind, held from the scenario's identity until its cleanup.
+///
+/// Expansion reads the world through a shared reference, and naming the address the first time
+/// may move it to a fresh port, so the address sits behind a cell. The slot is empty before the
+/// scenario's identity draws the address and after cleanup gives its ports back.
+#[derive(Default)]
+struct NodeBoundSlot {
+    address: RefCell<Option<NodeBoundAddress>>,
+}
+
+impl NodeBoundSlot {
+    fn draw(&mut self, listener: NodeBoundListener) {
+        let address = match NodeBoundAddress::draw(listener) {
+            Ok(address) => address,
+            Err(error) => panic!("failed to allocate the scenario's {listener} port: {error:#}"),
+        };
+        if let Some(replaced) = self.address.get_mut().replace(address) {
+            replaced.release();
+        }
+    }
+
+    /// The port the scenario drew for the address, read without naming the address.
+    fn drawn_port(&self, listener: NodeBoundListener) -> u16 {
+        let address = self.address.borrow();
+        let Some(address) = address.as_ref() else {
+            panic!("the scenario reads its {listener} port before its identity drew it");
+        };
+        address.port()
+    }
+
+    /// Lets the address's hold go and gives every port it drew back to the pool.
+    fn release(&mut self) {
+        if let Some(address) = self.address.get_mut().take() {
+            address.release();
+        }
+    }
+}
+
+/// A socket a scenario binds to a port it drew for its own nodes. Its only work is to hold the port
+/// until cleanup closes it.
+enum PortTaker {
+    Listener {
+        _socket: nervix_primitives::net::TcpListener,
+    },
+    Datagram {
+        _socket: nervix_primitives::net::UdpSocket,
+    },
+}
+
+impl ScenarioWorld {
+    /// The ZeroMQ ingest address as a statement or a sender names it.
+    fn zeromq_ingest_addr(&self) -> String {
+        self.name_node_bound_address(&self.zeromq_ingest, NodeBoundListener::ZeroMqPull)
+    }
+
+    /// The syslog ingest address as a statement or a sender names it.
+    fn syslog_ingest_addr(&self) -> String {
+        self.name_node_bound_address(&self.syslog_ingest, NodeBoundListener::Syslog)
+    }
+
+    /// Names an address the scenario's nodes bind. The first time, its port is bound once as its
+    /// node will bind it, and an address whose port another socket took moves to a fresh port
+    /// before anything names it, which the scenario's log records with what held the port.
+    fn name_node_bound_address(&self, slot: &NodeBoundSlot, listener: NodeBoundListener) -> String {
+        let mut address = slot.address.borrow_mut();
+        let Some(address) = address.as_mut() else {
+            panic!("the scenario names its {listener} address before its identity drew it");
+        };
+        let named = match address.name(bind_as_its_node) {
+            Ok(named) => named,
+            Err(error) => panic!("the scenario's {listener} address cannot be bound: {error:#}"),
+        };
+        for moved in &named.moves {
+            let line = format!(
+                "scenario domain={} test_id={}: the {listener} address {moved}",
+                self.domain, self.test_id
+            );
+            eprintln!("{line}");
+            append_cucumber_log_line(&line);
+        }
+        named.address
+    }
 }
 
 fn refresh_dependency_configuration(world: &mut ScenarioWorld) {
@@ -878,9 +1034,11 @@ async fn configure_stallable_tcp_endpoint(
     let target_port = endpoint_url
         .port()
         .unwrap_or_else(|| panic!("{name} endpoint '{endpoint}' has no explicit port"));
-    let proxy = StallableTcpProxy::start(target_host, target_port)
-        .await
-        .unwrap_or_else(|error| panic!("failed to start {name} stallable TCP endpoint: {error}"));
+    let proxy = match name {
+        "pulsar" => StallableTcpProxy::start_pulsar(target_host, target_port).await,
+        _ => StallableTcpProxy::start(target_host, target_port).await,
+    }
+    .unwrap_or_else(|error| panic!("failed to start {name} stallable TCP endpoint: {error}"));
     endpoint_url
         .set_host(Some("127.0.0.1"))
         .unwrap_or_else(|_| panic!("failed to replace host in {name} endpoint '{endpoint}'"));
@@ -902,6 +1060,71 @@ async fn given_stallable_rabbitmq_endpoint(world: &mut ScenarioWorld) {
 #[given("a stallable MQTT endpoint is configured")]
 async fn given_stallable_mqtt_endpoint(world: &mut ScenarioWorld) {
     configure_stallable_tcp_endpoint(world, "mqtt", MQTT_ADDR, "mqtt_stallable_addr").await;
+}
+
+/// Stands an endpoint the scenario controls in front of the NATS server, and names its address
+/// `{{nats_controlled_addr}}`.
+#[given("a NATS endpoint the scenario controls is configured")]
+async fn given_controlled_nats_endpoint(world: &mut ScenarioWorld) {
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(NATS_ADDR)
+        .unwrap_or_else(|error| panic!("NATS endpoint is unavailable: {error}"));
+    let mut endpoint_url = url::Url::parse(endpoint)
+        .unwrap_or_else(|error| panic!("failed to parse NATS endpoint '{endpoint}': {error}"));
+    // `nats` is not a special URL scheme, so the URL keeps its host as opaque text.
+    let server_ip = match endpoint_url.host() {
+        Some(url::Host::Ipv4(address)) => std::net::IpAddr::V4(address),
+        Some(url::Host::Ipv6(address)) => std::net::IpAddr::V6(address),
+        Some(url::Host::Domain(host)) => host.parse().unwrap_or_else(|error| {
+            panic!("NATS endpoint '{endpoint}' does not name the server by its IP address: {error}")
+        }),
+        None => panic!("NATS endpoint '{endpoint}' has no host"),
+    };
+    let server_port = endpoint_url
+        .port()
+        .unwrap_or_else(|| panic!("NATS endpoint '{endpoint}' has no explicit port"));
+    let controlled = NatsEndpoint::start(std::net::SocketAddr::new(server_ip, server_port))
+        .await
+        .unwrap_or_else(|error| panic!("failed to start the controlled NATS endpoint: {error}"));
+    endpoint_url
+        .set_host(Some("127.0.0.1"))
+        .unwrap_or_else(|_| panic!("failed to replace host in NATS endpoint '{endpoint}'"));
+    endpoint_url
+        .set_port(Some(controlled.local_port()))
+        .unwrap_or_else(|()| panic!("failed to replace port in NATS endpoint '{endpoint}'"));
+    world
+        .placeholders
+        .insert("nats_controlled_addr".to_string(), endpoint_url.to_string());
+    world.nats_endpoint = Some(controlled);
+}
+
+fn controlled_nats_endpoint(world: &ScenarioWorld) -> &NatsEndpoint {
+    world
+        .nats_endpoint
+        .as_ref()
+        .expect("a NATS endpoint the scenario controls must be configured first")
+}
+
+/// The endpoint ends every connection it forwards and refuses new ones, as a NATS server that went
+/// down, while the server itself keeps running for the other scenarios that share it.
+#[when("the controlled NATS endpoint goes down")]
+fn when_controlled_nats_endpoint_goes_down(world: &mut ScenarioWorld) {
+    controlled_nats_endpoint(world).go_down();
+}
+
+/// The endpoint forwards everything clients send again and accepts new connections.
+#[when("the controlled NATS endpoint forwards everything")]
+fn when_controlled_nats_endpoint_forwards_everything(world: &mut ScenarioWorld) {
+    controlled_nats_endpoint(world).forward_everything();
+}
+
+/// Each connection forwards `publishes` more publishes and then stops reading what its client
+/// sends, while what the server sends still reaches the client.
+#[when(expr = "the controlled NATS endpoint holds what each client sends after {int} publishes")]
+fn when_controlled_nats_endpoint_holds_after(world: &mut ScenarioWorld, publishes: usize) {
+    controlled_nats_endpoint(world).hold_after(publishes);
 }
 
 /// Stands a forwarder in front of the MQTT broker that can drop chosen PUBLISH packets, and names
@@ -995,6 +1218,79 @@ fn when_stallable_endpoint_resets_its_connections(world: &mut ScenarioWorld, nam
         .get(&name)
         .unwrap_or_else(|| panic!("stallable endpoint '{name}' is not configured"))
         .reset_connections();
+}
+
+/// Stand a stallable endpoint in front of the dependency whose URL placeholder `endpoint` holds,
+/// and record that URL in placeholder `name` with the endpoint's loopback address in place of the
+/// dependency's host and port.
+#[given(expr = "a stallable endpoint {string} stands in front of {string}")]
+async fn given_a_stallable_endpoint_stands_in_front_of(
+    world: &mut ScenarioWorld,
+    name: String,
+    endpoint: String,
+) {
+    let dependency = world
+        .placeholders
+        .get(&endpoint)
+        .unwrap_or_else(|| panic!("no dependency URL is published as '{endpoint}'"))
+        .clone();
+    let mut url = url::Url::parse(&dependency)
+        .unwrap_or_else(|error| panic!("'{endpoint}' is not a URL '{dependency}': {error}"));
+    let host = url
+        .host_str()
+        .unwrap_or_else(|| panic!("'{endpoint}' has no host"))
+        .to_string();
+    let port = url
+        .port_or_known_default()
+        .unwrap_or_else(|| panic!("'{endpoint}' names no port"));
+    let proxy = StallableTcpProxy::start(host, port)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("the stallable endpoint '{name}' could not listen: {error}")
+        });
+    url.set_ip_host(proxy.local_addr().ip())
+        .unwrap_or_else(|()| panic!("'{endpoint}' cannot carry an address host"));
+    url.set_port(Some(proxy.local_port()))
+        .unwrap_or_else(|()| panic!("'{endpoint}' cannot carry the endpoint's port"));
+    world.placeholders.insert(
+        name.clone(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+    world.stallable_tcp_proxies.insert(name, proxy);
+}
+
+/// Stand a loopback endpoint that accepts every connection and never answers on it, and record its
+/// `host:port` in placeholder `name`.
+#[given(expr = "a silent endpoint {string} is listening")]
+async fn given_a_silent_endpoint_is_listening(world: &mut ScenarioWorld, name: String) {
+    let proxy = StallableTcpProxy::silent()
+        .await
+        .unwrap_or_else(|error| panic!("the silent endpoint '{name}' could not listen: {error}"));
+    world
+        .placeholders
+        .insert(name.clone(), proxy.local_addr().to_string());
+    world.stallable_tcp_proxies.insert(name, proxy);
+}
+
+/// How long a scenario waits for a client to reach an endpoint it stood. Generous, because the wait
+/// ends as soon as the client connects.
+const STALLABLE_ENDPOINT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[then(expr = "the silent endpoint {string} eventually accepts a connection")]
+async fn then_the_silent_endpoint_eventually_accepts_a_connection(
+    world: &mut ScenarioWorld,
+    name: String,
+) {
+    let proxy = world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("no endpoint '{name}' was stood"));
+    nervix_primitives::time::timeout(
+        STALLABLE_ENDPOINT_CONNECTION_TIMEOUT,
+        proxy.accepted_at_least(1),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("no client connected to the endpoint '{name}'"));
 }
 
 #[given("ClickHouse is running")]
@@ -1115,6 +1411,7 @@ async fn start_http_receiver(
     world: &mut ScenarioWorld,
     name: String,
     transport: ReceiverTransport,
+    length: LengthPolicy,
 ) {
     initialize_scenario_identity(world);
     let name = expand_placeholders(world, &name);
@@ -1124,7 +1421,7 @@ async fn start_http_receiver(
     );
     let port = draw_scenario_port(world, "HTTP receiver");
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let receiver = match HttpReceiver::start(address, transport).await {
+    let receiver = match HttpReceiver::start(address, transport, length).await {
         Ok(receiver) => receiver,
         Err(error) => panic!("HTTP receiver '{name}' failed to start: {error:?}"),
     };
@@ -1162,7 +1459,23 @@ fn certificate_hosts(world: &ScenarioWorld, hosts: &str) -> Vec<String> {
 
 #[given(expr = "HTTP receiver {string} is running")]
 async fn given_http_receiver_is_running(world: &mut ScenarioWorld, name: String) {
-    start_http_receiver(world, name, ReceiverTransport::Plain).await;
+    start_http_receiver(world, name, ReceiverTransport::Plain, LengthPolicy::Lenient).await;
+}
+
+/// A receiver as strict about framing as some origin servers are: a `POST`, `PUT` or `PATCH` that
+/// declares no length is answered `411 Length Required` and is not captured.
+#[given(
+    expr = "HTTP receiver {string} is running and requires a declared length on POST, PUT and \
+            PATCH requests"
+)]
+async fn given_strict_http_receiver_is_running(world: &mut ScenarioWorld, name: String) {
+    start_http_receiver(
+        world,
+        name,
+        ReceiverTransport::Plain,
+        LengthPolicy::RequiredForContent,
+    )
+    .await;
 }
 
 #[given(expr = "HTTPS receiver {string} is running with a certificate for {string}")]
@@ -1171,7 +1484,13 @@ async fn given_https_receiver_is_running(world: &mut ScenarioWorld, name: String
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::NotRequested,
     };
-    start_http_receiver(world, name, ReceiverTransport::Tls(options)).await;
+    start_http_receiver(
+        world,
+        name,
+        ReceiverTransport::Tls(options),
+        LengthPolicy::Lenient,
+    )
+    .await;
 }
 
 #[given(
@@ -1187,7 +1506,32 @@ async fn given_https_receiver_requiring_client_certificates_is_running(
         certificate_hosts: certificate_hosts(world, &hosts),
         client_certificate: ClientCertificatePolicy::Required,
     };
-    start_http_receiver(world, name, ReceiverTransport::Tls(options)).await;
+    start_http_receiver(
+        world,
+        name,
+        ReceiverTransport::Tls(options),
+        LengthPolicy::Lenient,
+    )
+    .await;
+}
+
+/// Holds `address`, at the port of HTTP receiver `name`, behind a listener that never completes a
+/// connection, so a client whose DNS answer for the receiver's name lists `address` waits on that
+/// answer's handshake until it gives up on it.
+#[given(expr = "connections to {string} at the port of HTTP receiver {string} never complete")]
+async fn given_connections_to_address_at_http_receiver_port_never_complete(
+    world: &mut ScenarioWorld,
+    address: String,
+    name: String,
+) {
+    let ip = address
+        .parse::<std::net::IpAddr>()
+        .unwrap_or_else(|error| panic!("'{address}' is not an IP address: {error}"));
+    let port = http_receiver(world, &name).port();
+    let unaccepted = UnacceptedAddress::listen(SocketAddr::new(ip, port))
+        .await
+        .unwrap_or_else(|error| panic!("no listener could hold {address}:{port}: {error}"));
+    world.unaccepted_addresses.push(unaccepted);
 }
 
 /// Places the receiver's CA certificate and the client identity it issued where the node can mount
@@ -1590,6 +1934,23 @@ async fn then_http_receiver_request_has_no_header(
     );
 }
 
+/// Compares envelope bytes across attempts independently of transport authentication that a
+/// reopened client may refresh.
+#[then(expr = "HTTP receiver {string} request {int} repeats the body of request {int}")]
+async fn then_http_receiver_request_repeats_body(
+    world: &mut ScenarioWorld,
+    name: String,
+    repeated: usize,
+    original: usize,
+) {
+    let repeated_request = captured_http_request(world, &name, repeated);
+    let original_request = captured_http_request(world, &name, original);
+    assert_eq!(
+        repeated_request.body, original_request.body,
+        "HTTP receiver '{name}' request {repeated} body differs from request {original} body"
+    );
+}
+
 /// Asserts that one captured request, counted from 1, carries exactly one nonempty `header` and a
 /// body containing `fragment`, for a request whose values are generated and so cannot be named.
 #[then(
@@ -1851,7 +2212,13 @@ async fn given_otlp_receiver_is_running(world: &mut ScenarioWorld, name: String,
 
     let reachable = match transport {
         OtlpTransport::HttpProtobuf => {
-            start_http_receiver(world, name.clone(), ReceiverTransport::Plain).await;
+            start_http_receiver(
+                world,
+                name.clone(),
+                ReceiverTransport::Plain,
+                LengthPolicy::Lenient,
+            )
+            .await;
             let receiver = http_receiver(world, &name);
             Reachable {
                 origin: receiver.origin(),
@@ -2719,8 +3086,66 @@ fn when_nervix_server_help_is_requested(world: &mut ScenarioWorld) {
 }
 
 #[given("a nervix-server process is started")]
+#[when("a nervix-server process is started")]
 async fn given_nervix_server_process_is_started(world: &mut ScenarioWorld) {
     start_ready_server_process(world, &[]).await;
+}
+
+/// The listeners a step names by the name the fixture reports them under.
+fn startup_ports(listener: &str) -> StartupPorts {
+    listener
+        .parse()
+        .unwrap_or_else(|_| panic!("a server process has no '{listener}' listener"))
+}
+
+#[given(expr = "another socket holds the {string} port the next nervix-server process draws")]
+fn given_another_socket_holds_next_server_process_port(
+    world: &mut ScenarioWorld,
+    listener: String,
+) {
+    assert!(
+        world.server_process_held_ports.is_none(),
+        "a scenario holds the ports of one server process start at a time"
+    );
+    world.server_process_held_ports = Some(startup_ports(&listener));
+}
+
+#[then(
+    expr = "the server process startup fails at once with exit status {int} without another launch"
+)]
+async fn then_server_process_startup_fails_without_another_launch(
+    world: &mut ScenarioWorld,
+    code: i32,
+) {
+    let process = world
+        .server_process
+        .as_mut()
+        .verified("the preceding step started a nervix-server process");
+    let Err(failure) = process.wait_until_ready().await else {
+        panic!("a nervix-server whose startup ends with an error must not become ready");
+    };
+    assert_eq!(
+        process.launches(),
+        1,
+        "a startup that ends for a reason other than a lost bind is not launched again: {failure}"
+    );
+    let expected = format!("nervix-server exited during startup with exit status {code}");
+    assert!(
+        failure.to_string().starts_with(&expected),
+        "the startup must fail with the process's own exit: {failure}"
+    );
+}
+
+#[then(
+    expr = "the server process was relaunched once because another socket held its {string} port"
+)]
+fn then_server_process_was_relaunched_off_held_port(world: &mut ScenarioWorld, listener: String) {
+    world
+        .server_process
+        .as_mut()
+        .verified("the preceding step started a nervix-server process")
+        .verify_one_relaunch_off_held_ports(startup_ports(&listener))
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[given(
@@ -2735,6 +3160,10 @@ async fn given_server_process_cluster_is_started(
     assert!(
         world.server_process_cluster.is_none(),
         "a scenario starts at most one real-process cluster"
+    );
+    assert!(
+        world.server_process_held_ports.is_none(),
+        "this real-process cluster start holds no ports"
     );
     initialize_scenario_identity(world);
     let options = [
@@ -3052,8 +3481,12 @@ async fn start_ready_server_process_with_launch(
         "a scenario starts at most one nervix-server process"
     );
     initialize_scenario_identity(world);
-    let mut process = ServerProcess::start(launch, options)
-        .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
+    let started = match world.server_process_held_ports.take() {
+        Some(held) => ServerProcess::start_holding(launch, options, held).await,
+        None => ServerProcess::start(launch, options).await,
+    };
+    let mut process =
+        started.unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     process
         .wait_until_ready()
         .await
@@ -3066,7 +3499,8 @@ async fn given_nervix_server_process_is_started_with_open_file_limit(
     world: &mut ScenarioWorld,
     limit: u32,
 ) {
-    start_server_process_without_waiting(world, ServerProcessLaunch::OpenFileLimit(limit), &[]);
+    start_server_process_without_waiting(world, ServerProcessLaunch::OpenFileLimit(limit), &[])
+        .await;
 }
 
 #[when(
@@ -3078,7 +3512,7 @@ async fn when_nervix_server_process_is_started_with_written_option(
     value: String,
 ) {
     let option = ServerProcessOption::Written { option, value };
-    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]);
+    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]).await;
 }
 
 #[when(
@@ -3090,12 +3524,12 @@ async fn when_nervix_server_process_is_started_with_environment_variable(
     value: String,
 ) {
     let option = ServerProcessOption::Environment { variable, value };
-    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]);
+    start_server_process_without_waiting(world, ServerProcessLaunch::Direct, &[option]).await;
 }
 
 /// Starts the scenario's server process without waiting for it to accept commands, for a
 /// scenario about a process that is expected to exit during startup.
-fn start_server_process_without_waiting(
+async fn start_server_process_without_waiting(
     world: &mut ScenarioWorld,
     launch: ServerProcessLaunch,
     options: &[ServerProcessOption],
@@ -3104,7 +3538,12 @@ fn start_server_process_without_waiting(
         world.server_process.is_none(),
         "a scenario starts at most one nervix-server process"
     );
+    assert!(
+        world.server_process_held_ports.is_none(),
+        "a server process started without waiting for readiness holds no ports"
+    );
     let process = ServerProcess::start(launch, options)
+        .await
         .unwrap_or_else(|error| panic!("failed to launch nervix-server: {error}"));
     world.server_process = Some(process);
 }
@@ -5107,7 +5546,7 @@ impl IngestorLogicTransportFixture {
             Self::ZeroMq => {
                 world
                     .cluster()
-                    .publish_zeromq(&world.zeromq_ingest_addr, payload)
+                    .publish_zeromq(&world.zeromq_ingest_addr(), payload)
                     .await
                     .expect("failed to publish ingestor logic zeromq payload");
             }
@@ -5852,36 +6291,6 @@ async fn clickhouse_post_for_world(world: &ScenarioWorld, query: &str) -> Result
     } else {
         clickhouse_post(world.dependencies.endpoints(), query).await
     }
-}
-
-/// A verification client for the Postgres the scenario wrote to.
-///
-/// The same driver the product uses, so a scenario cannot pass against a connection contract the
-/// runtime does not actually speak.
-async fn postgres_client(
-    dependencies: &DependencyEndpoints,
-    tls: bool,
-) -> Result<SqlxPgPool, String> {
-    let addr = if tls {
-        dependencies.get(POSTGRES_TLS_ADDR)
-    } else {
-        dependencies.get(POSTGRES_ADDR)
-    }
-    .map_err(|error| error.to_string())?;
-    let mut options: SqlxPgConnectOptions = addr.parse().map_err(|source| format!("{source}"))?;
-    if tls {
-        let ca_file = dependencies
-            .tls_ca_path()
-            .map_err(|error| error.to_string())?;
-        options = options
-            .ssl_mode(SqlxPgSslMode::VerifyFull)
-            .ssl_root_cert(ca_file);
-    }
-    SqlxPgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(options)
-        .await
-        .map_err(|source| source.to_string())
 }
 
 fn mysql_pool(dependencies: &DependencyEndpoints, tls: bool) -> Result<MySqlPool, String> {
@@ -7538,11 +7947,11 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         "#
     );
     let commands = expand_placeholders(world, &commands);
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let started = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("the WASM reset graph must start");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(started.session);
+    world.active_session_node = Some(started.node);
     world.active_session_has_subscription = true;
 
     if !placement_commands.is_empty() {
@@ -8017,6 +8426,95 @@ async fn given_sqs_is_forwarded(world: &mut ScenarioWorld, name: String, address
     .await;
 }
 
+/// Stands a forwarder in front of the plain SQS listener that can hold the answer carrying a chosen
+/// message, and records in placeholder `sqs_held_endpoint` the SQS endpoint that reaches the service
+/// through it.
+#[given("SQS is reached through a forwarder that can hold an answer")]
+async fn given_sqs_answer_hold(world: &mut ScenarioWorld) {
+    let endpoint = started_dependency(world, SQS_ENDPOINT);
+    let mut url = url::Url::parse(&endpoint).expect("the SQS endpoint is a URL");
+    let host = url
+        .host_str()
+        .expect("the SQS endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the SQS listener is named by a literal address");
+    let port = url.port().expect("the SQS endpoint names its port");
+    let hold = SqsAnswerHold::start(std::net::SocketAddr::new(host, port))
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder to {endpoint} could not listen: {error}"));
+    url.set_host(Some("127.0.0.1"))
+        .expect("a loopback address is a valid URL host");
+    url.set_port(Some(hold.local_port()))
+        .expect("the SQS URL can carry the forwarder's port");
+    world.placeholders.insert(
+        "sqs_held_endpoint".to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+    world.sqs_answer_hold = Some(hold);
+}
+
+/// From now on the forwarder holds the first answer whose bytes carry `text`: the service took the
+/// message it carries off the queue for a receive the client still waits on.
+#[when(expr = "the SQS forwarder holds the answer that carries {string}")]
+fn when_the_sqs_forwarder_holds_the_answer_that_carries(world: &mut ScenarioWorld, text: String) {
+    let text = expand_placeholders(world, &text);
+    world
+        .sqs_answer_hold
+        .as_ref()
+        .expect("a forwarder that can hold an SQS answer must be configured first")
+        .hold_the_answer_carrying(text.into_bytes());
+}
+
+/// How long a step waits for the forwarder to hold the answer it was armed for: long enough for the
+/// cluster to start its source and send a receive on a loaded machine.
+const SQS_ANSWER_HOLD_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[then("the SQS forwarder holds that answer")]
+async fn then_the_sqs_forwarder_holds_that_answer(world: &mut ScenarioWorld) {
+    let holding = world
+        .sqs_answer_hold
+        .as_ref()
+        .expect("a forwarder that can hold an SQS answer must be configured first")
+        .holding();
+    match nervix_primitives::time::timeout(SQS_ANSWER_HOLD_TIMEOUT, holding).await {
+        Ok(held) => held.expect("the forwarder keeps its hold state while it waits"),
+        Err(_elapsed) => panic!(
+            "the SQS forwarder held no answer carrying the armed text within \
+             {SQS_ANSWER_HOLD_TIMEOUT:?}"
+        ),
+    }
+}
+
+/// Releases the held answer as soon as the entity gate pause for `domain` is reached. The release
+/// waits on a task of its own, so the answer reaches its receive however long this step's runner
+/// takes to observe the pause.
+#[when(
+    expr = "the SQS forwarder releases that answer once the entity gate pause for domain {string} \
+            is reached"
+)]
+async fn when_the_sqs_forwarder_releases_that_answer_at_the_entity_gate_pause(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let fault_injection = world.fault_injection.clone();
+    let reached = async move {
+        fault_injection.wait_for_entity_gate_pause(&domain).await;
+    };
+    let released = world
+        .sqs_answer_hold
+        .as_ref()
+        .expect("a forwarder that can hold an SQS answer must be configured first")
+        .release_once(reached);
+    match nervix_primitives::time::timeout(ENTITY_GATE_PAUSE_TIMEOUT, released).await {
+        Ok(release) => release.expect("the release task does not panic"),
+        Err(_elapsed) => panic!(
+            "the entity gate pause that releases the held SQS answer was not reached within \
+             {ENTITY_GATE_PAUSE_TIMEOUT:?}"
+        ),
+    }
+}
+
 /// The URL of the started dependency placeholder `source` names.
 fn started_dependency(world: &ScenarioWorld, source: &str) -> String {
     world
@@ -8364,6 +8862,65 @@ async fn given_next_entity_gate_engagement_is_rejected(world: &mut ScenarioWorld
         .fail_next_entity_gate_engagement(domain);
 }
 
+#[given(
+    expr = "the next ownership handoff gate engagement request in domain {string} breaks in \
+            transport"
+)]
+async fn given_next_handoff_engagement_request_breaks_in_transport(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world
+        .fault_injection
+        .break_next_handoff_engagement_transport(domain);
+}
+
+#[then(
+    expr = "the broken ownership handoff gate engagement request in domain {string} was delivered"
+)]
+async fn then_broken_handoff_engagement_request_was_delivered(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    assert!(
+        world
+            .fault_injection
+            .handoff_engagement_transport_failure_delivered(&domain),
+        "no ownership handoff gate engagement request in domain {domain} met the armed transport \
+         failure"
+    );
+}
+
+#[given(
+    expr = "the leader refuses the next relocation commit in domain {string} as a leader whose \
+            lease lapsed"
+)]
+async fn given_leader_refuses_next_relocation_commit(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world.fault_injection.refuse_next_relocation_commit(domain);
+}
+
+#[then(expr = "the refusal of the relocation commit in domain {string} was delivered")]
+async fn then_relocation_commit_refusal_was_delivered(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    assert!(
+        world
+            .fault_injection
+            .relocation_commit_refusal_delivered(&domain),
+        "no relocation commit in domain {domain} met the armed leader refusal"
+    );
+}
+
 #[given(expr = "the next domain drain in domain {string} is forced to time out")]
 async fn given_next_domain_drain_is_forced_to_time_out(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -8560,34 +9117,37 @@ fn onnx_fixture_path(fixture: &str) -> PathBuf {
 
 /// Writes every generated ONNX model into a fresh resource directory for `node_id` and registers
 /// the directory under `placeholder`.
-fn place_onnx_fixture_resource_directory(
+async fn place_onnx_fixture_resource_directory(
     world: &mut ScenarioWorld,
     node_id: &str,
     placeholder: &str,
 ) -> PathBuf {
-    ensure_onnx_runtime_loaded();
-
     let base_dir = world
         .cluster()
         .node_base_dir(node_id)
         .expect("node base dir should exist");
     let resource_dir = base_dir.join("fixtures").join(placeholder);
-    if resource_dir.exists() {
-        std::fs::remove_dir_all(&resource_dir).expect("old fixture directory should be removed");
-    }
-    std::fs::create_dir_all(resource_dir.join("models"))
-        .expect("fixture model directory should be created");
-    for fixture in ONNX_FIXTURE_MODELS {
-        let source_path = onnx_fixture_path(fixture);
-        let destination_path = resource_dir.join("models").join(fixture);
-        std::fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
-            panic!(
-                "failed to copy ONNX fixture '{}' to '{}': {error}",
-                source_path.display(),
-                destination_path.display()
-            )
-        });
-    }
+    let resource_dir = crate::common::runner_offload::off_the_runner(move || {
+        ensure_onnx_runtime_loaded();
+        if resource_dir.exists() {
+            std::fs::remove_dir_all(&resource_dir).expect("the fixture directory can be recreated");
+        }
+        std::fs::create_dir_all(resource_dir.join("models"))
+            .expect("fixture model directory should be created");
+        for fixture in ONNX_FIXTURE_MODELS {
+            let source_path = onnx_fixture_path(fixture);
+            let destination_path = resource_dir.join("models").join(fixture);
+            std::fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to copy ONNX fixture '{}' to '{}': {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            });
+        }
+        resource_dir
+    })
+    .await;
 
     world
         .placeholders
@@ -8601,7 +9161,7 @@ async fn given_node_has_onnx_fixture_resource_directory(
     node_id: String,
     placeholder: String,
 ) {
-    place_onnx_fixture_resource_directory(world, &node_id, &placeholder);
+    place_onnx_fixture_resource_directory(world, &node_id, &placeholder).await;
 }
 
 #[given(
@@ -8615,16 +9175,19 @@ async fn given_node_has_onnx_fixture_resource_directory_with_replaced_model(
     relative_path: String,
     fixture: String,
 ) {
-    let resource_dir = place_onnx_fixture_resource_directory(world, &node_id, &placeholder);
+    let resource_dir = place_onnx_fixture_resource_directory(world, &node_id, &placeholder).await;
     let source_path = onnx_fixture_path(&fixture);
     let destination_path = resource_dir.join(&relative_path);
-    std::fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
-        panic!(
-            "failed to copy ONNX fixture '{}' over '{}': {error}",
-            source_path.display(),
-            destination_path.display()
-        )
-    });
+    crate::common::runner_offload::off_the_runner(move || {
+        std::fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to copy ONNX fixture '{}' over '{}': {error}",
+                source_path.display(),
+                destination_path.display()
+            )
+        });
+    })
+    .await;
 }
 
 #[given(expr = "node {string} has WASM processor fixture resource directory {string}")]
@@ -10581,6 +11144,41 @@ async fn when_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: 
         .pause_runtime_preparation_on(crate::common::cluster::node_name(&node_id));
 }
 
+#[when(
+    expr = "node {string} resumes its runtime installation when forced recovery finds no schedule"
+)]
+async fn when_runtime_installation_resumes_after_missing_recovery_schedule(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .resume_installation_after_missing_recovery_schedule(crate::common::cluster::node_name(
+            &node_id,
+        ));
+}
+
+#[then(expr = "forced recovery on node {string} observes its missing schedule")]
+async fn then_forced_recovery_observes_missing_schedule(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let observation = nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_missing_recovery_schedule(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await;
+    assert!(
+        observation.is_ok(),
+        "forced recovery did not observe node '{node_id}' before its initial schedule \
+         installation: {observation:?}"
+    );
+}
+
 #[then(expr = "node {string} reaches its runtime preparation pause")]
 async fn then_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -11053,6 +11651,51 @@ async fn when_command_durable_admission_pause_is_released(
         .release_command_durable_admission_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+#[given(expr = "command finalization on node {string} pauses before its outcome is recorded")]
+async fn given_command_finalization_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_command_finalization_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "the command finalization pause on node {string} is reached")]
+async fn then_command_finalization_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    let task = world.background_command_result.as_mut();
+    // A leader resumes an applying execution on its own, so the finalization a scenario holds may
+    // belong to no request of the scenario. A loaded node takes long to get there, and the wait
+    // ends once the pause is reached, so its bound is generous.
+    nervix_primitives::time::timeout(Duration::from_secs(60), async {
+        let Some(task) = task else {
+            fault_injection
+                .wait_for_command_finalization_pause(&node_name)
+                .await;
+            return;
+        };
+        nervix_primitives::select! {
+            () = fault_injection.wait_for_command_finalization_pause(&node_name) => {},
+            result = task => panic!(
+                "command on '{node_id}' returned before its finalization pause: {result:?}"
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!("command finalization pause on '{node_id}' was not reached: {error}")
+    });
+}
+
+#[when(expr = "the command finalization pause on node {string} is released")]
+async fn when_command_finalization_pause_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_command_finalization_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "relocation publication for domain {string} pauses after planning")]
 async fn given_relocation_publication_pauses_after_planning(
     world: &mut ScenarioWorld,
@@ -11265,6 +11908,72 @@ async fn when_ownership_handoff_flush_pause_released(world: &mut ScenarioWorld, 
     world
         .fault_injection
         .release_ownership_handoff_flush_pause(&domain);
+}
+
+#[given(expr = "ownership handoff for domain {string} pauses before activation")]
+async fn given_ownership_handoff_activation_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world
+        .fault_injection
+        .pause_ownership_handoff_activation(domain);
+}
+
+/// The handoff reaches its activation pause only once its schedule is committed, which takes a
+/// gate engagement, a drain, a capture, a preparation and a consensus write on a loaded machine.
+#[then(expr = "the ownership handoff activation pause for domain {string} is reached")]
+async fn then_ownership_handoff_activation_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_ownership_handoff_activation_pause(&domain),
+    )
+    .await
+    .expect("the handoff must commit its schedule and reach its activation pause");
+}
+
+#[when(expr = "the ownership handoff activation pause for domain {string} is released")]
+async fn when_ownership_handoff_activation_pause_released(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world
+        .fault_injection
+        .release_ownership_handoff_activation_pause(&domain);
+}
+
+#[given(expr = "the graceful drain of node {string} pauses before it moves its work")]
+async fn given_graceful_drain_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_graceful_drain_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} reaches its graceful drain pause")]
+async fn then_graceful_drain_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_graceful_drain_pause(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await
+    .expect("the stopping node must advertise that it is terminating and reach its drain pause");
+}
+
+#[when(expr = "the graceful drain pause of node {string} is released")]
+async fn when_graceful_drain_pause_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_graceful_drain_pause(&crate::common::cluster::node_name(&node_id));
 }
 
 #[given(expr = "ingestor {string} pauses inside dispatch")]
@@ -12108,16 +12817,26 @@ async fn then_failed_consensus_domain_is_unpublished(world: &mut ScenarioWorld, 
 
 #[when("the cluster is restarted")]
 async fn when_the_cluster_is_restarted(world: &mut ScenarioWorld) {
-    world.active_session = None;
-    world.active_session_node = None;
-    world.active_session_has_subscription = false;
-    world.last_subscription_payload = None;
-    world.last_command_error = None;
-    world.last_command_output = None;
-    world.last_server_error = None;
+    world.forget_session_observations();
     world
         .cluster_mut()
         .restart()
+        .await
+        .expect("failed to restart cluster");
+}
+
+/// The node's runtime installation is held from its start, so whatever reaches it after the
+/// restart finds a node that has not installed its committed domains again.
+#[when(expr = "the cluster is restarted while runtime installation on node {string} waits")]
+async fn when_the_cluster_is_restarted_holding_runtime_installation(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.forget_session_observations();
+    world
+        .cluster_mut()
+        .restart_holding_runtime_installation(&node_id)
         .await
         .expect("failed to restart cluster");
 }
@@ -12463,6 +13182,36 @@ async fn when_the_external_member_leaves_kafka_consumer_group(
         .expect("the external Kafka group member should leave");
 }
 
+/// What a scenario requires of a consumer group's committed next offset: that it reaches a
+/// threshold, or that it stays below one.
+struct KafkaOffsetCondition {
+    should_reach: bool,
+    threshold: i64,
+}
+
+impl KafkaOffsetCondition {
+    /// Reads `at least <n>` or `below <n>`.
+    fn parse(condition: &str) -> Self {
+        let (should_reach, threshold) = if let Some(threshold) = condition.strip_prefix("at least ")
+        {
+            (true, threshold)
+        } else if let Some(threshold) = condition.strip_prefix("below ") {
+            (false, threshold)
+        } else {
+            panic!(
+                "Kafka offset condition must be 'at least <n>' or 'below <n>', got {condition:?}"
+            );
+        };
+        let threshold = threshold
+            .parse::<i64>()
+            .expect("Kafka offset threshold must be an integer");
+        Self {
+            should_reach,
+            threshold,
+        }
+    }
+}
+
 #[then(
     expr = "within {string} Kafka consumer group {string} next offset for topic {string} \
             partition {int} is {string}"
@@ -12478,29 +13227,54 @@ async fn then_kafka_consumer_group_next_offset_is(
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let group = expand_placeholders(world, &group);
     let topic = expand_placeholders(world, &topic);
-    let condition = expand_placeholders(world, &condition);
-    let (should_reach, threshold) = if let Some(threshold) = condition.strip_prefix("at least ") {
-        (true, threshold)
-    } else if let Some(threshold) = condition.strip_prefix("below ") {
-        (false, threshold)
-    } else {
-        panic!("Kafka offset condition must be 'at least <n>' or 'below <n>', got {condition:?}");
-    };
-    let threshold = threshold
-        .parse::<i64>()
-        .expect("Kafka offset threshold must be an integer");
+    let condition = KafkaOffsetCondition::parse(&expand_placeholders(world, &condition));
     world
         .cluster()
         .assert_kafka_consumer_group_next_offset(
             &group,
             &topic,
             partition,
-            threshold,
-            should_reach,
+            condition.threshold,
+            condition.should_reach,
             duration,
         )
         .await
         .expect("Kafka consumer group committed-offset assertion failed");
+}
+
+/// The committed next offset the scenario's own mock Kafka broker holds for a consumer group.
+#[then(
+    expr = "within {string} mock Kafka consumer group {string} next offset for topic {string} \
+            partition {int} is {string}"
+)]
+async fn then_mock_kafka_consumer_group_next_offset_is(
+    world: &mut ScenarioWorld,
+    duration: String,
+    group: String,
+    topic: String,
+    partition: i32,
+    condition: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let group = expand_placeholders(world, &group);
+    let topic = expand_placeholders(world, &topic);
+    let condition = KafkaOffsetCondition::parse(&expand_placeholders(world, &condition));
+    let client_config = world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before its offsets are read")
+        .client_config();
+    assert_kafka_consumer_group_next_offset_through(
+        client_config,
+        &group,
+        &topic,
+        partition,
+        condition.threshold,
+        condition.should_reach,
+        duration,
+    )
+    .await
+    .expect("mock Kafka consumer group committed-offset assertion failed");
 }
 
 #[then(expr = "RabbitMQ queue {string} eventually has {int} consumers")]
@@ -12515,6 +13289,27 @@ async fn then_rabbitmq_queue_eventually_has_consumers(
         .wait_for_rabbitmq_queue_consumers(&queue, expected)
         .await
         .expect("rabbitmq queue did not reach expected consumer count");
+}
+
+/// The messages a queue holds ready for delivery. Once the queue has no consumer, they include
+/// every delivery a consumer still held unacknowledged when it left, because the broker returns
+/// those to the queue as the consumer goes.
+#[then(expr = "RabbitMQ queue {string} holds {int} messages")]
+async fn then_rabbitmq_queue_holds_messages(
+    world: &mut ScenarioWorld,
+    queue: String,
+    expected: usize,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let actual = world
+        .cluster()
+        .rabbitmq_queue_messages(&queue)
+        .await
+        .expect("rabbitmq queue state could not be read");
+    assert_eq!(
+        actual, expected,
+        "RabbitMQ queue '{queue}' holds {actual} messages, expected {expected}"
+    );
 }
 
 #[then(expr = "Redis channel {string} eventually has {int} subscribers")]
@@ -12540,10 +13335,17 @@ fn docstring(step: &Step) -> &str {
 fn expand_placeholders(world: &ScenarioWorld, input: &str) -> String {
     let mut output = input
         .replace("{{test_id}}", &world.test_id)
-        .replace("{{domain}}", &world.domain)
-        .replace("{{zeromq_ingest_addr}}", &world.zeromq_ingest_addr)
-        .replace("{{zeromq_emit_addr}}", &world.zeromq_emit_addr)
-        .replace("{{syslog_ingest_addr}}", &world.syslog_ingest_addr)
+        .replace("{{domain}}", &world.domain);
+    // The scenario's nodes bind these two addresses themselves, so the first text that names one
+    // checks its port and may move it. Text that names neither leaves them unchecked.
+    if output.contains("{{zeromq_ingest_addr}}") {
+        output = output.replace("{{zeromq_ingest_addr}}", &world.zeromq_ingest_addr());
+    }
+    output = output.replace("{{zeromq_emit_addr}}", &world.zeromq_emit_addr);
+    if output.contains("{{syslog_ingest_addr}}") {
+        output = output.replace("{{syslog_ingest_addr}}", &world.syslog_ingest_addr());
+    }
+    output = output
         .replace("{{syslog_emit_addr}}", &world.syslog_emit_addr)
         .replace("{{syslog_pri}}", "<34>");
     for (key, value) in &world.placeholders {
@@ -13015,85 +13817,124 @@ async fn execute_nspl_commands_on_node(
     Ok(session)
 }
 
-/// A session that ran a step's commands on the leader, and the node it ended on.
-struct LeaderSession {
-    session: TestSession,
-    node: String,
+/// Learns the outcome of `command`, whose attempt under `reference` on a session of `scope` returned
+/// `first`, from the node that leads now, and logs which node answered.
+async fn learn_command_outcome(
+    routes: &LeaderRoutes,
+    scope: &SessionScope,
+    command: &str,
+    reference: &str,
+    first: nervix_client_wire::CommandOutcome,
+) -> LearnedOutcome {
+    append_cucumber_log_line(&format!(
+        "execution reference {reference} awaits the current leader ({}); sending it to the nodes",
+        first.message
+    ));
+    let learned = routes.learn_outcome(scope, command, reference, first).await;
+    match &learned.answered_on {
+        Some(answered) => append_cucumber_log_line(&format!(
+            "node {} answered execution reference {reference}: {:?}",
+            answered.node, learned.outcome.disposition
+        )),
+        None => {
+            append_cucumber_log_line(&format!("no node answered execution reference {reference}"))
+        }
+    }
+    learned
 }
 
-/// How long one command may take, in all, to learn an outcome that leadership changes left
-/// unknown. A test cluster elects a leader within its two-second election timeout; the rest is
-/// slack for a loaded machine.
-const UNKNOWN_OUTCOME_RECOVERY: Duration = Duration::from_secs(60);
+/// Runs `command` on `session`, which stays where it is because it may hold subscriptions or a
+/// transaction. When the node it reached does not lead, or leadership moved before the outcome was
+/// known, another session of the same user learns the outcome from the node that leads now,
+/// provided the command leaves what `session` holds alone. Returns the command's messages when it
+/// completed, and otherwise the failure a raw session reports.
+async fn run_command_on_held_session(
+    routes: &LeaderRoutes,
+    session: &mut TestSession,
+    command: &str,
+) -> Result<String, String> {
+    let reference = fresh_execution_reference();
+    let mut outcome = session
+        .run_command_result_with_reference(command, &reference)
+        .await
+        .map_err(|error| error.to_string())?;
+    if outcome_awaits_leader(&outcome) && session.outcome_learnable_elsewhere(command) {
+        let scope = session.scope();
+        let learned = learn_command_outcome(routes, &scope, command, &reference, outcome).await;
+        outcome = learned.outcome;
+    }
+    command_output(&outcome).map_err(|error| error.to_string())
+}
 
-/// Runs `commands` on the current leader in one session. When leadership moves before a command
-/// reached the leader, or after the leader admitted it and before its outcome was known, the command
-/// is sent again with the same execution reference to the current leader, as the client protocol
-/// requires, and the step goes on there once the outcome is known. The session moves with the
-/// command only while it holds no subscription and no transaction, which no other session could
-/// continue; a command whose outcome stays unknown past that point fails the step as before.
+/// Runs `commands` on the current leader in one session, and returns that session and the node it
+/// ended on.
+///
+/// When leadership moves before a command reached the leader, or after the leader admitted it and
+/// before its outcome was known, the step learns the outcome by sending the command again with the
+/// same execution reference to the node that leads now, as the client protocol requires. While the
+/// session holds no subscription and no transaction, it moves to that node with the command and
+/// the step goes on there. Once it holds one it stays where it is, as
+/// [`run_command_on_held_session`] describes.
 async fn execute_nspl_commands_on_leader(
     world: &mut ScenarioWorld,
     commands: &str,
-) -> Result<LeaderSession, String> {
-    let mut node = current_leader_node(world).await;
+) -> Result<NodeSession, String> {
+    let node = current_leader_node(world).await;
     if !requires_persistent_session(commands) || subscription_graph_statements(commands).is_some() {
         // The client library sends each command and recovers its outcome itself, the server
         // statements of a subscription graph included.
         let session = execute_nspl_commands_on_node(world, &node, commands).await?;
-        return Ok(LeaderSession { session, node });
+        return Ok(NodeSession { node, session });
     }
     record_avro_wire_optional_fields(world, commands);
     append_cucumber_log_line(&format!(
         "nspl commands on node {node}: {}",
         commands.replace('\n', "\\n")
     ));
-    let mut session = world
+    let routes = world.cluster().leader_routes();
+    let session = world
         .cluster()
         .open_session(&node, &world.domain)
         .await
         .map_err(|error| error.to_string())?;
+    let mut current = NodeSession { node, session };
     let mut session_bound = false;
     for command in nspl_statements(commands) {
         nervix_primitives::task::consume_budget().await;
-        append_cucumber_log_line(&format!("nspl command on session {node}: {command}"));
-        let reference = fresh_execution_reference();
-        let deadline = Instant::now() + UNKNOWN_OUTCOME_RECOVERY;
-        let outcome = loop {
-            nervix_primitives::task::consume_budget().await;
-            let outcome = session
-                .run_command_result_with_reference(&command, &reference)
-                .await
-                .map_err(|error| error.to_string())?;
-            let awaits_leader = outcome_unknown(&outcome) || outcome_not_leader(&outcome);
-            if !awaits_leader || session_bound || Instant::now() >= deadline {
-                break outcome;
-            }
-            node = current_leader_node(world).await;
-            append_cucumber_log_line(&format!(
-                "leadership moved before execution reference {reference} reached a known outcome; \
-                 sending it to node {node}"
-            ));
-            session = world
-                .cluster()
-                .open_session(&node, &world.domain)
-                .await
-                .map_err(|error| error.to_string())?;
-        };
-        if !outcome_succeeded(&outcome) {
-            return Err(format!(
-                "command failed: {}\ndiagnostics: {:?}",
-                outcome.message, outcome.diagnostics
-            ));
+        append_cucumber_log_line(&format!(
+            "nspl command on session {}: {command}",
+            current.node
+        ));
+        if session_bound {
+            let output =
+                run_command_on_held_session(&routes, &mut current.session, &command).await?;
+            world.last_command_output = Some(output);
+            continue;
         }
-        world.last_command_output = Some(flatten_command_messages(&outcome));
+        let reference = fresh_execution_reference();
+        let mut outcome = current
+            .session
+            .run_command_result_with_reference(&command, &reference)
+            .await
+            .map_err(|error| error.to_string())?;
+        if outcome_awaits_leader(&outcome) {
+            let scope = current.session.scope();
+            let learned =
+                learn_command_outcome(&routes, &scope, &command, &reference, outcome).await;
+            outcome = learned.outcome;
+            if let Some(answered) = learned.answered_on {
+                current = answered;
+            }
+        }
+        let output = command_output(&outcome).map_err(|error| error.to_string())?;
+        world.last_command_output = Some(output);
         let statement = command.trim().to_ascii_uppercase();
         if command_updates_subscription_state(false, &command) || statement == "BEGIN;" {
             session_bound = true;
         }
     }
     record_mqtt_ingestors(world, commands);
-    Ok(LeaderSession { session, node })
+    Ok(current)
 }
 
 #[given(expr = "the active domain is {string}")]
@@ -13160,15 +14001,13 @@ async fn when_these_nspl_commands_begin_executing_in_the_background(
         .open_session(&leader, &world.domain)
         .await
         .expect("failed to open background NSPL session");
+    let routes = world.cluster().leader_routes();
     world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
         async move {
             let mut last_output = String::new();
             for command in statements {
                 nervix_primitives::task::consume_budget().await;
-                last_output = session
-                    .run_command(&command)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                last_output = run_command_on_held_session(&routes, &mut session, &command).await?;
             }
             Ok(last_output)
         },
@@ -13263,6 +14102,10 @@ async fn when_exact_command_retry_begins_in_parallel(
     expr = "the active session begins this NSPL command request with execution reference {string} \
             in the background"
 )]
+#[when(
+    expr = "the active session begins this Plexus command request with execution reference \
+            {string} in the background"
+)]
 async fn when_active_session_referenced_command_begins_in_background(
     world: &mut ScenarioWorld,
     execution_reference: String,
@@ -13347,6 +14190,10 @@ async fn when_background_command_caller_deadline_expires(
     expr = "this NSPL command request with execution reference {string} is executed on the leader \
             node"
 )]
+#[when(
+    expr = "this Plexus command request with execution reference {string} is executed on the \
+            leader node"
+)]
 async fn when_referenced_command_request_is_executed_on_leader(
     world: &mut ScenarioWorld,
     execution_reference: String,
@@ -13428,10 +14275,19 @@ async fn execute_command_request_with_reference_on_leader(
         .open_session(&leader, &world.domain)
         .await
         .unwrap_or_else(|error| panic!("failed to open the resumed command session: {error}"));
-    let result = session
+    let mut result = session
         .run_command_result_with_reference(&query, execution_reference)
         .await
         .unwrap_or_else(|error| panic!("resumed command request failed: {error}"));
+    if outcome_awaits_leader(&result) {
+        // The step's session holds nothing and ends with the step, so whichever session learns the
+        // outcome stands in for it.
+        let routes = world.cluster().leader_routes();
+        let scope = session.scope();
+        let learned =
+            learn_command_outcome(&routes, &scope, &query, execution_reference, result).await;
+        result = learned.outcome;
+    }
     world.last_command_disposition = Some(result.disposition.clone());
     if result.succeeded() {
         world.last_command_error = None;
@@ -13473,6 +14329,27 @@ async fn then_background_command_request_reports_conflict_or_unknown_leadership(
     ));
 }
 
+#[then("the background command request reports an unknown outcome because leadership moved")]
+async fn then_background_command_request_reports_leadership_lost(world: &mut ScenarioWorld) {
+    let request = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    let result = nervix_primitives::time::timeout(Duration::from_secs(30), request)
+        .await
+        .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
+        .assured("the background command task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("background command request transport failed: {error}"));
+    assert_eq!(
+        result.disposition,
+        nervix_client_wire::CommandDisposition::OutcomeUnknown(
+            nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
+        ),
+        "background command request did not report that leadership moved: {}",
+        result.message
+    );
+}
+
 #[then("the last command request reports an execution reference content conflict")]
 fn then_last_command_request_reports_execution_reference_content_conflict(
     world: &mut ScenarioWorld,
@@ -13499,7 +14376,10 @@ async fn then_command_execution_reference_is_eventually_reclaimed(
     let observer = world
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // The leader reclaims a reference only once its retry window has passed, so the wait spans
+    // the configured window and then leaves the reclamation a minute of its own.
+    let deadline =
+        Instant::now() + world.cluster_config.command_retry_validity + Duration::from_secs(60);
     loop {
         nervix_primitives::task::consume_budget().await;
         assert!(
@@ -13774,16 +14654,16 @@ async fn run_nspl_commands_on_active_session(
         "nspl commands on active session: {}",
         commands.replace('\n', "\\n")
     ));
-    let session = world
-        .active_session
-        .as_mut()
-        .expect("an active session must exist");
+    let routes = world.cluster().leader_routes();
     for command in nspl_statements(commands) {
+        nervix_primitives::task::consume_budget().await;
         append_cucumber_log_line(&format!("nspl command on active session: {command}"));
-        match session.run_command(&command).await {
-            Ok(output) => world.last_command_output = Some(output),
-            Err(error) => return Err(error.to_string()),
-        }
+        let session = world
+            .active_session
+            .as_mut()
+            .expect("an active session must exist");
+        let output = run_command_on_held_session(&routes, session, &command).await?;
+        world.last_command_output = Some(output);
         world.active_session_has_subscription =
             command_updates_subscription_state(world.active_session_has_subscription, &command);
     }
@@ -13802,6 +14682,7 @@ async fn when_the_active_session_targets_domain(world: &mut ScenarioWorld, domai
 }
 
 #[when("these NSPL commands are executed on the active session")]
+#[when("these Plexus statements are executed on the active session")]
 async fn when_these_nspl_commands_are_executed_on_the_active_session(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -13836,12 +14717,11 @@ async fn when_a_new_session_executes_these_nspl_commands(
     world.last_command_error = None;
     world.last_command_output = None;
     let commands = expand_placeholders(world, docstring(step));
-    let leader = current_leader_node(world).await;
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let ran = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to execute NSPL commands on a new session");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(ran.session);
+    world.active_session_node = Some(ran.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
@@ -13979,11 +14859,11 @@ async fn when_these_nspl_commands_are_executed(world: &mut ScenarioWorld, #[step
             .expect("failed to execute NSPL command on active session");
         return;
     }
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let ran = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to execute NSPL setup command");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(ran.session);
+    world.active_session_node = Some(ran.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
@@ -15131,6 +16011,7 @@ async fn connect_to_node_with_credentials(
 }
 
 #[when(expr = "these NSPL commands are executed through the client on node {string}")]
+#[when(expr = "these Plexus statements are executed through the client on node {string}")]
 async fn when_these_nspl_commands_are_executed_through_the_client_on_node(
     world: &mut ScenarioWorld,
     node_id: String,
@@ -15277,6 +16158,7 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
 }
 
 #[when("this NSPL command request is executed on the leader node")]
+#[when("this Plexus command request is executed on the leader node")]
 async fn when_this_nspl_command_request_is_executed_on_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -15388,7 +16270,9 @@ async fn then_transaction_eventually_has_state(
     let leader = current_leader_node(world).await;
     let expected_id = format!("id={transaction_id}");
     let expected_state_fragment = format!("state={expected_state}");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // A state such as EXPIRED arrives only after a configured timer, and a loaded node reports it
+    // later still. The wait ends as soon as the state is listed, so its bound is generous.
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut last_output = String::new();
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -15822,7 +16706,11 @@ async fn then_transaction_is_eventually_removed(world: &mut ScenarioWorld, trans
     let transaction_id = expand_placeholders(world, &transaction_id);
     let leader = current_leader_node(world).await;
     let expected_id = format!("id={transaction_id}");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // A tombstone is removed only once the configured retention has passed, so the wait spans
+    // that retention and then leaves the cleanup a minute of its own.
+    let deadline = Instant::now()
+        + world.cluster_config.transaction_tombstone_retention
+        + Duration::from_secs(60);
     let mut last_output = String::new();
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -16193,6 +17081,190 @@ async fn when_bulk_execution_is_saturated(world: &mut ScenarioWorld, node_id: St
     });
 }
 
+/// Hold every byte of bulk memory on every node but `room`, so a charge that needs more room than
+/// that is refused until the scenario releases the hold.
+#[when(expr = "bulk memory on every node keeps only {string} bytes free")]
+async fn when_bulk_memory_on_every_node_keeps_only_bytes_free(
+    world: &mut ScenarioWorld,
+    room: String,
+) {
+    let room = expand_placeholders(world, &room);
+    let room = room
+        .parse::<u64>()
+        .unwrap_or_else(|error| panic!("the free bulk memory '{room}' must be bytes: {error}"));
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .hold_bulk_memory_leaving_room_on(&crate::common::cluster::node_name(&node_id), room);
+    }
+}
+
+/// Return the bulk memory the scenario held on every node.
+#[when("bulk memory on every node is released")]
+async fn when_bulk_memory_on_every_node_is_released(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .release_bulk_memory_on(&crate::common::cluster::node_name(&node_id));
+    }
+}
+
+/// Waits until each node has reported its bulk memory class reserving exactly what the scenario
+/// holds there, so no charge another operation took on a node outlives that operation. A node is
+/// checked until it reports so once, because unrelated bulk work may hold memory for a moment.
+#[then(expr = "within {string} every node reserves only the bulk memory the scenario holds")]
+async fn then_every_node_reserves_only_held_bulk_memory(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let mut unchecked = world.cluster().node_ids();
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let mut outstanding = Vec::new();
+        let mut remaining = Vec::new();
+        for node_id in unchecked {
+            let held = world
+                .fault_injection
+                .held_bulk_memory_on(&crate::common::cluster::node_name(&node_id));
+            let reserved = world
+                .cluster()
+                .read_observability_metric(
+                    &node_id,
+                    "nervix_execution_memory_reserved_bytes",
+                    &[BULK_MEMORY_LABEL.to_string()],
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("failed to read the bulk-memory reservation of '{node_id}': {error}")
+                });
+            let held: f64 = held.approx_into();
+            if reserved != held {
+                outstanding.push(format!(
+                    "'{node_id}' reserves {reserved} bytes of bulk memory while the scenario \
+                     holds {held}"
+                ));
+                remaining.push(node_id);
+            }
+        }
+        if remaining.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "within {duration}: {}",
+            outstanding.join("; ")
+        );
+        unchecked = remaining;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// What DESCRIBE EMITTER reports while an Iceberg commit waits for room in the bulk memory class:
+/// the staged bytes the commit asked the class for.
+fn iceberg_commit_waiting_for_bulk_memory(output: &str) -> Option<u64> {
+    let error = DescribedEmitterRetry::from_describe_output(output).transient_error?;
+    let request =
+        error.strip_prefix("Iceberg commit waits for room in the bulk memory class for ")?;
+    let bytes = request.strip_suffix(" staged bytes")?;
+    let Ok(bytes) = bytes.parse::<u64>() else {
+        panic!("DESCRIBE EMITTER reports the commit's staged bytes as a count, got '{error}'");
+    };
+    Some(bytes)
+}
+
+/// Waits until DESCRIBE EMITTER reports an Iceberg commit waiting for room in the bulk memory class,
+/// and saves the staged bytes the commit asked the class for.
+#[then(
+    expr = "within {string} DESCRIBE EMITTER {string} on the leader node reports an Iceberg \
+            commit waiting for bulk memory, whose staged bytes are saved as placeholder {string}"
+)]
+async fn then_within_duration_describe_emitter_reports_iceberg_commit_waiting_for_bulk_memory(
+    world: &mut ScenarioWorld,
+    duration: String,
+    emitter: String,
+    placeholder: String,
+) {
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let emitter = expand_placeholders(world, &emitter);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output =
+            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+                .await
+                .expect("describe emitter command must succeed");
+        world.last_command_output = Some(output.clone());
+        if let Some(bytes) = iceberg_commit_waiting_for_bulk_memory(&output) {
+            world.placeholders.insert(placeholder, bytes.to_string());
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE EMITTER {emitter} to report an Iceberg commit waiting \
+             for bulk memory. last output: {output}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Waits until DESCRIBE EMITTER reports `metric` in `direction` for `relay` with the total
+/// `expected`, on whichever physical node ran the emitter.
+#[then(
+    expr = "within {string} DESCRIBE EMITTER {string} on the leader node reports {string} \
+            {string} relay {string} totalling {string}"
+)]
+async fn then_within_duration_describe_emitter_reports_metric_total(
+    world: &mut ScenarioWorld,
+    duration: String,
+    emitter: String,
+    metric: String,
+    direction: String,
+    relay: String,
+    expected: String,
+) {
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let emitter = expand_placeholders(world, &emitter);
+    let prefix = format!(
+        "{} {} relay={} physical_node=",
+        expand_placeholders(world, &metric),
+        expand_placeholders(world, &direction),
+        expand_placeholders(world, &relay)
+    );
+    let expected = expand_placeholders(world, &expected);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output =
+            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+                .await
+                .expect("describe emitter command must succeed");
+        world.last_command_output = Some(output.clone());
+        let mut totals = Vec::new();
+        for line in output.lines() {
+            let line = line.trim();
+            if !line.starts_with(&prefix) {
+                continue;
+            }
+            if let Some(total) = metric_line_value(line, "total") {
+                totals.push(total.to_string());
+            }
+        }
+        if totals.iter().any(|total| total == &expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE EMITTER {emitter} to report '{prefix}…' totalling \
+             {expected}; it reported {totals:?}. last output: {output}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Fill the credentials worker and every place in its wait queue on the leader, so the next
 /// password the leader is asked to verify is refused rather than queued. The leader is the node
 /// the scenario created its user through, so the user is already visible there.
@@ -16450,7 +17522,7 @@ impl UnacknowledgedSourceFixture {
             }
             Self::Pulsar => {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
-          SUBSCRIPTION 'unacknowledged_{{test_id}}' INSTANCES 1 MODE NO ACK
+          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {
@@ -16530,7 +17602,7 @@ impl UnacknowledgedSourceFixture {
                     .await
                     .expect("failed to bind the unacknowledged Syslog sender");
                 socket
-                    .send_to(payload.as_bytes(), &world.syslog_ingest_addr)
+                    .send_to(payload.as_bytes(), world.syslog_ingest_addr())
                     .await
                     .expect("failed to send the unacknowledged Syslog datagram");
             }
@@ -16539,7 +17611,7 @@ impl UnacknowledgedSourceFixture {
             }
             Self::ZeroMq => world
                 .cluster()
-                .publish_zeromq(&world.zeromq_ingest_addr, &payload)
+                .publish_zeromq(&world.zeromq_ingest_addr(), &payload)
                 .await
                 .expect("failed to publish the unacknowledged ZeroMQ payload"),
         }
@@ -16568,12 +17640,11 @@ async fn when_the_unacknowledged_source_ingestor_is_created(
     let source = UnacknowledgedSourceFixture::parse(&source);
     source.prepare(world).await;
     let commands = expand_placeholders(world, &source.commands());
-    let leader = current_leader_node(world).await;
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let created = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to create the unacknowledged source's models on the leader");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(created.session);
+    world.active_session_node = Some(created.node);
     world.active_session_has_subscription = true;
 }
 
@@ -16696,17 +17767,17 @@ async fn given_the_leader_node_is_configured_with_these_nspl_commands(
 ) {
     world.last_command_error = None;
     world.last_command_output = None;
-    let leader = current_leader_node(world).await;
     let commands = expand_placeholders(world, docstring(step));
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let configured = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to execute NSPL setup command on leader");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(configured.session);
+    world.active_session_node = Some(configured.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
 #[when(expr = "these NSPL commands fail with {string}")]
+#[when(expr = "these Plexus statements fail with {string}")]
 async fn when_these_nspl_commands_fail_with(
     world: &mut ScenarioWorld,
     expected_error: String,
@@ -16721,8 +17792,7 @@ async fn when_these_nspl_commands_fail_with(
 
     let expected_error = expand_placeholders(world, &expected_error);
     let commands = expand_placeholders(world, docstring(step));
-    let leader = current_leader_node(world).await;
-    match execute_nspl_commands_on_node(world, &leader, &commands).await {
+    match execute_nspl_commands_on_leader(world, &commands).await {
         Ok(_) => panic!("expected commands to fail with {:?}", expected_error),
         Err(error) => {
             assert!(
@@ -16775,6 +17845,7 @@ async fn when_within_these_nspl_commands_on_node_eventually_fail_with(
 }
 
 #[when("these NSPL commands fail")]
+#[when("these Plexus statements fail")]
 async fn when_these_nspl_commands_fail(world: &mut ScenarioWorld, #[step] step: &Step) {
     world.last_command_error = None;
     world.last_command_output = None;
@@ -16784,8 +17855,7 @@ async fn when_these_nspl_commands_fail(world: &mut ScenarioWorld, #[step] step: 
     world.active_session_has_subscription = false;
 
     let commands = expand_placeholders(world, docstring(step));
-    let leader = current_leader_node(world).await;
-    match execute_nspl_commands_on_node(world, &leader, &commands).await {
+    match execute_nspl_commands_on_leader(world, &commands).await {
         Ok(_) => panic!("expected commands to fail"),
         Err(error) => {
             append_cucumber_log_line(&format!("expected command failure observed: {error}"));
@@ -16813,10 +17883,13 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
         world,
         &build_ingestor_logic_commands(transport, output_schema, docstring(step), true),
     );
-    let leader = current_leader_node(world).await;
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let started = execute_nspl_commands_on_leader(world, &commands)
         .await
         .expect("failed to start ingestor logic fixture on leader");
+    let NodeSession {
+        node: leader,
+        session,
+    } = started;
     if transport.executes_on_scheduled_owner() {
         let placement = PhaseDeadline::after(Duration::from_secs(5));
         let mut last_output = None;
@@ -16892,8 +17965,7 @@ async fn when_the_ingestor_logic_fixture_fails_to_start_with_output_schema_and_p
         world,
         &build_ingestor_logic_commands(transport, output_schema, docstring(step), false),
     );
-    let leader = current_leader_node(world).await;
-    match execute_nspl_commands_on_node(world, &leader, &commands).await {
+    match execute_nspl_commands_on_leader(world, &commands).await {
         Ok(_) => panic!("expected ingestor logic fixture to fail during leader validation"),
         Err(error) => {
             append_cucumber_log_line(&format!("logic fixture start failure observed: {error}"));
@@ -21794,6 +22866,56 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
 }
 
 #[then(
+    expr = "within {string} node {string} eventually reports scheduled {string} {string} replicas \
+            without placeholder {string}"
+)]
+async fn then_within_duration_node_eventually_reports_scheduled_replicas_without_placeholder(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    kind: String,
+    name: String,
+    placeholder: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let kind = expand_placeholders(world, &kind);
+    let name = expand_placeholders(world, &name);
+    let replaced = world
+        .placeholders
+        .get(&placeholder)
+        .unwrap_or_else(|| panic!("placeholder '{placeholder}' must be saved before assertion"))
+        .clone();
+    let placement = PhaseDeadline::after(duration);
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !placement.has_passed(),
+            "timed out waiting for scheduled {kind} {name} to have replicas without '{replaced}'. \
+             last output: {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        match world.cluster().status_text(&node_id, placement).await {
+            Ok(output) => {
+                world.last_command_output = Some(output.clone());
+                let placed =
+                    scheduled_node_placement_from_status(&output, &world.domain, &kind, &name);
+                if let Some((_, replicas)) = placed
+                    && !replicas.is_empty()
+                    && !replicas.contains(&replaced.as_str())
+                {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(format!("{error:#}")),
+        }
+        placement.pause(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(
     expr = "node {string} observability path {string} eventually responds with {int} and {string}"
 )]
 async fn then_node_observability_path_eventually_responds(
@@ -22138,6 +23260,8 @@ async fn given_kafka_topic_exists_with_partitions(
 /// `{{mock_kafka_addr}}`.
 #[given(expr = "a mock Kafka broker serves topic {string}")]
 fn given_mock_kafka_broker_serves_topic(world: &mut ScenarioWorld, topic: String) {
+    // The topic's name expands the scenario's identity, which no step may have drawn yet.
+    initialize_scenario_identity(world);
     let topic = expand_placeholders(world, &topic);
     let broker =
         KafkaMockBroker::start().expect("librdkafka starts an in-process mock Kafka broker");
@@ -22186,12 +23310,88 @@ fn when_mock_kafka_broker_accepts_writes_again(world: &mut ScenarioWorld) {
         .expect("the mock Kafka broker accepts writes again");
 }
 
+#[given(expr = "the mock Kafka broker also serves topic {string}")]
+fn given_mock_kafka_broker_also_serves_topic(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it serves another topic")
+        .create_topic(&topic)
+        .expect("the mock Kafka broker creates the topic");
+}
+
+#[given("the mock Kafka broker refuses every offset commit")]
+fn given_mock_kafka_broker_refuses_every_offset_commit(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it refuses offset commits")
+        .refuse_offset_commits()
+        .expect("the mock Kafka broker refuses offset commits");
+}
+
+#[given("the mock Kafka broker refuses the next offset commit")]
+fn given_mock_kafka_broker_refuses_the_next_offset_commit(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it refuses an offset commit")
+        .refuse_next_offset_commits(1)
+        .expect("the mock Kafka broker refuses the next offset commit");
+}
+
+#[when("the mock Kafka broker accepts offset commits again")]
+fn when_mock_kafka_broker_accepts_offset_commits_again(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the scenario before it accepts offset commits again")
+        .accept_offset_commits()
+        .expect("the mock Kafka broker accepts offset commits again");
+}
+
+#[when(expr = "mock Kafka message is published to topic {string}")]
+async fn when_mock_kafka_message_is_published(
+    world: &mut ScenarioWorld,
+    topic: String,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let payload = expand_placeholders(world, docstring(step));
+    let client_config = world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the topic before a message is published to it")
+        .client_config();
+    world.last_publish_at = Some(Instant::now());
+    publish_kafka_record_through(client_config, &topic, None, &payload, &[])
+        .await
+        .expect("failed to publish the mock kafka message");
+}
+
 #[given(expr = "SQS queue {string} exists")]
 async fn given_sqs_queue_exists(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
     world
         .cluster()
         .ensure_sqs_queue(&queue)
+        .await
+        .expect("failed to declare sqs queue");
+}
+
+#[given(expr = "SQS queue {string} exists with a visibility timeout of {string}")]
+async fn given_sqs_queue_exists_with_visibility_timeout(
+    world: &mut ScenarioWorld,
+    queue: String,
+    visibility_timeout: String,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let visibility_timeout =
+        parse_duration_text(&visibility_timeout).expect("the visibility timeout is a duration");
+    world
+        .cluster()
+        .ensure_sqs_queue_with_visibility_timeout(&queue, visibility_timeout)
         .await
         .expect("failed to declare sqs queue");
 }
@@ -22316,6 +23516,40 @@ async fn given_nats_subject_is_observed(world: &mut ScenarioWorld, subject: Stri
     );
 }
 
+/// Another socket listens on the port the scenario drew for its ZeroMQ ingest address before any
+/// statement names it, as a port Docker publishes for a container, or a server bound to that port
+/// explicitly, would: a listener with `SO_REUSEADDR` on every address, which the port's hold does
+/// not keep out.
+#[given("another socket listens on the port the scenario drew for its ZeroMQ ingest address")]
+async fn given_another_socket_listens_on_the_zeromq_ingest_port(world: &mut ScenarioWorld) {
+    let port = world
+        .zeromq_ingest
+        .drawn_port(NodeBoundListener::ZeroMqPull);
+    let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    let socket = match nervix_primitives::net::TcpListener::bind(address).await {
+        Ok(socket) => socket,
+        Err(error) => panic!("another listener could not take {address}: {error}"),
+    };
+    world
+        .port_takers
+        .push(PortTaker::Listener { _socket: socket });
+}
+
+/// Another UDP socket binds the port the scenario drew for its syslog ingest address on every
+/// address before any statement names it. No hold keeps a UDP socket out.
+#[given("another socket binds UDP on the port the scenario drew for its syslog ingest address")]
+async fn given_another_socket_binds_udp_on_the_syslog_ingest_port(world: &mut ScenarioWorld) {
+    let port = world.syslog_ingest.drawn_port(NodeBoundListener::Syslog);
+    let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    let socket = match nervix_primitives::net::UdpSocket::bind(address).await {
+        Ok(socket) => socket,
+        Err(error) => panic!("another UDP socket could not take {address}: {error}"),
+    };
+    world
+        .port_takers
+        .push(PortTaker::Datagram { _socket: socket });
+}
+
 #[given(expr = "ZeroMQ emission endpoint {string} is observed")]
 async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
     let addr = expand_placeholders(world, &addr);
@@ -22354,6 +23588,86 @@ async fn observe_zeromq_emission_endpoint(world: &mut ScenarioWorld, addr: Strin
         "failed to observe a generated ZeroMQ endpoint after {ZEROMQ_OBSERVER_BIND_ATTEMPTS} \
          fresh port allocations"
     );
+}
+
+/// Holds the scenario's ZeroMQ emission port with a socket that is bound to it and never listens,
+/// so the kernel refuses every connection there and no other process takes the port before a peer
+/// starts listening on it. The address can be taken between its allocation and this bind, so a
+/// fresh port then replaces it, as it does for the observing socket.
+#[given("the ZeroMQ emission endpoint refuses connections")]
+async fn given_zeromq_emission_endpoint_refuses_connections(world: &mut ScenarioWorld) {
+    for _ in 0..ZEROMQ_OBSERVER_BIND_ATTEMPTS {
+        nervix_primitives::task::consume_budget().await;
+        let address = zeromq_tcp_address(&world.zeromq_emit_addr);
+        let socket = nervix_primitives::net::TcpSocket::new_v4()
+            .unwrap_or_else(|error| panic!("failed to create a TCP socket: {error}"));
+        if socket.bind(address).is_ok() {
+            world.zeromq_emit_refusal = Some(socket);
+            return;
+        }
+        world.zeromq_emit_addr = format!(
+            "tcp://127.0.0.1:{}",
+            draw_scenario_port(world, "replacement ZeroMQ emit")
+        );
+    }
+
+    panic!(
+        "failed to hold a generated ZeroMQ emission port after {ZEROMQ_OBSERVER_BIND_ATTEMPTS} \
+         fresh port allocations"
+    );
+}
+
+/// A peer starts listening where the scenario's ZeroMQ emission endpoint refused connections: the
+/// socket holding the port lets it go and the observing pull socket binds the same address.
+#[when("a ZeroMQ peer starts listening on the emission endpoint")]
+async fn when_zeromq_peer_starts_listening_on_emission_endpoint(world: &mut ScenarioWorld) {
+    let refusal = world
+        .zeromq_emit_refusal
+        .take()
+        .expect("the ZeroMQ emission endpoint must refuse connections before a peer listens there");
+    drop(refusal);
+    let addr = world.zeromq_emit_addr.clone();
+    let observer = world
+        .cluster()
+        .observe_zeromq(&addr)
+        .await
+        .unwrap_or_else(|error| panic!("failed to observe zeromq endpoint '{addr}': {error}"));
+    world.broker_observer = Some(observer);
+}
+
+/// Stand a stallable endpoint in front of the scenario's observed ZeroMQ emission endpoint, and
+/// record in placeholder `name` the ZeroMQ address a client connects to through it.
+#[given(expr = "a stallable endpoint {string} stands in front of the ZeroMQ emission endpoint")]
+async fn given_stallable_endpoint_in_front_of_zeromq_emission_endpoint(
+    world: &mut ScenarioWorld,
+    name: String,
+) {
+    let target = zeromq_tcp_address(&world.zeromq_emit_addr);
+    let proxy = StallableTcpProxy::start(target.ip().to_string(), target.port())
+        .await
+        .unwrap_or_else(|error| {
+            panic!("the stallable endpoint '{name}' could not listen: {error}")
+        });
+    world
+        .placeholders
+        .insert(name.clone(), format!("tcp://{}", proxy.local_addr()));
+    world.stallable_tcp_proxies.insert(name, proxy);
+}
+
+/// The socket address of the ZeroMQ TCP endpoint `addr`, such as `tcp://127.0.0.1:5555`.
+fn zeromq_tcp_address(addr: &str) -> SocketAddr {
+    let endpoint = url::Url::parse(addr)
+        .unwrap_or_else(|error| panic!("'{addr}' is not a ZeroMQ endpoint: {error}"));
+    let host = endpoint
+        .host_str()
+        .unwrap_or_else(|| panic!("ZeroMQ endpoint '{addr}' has no host"));
+    let ip: IpAddr = host
+        .parse()
+        .unwrap_or_else(|error| panic!("ZeroMQ endpoint '{addr}' has no IP host: {error}"));
+    let port = endpoint
+        .port()
+        .unwrap_or_else(|| panic!("ZeroMQ endpoint '{addr}' names no port"));
+    SocketAddr::new(ip, port)
 }
 
 /// A broker or message destination that one scenario outline publishes to for every transport.
@@ -22492,6 +23806,53 @@ async fn given_pulsar_topic_accepts_messages_of_at_most(
         });
 }
 
+/// What the broker holds for the subscription now: messages no acknowledgement reached it for.
+#[then(
+    expr = "Pulsar subscription {string} of topic {string} holds {int} unacknowledged message(s)"
+)]
+async fn then_pulsar_subscription_holds_unacknowledged_messages(
+    world: &mut ScenarioWorld,
+    subscription: String,
+    topic: String,
+    expected: u64,
+) {
+    let subscription = expand_placeholders(world, &subscription);
+    let topic = expand_placeholders(world, &topic);
+    let backlog = world
+        .cluster()
+        .pulsar_subscription_backlog(&topic, &subscription)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to read the backlog of Pulsar subscription '{subscription}': {error}")
+        });
+    assert_eq!(
+        backlog, expected,
+        "Pulsar subscription '{subscription}' of topic '{topic}' holds {backlog} unacknowledged \
+         messages"
+    );
+}
+
+#[then(
+    expr = "within {string} Pulsar subscription {string} of topic {string} holds {int} \
+            unacknowledged message(s)"
+)]
+async fn then_pulsar_subscription_eventually_holds_unacknowledged_messages(
+    world: &mut ScenarioWorld,
+    duration: String,
+    subscription: String,
+    topic: String,
+    expected: u64,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let subscription = expand_placeholders(world, &subscription);
+    let topic = expand_placeholders(world, &topic);
+    world
+        .cluster()
+        .wait_for_pulsar_subscription_backlog(&topic, &subscription, expected, duration)
+        .await
+        .expect("Pulsar subscription backlog assertion failed");
+}
+
 #[given(expr = "Syslog UDP emission endpoint {string} is observed")]
 async fn given_syslog_udp_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
     initialize_scenario_identity(world);
@@ -22621,8 +23982,9 @@ async fn given_postgres_table_rejecting_poison_actions_exists(
         .postgres_table
         .as_ref()
         .expect("Postgres table should be recorded after preparation");
-    let client = postgres_client(world.dependencies.endpoints(), false)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(false)
         .expect("failed to connect to Postgres");
     sqlx::raw_sql(SqlxAssertSqlSafe(format!(
         "ALTER TABLE {table} ADD CONSTRAINT reject_poison_action CHECK (postgres_action <> \
@@ -22646,8 +24008,9 @@ async fn given_postgres_table_recording_insert_statement_sizes_exists(
         .clone();
     let audit_table = format!("{table}_insert_audit");
     let trigger_function = format!("{table}_record_insert");
-    let client = postgres_client(world.dependencies.endpoints(), false)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(false)
         .expect("failed to connect to Postgres");
     sqlx::raw_sql(SqlxAssertSqlSafe(format!(
         "DROP TABLE IF EXISTS {audit_table};
@@ -22694,8 +24057,9 @@ async fn prepare_postgres_table_schema(
     primary_key: bool,
 ) {
     let table = expand_placeholders(world, &table);
-    let client = postgres_client(world.dependencies.endpoints(), tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(tls)
         .expect("failed to connect to Postgres");
     sqlx::raw_sql(SqlxAssertSqlSafe(format!("DROP TABLE IF EXISTS {table}")))
         .execute(&client)
@@ -23272,19 +24636,35 @@ async fn when_nats_message_is_published(
         .expect("failed to publish nats message");
 }
 
+/// Provisions JetStream stream `stream` capturing `subject`, as an operator does.
+async fn provision_nats_jetstream_stream(world: &mut ScenarioWorld, stream: &str, subject: &str) {
+    let stream = expand_placeholders(world, stream);
+    let subject = expand_placeholders(world, subject);
+    world
+        .cluster()
+        .provision_nats_stream(&stream, &subject)
+        .await
+        .expect("failed to provision NATS JetStream stream");
+}
+
+/// The stream exists before the scenario's graph publishes to it.
+#[given(expr = "NATS JetStream stream {string} exists for subject {string}")]
+async fn given_nats_jetstream_stream_exists(
+    world: &mut ScenarioWorld,
+    stream: String,
+    subject: String,
+) {
+    provision_nats_jetstream_stream(world, &stream, &subject).await;
+}
+
+/// An operator provisions the stream while the scenario's graph already publishes to its subject.
 #[when(expr = "NATS JetStream stream {string} is provisioned for subject {string}")]
 async fn when_nats_jetstream_stream_is_provisioned(
     world: &mut ScenarioWorld,
     stream: String,
     subject: String,
 ) {
-    let stream = expand_placeholders(world, &stream);
-    let subject = expand_placeholders(world, &subject);
-    world
-        .cluster()
-        .provision_nats_stream(&stream, &subject)
-        .await
-        .expect("failed to provision NATS JetStream stream");
+    provision_nats_jetstream_stream(world, &stream, &subject).await;
 }
 
 #[then(expr = "NATS JetStream stream {string} eventually contains a payload on subject {string}")]
@@ -23302,6 +24682,158 @@ async fn then_nats_jetstream_stream_eventually_contains_payload(
         .wait_for_nats_stream_payload(&stream, &subject, &expected)
         .await
         .expect("NATS JetStream stream did not receive expected payload");
+}
+
+/// Publishes one NATS message whose payload is a JSON array of `count` records, the `n`th of which
+/// carries `n` in `field`.
+///
+/// The message is published exactly once, because the steps after it count how many times each
+/// record arrives; a second copy would deliver every record twice. An ingestor that reports itself
+/// ready has already subscribed, so the one copy reaches it.
+#[when(
+    expr = "a NATS message carrying records 1 to {int} by field {string} is published to subject \
+            {string}"
+)]
+async fn when_nats_message_carrying_records_is_published(
+    world: &mut ScenarioWorld,
+    count: i64,
+    field: String,
+    subject: String,
+) {
+    let subject = expand_placeholders(world, &subject);
+    let records = (1..=count)
+        .map(|value| serde_json::json!({ field.as_str(): value }))
+        .collect::<Vec<_>>();
+    let payload = serde_json::Value::Array(records).to_string();
+    world
+        .cluster()
+        .publish_nats_payloads(&subject, std::slice::from_ref(&payload))
+        .await
+        .expect("failed to publish a NATS message carrying records");
+}
+
+/// The runs of consecutive values in `values`, in order, such as `1-16, 17-5900, 1-12000`: how
+/// the records a stream holds were published, attempt by attempt. At most `limit` runs are named.
+fn consecutive_runs(values: &[i64], limit: usize) -> String {
+    struct ValueRun {
+        first: i64,
+        last: i64,
+    }
+    let mut runs: Vec<ValueRun> = Vec::new();
+    for value in values {
+        let next_of_last_run = match runs.last() {
+            Some(run) => run.last.checked_add(1) == Some(*value),
+            None => false,
+        };
+        match runs.last_mut() {
+            Some(run) if next_of_last_run => run.last = *value,
+            _ => runs.push(ValueRun {
+                first: *value,
+                last: *value,
+            }),
+        }
+    }
+    let mut named = Vec::new();
+    for run in runs.iter().take(limit) {
+        named.push(format!("{}-{}", run.first, run.last));
+    }
+    if runs.len() > limit {
+        named.push(format!("… {} runs in all", runs.len()));
+    }
+    named.join(", ")
+}
+
+/// Waits until JetStream `stream` holds a message for every value from 1 to `last` of `field`,
+/// then requires that it holds exactly one message for each value from 1 to `once`.
+#[then(
+    expr = "within {string} NATS JetStream stream {string} holds every record from 1 to {int} by \
+            field {string}, and records 1 to {int} exactly once"
+)]
+async fn then_nats_jetstream_stream_holds_records(
+    world: &mut ScenarioWorld,
+    duration: String,
+    stream: String,
+    last: i64,
+    field: String,
+    once: i64,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let stream = expand_placeholders(world, &stream);
+    let deadline = Instant::now() + duration;
+    let least = u64::try_from(last).expect("a record count is not negative");
+    let values = loop {
+        nervix_primitives::task::consume_budget().await;
+        // The stream cannot hold every record before it holds as many messages, and counting the
+        // messages is far cheaper than reading them.
+        let held = world
+            .cluster()
+            .nats_stream_message_count(&stream)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to read NATS JetStream stream '{stream}': {error}")
+            });
+        if held < least {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for NATS JetStream stream '{stream}' to hold every record from \
+                 1 to {last} by '{field}'; it holds {held} messages"
+            );
+            nervix_primitives::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+        let values = world
+            .cluster()
+            .nats_stream_field_values(&stream, &field)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to read NATS JetStream stream '{stream}': {error}")
+            });
+        let held_values = values.iter().copied().collect::<BTreeSet<_>>();
+        let mut missing = Vec::new();
+        for value in 1..=last {
+            if !held_values.contains(&value) {
+                missing.push(value);
+            }
+        }
+        if missing.is_empty() {
+            break values;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for NATS JetStream stream '{stream}' to hold every record from 1 \
+             to {last} by '{field}'; {} are missing, the first of them {:?}",
+            missing.len(),
+            missing.iter().take(16).collect::<Vec<_>>(),
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(500)).await;
+    };
+    let mut counts = BTreeMap::new();
+    for value in &values {
+        let count = counts.entry(*value).or_insert(0_usize);
+        *count = count
+            .checked_add(1)
+            .expect("a stream holds fewer messages than usize counts");
+    }
+    let mut repeated = Vec::new();
+    for value in 1..=once {
+        let held = match counts.get(&value) {
+            Some(held) => *held,
+            None => 0,
+        };
+        if held != 1 {
+            repeated.push((value, held));
+        }
+    }
+    assert!(
+        repeated.is_empty(),
+        "NATS JetStream stream '{stream}' holds {} of the records 1 to {once} by '{field}' other \
+         than exactly once, as (record, messages): {:?}. It holds {} messages, stored as the runs \
+         {}",
+        repeated.len(),
+        repeated.iter().take(16).collect::<Vec<_>>(),
+        values.len(),
+        consecutive_runs(&values, 32),
+    );
 }
 
 #[when(expr = "{int} sequential NATS messages are published to subject {string}")]
@@ -23332,7 +24864,7 @@ async fn when_zeromq_message_is_published(world: &mut ScenarioWorld, #[step] ste
     let payload = expand_placeholders(world, docstring(step));
     world
         .cluster()
-        .publish_zeromq(&world.zeromq_ingest_addr, &payload)
+        .publish_zeromq(&world.zeromq_ingest_addr(), &payload)
         .await
         .expect("failed to publish zeromq message");
 }
@@ -24417,7 +25949,11 @@ async fn when_http_payload_is_posted_to_node(
     append_cucumber_log_line(&format!(
         "http publish: node={node_id} host={host} path={path} payload={payload}"
     ));
-    world.last_publish_at = Some(Instant::now());
+    let posted_at = Instant::now();
+    world.last_publish_at = Some(posted_at);
+    if world.first_http_post_at.is_none() {
+        world.first_http_post_at = Some(posted_at);
+    }
     world
         .cluster()
         .publish_http(&node_id, &host, &path, &payload)
@@ -25616,18 +27152,69 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
     #[step] step: &Step,
 ) {
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let expected_fragments = expected_payload_fragments(world, step);
+    await_subscription_payloads(world, duration, &expected_fragments).await;
+}
+
+/// Measures an input collector's hold instead of asserting silence while its window runs. Each
+/// collector's window opens no earlier than the first record that reaches it, which was posted no
+/// earlier than the scenario's first HTTP post, so the collected payloads cannot be read sooner
+/// than the window after that post. This step must start while the window is still open: then it
+/// reads each payload as it arrives, and a step that starts late can only lengthen the measured
+/// delay.
+#[then(
+    expr = "within {string} the relay subscription receives payloads no sooner than {string} \
+            after the first http payload was posted"
+)]
+async fn then_within_duration_the_relay_subscription_receives_payloads_after_collection(
+    world: &mut ScenarioWorld,
+    duration: String,
+    delay: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let expected_delay = parse_duration_text(&delay).expect("step delay must be a valid duration");
+    let first_posted_at = world
+        .first_http_post_at
+        .expect("a collection-delay assertion must follow an http post");
+    let expected_fragments = expected_payload_fragments(world, step);
+
+    let first_read_at = await_subscription_payloads(world, duration, &expected_fragments).await;
+
+    let first_read_after = first_read_at.duration_since(first_posted_at);
+    append_cucumber_log_line(&format!(
+        "first collected subscription payload was read {first_read_after:?} after the first http \
+         post"
+    ));
+    assert!(
+        first_read_after >= expected_delay,
+        "expected the collected payloads no sooner than {expected_delay:?} after the first http \
+         post, but the first was read after {first_read_after:?}"
+    );
+}
+
+/// The payload fragments a step's docstring expects, one for each non-empty line.
+fn expected_payload_fragments(world: &ScenarioWorld, step: &Step) -> Vec<String> {
     let expected_fragments = docstring(step)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(|line| expand_placeholders(world, line))
         .collect::<Vec<_>>();
-
     assert!(
         !expected_fragments.is_empty(),
         "step docstring must contain at least one expected payload fragment"
     );
+    expected_fragments
+}
 
+/// Reads the active session's subscription until every expected fragment has arrived as often as
+/// it is listed, failing once `duration` has passed, and returns when the first payload was read.
+async fn await_subscription_payloads(
+    world: &mut ScenarioWorld,
+    duration: Duration,
+    expected_fragments: &[String],
+) -> Instant {
     let session = world
         .active_session
         .as_mut()
@@ -25640,6 +27227,7 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
             counts
         });
     let mut observed = Vec::with_capacity(expected_fragments.len());
+    let mut first_read_at = None;
 
     while !remaining.is_empty() {
         let now = Instant::now();
@@ -25661,6 +27249,10 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
                     remaining, observed
                 )
             });
+        let read_at = Instant::now();
+        if first_read_at.is_none() {
+            first_read_at = Some(read_at);
+        }
         let payload = event.payload;
         observed.push(payload.clone());
         world.last_subscription_payload = Some(payload.clone());
@@ -25679,6 +27271,7 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
             }
         }
     }
+    first_read_at.expect("at least one expected fragment makes the loop read a payload")
 }
 
 #[then(
@@ -25887,112 +27480,131 @@ async fn then_generator_occurrences_preserve_branches(
     );
     let branch_field = expand_placeholders(world, &branch_field);
     let timestamp_field = expand_placeholders(world, &timestamp_field);
-    let session = world
+    let mut session = world
         .active_session
-        .as_mut()
+        .take()
         .assured("an active session with subscription must exist");
     let deadline = Instant::now()
         .checked_add(duration)
         .assured("scenario durations fit Tokio's monotonic instant range");
-    let mut branches_by_timestamp = BTreeMap::<_, BTreeSet<String>>::new();
-    let mut latest_timestamp_by_branch = BTreeMap::<String, i64>::new();
-    let mut observed = Vec::new();
+    let mut last_payload = world.last_subscription_payload.take();
+    let (session, last_payload) =
+        crate::common::runner_observation::observe_off_the_runner(async move {
+            let mut branches_by_timestamp = BTreeMap::<_, BTreeSet<String>>::new();
+            let mut latest_timestamp_by_branch = BTreeMap::<String, i64>::new();
+            let mut observed = Vec::new();
 
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        let complete_occurrences = branches_by_timestamp
-            .values()
-            .filter(|branches| *branches == &expected_branches)
-            .count();
-        if complete_occurrences >= expected_occurrences {
-            assert_eq!(
-                complete_occurrences, expected_occurrences,
-                "generator produced more complete occurrences than the assertion consumed"
-            );
-            return;
-        }
-        let now = Instant::now();
-        assert!(
-            now < deadline,
-            "timed out after observing {complete_occurrences} of {expected_occurrences} complete \
-             generator occurrences for branches {expected_branches:?}: {observed:?}"
-        );
-        let remaining = deadline
-            .checked_duration_since(now)
-            .verified("the deadline comparison above established remaining scenario time");
-        let event = match session.try_next_subscription(remaining).await {
-            Ok(Some(event)) => event,
-            Ok(None) => panic!(
-                "timed out after observing {complete_occurrences} of {expected_occurrences} \
-                 complete generator occurrences for branches {expected_branches:?}: {observed:?}"
-            ),
-            Err(error) => panic!("failed while waiting for subscription payloads: {error}"),
-        };
-        let payload = event.payload;
-        let (key, payload_json) = if let Some((key, payload_json)) = payload.split_once(" payload=")
-        {
-            (key.strip_prefix("key="), payload_json)
-        } else {
-            (None, payload.as_str())
-        };
-        let parsed = match serde_json::from_str::<serde_json::Value>(payload_json) {
-            Ok(parsed) => parsed,
-            Err(error) => panic!("subscription payload is not valid JSON: {error}"),
-        };
-        let Some(branch) = parsed.get(&branch_field) else {
-            panic!("subscription payload has no field '{branch_field}': {payload}");
-        };
-        let Some(branch) = branch.as_str() else {
-            panic!("subscription payload field '{branch_field}' is not a string: {payload}");
-        };
-        assert!(
-            expected_branches.contains(branch),
-            "generator produced unexpected branch '{branch}': {payload}"
-        );
-        if let Some(key) = key {
-            let key = match serde_json::from_str::<serde_json::Value>(key) {
-                Ok(key) => key,
-                Err(error) => panic!("subscription key is not valid JSON: {error}"),
-            };
-            assert_eq!(
-                key.get(&branch_field),
-                parsed.get(&branch_field),
-                "generator output did not preserve branch field '{branch_field}': {payload}"
-            );
-        }
-        let Some(timestamp) = parsed.get(&timestamp_field) else {
-            panic!("subscription payload has no field '{timestamp_field}': {payload}");
-        };
-        let Some(timestamp) = timestamp.as_str() else {
-            panic!("subscription payload field '{timestamp_field}' is not a string: {payload}");
-        };
-        let timestamp = match chrono::DateTime::parse_from_rfc3339(timestamp) {
-            Ok(timestamp) => timestamp,
-            Err(error) => {
-                panic!("subscription payload field '{timestamp_field}' is not RFC 3339: {error}")
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let complete_occurrences = branches_by_timestamp
+                    .values()
+                    .filter(|branches| *branches == &expected_branches)
+                    .count();
+                if complete_occurrences >= expected_occurrences {
+                    assert_eq!(
+                        complete_occurrences, expected_occurrences,
+                        "generator produced more complete occurrences than the assertion consumed"
+                    );
+                    return (session, last_payload);
+                }
+                let now = Instant::now();
+                assert!(
+                    now < deadline,
+                    "timed out after observing {complete_occurrences} of {expected_occurrences} \
+                     complete generator occurrences for branches {expected_branches:?}: \
+                     {observed:?}"
+                );
+                let remaining = deadline
+                    .checked_duration_since(now)
+                    .verified("the deadline comparison above established remaining scenario time");
+                let event = match session.try_next_subscription(remaining).await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => panic!(
+                        "timed out after observing {complete_occurrences} of \
+                         {expected_occurrences} complete generator occurrences for branches \
+                         {expected_branches:?}: {observed:?}"
+                    ),
+                    Err(error) => panic!("failed while waiting for subscription payloads: {error}"),
+                };
+                let payload = event.payload;
+                let (key, payload_json) =
+                    if let Some((key, payload_json)) = payload.split_once(" payload=") {
+                        (key.strip_prefix("key="), payload_json)
+                    } else {
+                        (None, payload.as_str())
+                    };
+                let parsed = match serde_json::from_str::<serde_json::Value>(payload_json) {
+                    Ok(parsed) => parsed,
+                    Err(error) => panic!("subscription payload is not valid JSON: {error}"),
+                };
+                let Some(branch) = parsed.get(&branch_field) else {
+                    panic!("subscription payload has no field '{branch_field}': {payload}");
+                };
+                let Some(branch) = branch.as_str() else {
+                    panic!(
+                        "subscription payload field '{branch_field}' is not a string: {payload}"
+                    );
+                };
+                assert!(
+                    expected_branches.contains(branch),
+                    "generator produced unexpected branch '{branch}': {payload}"
+                );
+                if let Some(key) = key {
+                    let key = match serde_json::from_str::<serde_json::Value>(key) {
+                        Ok(key) => key,
+                        Err(error) => panic!("subscription key is not valid JSON: {error}"),
+                    };
+                    assert_eq!(
+                        key.get(&branch_field),
+                        parsed.get(&branch_field),
+                        "generator output did not preserve branch field '{branch_field}': \
+                         {payload}"
+                    );
+                }
+                let Some(timestamp) = parsed.get(&timestamp_field) else {
+                    panic!("subscription payload has no field '{timestamp_field}': {payload}");
+                };
+                let Some(timestamp) = timestamp.as_str() else {
+                    panic!(
+                        "subscription payload field '{timestamp_field}' is not a string: {payload}"
+                    );
+                };
+                let timestamp = match chrono::DateTime::parse_from_rfc3339(timestamp) {
+                    Ok(timestamp) => timestamp,
+                    Err(error) => {
+                        panic!(
+                            "subscription payload field '{timestamp_field}' is not RFC 3339: \
+                             {error}"
+                        )
+                    }
+                };
+                let timestamp = timestamp
+                    .timestamp_nanos_opt()
+                    .assured("generator scenario timestamps fit signed Unix nanoseconds");
+                if let Some(previous) =
+                    latest_timestamp_by_branch.insert(branch.to_string(), timestamp)
+                {
+                    assert!(
+                        timestamp > previous,
+                        "generator timestamps for branch '{branch}' did not increase: \
+                         {observed:?}, {payload}"
+                    );
+                }
+                let inserted = branches_by_timestamp
+                    .entry(timestamp)
+                    .or_default()
+                    .insert(branch.to_string());
+                assert!(
+                    inserted,
+                    "generator repeated an occurrence for branch '{branch}': {payload}"
+                );
+                last_payload = Some(payload.clone());
+                observed.push(payload);
             }
-        };
-        let timestamp = timestamp
-            .timestamp_nanos_opt()
-            .assured("generator scenario timestamps fit signed Unix nanoseconds");
-        if let Some(previous) = latest_timestamp_by_branch.insert(branch.to_string(), timestamp) {
-            assert!(
-                timestamp > previous,
-                "generator timestamps for branch '{branch}' did not increase: {observed:?}, \
-                 {payload}"
-            );
-        }
-        let inserted = branches_by_timestamp
-            .entry(timestamp)
-            .or_default()
-            .insert(branch.to_string());
-        assert!(
-            inserted,
-            "generator repeated an occurrence for branch '{branch}': {payload}"
-        );
-        world.last_subscription_payload = Some(payload.clone());
-        observed.push(payload);
-    }
+        })
+        .await;
+    world.active_session = Some(session);
+    world.last_subscription_payload = last_payload;
 }
 
 #[then(
@@ -26761,6 +28373,43 @@ async fn then_within_duration_the_active_session_observes_a_server_error_contain
     }
 }
 
+/// A server error that must never be raised. Every error the session receives within the window is
+/// read, including those it already held from earlier steps, and none of them may contain `text`.
+#[then(expr = "the active session observes no server error containing {string} within {string}")]
+async fn then_the_active_session_observes_no_server_error_containing(
+    world: &mut ScenarioWorld,
+    text: String,
+    duration: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let unexpected = expand_placeholders(world, &text);
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session must exist");
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = session
+            .try_next_server_error(remaining)
+            .await
+            .expect("failed while waiting for server error");
+        let Some(event) = event else {
+            return;
+        };
+        append_cucumber_log_line(&format!(
+            "observed runtime server error level={:?} message={}",
+            event.level, event.message
+        ));
+        assert!(
+            !event.message.contains(&unexpected),
+            "the session observed a server error containing {unexpected:?}: {}",
+            event.message
+        );
+    }
+}
+
 #[then("the last server error contains")]
 async fn then_last_server_error_contains(world: &mut ScenarioWorld, #[step] step: &Step) {
     let expected = expand_placeholders(world, docstring(step).trim());
@@ -26860,6 +28509,63 @@ async fn then_last_observed_broker_message_has_headers(
             world.last_broker_headers
         );
     }
+}
+
+/// A Sentry recorder deduplicates complete envelopes by event id, including requests whose
+/// success response was lost. Keep the raw attempts to compare retries independently of that
+/// deduplication, and check both the envelope header and the event's complete supplied fields.
+#[then(expr = "Sentry receiver {string} recorded {int} distinct event(s) across {int} attempt(s)")]
+async fn then_sentry_receiver_recorded_events(
+    world: &mut ScenarioWorld,
+    name: String,
+    events: usize,
+    attempts: usize,
+    #[step] step: &Step,
+) {
+    let expected: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&expand_placeholders(world, docstring(step)))
+            .assured("the scenario supplies a valid expected event object");
+    let captured = http_receiver(world, &name).captured();
+    assert_eq!(captured.len(), attempts, "Sentry envelope attempt count");
+    let mut recorded = BTreeMap::new();
+    for request in captured {
+        assert_eq!(request.request_line(), "POST /api/1/envelope/");
+        assert_eq!(
+            request.header_values("content-type"),
+            vec![b"application/x-sentry-envelope".as_slice()]
+        );
+        assert_eq!(request.header_values("x-sentry-auth").len(), 1);
+        let mut lines = request.body.split(|byte| *byte == b'\n');
+        let header: serde_json::Value = serde_json::from_slice(
+            lines
+                .next()
+                .assured("a captured envelope has a header line"),
+        )
+        .assured("the envelope header is valid JSON");
+        let item: serde_json::Value =
+            serde_json::from_slice(lines.next().assured("a captured envelope has an item line"))
+                .assured("the envelope item header is valid JSON");
+        let bytes = lines
+            .next()
+            .assured("a captured envelope has an event line");
+        let event: serde_json::Value =
+            serde_json::from_slice(bytes).assured("the envelope event is valid JSON");
+        let id = header["event_id"]
+            .as_str()
+            .assured("a captured envelope has an event id");
+        uuid::Uuid::parse_str(id).assured("the envelope id is a valid UUID");
+        assert_eq!(event["event_id"], id);
+        assert_eq!(item["type"], "event");
+        assert_eq!(item["length"], bytes.len());
+        assert_eq!(item["content_type"], "application/json");
+        for (field, value) in &expected {
+            assert_eq!(&event[field], value, "Sentry event field {field}");
+        }
+        if let Some(previous) = recorded.insert(id.to_owned(), event.clone()) {
+            assert_eq!(previous, event, "one Sentry event id has one event");
+        }
+    }
+    assert_eq!(recorded.len(), events, "Sentry deduplicated event count");
 }
 
 #[then("Sentry eventually receives an event")]
@@ -27150,8 +28856,9 @@ async fn then_clickhouse_table_eventually_contains_rows_in_parts(
 /// `application_name` is what distinguishes them from the harness's own connections and from any
 /// other application, which is how an operator checks a declared budget too.
 async fn postgres_application_connections(world: &ScenarioWorld, application: &str) -> i64 {
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     sqlx::query("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1")
         .bind(application)
@@ -27232,14 +28939,18 @@ async fn then_postgres_eventually_reports_connections(
     }
 }
 
-#[given(expr = "the Postgres table is locked against inserts")]
-async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
-    let table = world
-        .postgres_table
-        .as_ref()
-        .expect("a Postgres table must be prepared before locking it")
-        .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
+/// Holds `table` locked against inserts in a transaction of its own until the returned sender
+/// fires or is dropped. Reads still proceed, so a scenario observes the inserts that queue behind
+/// the lock while each holds the pooled connection it borrowed.
+///
+/// The lock lives in a spawned task because it must outlive the step that took it.
+async fn hold_postgres_table_lock(
+    world: &ScenarioWorld,
+    table: String,
+) -> nervix_primitives::sync::oneshot::Sender<()> {
+    let mut client = world
+        .dependencies
+        .postgres_lock_connection(world.postgres_tls)
         .await
         .expect("failed to connect to Postgres");
     let (release_tx, release_rx) = nervix_primitives::sync::oneshot::channel();
@@ -27258,7 +28969,7 @@ async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
         locked_tx
             .send(())
             .expect("the locking step must still be waiting for its lock");
-        // Held until the scenario releases it, which is what keeps one pooled connection busy.
+        // This database lock keeps the product writer's pooled connection busy until release.
         // A dropped sender means the scenario ended without releasing, and the lock goes with it.
         release_rx
             .await
@@ -27271,7 +28982,18 @@ async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
     locked_rx
         .await
         .expect("the Postgres locking task must acquire its lock");
-    world.postgres_lock_release = Some(release_tx);
+    release_tx
+}
+
+#[given(expr = "the Postgres table is locked against inserts")]
+async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
+    let table = world
+        .postgres_table
+        .as_ref()
+        .expect("a Postgres table must be prepared before locking it")
+        .clone();
+    let release = hold_postgres_table_lock(world, table).await;
+    world.postgres_lock_release = Some(release);
 }
 
 #[when("the Postgres table lock is released")]
@@ -27285,6 +29007,170 @@ async fn when_postgres_table_lock_is_released(world: &mut ScenarioWorld) {
         .expect("the Postgres locking task must still be holding its lock");
 }
 
+#[given(expr = "Postgres table {string} is locked against inserts")]
+async fn given_named_postgres_table_is_locked(world: &mut ScenarioWorld, table: String) {
+    let table = expand_placeholders(world, &table);
+    let release = hold_postgres_table_lock(world, table.clone()).await;
+    let replaced = world
+        .postgres_named_lock_releases
+        .insert(table.clone(), release);
+    assert!(
+        replaced.is_none(),
+        "this scenario already holds a lock on Postgres table {table}"
+    );
+}
+
+#[when(expr = "the lock on Postgres table {string} is released")]
+async fn when_named_postgres_table_lock_is_released(world: &mut ScenarioWorld, table: String) {
+    let table = expand_placeholders(world, &table);
+    let release = world
+        .postgres_named_lock_releases
+        .remove(&table)
+        .unwrap_or_else(|| panic!("Postgres table {table} must be locked before releasing it"));
+    release
+        .send(())
+        .expect("the Postgres locking task must still be holding its lock");
+}
+
+/// Waits until an insert into `table` queues behind a lock. The writer of that insert has borrowed
+/// its pooled connection and holds it while it waits, which is how a scenario knows who holds a
+/// connection without reading Nervix's own state.
+#[then(expr = "Postgres eventually reports an insert into table {string} waiting for its lock")]
+async fn then_postgres_reports_insert_waiting_for_lock(world: &mut ScenarioWorld, table: String) {
+    let table = expand_placeholders(world, &table);
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
+        .expect("failed to connect to Postgres");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let waiting: i64 = sqlx::query(
+            "SELECT count(*) FROM pg_locks AS lock JOIN pg_class AS class ON class.oid = \
+             lock.relation WHERE class.relname = $1 AND NOT lock.granted",
+        )
+        .bind(&table)
+        .fetch_one(&client)
+        .await
+        .expect("failed to read Postgres lock waits")
+        .get(0);
+        if waiting > 0 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for an insert into Postgres table {table} to wait for its lock"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then("the Postgres table eventually holds exactly these rows")]
+async fn then_postgres_table_eventually_holds_exactly_rows(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let table = world
+        .postgres_table
+        .as_ref()
+        .expect("a Postgres table must be prepared before assertion")
+        .clone();
+    let expected = expand_placeholders(world, docstring(step));
+    wait_for_exact_postgres_rows(world, &table, &expected).await;
+}
+
+#[then(expr = "the Postgres table {string} eventually holds exactly these rows")]
+async fn then_named_postgres_table_eventually_holds_exactly_rows(
+    world: &mut ScenarioWorld,
+    table: String,
+    #[step] step: &Step,
+) {
+    let table = expand_placeholders(world, &table);
+    let expected = expand_placeholders(world, docstring(step));
+    wait_for_exact_postgres_rows(world, &table, &expected).await;
+}
+
+/// One row of a Postgres emitter table, by every column the emitter maps.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PostgresEmittedRow {
+    user_id: i32,
+    action: String,
+}
+
+/// Waits until `table` holds exactly the rows `expected` lists, one JSON object per line naming
+/// its `postgres_user_id` and `postgres_action`, and every row also carries the RFC 3339 instant
+/// its emitter mapped into `postgres_now`. Every column is compared, so a row written with a
+/// missing or wrong value does not count as the expected one.
+async fn wait_for_exact_postgres_rows(world: &ScenarioWorld, table: &str, expected: &str) {
+    let mut expected_rows = Vec::new();
+    for line in expected
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let row: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("expected Postgres row {line:?} is not JSON: {error}"));
+        let Some(user_id) = row
+            .get("postgres_user_id")
+            .and_then(serde_json::Value::as_i64)
+        else {
+            panic!("expected Postgres row {line} names no postgres_user_id");
+        };
+        let Some(action) = row
+            .get("postgres_action")
+            .and_then(serde_json::Value::as_str)
+        else {
+            panic!("expected Postgres row {line} names no postgres_action");
+        };
+        let user_id = i32::try_from(user_id)
+            .unwrap_or_else(|_| panic!("expected Postgres user id {user_id} exceeds integer"));
+        expected_rows.push(PostgresEmittedRow {
+            user_id,
+            action: action.to_string(),
+        });
+    }
+    expected_rows.sort();
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
+        .expect("failed to connect to Postgres");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let rows = sqlx::query(SqlxAssertSqlSafe(format!(
+            "SELECT postgres_user_id, postgres_now, postgres_action FROM {table}"
+        )))
+        .fetch_all(&client)
+        .await
+        .expect("failed to query Postgres table");
+        let mut observed_rows = Vec::with_capacity(rows.len());
+        let mut incomplete = Vec::new();
+        for row in &rows {
+            let user_id: Option<i32> = row.get(0);
+            let now: Option<String> = row.get(1);
+            let action: Option<String> = row.get(2);
+            let mapped_instant = match now.as_deref() {
+                Some(now) => chrono::DateTime::parse_from_rfc3339(now).is_ok(),
+                None => false,
+            };
+            match (user_id, action) {
+                (Some(user_id), Some(action)) if mapped_instant => {
+                    observed_rows.push(PostgresEmittedRow { user_id, action });
+                }
+                (user_id, action) => incomplete.push(format!("{user_id:?}/{now:?}/{action:?}")),
+            }
+        }
+        observed_rows.sort();
+        if incomplete.is_empty() && observed_rows == expected_rows {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for Postgres table {table} to hold exactly {expected_rows:?}; \
+             observed {observed_rows:?}, incomplete rows {incomplete:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[then("the Postgres table eventually contains a row")]
 async fn then_postgres_table_eventually_contains_row(
     world: &mut ScenarioWorld,
@@ -27296,8 +29182,9 @@ async fn then_postgres_table_eventually_contains_row(
         .as_ref()
         .expect("a Postgres table must be prepared before assertion")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -27343,8 +29230,9 @@ async fn then_postgres_table_eventually_contains_exactly_rows(
         .as_ref()
         .expect("a Postgres table must be prepared before assertion")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -27388,8 +29276,9 @@ async fn then_postgres_table_contains_exactly_one_row_for_each_user_id(
         .as_ref()
         .expect("a Postgres table must be prepared before assertion")
         .clone();
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let rows = sqlx::query(SqlxAssertSqlSafe(format!(
         "SELECT postgres_user_id, count(*) FROM {table} GROUP BY postgres_user_id"
@@ -27431,8 +29320,9 @@ async fn then_postgres_table_eventually_contains_rows_across_bounded_inserts(
         .expect("a Postgres table must be prepared before assertion")
         .clone();
     let audit_table = format!("{table}_insert_audit");
-    let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
-        .await
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -28076,7 +29966,13 @@ async fn then_object_storage_path_does_not_exist(world: &mut ScenarioWorld, path
 }
 
 fn path_contains_staged_iceberg_arrow_ipc_batch(root: &Path) -> bool {
-    path_contains_staged_iceberg_batch(root, |path, name| {
+    staged_iceberg_arrow_ipc_batches(root) > 0
+}
+
+/// How many complete Arrow IPC batches Iceberg emitters staged under `root`: files a staging
+/// write finished, which hold at least one record batch.
+fn staged_iceberg_arrow_ipc_batches(root: &Path) -> usize {
+    staged_iceberg_batches(root, |path, name| {
         if !name.starts_with("batch-") || !name.ends_with(".arrow") {
             return false;
         }
@@ -28094,33 +29990,34 @@ fn path_contains_staged_iceberg_arrow_ipc_batch(root: &Path) -> bool {
 }
 
 fn path_contains_staged_iceberg_parquet_batch(root: &Path) -> bool {
-    path_contains_staged_iceberg_batch(root, |_path, name| {
+    let staged = staged_iceberg_batches(root, |_path, name| {
         name.starts_with("batch-") && name.ends_with(".parquet")
-    })
+    });
+    staged > 0
 }
 
-fn path_contains_staged_iceberg_batch(
-    root: &Path,
-    predicate: impl Copy + Fn(&Path, &str) -> bool,
-) -> bool {
+/// How many files under `root`, at any depth, `predicate` accepts by their path and name.
+fn staged_iceberg_batches(root: &Path, predicate: impl Copy + Fn(&Path, &str) -> bool) -> usize {
     let Ok(entries) = std::fs::read_dir(root) else {
-        return false;
+        return 0;
     };
+    let mut staged = 0_usize;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if path_contains_staged_iceberg_batch(&path, predicate) {
-                return true;
-            }
-        } else if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| predicate(&path, name))
-        {
-            return true;
-        }
+        let found = if path.is_dir() {
+            staged_iceberg_batches(&path, predicate)
+        } else {
+            let accepted = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| predicate(&path, name));
+            usize::from(accepted)
+        };
+        staged = staged
+            .checked_add(found)
+            .assured("a scenario's temp directory holds far fewer than usize::MAX files");
     }
-    false
+    staged
 }
 
 async fn iceberg_table_rows(
@@ -28367,6 +30264,15 @@ impl IcebergTableFixture {
     }
 
     fn parse_data_type(column_type: &str) -> ArrowDataType {
+        if let Some(nested) = column_type.strip_prefix("LIST<")
+            && let Some(element) = nested.strip_suffix('>')
+        {
+            return ArrowDataType::List(StdArc::new(ArrowField::new(
+                "item",
+                Self::parse_data_type(element),
+                false,
+            )));
+        }
         match column_type {
             "STRING" => ArrowDataType::Utf8,
             "I64" => ArrowDataType::Int64,
@@ -28404,52 +30310,76 @@ fn iceberg_cell_value(
 ) -> Result<serde_json::Value, String> {
     let schema = batch.schema();
     let field = schema.field(column_index);
-    let array = batch.column(column_index);
+    iceberg_array_value(batch.column(column_index).as_ref(), row_index, field.name())
+}
+
+fn iceberg_array_value(
+    array: &dyn Array,
+    row_index: usize,
+    field_name: &str,
+) -> Result<serde_json::Value, String> {
     if array.is_null(row_index) {
         return Ok(serde_json::Value::Null);
     }
-    match field.data_type() {
+    match array.data_type() {
         ArrowDataType::Int64 => Ok(serde_json::Value::from(
-            iceberg_column::<Int64Array>(batch, column_index)?.value(row_index),
+            iceberg_array::<Int64Array>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::UInt64 => Ok(serde_json::Value::from(
-            iceberg_column::<UInt64Array>(batch, column_index)?.value(row_index),
+            iceberg_array::<UInt64Array>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Boolean => Ok(serde_json::Value::from(
-            iceberg_column::<BooleanArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<BooleanArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Utf8 => Ok(serde_json::Value::from(
-            iceberg_column::<StringArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<StringArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::LargeUtf8 => Ok(serde_json::Value::from(
-            iceberg_column::<LargeStringArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<LargeStringArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Utf8View => Ok(serde_json::Value::from(
-            iceberg_column::<StringViewArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<StringViewArray>(array, field_name)?.value(row_index),
         )),
         ArrowDataType::Timestamp(ArrowTimeUnit::Microsecond, _) => Ok(serde_json::Value::from(
-            iceberg_column::<TimestampMicrosecondArray>(batch, column_index)?.value(row_index),
+            iceberg_array::<TimestampMicrosecondArray>(array, field_name)?.value(row_index),
         )),
+        ArrowDataType::List(_) => iceberg_list_values(
+            iceberg_array::<ListArray>(array, field_name)?.value(row_index),
+            field_name,
+        ),
+        ArrowDataType::LargeList(_) => iceberg_list_values(
+            iceberg_array::<LargeListArray>(array, field_name)?.value(row_index),
+            field_name,
+        ),
+        ArrowDataType::FixedSizeList(_, _) => iceberg_list_values(
+            iceberg_array::<FixedSizeListArray>(array, field_name)?.value(row_index),
+            field_name,
+        ),
         unsupported => Err(format!(
             "unsupported Iceberg assertion field '{}' Arrow type {unsupported:?}",
-            field.name()
+            field_name
         )),
     }
 }
 
-fn iceberg_column<T: 'static>(batch: &RecordBatch, column_index: usize) -> Result<&T, String> {
-    let schema = batch.schema();
-    batch
-        .column(column_index)
-        .as_any()
-        .downcast_ref::<T>()
-        .ok_or_else(|| {
-            format!(
-                "Iceberg assertion column '{}' did not contain expected Arrow array {}",
-                schema.field(column_index).name(),
-                std::any::type_name::<T>()
-            )
-        })
+fn iceberg_list_values(
+    values: StdArc<dyn Array>,
+    field_name: &str,
+) -> Result<serde_json::Value, String> {
+    let values = (0..values.len())
+        .map(|index| iceberg_array_value(values.as_ref(), index, field_name))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::Value::Array(values))
+}
+
+fn iceberg_array<'a, T: 'static>(array: &'a dyn Array, field_name: &str) -> Result<&'a T, String> {
+    array.as_any().downcast_ref::<T>().ok_or_else(|| {
+        format!(
+            "Iceberg assertion column '{}' did not contain expected Arrow array {}",
+            field_name,
+            std::any::type_name::<T>()
+        )
+    })
 }
 
 fn iceberg_row_matches_expected(row: &serde_json::Value, expected: &serde_json::Value) -> bool {
@@ -28654,48 +30584,64 @@ async fn then_within_duration_the_observed_broker_receives_exactly_messages(
 ) {
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let deadline = Instant::now() + duration;
-    let mut payload_counts = BTreeMap::new();
+    let mut observer = world
+        .broker_observer
+        .take()
+        .expect("a broker observer must exist before assertion");
+    let mut last_payload = world.last_broker_payload.take();
+    let mut last_headers = std::mem::take(&mut world.last_broker_headers);
+    struct BrokerObservation {
+        observer: BrokerObserver,
+        last_payload: Option<String>,
+        last_headers: Vec<(String, String)>,
+    }
+    let observation = crate::common::runner_observation::observe_off_the_runner(async move {
+        let mut payload_counts = BTreeMap::new();
 
-    for received in 0..count {
-        nervix_primitives::task::consume_budget().await;
-        let now = Instant::now();
+        for received in 0..count {
+            nervix_primitives::task::consume_budget().await;
+            let now = Instant::now();
+            assert!(
+                now < deadline,
+                "timed out after receiving {received} of {count} broker messages within \
+                 {duration:?}; observed payload counts: {payload_counts:?}"
+            );
+            let message = observer
+                .try_next_message(deadline.saturating_duration_since(now))
+                .await
+                .expect("failed while waiting for an exact broker message count")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "timed out after receiving {received} of {count} broker messages within \
+                         {duration:?}; observed payload counts: {payload_counts:?}"
+                    )
+                });
+            *payload_counts
+                .entry(message.payload.clone())
+                .or_insert(0usize) += 1;
+            last_payload = Some(message.payload);
+            last_headers = message.headers;
+        }
+
+        let duplicate = observer
+            .try_next_message(Duration::from_millis(500))
+            .await
+            .expect("failed while checking for a duplicate broker message");
         assert!(
-            now < deadline,
-            "timed out after receiving {received} of {count} broker messages within {duration:?}; \
+            duplicate.is_none(),
+            "observed an extra broker message after receiving exactly {count}: {duplicate:?}; \
              observed payload counts: {payload_counts:?}"
         );
-        let message = world
-            .broker_observer
-            .as_mut()
-            .expect("a broker observer must exist before assertion")
-            .try_next_message(deadline.saturating_duration_since(now))
-            .await
-            .expect("failed while waiting for an exact broker message count")
-            .unwrap_or_else(|| {
-                panic!(
-                    "timed out after receiving {received} of {count} broker messages within \
-                     {duration:?}; observed payload counts: {payload_counts:?}"
-                )
-            });
-        *payload_counts
-            .entry(message.payload.clone())
-            .or_insert(0usize) += 1;
-        world.last_broker_payload = Some(message.payload);
-        world.last_broker_headers = message.headers;
-    }
-
-    let duplicate = world
-        .broker_observer
-        .as_mut()
-        .expect("a broker observer must exist before assertion")
-        .try_next_message(Duration::from_millis(500))
-        .await
-        .expect("failed while checking for a duplicate broker message");
-    assert!(
-        duplicate.is_none(),
-        "observed an extra broker message after receiving exactly {count}: {duplicate:?}; \
-         observed payload counts: {payload_counts:?}"
-    );
+        BrokerObservation {
+            observer,
+            last_payload,
+            last_headers,
+        }
+    })
+    .await;
+    world.broker_observer = Some(observation.observer);
+    world.last_broker_payload = observation.last_payload;
+    world.last_broker_headers = observation.last_headers;
 }
 
 /// Every docstring line is one exact payload. The broker must deliver exactly those payloads, in
@@ -29484,21 +31430,31 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         .with_parser(PrioritizedScenarioParser)
         .max_concurrent_scenarios(usize::MAX)
         .retries(2)
-        .before(move |feature, _rule, scenario, world| {
+        .before(move |feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
             let scenario_line = scenario.position.line;
+            let rule_tags: &[String] = match rule {
+                Some(rule) => &rule.tags,
+                None => &[],
+            };
+            let declared_tags = feature.tags.iter().chain(rule_tags).chain(&scenario.tags);
+            let length = ScenarioLength::declared_by(declared_tags.map(String::as_str));
             let run_slots = run_slots.clone();
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
                 // visible while it waits for them rather than only once it runs.
-                let registration =
-                    ActiveScenarioRegistration::start(&feature_name, &scenario_name, scenario_line);
+                let registration = ActiveScenarioRegistration::start(
+                    &feature_name,
+                    &scenario_name,
+                    scenario_line,
+                    length,
+                );
                 let attempt = registration.attempt();
                 world.active_scenario = Some(registration);
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, &feature_name, attempt, |reason| {
+                    .admit_with(limit, length, &feature_name, attempt, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;
@@ -29572,6 +31528,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.active_session_node = None;
                 world.active_session_has_subscription = false;
                 world.last_server_error = None;
+                world.release_mysql_table_locks().await;
                 let cluster_cleanup = match world.cluster.take() {
                     Some(mut cluster) => {
                         let teardown = cluster.shutdown_for_teardown().await;
@@ -29606,11 +31563,21 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
                 world.mqtt_publish_filter = None;
+                world.sqs_answer_hold = None;
+                world.iceberg_catalog_gate = None;
+                world.nats_endpoint = None;
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
+                world.port_takers.clear();
+                // A scenario that ended before a peer listened still holds its refused ZeroMQ
+                // emission port.
+                world.zeromq_emit_refusal = None;
                 // The ZeroMQ and syslog ports the scenario drew for itself were bound by its nodes
-                // and its observers, and both are gone by now, so the ports go back to the pool
-                // the next scenario draws from.
+                // and its observers, and both are gone by now, so the holds on the addresses its
+                // nodes bound let go, and the ports go back to the pool the next scenario draws
+                // from.
+                world.zeromq_ingest.release();
+                world.syslog_ingest.release();
                 let scenario_ports = std::mem::take(&mut world.scenario_ports);
                 crate::common::port_pool::release_test_ports(&scenario_ports);
 

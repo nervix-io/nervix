@@ -29,7 +29,8 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
+    SourceResult, SourceResume,
 };
 use nervix_models::ClientConfigEntry;
 #[cfg(feature = "testing")]
@@ -307,20 +308,27 @@ impl BrokerSourceConnector for SyslogSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
-        let result = match self.listener.as_mut() {
+        let received = match self.listener.as_mut() {
             Some(SyslogListener::Udp(listener)) => {
-                listener.receive(self.config.max_message_size).await
+                let receive = listener.receive(self.config.max_message_size);
+                cancellation.unless_cancelled(receive).await
             }
             Some(SyslogListener::Stream(listener)) => {
                 if listener.listener.is_none() {
                     return Ok(SourceBatch::ResumeRequired);
                 }
-                listener
-                    .receive(self.config.max_message_size, self.tls_acceptor.clone())
-                    .await
+                let receive =
+                    listener.receive(self.config.max_message_size, self.tls_acceptor.clone());
+                cancellation.unless_cancelled(receive).await
             }
             None => return Ok(SourceBatch::ResumeRequired),
+        };
+        let Some(result) = received else {
+            return Ok(SourceBatch::Interrupted {
+                gathered: Vec::new(),
+            });
         };
         match result {
             Ok(message) => Ok(SourceBatch::Messages(vec![message])),

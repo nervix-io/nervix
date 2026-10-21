@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** One single-broker mock cluster, the librdkafka client whose instance hosts it for as
 //!   long as the scenario keeps it, the topics it serves, and whether it refuses the writes produced
-//!   to it.
+//!   to it or the offsets its consumer groups commit.
 //! - **Depends on.** rust-rdkafka through the Kafka connector's testing re-export.
 //! - **Must not know.** Nervix, its emitters, or the shared Kafka test broker.
 //!
@@ -13,7 +13,9 @@
 //! replication factor. The mock broker answers the Kafka protocol for one scenario alone. While a
 //! scenario asks it to, it refuses every produce request with `NOT_ENOUGH_REPLICAS`: a producer
 //! retries that answer, and the broker stores nothing it refused, so nothing it refused appears once
-//! it accepts writes again.
+//! it accepts writes again. While a scenario asks it to, it also refuses offset commits with
+//! `GROUP_AUTHORIZATION_FAILED`, an answer a consumer does not retry, and a group's committed offset
+//! stays where it was.
 
 use std::{fmt, io};
 
@@ -27,6 +29,11 @@ use nervix_connector_kafka::testing_rdkafka::{
 /// How many produce requests a refusing broker answers with `NOT_ENOUGH_REPLICAS` at most: far more
 /// than a producer, which retries a refused request about once a second, sends during a scenario.
 const REFUSED_PRODUCE_REQUESTS: usize = 10_000;
+
+/// How many offset commits a broker refusing every commit answers with `GROUP_AUTHORIZATION_FAILED`
+/// at most: far more than an ingestor, which commits again after each retry backoff, sends during a
+/// scenario.
+const REFUSED_OFFSET_COMMITS: usize = 10_000;
 
 /// The librdkafka setting that makes a client host a mock cluster of that many brokers.
 const MOCK_BROKER_COUNT: &str = "test.mock.num.brokers";
@@ -98,6 +105,28 @@ impl KafkaMockBroker {
     /// Makes the broker store the writes produced to it again.
     pub(crate) fn accept_writes(&self) -> io::Result<()> {
         self.cluster()?.clear_request_errors(RDKafkaApiKey::Produce);
+        Ok(())
+    }
+
+    /// Makes the broker refuse every offset commit with `GROUP_AUTHORIZATION_FAILED` until it
+    /// accepts commits again.
+    pub(crate) fn refuse_offset_commits(&self) -> io::Result<()> {
+        self.refuse_next_offset_commits(REFUSED_OFFSET_COMMITS)
+    }
+
+    /// Makes the broker refuse the next `commits` offset commits with `GROUP_AUTHORIZATION_FAILED`
+    /// and accept the ones after them.
+    pub(crate) fn refuse_next_offset_commits(&self, commits: usize) -> io::Result<()> {
+        let refusals = vec![RDKafkaRespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED; commits];
+        self.cluster()?
+            .request_errors(RDKafkaApiKey::OffsetCommit, &refusals);
+        Ok(())
+    }
+
+    /// Makes the broker store the offsets its consumer groups commit again.
+    pub(crate) fn accept_offset_commits(&self) -> io::Result<()> {
+        self.cluster()?
+            .clear_request_errors(RDKafkaApiKey::OffsetCommit);
         Ok(())
     }
 }

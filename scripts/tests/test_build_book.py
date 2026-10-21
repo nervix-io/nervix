@@ -380,31 +380,38 @@ class MdbookVersionTests(unittest.TestCase):
     def completed(self, stdout: str) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(["mdbook", "--version"], 0, stdout=stdout, stderr="")
 
-    def test_pinned_version_is_accepted(self) -> None:
-        with patch(
-            "scripts.build_book.subprocess.run",
-            return_value=self.completed(f"mdbook v{MDBOOK_VERSION}\n"),
-        ):
-            verify_mdbook_version()
+    def test_patch_releases_of_the_supported_minor_are_accepted(self) -> None:
+        minor = MDBOOK_VERSION.rsplit(".", maxsplit=1)[0]
+        for version in (f"{minor}.0", MDBOOK_VERSION, f"{minor}.4", f"{minor}.42"):
+            with self.subTest(version=version):
+                with patch(
+                    "scripts.build_book.subprocess.run",
+                    return_value=self.completed(f"mdbook v{version}\n"),
+                ):
+                    verify_mdbook_version()
 
-    def test_newer_patch_version_is_accepted(self) -> None:
-        major, minor, patch_version = map(int, MDBOOK_VERSION.split("."))
-        with patch(
-            "scripts.build_book.subprocess.run",
-            return_value=self.completed(f"mdbook v{major}.{minor}.{patch_version + 1}\n"),
-        ):
-            verify_mdbook_version()
+    def test_other_minor_versions_are_rejected_by_name(self) -> None:
+        for version in ("0.4.40", "0.6.0", "1.5.3"):
+            with self.subTest(version=version):
+                with patch(
+                    "scripts.build_book.subprocess.run",
+                    return_value=self.completed(f"mdbook v{version}\n"),
+                ):
+                    with self.assertRaises(SystemExit) as raised:
+                        verify_mdbook_version()
 
-    def test_other_version_is_rejected_by_name(self) -> None:
-        with patch(
-            "scripts.build_book.subprocess.run",
-            return_value=self.completed("mdbook v0.4.40\n"),
-        ):
-            with self.assertRaises(SystemExit) as raised:
-                verify_mdbook_version()
+                self.assertIn("0.5.x", str(raised.exception))
+                self.assertIn(version, str(raised.exception))
 
-        self.assertIn(f"{MDBOOK_VERSION.rsplit('.', 1)[0]}.x", str(raised.exception))
-        self.assertIn("0.4.40", str(raised.exception))
+    def test_malformed_version_is_rejected(self) -> None:
+        for version in ("", "0.5", "0.5.4.1", "0.5.patch", "0.5.4-beta"):
+            with self.subTest(version=version):
+                with patch(
+                    "scripts.build_book.subprocess.run",
+                    return_value=self.completed(f"mdbook v{version}\n"),
+                ):
+                    with self.assertRaises(SystemExit):
+                        verify_mdbook_version()
 
     def test_missing_mdbook_is_reported(self) -> None:
         with patch("scripts.build_book.subprocess.run", side_effect=FileNotFoundError("mdbook")):

@@ -19,12 +19,12 @@ contract and a violated contract require different corrections.
 
 | Family | Purpose and owning fact | Allowed example | Rejected example | Enforcement and qualification |
 | --- | --- | --- | --- | --- |
-| `data_plane_lock_acquisitions` | Resolve synchronization APIs and the execution contract of their callers. [Concurrency](data-plane-concurrency.md#source-contracts) owns contexts, effects and bounds. | A task-local `HashMap::entry`; a registry acquisition with a lifecycle contract. | A recurring callback reaching a DashMap shard or a lifecycle-only helper. | Compiler `sync_acquisition`, `lifecycle_call`, `unknown_effect`; resolved receiver, helper, callback, trait, macro and expectation fixtures. |
+| `data_plane_lock_acquisitions` | Resolve synchronization APIs and the execution contract of their callers. [Concurrency](data-plane-concurrency.md#source-contracts) owns contexts, effects and bounds. | A task-local `HashMap::entry`; a registry acquisition with a lifecycle contract. | A recurring callback reaching a DashMap shard or a lifecycle-only helper. | Compiler `sync_acquisition`, `lifecycle_call`, `unknown_effect`; resolved receiver, helper, callback, trait, foreign item, macro and expectation fixtures. |
 | `bare_error_signatures` | A Nervix failure contract carries its complete contextual report. [Errors](errors-and-diagnostics.md) owns outcome, library and foreign-interface classifications. | `Result<T, Report<DomainError>>`; an exact reason-bearing outcome contract. | An owned failure in an alias, inferred future or stream without its report. | Compiler `bare_error_signature`; associated-output, alias, inference, metadata and report-carrier fixtures. |
 | `discarded_results` | Preserve a failure or classify recovery at its consuming operation. | A propagated failure or the recovery owner's explicit `Discarded` operation. | A failed outcome discarded through a binding, projection or `drop`. | Compiler `discarded_outcome`; complete and partial-discard, borrowed, tuple and collection fixtures. |
 | `bare_unwrap_and_expect` | A canonical Option/Result panic needs a construction or checked guarantee, expressed through meticulous. | `verified` after checking the condition; an unrelated object's method named `expect`. | Canonical `unwrap` or `expect`, including aliases and UFCS. | Compiler `bare_panic`; canonical/custom methods, dereference and call-form fixtures. |
 | `model_matches_in_data_plane` | Configuration Models stay inside their owning boundary; data plane and connector engines consume plans. | A vocabulary Model or a typed connector plan. | A forbidden Model in a body, normalized interface or nested aggregate. | Compiler `model_in_data_plane`; source `layer`, `value` and `input` contracts, cross-crate and projection fixtures. |
-| `parser_imports_outside_edges` | Language dependencies belong to the language and its declared edges. | The session adapter consuming public parsing; a runtime consuming Models. | A language reference outside its authorized layer, including aliases. | Compiler `parser_dependency` plus disjoint inactive import/manifest provenance; qualified names, reexports and dependency fixtures. |
+| `parser_imports_outside_edges` | Language dependencies belong to the language and its declared edges. | The session adapter consuming public parsing; a runtime consuming Models. | A language reference outside its authorized layer, including aliases. | Compiler `parser_dependency` plus disjoint inactive import/manifest provenance; qualified names, reexports, foreign items and dependency fixtures. |
 | `data_plane_cluster_awaits` | Recurring processing retains observations instead of awaiting cluster control access. | A lifecycle observation; reading an installed immutable publication. | Recurring work awaiting a declared cluster-access capability. | Compiler `cluster_await`; direct, bound-future, helper and trait fixtures. |
 | `string_node_ids` | Declared node identities use the shared typed vocabulary. [Typed States](typed-states.md#source-owned-identity-and-installation-contracts) owns the identity contract. | `ClusterNodeId`; an ordinary string unrelated to node identity. | A declared identity interface or field represented by a string. | Compiler `node_identity`; alias, interface, aggregate, field and metadata fixtures. |
 | `write_once_rwlock_fields` | Installation-only state is an installed value rather than replaceable locked absence. | An installed value; a genuinely mutable field with its lifetime reason. | An installed field containing an RwLock, or an unclassified candidate requiring review. | Compiler `installed_state` and `state_contract`; normalized representation, lifetime, review and exception fixtures. |
@@ -60,6 +60,21 @@ must be present, current and complete. Authored macro expansion and captured cal
 provenance; generated build-directory code and external definitions are explicit exclusions.
 The compiler does not infer the APIs of code that no declared configuration compiles.
 
+Cargo runs the driver for each workspace target through `scripts/typed_lint_wrapper.py`, below the
+compiler wrapper the host configures. That compiler wrapper reports a compiler ended by a signal with
+the exit status of a compile error, so the driver runs as the workspace wrapper's child instead of
+replacing it. It inherits the wrapper's descriptors, Cargo's jobserver among them, and ends when the
+wrapper ends, so a compiler wrapper that stops a compilation still stops the driver. Every
+compilation leaves a compilation record in a `compilations` directory beside the reports: its exit
+status or signal, its start, duration and peak resident size, the out-of-memory kills the kernel
+counted in its cgroup while it ran, and its [host memory admission](#host-memory-admission). When
+Cargo fails, the gate names each compilation whose record holds a failure as terminated by a signal,
+failed with compiler errors, or exited without a compiler error, which means the driver itself
+failed, for example while publishing its report. A Cargo failure with no failed compilation happened
+outside them, in Cargo, a build script or the compiler wrapper. Records of an earlier run are
+discarded before Cargo starts. The kernel's out-of-memory killer ends a compilation with a signal and
+no message, which the gate reports as such instead of as a missing report.
+
 Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The four
 counts retain their product-debt scope: directory components named `tests`, `benches` or
 `examples` are excluded. In-crate `tests.rs`, `*_tests.rs` and `test_fixtures.rs` count toward
@@ -80,6 +95,64 @@ The parser requires no rustc internals or analysis driver. `just typed-ratchet-s
 builds it on the stable toolchain. Native compiler coverage builds it on that producer's pinned
 toolchain so LLVM profiles and exporters match. The tooling workspace stays outside product
 dependencies, including browser and ordinary release graphs.
+
+## Host Memory Admission
+
+An analysis compilation needs about the memory of rustc's own check of its target, and the server
+library's dwarfs every other: it peaks between about 11 and 13.5 GiB in each of the ten declared
+configurations that compile it, while no other analysis compilation reaches 2 GiB. Configurations
+run one after another, and inside one the server library compiles after the crates it depends on,
+so one validation holds little more than one server analysis at a time. Validations in several
+worktrees of one host run at the same time, though, and nothing else admits them against the
+host's memory: kache, the compiler wrapper the host configures, runs a chain with a workspace
+wrapper directly, outside its own memory-weighted scheduler. Five server analyses at once exceed a
+62 GiB host, and the kernel's out-of-memory killer ends one of them.
+
+`tools/nervix-lint/configurations.toml` declares the admission: a threshold, a wait limit and a
+reservation for every compilation, by crate and target kind, that peaks above the threshold. The
+runner hands the policy to every compilation through the workspace wrapper. A compilation with a
+reservation takes a place in one queue, `/tmp/nervix-analysis-admission-<uid>`, which every worktree
+of the user shares on the host, before its driver starts, and holds it until the driver ends:
+
+- It waits while an older waiter is ahead of it. A waiter that has not decided for ten polls, such
+  as a stopped wrapper, keeps its place but no longer holds back the waiters behind it.
+- It is admitted when its reservation fits in what each memory domain it runs in has left after the
+  growth still to come of every compilation admitted in that domain. The domains are the host, with
+  the kernel's estimate of its available memory, and each ancestor cgroup with a memory limit, with
+  its limit less its usage plus its inactive file pages. An admitted compilation's growth still to
+  come is its reservation less its driver's resident size.
+- It is admitted when no other compilation is admitted, whether or not its reservation fits, so the
+  queue always progresses: with too little memory the declared compilations run one at a time. A
+  compilation admitted alone into too little memory can still be killed, and its record names the
+  kill as before.
+- It starts at the wait limit when neither happens first, so every wait is bounded. Admission never
+  fails a compilation.
+
+A place is an exclusive advisory lock on the compilation's lease file, so the kernel releases the
+place of a wrapper that ends without releasing it, and the next decision deletes its lease. Every
+decision holds the queue's lock. A waiter reports what it waits for when it starts waiting and every
+minute after: its reservation, the waiters ahead of it, each admitted compilation by crate,
+configuration, worktree and process, and the memory left. A queue that cannot be used admits
+nothing: the compilation starts at once, and its report and record name the failure. A platform
+that does not report its memory, such as one without `/proc`, runs the declared compilations one at
+a time.
+
+The admission lands in each compilation record: the reservation, the outcome (`fit`, `alone`,
+`wait_limit`, `queue_locked` when the queue's lock stayed held through the wait limit, or
+`unavailable`), the seconds waited, the memory left at the decision and the number of admitted
+compilations. The runner requires a record for every expected target Cargo compiled in the run and
+holds every record of the run to the declaration, including those of the workspace libraries a
+binary configuration compiles for its binaries: a compilation that peaks above its reservation, or
+above the threshold without one, fails the gate and names the declaration to change, so the
+reservations keep covering what the compilations use. Such a failure also discards the configuration's analysis, because Cargo
+would find the compilation fresh and the next run would measure nothing. The completion evidence
+keeps the measurements, and the runner prints each configuration's largest compilation and every
+admission that waited or did not fit.
+
+Admission covers the declared analysis compilations only. Clippy's compilations go through kache's
+own scheduler, and tests, scenario clusters and other work on the host are admitted by nothing; each
+decision sees the memory they use, not the memory they will use. The queue belongs to one user on
+one host, so separate users, containers and machines have queues of their own.
 
 ## Function Complexity
 

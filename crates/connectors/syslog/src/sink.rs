@@ -3,7 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The Syslog sender a client's transport configures, DNS-backed UDP, TCP and TLS
-//!   connections, RFC 6587 stream framing, and the payload limits each transport enforces.
+//!   connections opened within the client's `connect_timeout_ms`, RFC 6587 stream framing, and
+//!   the payload limits each transport enforces.
 //! - **Depends on.** The connector contract, this crate's shared client configuration,
 //!   the node resolver, `error-stack`, Tokio, `rustls` and `tokio-rustls`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -21,22 +22,20 @@
     )
 )]
 
-use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    time::Duration,
-};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use async_trait::async_trait;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
-    PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
-    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
+    ConfiguredDeadline, PerRecordOutcome, RecordSink, SinkFinish, SinkFinishResult, SinkHost,
+    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId, SinkStartError,
+    SinkStartResult,
 };
-use nervix_dns::{ConnectionBudget, DnsResolver};
+use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::{
     net::{TcpStream, UdpSocket},
-    time::timeout,
+    time::{Instant, timeout},
 };
 use rustls_pki_types::ServerName;
 use thiserror::Error;
@@ -48,7 +47,6 @@ use crate::config::{
 };
 
 const SYSLOG: &str = "syslog";
-const CONNECT_BUDGET: Duration = Duration::from_secs(30);
 
 /// What one Syslog sink sends through: the entries its client declares its transport with.
 pub struct SyslogSinkConfig {
@@ -84,22 +82,58 @@ enum SyslogPayloadError {
 impl SyslogSink {
     pub async fn new(config: SyslogSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
         let client = Self::client_config(&config.config)?;
-        let sender = Self::connect(&client, &config.dns).await?;
+        let connect_timeout = Self::connect_timeout(&config.config)?;
+        let sender = Self::connect(&client, connect_timeout, &config.dns).await?;
         Ok(Self {
             config: client,
             sender,
         })
     }
 
-    /// Checks that `config` declares a usable Syslog transport, loading its TLS material when the
-    /// transport is TLS, so an unusable configuration fails the emitter's start instead of every
-    /// connection attempt.
+    /// Checks that `config` declares a usable Syslog transport and connection deadline, loading
+    /// its TLS material when the transport is TLS, so an unusable configuration fails the
+    /// emitter's start instead of every connection attempt.
     pub fn check_client_config(config: &[ClientConfigEntry]) -> SinkStartResult<()> {
-        let config = Self::client_config(config)?;
-        if config.protocol == SyslogProtocol::Tls {
-            config.tls_client_config().map_err(Self::config_error)?;
+        let client = Self::client_config(config)?;
+        Self::connect_timeout(config)?;
+        if client.protocol == SyslogProtocol::Tls {
+            client.tls_client_config().map_err(Self::config_error)?;
         }
         Ok(())
+    }
+
+    /// The deadline the client's `connect_timeout_ms` sets on opening the sink's connection.
+    fn connect_timeout(config: &[ClientConfigEntry]) -> SinkStartResult<ConfiguredDeadline> {
+        ConfiguredDeadline::connect(config)
+            .change_context(SinkStartError::InvalidConfiguration { sink: SYSLOG })
+    }
+
+    /// Why no connection was opened, with each address attempt's failure. When the attempts ran
+    /// out of the client's `connect_timeout_ms`, the failure names it beneath the sink's, and its
+    /// message is attached last, so it leads the report the emitter shows.
+    fn unconnected(
+        budget: &OperationBudget,
+        connect_timeout: ConfiguredDeadline,
+        step: &'static str,
+        failures: Vec<String>,
+    ) -> Report<SinkStartError> {
+        let initialize = SinkStartError::Initialize { sink: SYSLOG };
+        let elapsed = if budget.remaining().is_zero() {
+            Some(connect_timeout.elapsed(step))
+        } else {
+            None
+        };
+        let mut report = match elapsed {
+            Some(elapsed) => Report::new(elapsed).change_context(initialize),
+            None => Report::new(initialize),
+        };
+        for failure in failures {
+            report = report.attach_printable(failure);
+        }
+        if let Some(elapsed) = elapsed {
+            report = report.attach_printable(elapsed.to_string());
+        }
+        report
     }
 
     /// The Syslog transport a resolved client configuration declares.
@@ -109,12 +143,13 @@ impl SyslogSink {
 
     async fn connect(
         config: &SyslogClientConfig,
+        connect_timeout: ConfiguredDeadline,
         dns: &DnsResolver,
     ) -> SinkStartResult<SyslogSender> {
-        let budget = ConnectionBudget::start(CONNECT_BUDGET);
+        let budget = OperationBudget::start(connect_timeout.bound(), LookupShare::Whole);
         let addresses = {
             let mapping_input = dns
-                .resolve(&config.server_name, config.port, budget.remaining())
+                .resolve(&config.server_name, config.port, budget.lookup())
                 .await;
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
@@ -128,7 +163,7 @@ impl SyslogSink {
         }?;
         match config.protocol {
             SyslogProtocol::Udp => {
-                let mut report = Report::new(SinkStartError::Initialize { sink: SYSLOG });
+                let mut failures = Vec::new();
                 for attempt in budget.attempts(&addresses) {
                     nervix_primitives::task::consume_budget().await;
                     let local = SocketAddr::new(
@@ -146,22 +181,22 @@ impl SyslogSink {
                     .await;
                     match connected {
                         Ok(Ok(socket)) => return Ok(SyslogSender::Udp(socket)),
-                        Ok(Err(error)) => {
-                            report =
-                                report.attach_printable(format!("{}: {error}", attempt.address));
-                        }
-                        Err(_) => {
-                            report = report.attach_printable(format!(
-                                "{}: no UDP setup within {:?}",
-                                attempt.address, attempt.budget
-                            ));
-                        }
+                        Ok(Err(error)) => failures.push(format!("{}: {error}", attempt.address)),
+                        Err(_) => failures.push(format!(
+                            "{}: no UDP setup within {:?}",
+                            attempt.address, attempt.budget
+                        )),
                     }
                 }
-                Err(report)
+                Err(Self::unconnected(
+                    &budget,
+                    connect_timeout,
+                    "setting up the Syslog UDP socket",
+                    failures,
+                ))
             }
             SyslogProtocol::Tcp => {
-                let mut report = Report::new(SinkStartError::Initialize { sink: SYSLOG });
+                let mut failures = Vec::new();
                 for attempt in budget.attempts(&addresses) {
                     nervix_primitives::task::consume_budget().await;
                     let stream = timeout(attempt.budget, TcpStream::connect(attempt.address)).await;
@@ -170,19 +205,19 @@ impl SyslogSink {
                             stream.set_nodelay(true).map_err(Self::start_error)?;
                             return Ok(SyslogSender::Tcp(stream));
                         }
-                        Ok(Err(error)) => {
-                            report =
-                                report.attach_printable(format!("{}: {error}", attempt.address));
-                        }
-                        Err(_) => {
-                            report = report.attach_printable(format!(
-                                "{}: no connection within {:?}",
-                                attempt.address, attempt.budget
-                            ));
-                        }
+                        Ok(Err(error)) => failures.push(format!("{}: {error}", attempt.address)),
+                        Err(_) => failures.push(format!(
+                            "{}: no connection within {:?}",
+                            attempt.address, attempt.budget
+                        )),
                     }
                 }
-                Err(report)
+                Err(Self::unconnected(
+                    &budget,
+                    connect_timeout,
+                    "connecting to the Syslog server",
+                    failures,
+                ))
             }
             SyslogProtocol::Tls => {
                 let server_name =
@@ -196,7 +231,7 @@ impl SyslogSink {
                     })?;
                 let connector =
                     TlsConnector::from(config.tls_client_config().map_err(Self::config_error)?);
-                let mut report = Report::new(SinkStartError::Initialize { sink: SYSLOG });
+                let mut failures = Vec::new();
                 for attempt in budget.attempts(&addresses) {
                     nervix_primitives::task::consume_budget().await;
                     let connected = timeout(attempt.budget, async {
@@ -207,19 +242,19 @@ impl SyslogSink {
                     .await;
                     match connected {
                         Ok(Ok(stream)) => return Ok(SyslogSender::Tls(Box::new(stream))),
-                        Ok(Err(error)) => {
-                            report =
-                                report.attach_printable(format!("{}: {error}", attempt.address));
-                        }
-                        Err(_) => {
-                            report = report.attach_printable(format!(
-                                "{}: no TLS connection within {:?}",
-                                attempt.address, attempt.budget
-                            ));
-                        }
+                        Ok(Err(error)) => failures.push(format!("{}: {error}", attempt.address)),
+                        Err(_) => failures.push(format!(
+                            "{}: no TLS connection within {:?}",
+                            attempt.address, attempt.budget
+                        )),
                     }
                 }
-                Err(report)
+                Err(Self::unconnected(
+                    &budget,
+                    connect_timeout,
+                    "the TLS connection to the Syslog server",
+                    failures,
+                ))
             }
         }
     }
@@ -301,7 +336,13 @@ impl SyslogSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for SyslogSink {}
+impl SinkLifecycle for SyslogSink {
+    /// Each frame is written and flushed to the socket before the publish returns, so the
+    /// sender holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RecordSink for SyslogSink {
@@ -376,11 +417,13 @@ async fn write_stream_frame(
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use std::net::Ipv6Addr;
+    use std::{net::Ipv6Addr, time::Duration};
 
     use error_stack::{AttachmentKind, FrameKind};
     use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_connector::DeadlineElapsed;
     use nervix_dns::{DnsConfiguration, NameServers};
+    use nervix_models::DeadlineKey;
     use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
     use tempfile::TempDir;
     use tokio::io::AsyncReadExt as _;
@@ -510,6 +553,11 @@ mod tests {
         }
     }
 
+    /// The deadline an emitter's client that leaves `connect_timeout_ms` out connects within.
+    fn default_connect_timeout() -> ConfiguredDeadline {
+        ConfiguredDeadline::connect(&[]).assured("a client without the key takes the default")
+    }
+
     fn endpoint_config(protocol: &str, addr: &str) -> SyslogClientConfig {
         SyslogClientConfig::parse(
             &[
@@ -548,9 +596,10 @@ mod tests {
             },
         );
         let config = endpoint_config("tcp", &format!("syslog.nervix.test:{port}"));
-        let SyslogSender::Tcp(mut sender) = SyslogSink::connect(&config, &fixture.resolver)
-            .await
-            .assured("the second DNS answer has a listener")
+        let SyslogSender::Tcp(mut sender) =
+            SyslogSink::connect(&config, default_connect_timeout(), &fixture.resolver)
+                .await
+                .assured("the second DNS answer has a listener")
         else {
             panic!("the TCP configuration must open a TCP stream");
         };
@@ -577,9 +626,10 @@ mod tests {
             .assured("the IPv6 loopback address is available");
         let address = receiver.local_addr().assured("the UDP receiver is bound");
         let config = endpoint_config("udp", &address.to_string());
-        let SyslogSender::Udp(sender) = SyslogSink::connect(&config, &fixture.resolver)
-            .await
-            .assured("the literal IPv6 address can be connected")
+        let SyslogSender::Udp(sender) =
+            SyslogSink::connect(&config, default_connect_timeout(), &fixture.resolver)
+                .await
+                .assured("the literal IPv6 address can be connected")
         else {
             panic!("the UDP configuration must open a UDP socket");
         };
@@ -613,7 +663,7 @@ mod tests {
             .assured("the listener is bound")
             .port();
         let config = endpoint_config("tcp", &format!("listed.nervix.test:{port}"));
-        let sender = SyslogSink::connect(&config, &fixture.resolver)
+        let sender = SyslogSink::connect(&config, default_connect_timeout(), &fixture.resolver)
             .await
             .assured("the hosts-file address has a listener");
         assert!(matches!(sender, SyslogSender::Tcp(_)));
@@ -634,7 +684,7 @@ mod tests {
             },
         );
         let config = endpoint_config("tcp", "missing.nervix.test:6514");
-        let failure = SyslogSink::connect(&config, &fixture.resolver)
+        let failure = SyslogSink::connect(&config, default_connect_timeout(), &fixture.resolver)
             .await
             .err()
             .assured("the fixture name has no address");
@@ -643,6 +693,99 @@ mod tests {
             SinkStartError::Initialize { sink: SYSLOG }
         ));
         assert!(format!("{failure:?}").contains("the name does not exist"));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_tls_server_that_never_answers_is_reported_within_connect_timeout() {
+        let fixture = DnsFixture::start("").await;
+        let listener = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .assured("a loopback TCP port is available");
+        let address = listener.local_addr().assured("the listener is bound");
+        // Accepts the connection and never answers the TLS client hello.
+        let silent = nervix_primitives::task::spawn(async move {
+            let (held, _) = listener.accept().await.assured("the listener accepts it");
+            std::future::pending::<()>().await;
+            drop(held);
+        });
+        let entries = [
+            ClientConfigEntry {
+                key: "protocol".to_string(),
+                value: "tls".to_string(),
+            },
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: address.to_string(),
+            },
+            ClientConfigEntry {
+                key: "connect_timeout_ms".to_string(),
+                value: "200".to_string(),
+            },
+        ];
+        let config = SyslogClientConfig::parse(&entries, SyslogDirection::Emit)
+            .assured("the test endpoint is a valid Syslog client");
+        let connect_timeout =
+            SyslogSink::connect_timeout(&entries).assured("200 ms is a valid deadline");
+        let failure = nervix_primitives::time::timeout(
+            Duration::from_secs(10),
+            SyslogSink::connect(&config, connect_timeout, &fixture.resolver),
+        )
+        .await
+        .assured("connect_timeout_ms bounds the connection")
+        .err()
+        .assured("a server that never answers cannot be connected");
+        assert!(matches!(
+            failure.current_context(),
+            SinkStartError::Initialize { sink: SYSLOG }
+        ));
+        let elapsed = failure
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<DeadlineElapsed>())
+            .assured("the elapsed deadline stays beneath the start failure");
+        assert_eq!(elapsed.key, DeadlineKey::ConnectTimeout);
+        assert_eq!(elapsed.bound, Duration::from_millis(200));
+        assert!(format!("{failure:#}").contains("within connect_timeout_ms 200ms"));
+        // The emitter shows the last message a sink attached, and the deadline leads.
+        let leading = failure
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<String>())
+            .assured("the start failure carries a message");
+        assert_eq!(
+            leading,
+            "the TLS connection to the Syslog server did not finish within connect_timeout_ms \
+             200ms"
+        );
+        silent.abort();
+    }
+
+    #[test]
+    fn an_invalid_connect_timeout_fails_the_client_check() {
+        for value in ["0", "1s", ""] {
+            let entries = [
+                ClientConfigEntry {
+                    key: "protocol".to_string(),
+                    value: "tcp".to_string(),
+                },
+                ClientConfigEntry {
+                    key: "addr".to_string(),
+                    value: "127.0.0.1:6514".to_string(),
+                },
+                ClientConfigEntry {
+                    key: "connect_timeout_ms".to_string(),
+                    value: value.to_string(),
+                },
+            ];
+            let failure = SyslogSink::check_client_config(&entries)
+                .err()
+                .assured("an invalid deadline fails the check");
+            assert!(
+                matches!(
+                    failure.current_context(),
+                    SinkStartError::InvalidConfiguration { sink: SYSLOG }
+                ),
+                "{value:?}: {failure:?}"
+            );
+        }
     }
 
     #[nervix_primitives::test]

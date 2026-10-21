@@ -9,7 +9,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BatchMessageLimit, ByteSizeUnit, ClickHouseSink, ClickHouseSinkEntity, ClickHouseTableSink,
     ClickHouseValueMapping, ClientConsumerSink, ClientSink, ClientSinkEntity, CreateEmitter,
-    EmitSink, EmitSinkKind, EmitterBatchPolicy, EmitterBatchRequirement, EmitterBody,
+    EmitSink, EmitSinkKind, EmitterBatchLegality, EmitterBatchPolicy, EmitterBody,
     EmitterPublishingMode, Expression, HttpRequestSink, HttpSink, HttpSinkEntity, IcebergCatalog,
     IcebergSink, IcebergSinkEntity, IcebergStorageBackend, IcebergTableSink, KafkaSink,
     KafkaSinkEntity, KafkaTopicSink, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink,
@@ -49,16 +49,13 @@ impl Arbitrary<'_> {
             EmitterBody::Values => RouteShape::FilterOnly,
         };
         let publishing_mode = self.accepted_publishing_mode(&sink);
-        // NSPL writes no batching clause for an HTTP emitter, whose requests carry one record
-        // each, even though the vocabulary lets its sink batch.
-        let batch = match (sink.batch_requirement(), &sink) {
-            (EmitterBatchRequirement::Required, _) => Some(self.batch_policy()),
-            (EmitterBatchRequirement::Optional, EmitSink::Http(_))
-                if self.domain == Domain::Nspl =>
-            {
-                None
-            }
-            (EmitterBatchRequirement::Optional, _) => {
+        // Plexus writes no batching clause where batching is unavailable, as for an HTTP emitter,
+        // whose requests carry one record each. The vocabulary can still hold one, which a stored
+        // form must carry back, so its domain may draw one.
+        let batch = match sink.batch_legality() {
+            EmitterBatchLegality::Required { .. } => Some(self.batch_policy()),
+            EmitterBatchLegality::Unavailable { .. } if self.domain == Domain::Nspl => None,
+            EmitterBatchLegality::Optional { .. } | EmitterBatchLegality::Unavailable { .. } => {
                 if self.entropy.flag() {
                     Some(self.batch_policy())
                 } else {

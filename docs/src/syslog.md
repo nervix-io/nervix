@@ -127,11 +127,12 @@ An emitter resolves the host in `addr` through the node's asynchronous resolver 
 opens a sender. Literal IPv4 and IPv6 addresses are used directly; hosts-file names and DNS
 answers follow the node's configured resolver and TTL policy. UDP tries answers in order, binding
 each socket to the answer's IP family, and sends to the first address whose setup succeeds. TCP
-and TLS try the answers in order, giving each an equal share of the time left in one 30-second
-connection budget. DNS, address attempts and the TLS
-handshake all spend that same budget. TLS verifies the original host from `addr`, whichever address
-accepted the connection. A new sender after a failure resolves again, so an expired answer can be
-replaced without restarting the node.
+and TLS try the answers in order, giving each an equal share of the time left in one connection
+budget, the client's `connect_timeout_ms`, 30 seconds when it is left out. DNS, address attempts and
+the TLS handshake all spend that same budget, and a connection that runs out of it is the emitter's
+transient status, naming the key and its bound. TLS verifies the original host from `addr`,
+whichever address accepted the connection. A new sender after a failure resolves again, so an
+expired answer can be replaced without restarting the node.
 
 | Config key | Required | Meaning |
 | --- | --- | --- |
@@ -139,6 +140,7 @@ replaced without restarting the node.
 | `addr` | Yes | `host:port`; bind address for ingestion and destination for emission |
 | `max_message_size` | No | Ingested-message byte cap; defaults to `131072` |
 | `framing` | No | TCP emitter framing: `octet-counting` by default or `non-transparent` |
+| `connect_timeout_ms` | No | Emitter only: positive whole milliseconds a new connection may take, name resolution, address attempts and TLS included; defaults to 30 seconds |
 | `tls_cert_file` | Directional | TLS ingestor server certificate; optional emitter client certificate |
 | `tls_key_file` | Directional | Private key paired with `tls_cert_file` |
 | `tls_ca_file` | No | Ingestor client-certificate CA, or emitter server trust root |
@@ -166,12 +168,18 @@ client authentication. `tls_ca_file` adds a server trust root; platform roots ar
 absent. TLS verifies the server name derived from `addr`.
 
 Configuration fails with a key-specific error for an unknown protocol, malformed address,
-`framing` on UDP, non-transparent framing on TLS, a missing TLS server identity, or only one half
-of an emitter client identity. TLS keys are invalid with UDP or plain TCP.
+`framing` on UDP, non-transparent framing on TLS, a missing TLS server identity, only one half
+of an emitter client identity, a `connect_timeout_ms` that is not a positive whole number of
+milliseconds, or a `connect_timeout_ms` on a listener's client, since only an emitter opens
+connections. TLS keys are invalid with UDP or plain TCP.
 Startup diagnostics retain the failed TLS file, certificate, or key cause beneath the Syslog
 configuration error, with the setting or path that failed. They do not include TLS file contents.
 
 ## Ingestor
+
+The generated [SYSLOG LISTENER ingest table](connector-capabilities.md#syslog-listener-ingest)
+and [SYSLOG COLLECTOR emit table](connector-capabilities.md#syslog-collector-emit) record the
+Plexus declarations, including peer metadata, header availability, quiesce and batching.
 
 A `SYSLOG LISTENER` ingestor reads through a `TYPE SYSLOG` client. It has one delivery mode,
 `NO ACK`, and no `INSTANCES` clause:

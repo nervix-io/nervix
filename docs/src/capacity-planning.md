@@ -55,6 +55,15 @@ saturating one cannot take the slots another is entitled to.
 | Consensus storage | 1, ordered | Consensus storage batches, applied in the order they were admitted |
 | Filesystem storage | 2 | Every other synchronous filesystem and database operation, including Iceberg's staged files |
 
+An ONNX binding inspection reserves 16 KiB from the bulk budget for sequential native-image
+preparation. That fixed buffer is read and released on the admitted worker, with cancellation
+checked between reads. Its thirty-second deadline includes waiting for that memory, the worker
+queue, image preparation and the native session's build, metadata extraction and release. ONNX
+Runtime's own heap remains outside this buffer charge. Only an absolute `ORT_DYLIB_PATH` naming a
+regular file receives the read hint; other library discovery and load failures remain the external
+loader's responsibility. Kernel I/O and native calls cannot be preempted by dropping their awaiter;
+a running job retains its charge until it returns and checks cancellation between bounded reads.
+
 These counts bound admission, not threads. Jobs run on the process-wide blocking pool, so a
 class's count is the number of its jobs that may be on that pool at once. A class is guaranteed its
 share of admission; it is not guaranteed an idle thread. Apart from the classes, only work that
@@ -65,7 +74,8 @@ the work that submitted it reports the refusal as its own failure. The one excep
 node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
 place instead, while its payload stays counted in the buffer. So does the unfolding of a poll a
 paced source handed over, and of a payload a NATS, ZeroMQ or Syslog source read without an
-acknowledgement. Holding one of those source loops pushes back into its transport, so a node whose
+acknowledgement, and an Iceberg commit's read of the staged files its sink already accepted.
+Holding one of those source loops pushes back into its transport, so a node whose
 extension workers stay full delays polls and lets those transports buffer or drop at their own
 bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
@@ -74,6 +84,10 @@ Transient memory is 275 MiB per node, divided into ceilings that cannot borrow f
 bulk buffers and 19 MiB for credentials. One relay operation may hold at most 32 MiB of encoded body, 32 MiB of decoded data
 and 16 MiB of conversion scratch, and the relay budget is sized to hold two such operations at
 once so one blocked channel cannot exhaust the capacity another needs.
+An Iceberg commit charges the bulk budget for the staged files it reads back, only when the budget
+has room for them now, so a commit whose staged files exceed the budget reads them in groups, a
+single staged file larger than the budget waits until the whole budget is free and is charged all
+of it, and a commit refused for room is retried by its emitter.
 The relay budget also carries the acknowledgement watches a relay owner keeps for rows another node
 delivered with acknowledgements: 1 KiB per row until the owner reports that row's outcome, and
 4 KiB per delivery. A delivery of 8 MiB of 164-byte rows therefore needs about 51 MiB of watches
@@ -124,7 +138,15 @@ not pay for a window's state, and a window width does not bound a correlator.
 - Cluster interconnect carries each relay batch as one Arrow IPC body with a fixed 32 MiB limit.
   It reserves one unadmitted batch and one terminal outcome per active logical channel. Channels
   are concrete-branch local, so waiting work in one branch does not consume another branch's
-  ordering slot. Management subquotas independently reserve streams for discovery, liveness,
+  ordering slot. A receiving node also keeps, for every peer, a watermark for each channel that
+  peer opened in the last ten minutes, up to a fixed 8,192 per peer at about 180 bytes each.
+  Branches that end and return open new channels, so size branch turnover between two nodes
+  against that budget: beyond it the least recently used watermarks are forgotten first rather
+  than new channels refused. A branch whose channel was forgotten while it was still in use fails
+  its next delivery as indeterminate and opens a new channel; a source that waits for
+  acknowledgements redelivers the batch, and one in `NO ACK` mode loses it as it loses any failed
+  delivery. Keep the branches that are active at once between two nodes below the budget, and read
+  `nervix_interconnect_relay_channel_watermarks_evicted_total` to see when turnover exceeds it. Management subquotas independently reserve streams for discovery, liveness,
   replaceable domain-clock progress, relay admission, cancellation, and terminal outcomes even when
   ordinary management requests are full.
   Bulk subquotas independently reserve streams for resource transfer and for runtime and Raft
@@ -137,8 +159,10 @@ not pay for a window's state, and a window width does not bound a correlator.
   and moved one bounded section at a time, so neither construction nor transfer grows with the size
   of the replicated state.
   Keep `MAX BATCH SIZE` well below 32 MiB on any route whose consumer may be scheduled on another
-  node. Each node publishes what its pools and budgets are actually holding; see the
-  [interconnection metrics](metrics-and-observability.md) for the series to size against.
+  node, and on a route that feeds an Iceberg emitter, whose commit reads a staged batch above the
+  bulk budget only once the whole budget is free. Each node publishes what its pools and budgets
+  are actually holding; see the [interconnection metrics](metrics-and-observability.md) for the
+  series to size against.
 - Stateful `MAX TIME`, `WIDTH`, and `STEP` trade history and aggregation coverage against retained
   entries, open windows, and buffered rows.
 - Source `INSTANCES` trades source parallelism against concurrent admission pressure. It does not

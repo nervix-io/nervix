@@ -5,6 +5,13 @@
 //! the top of its body, so a loop that always has work ready still lets the scheduler run other
 //! tasks.
 //!
+//! [`unconstrained`] polls a future outside the cooperative budget. Once a task has spent its
+//! budget, Tokio's channels and timers read as not ready even when their value has arrived, so an
+//! owner that must learn what has already arrived without waiting for anything polls through it:
+//! a confirmation window settling every answer its broker gave before a publish failed is one. A
+//! future polled this way is never made to yield, so its owner bounds how much it polls. Shuttle
+//! has no cooperative budget, and there it only forwards the poll.
+//!
 //! [`spawn_blocking`] is the runtime's mechanism, not a policy: variable-size and blocking work
 //! belongs to the bounded executor, which admits, charges and cancels it and runs its storage jobs
 //! here. `just validate-primitive-boundary` rejects it outside the executor's worker pools unless
@@ -23,6 +30,8 @@
 //! worker pools, so it gives no caller a way around admission either.
 
 #[cfg(feature = "shuttle")]
+pub use shuttle_tokio::task::coop::unconstrained;
+#[cfg(feature = "shuttle")]
 pub use shuttle_tokio::task::spawn_blocking as spawn_cpu;
 #[cfg(feature = "shuttle")]
 pub use shuttle_tokio::task::{
@@ -30,6 +39,8 @@ pub use shuttle_tokio::task::{
 };
 #[cfg(feature = "shuttle")]
 pub use shuttle_tokio_util::task::TaskTracker;
+#[cfg(not(feature = "shuttle"))]
+pub use tokio::task::coop::unconstrained;
 #[cfg(not(any(feature = "shuttle", feature = "turmoil")))]
 pub use tokio::task::spawn_blocking as spawn_cpu;
 #[cfg(not(feature = "shuttle"))]

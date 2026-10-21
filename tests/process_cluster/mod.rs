@@ -71,18 +71,66 @@ fn save_other_member(world: &mut ScenarioWorld, excluded: &[&str], placeholder: 
     world.placeholders.insert(placeholder, node_id);
 }
 
+#[given(
+    expr = "another socket holds the {string} port the bootstrap member of the next nervix-server \
+            process cluster draws"
+)]
+fn given_another_socket_holds_next_bootstrap_member_port(
+    world: &mut ScenarioWorld,
+    listener: String,
+) {
+    assert!(
+        world.server_process_held_ports.is_none(),
+        "a scenario holds the ports of one server process start at a time"
+    );
+    world.server_process_held_ports = Some(startup_ports(&listener));
+}
+
 #[given("a 3 node nervix-server process cluster is started")]
+#[when("a 3 node nervix-server process cluster is started")]
 async fn given_plain_server_process_cluster_is_started(world: &mut ScenarioWorld) {
     assert!(
         world.server_process_cluster.is_none(),
         "a scenario starts at most one real-process cluster"
     );
     initialize_scenario_identity(world);
+    let started = match world.server_process_held_ports.take() {
+        Some(held) => ServerProcessCluster::start_holding_bootstrap_ports(&[], held).await,
+        None => ServerProcessCluster::start(&[]).await,
+    };
     world.server_process_cluster = Some(
-        ServerProcessCluster::start(&[])
-            .await
-            .unwrap_or_else(|error| panic!("failed to start the real-process cluster: {error}")),
+        started.unwrap_or_else(|error| panic!("failed to start the real-process cluster: {error}")),
     );
+}
+
+#[when(expr = "another socket holds the {string} port of server process node {string}")]
+async fn when_another_socket_holds_server_process_node_port(
+    world: &mut ScenarioWorld,
+    listener: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .process_cluster_mut()
+        .hold_member_ports(&node_id, startup_ports(&listener))
+        .await
+        .unwrap_or_else(|error| panic!("another socket cannot hold {node_id}'s ports: {error}"));
+}
+
+#[then(
+    expr = "server process node {string} was relaunched once because another socket held its \
+            {string} port"
+)]
+fn then_server_process_node_was_relaunched_off_held_port(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    listener: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .process_cluster_mut()
+        .verify_member_relaunched_off_held_ports(&node_id, startup_ports(&listener))
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[given(expr = "the server process cluster leader is saved as placeholder {string}")]

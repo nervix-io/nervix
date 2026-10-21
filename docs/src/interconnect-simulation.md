@@ -351,7 +351,8 @@ defect, committed with its fix, so the regression set records what the simulatio
 sweep explores beyond them: `just test-turmoil-sweep` runs sixty-four consecutive seeds from 1000
 through every case by default. A seed that fails in a sweep leaves an ordinary record, and once the
 defect it found is fixed, it joins the committed seeds of its case. Seed 1036 of the receiver
-restart with a delayed relay response is the first such seed.
+restart with a delayed relay response is the first such seed, and seed 7053 of the host isolation
+case, whose client dialled a host before the host had bound its port, the second.
 
 ### Fresh-Process Attempts
 
@@ -401,7 +402,7 @@ itself.
 | `just test-turmoil-simulation [args]` | The `simulation` target alone, with libtest arguments, such as a test name and `--exact` | The per-run bounds only; fails when the selection executes no test |
 | `just test-turmoil-replay <record>` | Exactly the recorded package, target, test, and case, once, with the recorded inputs, in a fresh process | Exits nonzero when the replay fails, including when it reproduces the record, and when no case in the recorded test matches |
 | `just test-turmoil-replay-check` | Injects a failure at five simulated seconds into the partition-before-connect case, requires exactly one record, and requires its replay to report `turmoil replay: reproduced the recorded outcome and trace` | Fails when any of those does not hold |
-| `just test-turmoil-sweep [first] [count] [budget_seconds]` | Every case over `count` seeds from `first`, 64 from 1000 by default, each seed twice in fresh processes | A real-time budget of 1,500 seconds by default; exits `124` when it expires, and fails when the sweep executes no test |
+| `just test-turmoil-sweep [first] [count] [budget_seconds] [filter]` | Every case over `count` seeds from `first`, 64 from 1000 by default, each seed twice in fresh processes; a nonempty `filter` selects the tests whose names contain it | A real-time budget of 1,500 seconds by default; exits `124` when it expires, and fails when the sweep executes no test |
 | `just coverage-turmoil <output>` | The canonical `just test-turmoil` suite through the native coverage collector, copying a complete product-source LCOV report to `output` and retaining its collection evidence | The same per-run bounds, inventory validation and 480-second post-build suite budget as `just test-turmoil`; failed or interrupted collection cannot produce a complete report |
 
 The replay prints a verdict for every run:
@@ -518,7 +519,10 @@ the ordinary coverage comment, and publication checks that the PR is open at the
 A fast simulation run cannot replace the ordinary report, and a failed collection never supplies
 a successful report. Coverage percentages and comment failures remain advisory; the simulation,
 replay and collection verdicts remain mandatory. The ordinary coverage/CRAP job uses ordinary
-reports only. `just coverage-turmoil <output>` uses this same collector for local inspection.
+reports only. For a pull request labeled `turmoil`, the `coverage-full` job requires this job's
+success and its complete collection, and adds the collection's lines, attributed to Turmoil, to the
+[full workspace union](./coverage-reports.md#the-full-workspace-union). `just coverage-turmoil
+<output>` uses this same collector for local inspection.
 
 The job uses the shared native [CI linker](./developing-nervix.md#validation-and-tests), so
 adding `--cfg tokio_unstable` to `RUSTFLAGS` preserves Wild linking. It installs `flatc`, because
@@ -560,7 +564,7 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | Case | Test | Committed seeds | Simulated / steps / real | Main assertion |
 | --- | --- | --- | --- | --- |
 | peer resolution | `peer_resolution_uses_simulated_dns` | 41 | 1 s / 200 / 3 s | A peer endpoint resolves to its simulated address through Turmoil DNS |
-| host isolation | `simulated_hosts_keep_their_own_names_sockets_and_clocks` | 43 | 15 s / 20,000 / 60 s | Two hosts listening on one port are each reached at their own address, a name no host holds fails as not existing without time passing, and a ten-second wait completes only on the simulated clock |
+| host isolation | `simulated_hosts_keep_their_own_names_sockets_and_clocks` | 43, 7053 | 15 s / 20,000 / 60 s | Once both report that they listen, two hosts listening on one port are each reached at their own address, a name no host holds fails as not existing without time passing, and a ten-second wait completes only on the simulated clock |
 | bounded CPU worker | `bounded_cpu_job_runs_on_the_simulated_scheduler` | 1–12 | 1 s / 200 / 3 s | Every CPU and memory class runs its job on the scheduler thread, and every queue and reservation returns to zero |
 | typed Arrow exchange | `transport::production_transport_exchanges_typed_arrow_batch_and_state_frames_over_simulated_tcp` | 49 | 30 s / 50,000 / 90 s | After a listener rebind, production TLS, HTTP/2, typed envelopes, and Arrow IPC carry a typed request, a relay payload and generation-qualified state frames |
 | materialized state owner replacement | `transport::materialized::materialized_branch_state_transfers_reconnect_to_the_replacement_owner` | 51, 53 | 180 s / 200,000 / 120 s | Two branch placements describe and stream a 3 MiB Arrow payload at revision 1, then a partition after the first received frame interrupts another fetch. After repair and serving transport replacement, both branches transfer at revision 2. The client verifies exact length and digest at both revisions. This exercises the transport and typed checkpoint envelope; server installation, disk durability and whole-cluster recovery are covered separately. |
@@ -581,6 +585,7 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | backup section partition and repair | `transport::backup::backup_section_fetch_is_fenced_and_recovers_after_partition` | 101, 1000 | 320 s / 400,000 / 90 s | A forged process identity cannot capture or consume a section; a stalled fetch reaches its deadline; a partitioned fetch fails and succeeds after repair; six 6 MiB materialized column sections, 36 MiB in all, stream in 64 KiB chunks and install as one checkpoint |
 | window section partition and repair | `transport::backup::window_sections_larger_than_the_bulk_budget_stream_across_a_partition` | 103 | 320 s / 400,000 / 90 s | The same fences and faults for three window groups of input rows and argument columns, each section classified by its own kind; 36 MiB, beyond the 32 MiB bulk budget, streams in 64 KiB chunks and installs as one branched window checkpoint |
 | backup owner restart during transfer | `transport::backup::restart_during_backup_transfer_discards_the_process_stage` | 102 | 320 s / 400,000 / 90 s | An incomplete section cannot finish after owner restart, and the replacement process has no prior capture stage |
+| backup inventory partition and held link | `transport::backup::backup_inventory_is_bounded_across_a_partition_and_a_held_link` | 104 | 85 s / 100,000 / 90 s | An inventory request across a partition, and another across a held link, each fails at the request's five-second deadline; after repair and after release the capture owner lists its complete six-section stage unchanged, from its single capture |
 | stalled peer isolation | `transport::isolation::stalled_peer_cannot_consume_unrelated_capacity_or_leak_reservations` | 91–93 | 120 s / 120,000 / 120 s | A stalled peer holds only its own connection's slots, unrelated work progresses, and every reservation is released |
 
 The simulation target also holds 26 runner and driver checks, such as the supervision, bound, clock,
@@ -655,9 +660,14 @@ that claims another process epoch is rejected before the capture or stream handl
 partition case bounds a stalled fetch by its request deadline, leaves the staged section available
 when the link is partitioned, repairs the link, and reads the verified section. The restart case
 ends an owner process after its first stream chunk;
-the incomplete stream fails, and the rebound owner has no stage from that process. These are
-transport and in-memory staging boundary checks; the Cucumber cluster scenarios verify the
-server's archive and restore behavior.
+the incomplete stream fails, and the rebound owner has no stage from that process. The inventory
+case partitions the coordinator's link to the capture owner, and later holds it, while the
+coordinator asks for the staged section inventory. Each request fails at the inventory request's
+deadline, and a request over the repaired or released link lists the whole stage unchanged: a
+disrupted inventory request consumes and alters nothing, and the owner captured only once. These
+are transport and in-memory staging boundary checks; the Cucumber cluster scenarios verify the
+server's archive and restore behavior, and the external `backup-fault` chaos scenario the same
+boundaries between packaged processes.
 
 ### Stalled-Peer Isolation
 
@@ -721,7 +731,9 @@ A new case follows the same contract as the existing ones.
 5. **Build each host inside its host.** Bind a transport per host with `SimulatedEntropy` named
    after the host and a `SimulatedUtc` clock. Share only readiness and completion signals between
    hosts, run each host body under `HostSupervisor::run`, and have the `observer` client wait for
-   every host to finish.
+   every host to finish. A host or client whose first dial must succeed waits until the host it
+   dials reports that it listens: the seed orders hosts within each step, so an early dial can
+   reach a port its host has not bound yet.
 6. **Stay inside the simulated boundary.** Use `nervix_primitives::time` for every wait and instant
    and `nervix_primitives::net` for every socket, and call
    `nervix_primitives::task::consume_budget().await` at the top of every loop. Never sleep a real
@@ -758,6 +770,7 @@ qualification run found no further product defect and no behavior-affecting trac
 | A CPU queue refusal reaches a typed-request caller as `RequestError::Encode` when the first encode is refused, but as `RequestError::Transport` when an admitted request is refused at a later stage | The stalled-peer case asserts both shapes and counts every failure as exactly one queue refusal | The stalled-peer case |
 | Two runs of one seed in one process diverged after a simulated crash, because teardown order follows Tokio's process-wide task numbering | Every attempt and every replay runs in a fresh process | Seed 1036 of the receiver restart with a delayed relay response |
 | A panic in a host task surfaced only as Tokio's generic runtime-shutdown message | The runner reports the first panic of the scheduler thread, and supervises cleanup as its own phase | `simulation_host_task_panic_reports_its_own_message`, `simulation_cleanup_panic_fails_a_completed_run` |
+| The host isolation client dialled each host as soon as the client started. The seed orders hosts within a step, so under seed 7053 the first connection attempt reached `alpha` before `alpha` had bound its port, and the refused dial failed the run | Each host reports on a readiness signal once it listens, and the client dials only after both have reported | Seed 7053 of the host isolation case |
 
 ## Guarantees And Limits
 

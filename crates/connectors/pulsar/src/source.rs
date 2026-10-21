@@ -3,11 +3,15 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The Pulsar client a source configuration declares, its TLS options, topic
-//!   qualification, the shared-subscription consumer each instance reads through, message
-//!   properties as ingest headers, and per-message acknowledgement and negative acknowledgement.
+//!   qualification, the shared-subscription consumer each instance reads through and the name it
+//!   registers under, the check that a provisioned subscription exists, the removal of a
+//!   subscription its ingestor owned, message properties as ingest headers, acknowledgements the
+//!   broker answers, redelivery requests, and the classification of an acknowledgement or a
+//!   redelivery request that did not take effect.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
-//!   Tokio and `pulsar`.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//!   the recovery vocabulary, Tokio and `pulsar`.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, why an
+//!   ingestor's subscription is removed, or Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -21,35 +25,113 @@
     )
 )]
 
-use std::num::NonZeroUsize;
+use std::{collections::BTreeMap, fmt, io, num::NonZeroUsize, time::Duration};
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use futures_util::StreamExt as _;
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
-    client_config_value, client_tls_paths, optional_bool_client_config_value,
-    optional_client_config_value, read_tls_file,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
+    SourceResult, SourceResume, client_config_value, client_tls_paths,
+    optional_bool_client_config_value, optional_client_config_value, read_tls_file,
 };
-use nervix_models::{ClientConfigEntry, PulsarSubscriptionName, PulsarTopicName};
-use nervix_primitives::time::{Instant, sleep_until};
+use nervix_models::{
+    ClientConfigEntry, ConnectorKind, PulsarSubscription, PulsarSubscriptionName,
+    PulsarSubscriptionOwnership, PulsarTopicName,
+};
+use nervix_primitives::time::{Instant, sleep_until, timeout};
+use nervix_recovery::Reported as _;
 use pulsar::{
-    Consumer as PulsarConsumer, ConsumerOptions as PulsarConsumerOptions, Pulsar,
-    SubType as PulsarSubType, TlsOptions as PulsarTlsOptions, TokioExecutor,
+    ConnectionRetryOptions as PulsarConnectionRetryOptions, Consumer as PulsarConsumer,
+    ConsumerBuilder as PulsarConsumerBuilder, ConsumerOptions as PulsarConsumerOptions,
+    Error as PulsarError, Pulsar, SubType as PulsarSubType, TlsOptions as PulsarTlsOptions,
+    TokioExecutor,
     consumer::{InitialPosition as PulsarInitialPosition, Message as PulsarMessage},
+    error::{ConnectionError as PulsarConnectionError, ConsumerError as PulsarConsumerError},
+    message::proto::ServerError as PulsarServerError,
     proto::MessageIdData,
 };
 use thiserror::Error;
 use tracing::warn;
+use url::Url;
 
 const PULSAR: &str = "pulsar";
+
+/// The reason a broker gives when it refuses a non-durable subscribe because a durable
+/// subscription of the same name exists. The broker refuses other subscribes with the same
+/// `NotAllowedError`, such as one past a topic's subscription limit, so only this reason says that
+/// the subscription exists.
+const DURABLE_SUBSCRIPTION_EXISTS: &str = "Durable subscription with the same name already exists";
+
+/// What a Pulsar broker answered when it refused a request: its server error, absent when the
+/// client does not know the error's code, and the reason it gave, absent when it gave none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PulsarRefusal {
+    pub error: Option<PulsarServerError>,
+    pub reason: Option<String>,
+}
+
+impl fmt::Display for PulsarRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.error {
+            Some(error) => formatter.write_str(error.as_str_name())?,
+            None => formatter.write_str("a server error this client does not know")?,
+        }
+        if let Some(reason) = &self.reason {
+            write!(formatter, ": {reason}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Why a request of a Pulsar consumer has no outcome it can rely on: the broker may or may not
+/// have applied it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum PulsarUnresolvedRequest {
+    /// Nothing answered within the client's operation timeout, such as while its connection is
+    /// stalled or a reconnection holds the consumer back.
+    #[error("the client's operation timeout passed first")]
+    OperationTimeout,
+    /// The connection closed before the request was answered or sent.
+    #[error("the connection closed first")]
+    ConnectionClosed,
+    /// The consumer stopped before the request was answered or sent.
+    #[error("the consumer stopped first")]
+    ConsumerStopped,
+}
+
+impl PulsarUnresolvedRequest {
+    /// What `error` leaves unresolved, when it says the request went unanswered rather than that
+    /// the broker refused it or the client failed otherwise.
+    fn of(error: &PulsarConsumerError) -> Option<Self> {
+        match error {
+            PulsarConsumerError::Connection(PulsarConnectionError::Io(source))
+                if source.kind() == io::ErrorKind::TimedOut =>
+            {
+                Some(Self::OperationTimeout)
+            }
+            PulsarConsumerError::Connection(
+                PulsarConnectionError::Disconnected
+                | PulsarConnectionError::Canceled
+                | PulsarConnectionError::Shutdown,
+            ) => Some(Self::ConnectionClosed),
+            PulsarConsumerError::Closed => Some(Self::ConsumerStopped),
+            _ => None,
+        }
+    }
+}
 
 /// Why a Pulsar source could not connect, consume, or settle a message.
 #[derive(Debug, Error)]
 pub enum PulsarSourceError {
     #[error("invalid Pulsar client configuration")]
     ClientConfig,
+    #[error(
+        "{connector} service address must use pulsar or pulsar+ssl and name a host",
+        connector = ConnectorKind::Pulsar
+    )]
+    InvalidServiceAddress,
     #[error(
         "Pulsar TLS supports 'tls_ca_file' but does not support client certificate authentication"
     )]
@@ -62,26 +144,180 @@ pub enum PulsarSourceError {
     Receive,
     #[error("Pulsar consumer closed")]
     ConsumerClosed,
+    /// The broker refused an acknowledgement, so the messages it named stay unacknowledged on the
+    /// subscription.
+    #[error("the Pulsar broker refused an acknowledgement with {refusal}")]
+    AcknowledgementRefused { refusal: PulsarRefusal },
+    /// The broker did not confirm an acknowledgement, so whether it applied it is unknown.
+    #[error("the Pulsar broker did not confirm an acknowledgement: {unresolved}")]
+    AcknowledgementUnconfirmed { unresolved: PulsarUnresolvedRequest },
+    /// The consumer did not confirm that it sent a redelivery request. The broker answers none,
+    /// and it redelivers an unacknowledged message once the connection that delivered it is gone.
+    #[error("the Pulsar consumer did not confirm sending a redelivery request: {unresolved}")]
+    RedeliveryRequestUnsent { unresolved: PulsarUnresolvedRequest },
+    /// An acknowledgement failed in a way this source does not classify; the client's error is the
+    /// cause beneath.
     #[error("failed to acknowledge a Pulsar message")]
     Acknowledge,
+    /// A redelivery request failed in a way this source does not classify; the client's error is
+    /// the cause beneath.
     #[error("failed to negatively acknowledge a Pulsar message")]
     NegativelyAcknowledge,
     #[error("failed to close the Pulsar consumer")]
     Close,
     #[error("Pulsar batch timeout exceeds the monotonic clock range")]
     BatchDeadline,
+    /// The subscription an operator provisioned does not exist. A provisioned subscription is
+    /// never created, so the source reports it until the operator provisions it.
+    #[error(
+        "{connector} subscription '{subscription}' of topic '{topic}' does not exist",
+        connector = ConnectorKind::Pulsar
+    )]
+    MissingSubscription {
+        subscription: PulsarSubscriptionName,
+        topic: String,
+    },
+    /// Whether a provisioned subscription exists could not be learned; the client's error is the
+    /// cause beneath.
+    #[error(
+        "failed to verify {connector} subscription '{subscription}' of topic '{topic}'",
+        connector = ConnectorKind::Pulsar
+    )]
+    VerifySubscription {
+        subscription: PulsarSubscriptionName,
+        topic: String,
+    },
+    /// Removing a subscription its ingestor owned failed; the cause beneath says why.
+    #[error(
+        "failed to remove {connector} subscription '{subscription}' of topic '{topic}'",
+        connector = ConnectorKind::Pulsar
+    )]
+    RemoveSubscription {
+        subscription: PulsarSubscriptionName,
+        topic: String,
+    },
+    /// The consumer that removes the subscription could not join it; the client's error is the
+    /// cause beneath.
+    #[error("failed to join the {connector} subscription to remove it", connector = ConnectorKind::Pulsar)]
+    JoinSubscription,
+    /// The broker did not remove the subscription, such as while another consumer is connected
+    /// to it; the client's error is the cause beneath.
+    #[error("the {connector} broker did not unsubscribe the subscription", connector = ConnectorKind::Pulsar)]
+    Unsubscribe,
+    /// The removal did not finish within its budget, such as while the broker cannot be reached.
+    #[error(
+        "{connector} subscription removal exceeded its connection budget of {budget:?}",
+        connector = ConnectorKind::Pulsar
+    )]
+    RemovalDeadline { budget: Duration },
+}
+
+impl PulsarSourceError {
+    /// What a failed acknowledgement means: the refusal the broker answered with, an answer the
+    /// client could not get, or a failure this source does not classify, which keeps the client's
+    /// error beneath it.
+    fn unsettled_acknowledgement(error: PulsarConsumerError) -> Report<Self> {
+        if let PulsarConsumerError::Connection(PulsarConnectionError::PulsarError(code, reason)) =
+            &error
+        {
+            return Report::new(Self::AcknowledgementRefused {
+                refusal: PulsarRefusal {
+                    error: *code,
+                    reason: reason.clone(),
+                },
+            });
+        }
+        if let Some(unresolved) = PulsarUnresolvedRequest::of(&error) {
+            return Report::new(Self::AcknowledgementUnconfirmed { unresolved });
+        }
+        Report::new(error).change_context(Self::Acknowledge)
+    }
+
+    /// What a failed redelivery request means: a request the consumer could not confirm sending,
+    /// or a failure this source does not classify, which keeps the client's error beneath it.
+    fn unsent_redelivery_request(error: PulsarConsumerError) -> Report<Self> {
+        if let Some(unresolved) = PulsarUnresolvedRequest::of(&error) {
+            return Report::new(Self::RedeliveryRequestUnsent { unresolved });
+        }
+        Report::new(error).change_context(Self::NegativelyAcknowledge)
+    }
 }
 
 type PulsarSourceResult<T> = Result<T, Report<PulsarSourceError>>;
 
+/// Whether acknowledging a Pulsar source's positions waits for the broker's answer, which the
+/// ingestor's acknowledgement mode decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PulsarAckReceipts {
+    /// `MODE NO ACK`: acknowledging returns once the client queued the acknowledgements. A mode
+    /// that holds no acknowledgement tree reads one message at a time, and waiting for the broker
+    /// would add a round trip to every read.
+    Unawaited,
+    /// An `ACK` mode: acknowledging returns once the broker answered the acknowledgements, which
+    /// is the progress the host reports for the batch.
+    Awaited,
+}
+
+impl PulsarAckReceipts {
+    /// Whether the client sends acknowledgements with a request id and waits for their answer.
+    fn enabled(self) -> bool {
+        match self {
+            Self::Unawaited => false,
+            Self::Awaited => true,
+        }
+    }
+}
+
 /// What one Pulsar source subscribes with: its resolved client entries, the topic it reads, the
-/// shared subscription it joins, and the name its consumers register under.
+/// shared subscription it joins and who owns it, the name its consumers register under, and
+/// whether acknowledging waits for the broker.
 pub struct PulsarSourceSettings<'a> {
     pub config: &'a [ClientConfigEntry],
     pub topic: &'a PulsarTopicName,
-    pub subscription: PulsarSubscriptionName,
-    /// Each instance's consumer registers under this name suffixed with its instance index.
+    pub subscription: PulsarSubscription,
+    /// Each instance's consumer registers under this name suffixed with `-` and its instance
+    /// index.
     pub consumer_name: String,
+    pub ack_receipts: PulsarAckReceipts,
+}
+
+impl PulsarSourceSettings<'_> {
+    /// Whether both inputs read the same broker subscription. Consumer policy and declared
+    /// ownership do not change that identity. Configuration is resolved by the host first;
+    /// comparison opens no connection and performs no DNS lookup.
+    pub fn reads_same_subscription(&self, replacement: &Self) -> PulsarSourceResult<bool> {
+        let previous = self.service_url()?;
+        let next = replacement.service_url()?;
+        let same_host = previous.host_str().map(str::to_ascii_lowercase)
+            == next.host_str().map(str::to_ascii_lowercase);
+        let same_broker =
+            previous.scheme() == next.scheme() && same_host && previous.port() == next.port();
+        let previous_topic = PulsarSourcePlan::topic_from_config(self.config, self.topic.as_str());
+        let next_topic =
+            PulsarSourcePlan::topic_from_config(replacement.config, replacement.topic.as_str());
+        Ok(same_broker
+            && previous_topic == next_topic
+            && self.subscription.name == replacement.subscription.name)
+    }
+
+    fn service_url(&self) -> PulsarSourceResult<Url> {
+        let addr = client_config_value(self.config, "addr", ConnectorKind::Pulsar.into())
+            .change_context(PulsarSourceError::ClientConfig)?;
+        let mut url = Url::parse(&addr).change_context(PulsarSourceError::ClientConfig)?;
+        let default_port = match url.scheme() {
+            "pulsar" => 6650,
+            "pulsar+ssl" => 6651,
+            _ => return Err(Report::new(PulsarSourceError::InvalidServiceAddress)),
+        };
+        if !url.has_host() {
+            return Err(Report::new(PulsarSourceError::InvalidServiceAddress));
+        }
+        if url.port().is_none() {
+            url.set_port(Some(default_port))
+                .map_err(|()| Report::new(PulsarSourceError::InvalidServiceAddress))?;
+        }
+        Ok(url)
+    }
 }
 
 /// One Pulsar source's client and the shared subscription every instance consumes from.
@@ -91,8 +327,9 @@ pub struct PulsarSourceSettings<'a> {
 pub struct PulsarSourcePlan {
     client: Pulsar<TokioExecutor>,
     topic: String,
-    subscription: PulsarSubscriptionName,
+    subscription: PulsarSubscription,
     consumer_name: String,
+    ack_receipts: PulsarAckReceipts,
 }
 
 impl PulsarSourcePlan {
@@ -102,6 +339,7 @@ impl PulsarSourcePlan {
             topic,
             subscription,
             consumer_name,
+            ack_receipts,
         } = settings;
         let client = Self::client_from_config(config).await?;
         Ok(Self {
@@ -109,6 +347,7 @@ impl PulsarSourcePlan {
             topic: Self::topic_from_config(config, topic.as_str()),
             subscription,
             consumer_name,
+            ack_receipts,
         })
     }
 
@@ -181,20 +420,25 @@ impl PulsarSourcePlan {
         Ok(Some(tls_options))
     }
 
+    /// The consumer instance `instance_index` reads through. An instance of a provisioned
+    /// subscription first checks that the subscription exists, because joining an absent one
+    /// would create it. The subscription can still disappear between that check and the join, in
+    /// which case the join creates it as an owned subscription's join does.
     async fn consumer(
         &self,
         instance_index: u64,
     ) -> PulsarSourceResult<PulsarConsumer<Vec<u8>, TokioExecutor>> {
-        self.client
-            .consumer()
-            .with_topic(self.topic.as_str())
-            .with_consumer_name(format!("{}-{instance_index}", self.consumer_name))
-            .with_subscription(self.subscription.as_str())
-            .with_subscription_type(PulsarSubType::Shared)
-            .with_options(
-                PulsarConsumerOptions::default()
-                    .with_initial_position(PulsarInitialPosition::Earliest),
-            )
+        let consumer_name = format!("{}-{instance_index}", self.consumer_name);
+        match self.subscription.ownership {
+            PulsarSubscriptionOwnership::Ingestor => {}
+            PulsarSubscriptionOwnership::Provisioned => {
+                self.verify_provisioned(&consumer_name).await?;
+            }
+        }
+        let options = PulsarConsumerOptions::default()
+            .with_initial_position(PulsarInitialPosition::Earliest)
+            .with_ack_receipt_enabled(self.ack_receipts.enabled());
+        self.consumer_builder(consumer_name, options)
             .build()
             .await
             .map_err(|source| {
@@ -203,6 +447,134 @@ impl PulsarSourcePlan {
                 })
                 .attach_printable(source.to_string())
             })
+    }
+
+    /// A consumer of this source's topic on its shared subscription, registered under
+    /// `consumer_name`.
+    fn consumer_builder(
+        &self,
+        consumer_name: String,
+        options: PulsarConsumerOptions,
+    ) -> PulsarConsumerBuilder<TokioExecutor> {
+        self.client
+            .consumer()
+            .with_topic(self.topic.as_str())
+            .with_consumer_name(consumer_name)
+            .with_subscription(self.subscription.name.as_str())
+            .with_subscription_type(PulsarSubType::Shared)
+            .with_options(options)
+    }
+
+    /// Checks that the subscription an operator provisioned exists before an instance joins it.
+    ///
+    /// The broker refuses a non-durable subscribe while a durable subscription of the same name
+    /// exists. Without one it opens a non-durable cursor of that name instead, which closing the
+    /// probe removes again, so the check never creates the subscription it asks about.
+    async fn verify_provisioned(&self, consumer_name: &str) -> PulsarSourceResult<()> {
+        let options = PulsarConsumerOptions::default().durable(false);
+        let probe = self
+            .consumer_builder(consumer_name.to_string(), options)
+            .build::<Vec<u8>>()
+            .await;
+        let mut probe = match probe {
+            Ok(probe) => probe,
+            Err(error) => {
+                if Self::refused_for_a_durable_subscription(&error) {
+                    return Ok(());
+                }
+                return Err(Report::new(error).change_context(
+                    PulsarSourceError::VerifySubscription {
+                        subscription: self.subscription.name.clone(),
+                        topic: self.topic.clone(),
+                    },
+                ));
+            }
+        };
+        // The broker also removes a non-durable cursor once the connection that opened it closes,
+        // so a probe whose close fails is gone with its connection at the latest.
+        probe
+            .close()
+            .await
+            .reported("closing the probe of a missing provisioned Pulsar subscription");
+        Err(Report::new(PulsarSourceError::MissingSubscription {
+            subscription: self.subscription.name.clone(),
+            topic: self.topic.clone(),
+        }))
+    }
+
+    /// Whether the broker refused a non-durable subscribe because a durable subscription of the
+    /// same name exists.
+    fn refused_for_a_durable_subscription(error: &PulsarError) -> bool {
+        let (PulsarError::Connection(refusal)
+        | PulsarError::Consumer(PulsarConsumerError::Connection(refusal))) = error
+        else {
+            return false;
+        };
+        let PulsarConnectionError::PulsarError(
+            Some(PulsarServerError::NotAllowedError),
+            Some(reason),
+        ) = refusal
+        else {
+            return false;
+        };
+        reason.starts_with(DURABLE_SUBSCRIPTION_EXISTS)
+    }
+
+    /// Removes the subscription an ingestor owned, once every consumer of that ingestor
+    /// has closed.
+    ///
+    /// A durable consumer joins the subscription and unsubscribes it, and the broker removes the
+    /// subscription with its backlog. The broker refuses while another consumer is still connected
+    /// to the subscription, and an absent subscription is created by the join and removed again.
+    /// The driver's connection timeout bounds the whole removal: connecting the client, joining
+    /// and unsubscribing.
+    pub async fn remove_subscription(settings: PulsarSourceSettings<'_>) -> PulsarSourceResult<()> {
+        let budget = PulsarConnectionRetryOptions::default().connection_timeout;
+        Self::remove_subscription_within(settings, budget).await
+    }
+
+    async fn remove_subscription_within(
+        settings: PulsarSourceSettings<'_>,
+        budget: Duration,
+    ) -> PulsarSourceResult<()> {
+        let removal = PulsarSourceError::RemoveSubscription {
+            subscription: settings.subscription.name.clone(),
+            topic: Self::topic_from_config(settings.config, settings.topic.as_str()),
+        };
+        let removed = timeout(budget, async {
+            let plan = Self::connect(settings).await?;
+            plan.unsubscribe().await
+        })
+        .await;
+        let Ok(removed) = removed else {
+            return Err(
+                Report::new(PulsarSourceError::RemovalDeadline { budget }).change_context(removal)
+            );
+        };
+        removed.change_context(removal)
+    }
+
+    /// Joins the subscription with a durable consumer and unsubscribes it.
+    async fn unsubscribe(&self) -> PulsarSourceResult<()> {
+        let consumer_name = format!("{}-removal", self.consumer_name);
+        let mut consumer = self
+            .consumer_builder(consumer_name, PulsarConsumerOptions::default())
+            .build::<Vec<u8>>()
+            .await
+            .map_err(|error| {
+                Report::new(error).change_context(PulsarSourceError::JoinSubscription)
+            })?;
+        let unsubscribed = consumer.unsubscribe().await;
+        let Err(error) = unsubscribed else {
+            return Ok(());
+        };
+        // A refused unsubscribe leaves this consumer joined, which would keep the subscription it
+        // was asked to remove busy while its connection stays open.
+        consumer
+            .close()
+            .await
+            .reported("closing the consumer of a refused Pulsar unsubscribe");
+        Err(Report::new(error).change_context(PulsarSourceError::Unsubscribe))
     }
 }
 
@@ -289,15 +661,24 @@ impl PulsarSource {
 impl SourceConnector for PulsarSource {
     type Plan = PulsarSourcePlan;
 
+    /// An instance of an owned subscription joins it here. An instance of a provisioned one joins
+    /// in its first resume instead, where a subscription the operator has not provisioned yet is
+    /// the ingestor's transient status rather than a failure that keeps the ingestor from starting.
     async fn open(plan: &Self::Plan, instance_index: u64) -> SourceResult<Self> {
-        let consumer = plan
-            .consumer(instance_index)
-            .await
-            .change_context(SourceError::Open { connector: PULSAR })?;
+        let consumer = match plan.subscription.ownership {
+            PulsarSubscriptionOwnership::Ingestor => {
+                let consumer = plan
+                    .consumer(instance_index)
+                    .await
+                    .change_context(SourceError::Open { connector: PULSAR })?;
+                Some(consumer)
+            }
+            PulsarSubscriptionOwnership::Provisioned => None,
+        };
         Ok(Self {
             plan: plan.clone(),
             instance_index,
-            consumer: Some(consumer),
+            consumer,
         })
     }
 
@@ -340,11 +721,17 @@ impl BrokerSourceConnector for PulsarSource {
     async fn next_batch(
         &mut self,
         request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let Some(consumer) = self.consumer.as_mut() else {
             return Ok(SourceBatch::ResumeRequired);
         };
-        let first = match consumer.next().await {
+        let Some(first) = cancellation.unless_cancelled(consumer.next()).await else {
+            return Ok(SourceBatch::Interrupted {
+                gathered: Vec::new(),
+            });
+        };
+        let first = match first {
             Some(Ok(message)) => message,
             Some(Err(error)) => {
                 return Err(Report::new(PulsarSourceError::Receive)
@@ -382,31 +769,43 @@ impl BrokerSourceConnector for PulsarSource {
                         None => break,
                     }
                 }
+                () = cancellation.cancelled() => {
+                    return Ok(SourceBatch::Interrupted { gathered: messages });
+                }
             }
         }
         Ok(SourceBatch::Messages(messages))
     }
 
+    /// The positions of each topic are acknowledged in one command. Under an `ACK` mode
+    /// acknowledging returns once the broker answered every one of them, within the client's
+    /// operation timeout; under `MODE NO ACK`, once the client queued them.
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         let Some(consumer) = self.consumer.as_mut() else {
             return Err(Report::new(PulsarSourceError::ConsumerClosed)
                 .change_context(SourceError::Acknowledge { connector: PULSAR }));
         };
+        let mut by_topic: BTreeMap<&str, Vec<MessageIdData>> = BTreeMap::new();
         for position in positions {
+            by_topic
+                .entry(position.topic.as_str())
+                .or_default()
+                .push(position.message_id.clone());
+        }
+        for (topic, message_ids) in by_topic {
             nervix_primitives::task::consume_budget().await;
             consumer
-                .ack_with_id(&position.topic, position.message_id.clone())
+                .ack_with_ids(topic, message_ids)
                 .await
-                .map_err(|source| {
-                    Report::new(PulsarSourceError::Acknowledge).attach_printable(source.to_string())
-                })
+                .map_err(PulsarSourceError::unsettled_acknowledgement)
                 .change_context(SourceError::Acknowledge { connector: PULSAR })?;
         }
         Ok(())
     }
 
     /// A rejected message is negatively acknowledged, which asks the broker to redeliver it on the
-    /// shared subscription.
+    /// shared subscription. Rejecting returns once the consumer sent the request; the broker does
+    /// not answer it.
     async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         let Some(consumer) = self.consumer.as_mut() else {
             return Err(Report::new(PulsarSourceError::ConsumerClosed)
@@ -417,15 +816,28 @@ impl BrokerSourceConnector for PulsarSource {
             consumer
                 .nack_with_id(&position.topic, position.message_id.clone())
                 .await
-                .map_err(|source| {
-                    Report::new(PulsarSourceError::NegativelyAcknowledge)
-                        .attach_printable(source.to_string())
-                })
+                .map_err(PulsarSourceError::unsent_redelivery_request)
                 .change_context(SourceError::Reject { connector: PULSAR })?;
         }
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "source_tests.rs"]
+mod settlement_tests;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "source_subscription_tests.rs"]
+mod subscription_tests;
 
 #[cfg(test)]
 #[cfg_attr(

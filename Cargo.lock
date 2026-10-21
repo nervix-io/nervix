@@ -6814,6 +6814,7 @@ name = "nervix-connector-http"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
  "error-stack",
  "httparse",
  "httpdate",
@@ -6825,6 +6826,7 @@ dependencies = [
  "reqwest 0.13.5",
  "rustls",
  "rustls-pki-types",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
@@ -6842,6 +6844,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "async-trait",
+ "bolero",
  "bytes",
  "error-stack",
  "fastrand",
@@ -6868,6 +6871,7 @@ dependencies = [
  "tokio",
  "tracing",
  "typetag",
+ "ubyte",
  "url",
  "uuid",
  "webpki-roots 1.0.9",
@@ -6877,6 +6881,7 @@ dependencies = [
 name = "nervix-connector-kafka"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "async-trait",
  "bolero",
  "criterion 0.5.1",
@@ -6885,9 +6890,12 @@ dependencies = [
  "meticulous",
  "nervix-connector",
  "nervix-execution",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "rdkafka",
+ "shuttle",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -6925,12 +6933,14 @@ dependencies = [
  "nervix-connector",
  "nervix-dns",
  "nervix-execution",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
  "nervix-test-environment",
  "nonzero_ext",
  "rumqttc-core-next",
  "rumqttc-next",
+ "shuttle",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -6967,12 +6977,12 @@ dependencies = [
  "bytes",
  "error-stack",
  "futures-util",
- "humantime",
- "meticulous",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
+ "serde_json",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -7059,20 +7069,23 @@ dependencies = [
 name = "nervix-connector-pulsar"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "async-trait",
+ "bolero",
  "error-stack",
  "futures-util",
- "humantime",
  "meticulous",
  "nervix-connector",
  "nervix-execution",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "pulsar",
  "tempfile",
  "thiserror 2.0.21",
  "tokio-util",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -7090,7 +7103,9 @@ dependencies = [
  "nervix-dns",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "nervix-test-environment",
+ "socket2 0.6.5",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7124,8 +7139,10 @@ name = "nervix-connector-sentry"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
  "chrono",
  "error-stack",
+ "meticulous",
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
@@ -7135,6 +7152,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -7152,10 +7170,13 @@ dependencies = [
  "meticulous",
  "nervix-connector",
  "nervix-dns",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "nervix-simd-kernels",
  "nervix-test-environment",
+ "shuttle",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7223,6 +7244,7 @@ version = "0.1.0-dev"
 dependencies = [
  "async-trait",
  "error-stack",
+ "meticulous",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
@@ -7303,6 +7325,7 @@ version = "0.1.0-dev"
 dependencies = [
  "arch-into",
  "aws-smithy-runtime-api",
+ "bolero",
  "bytes",
  "error-stack",
  "hickory-resolver 0.26.3",
@@ -7460,6 +7483,7 @@ dependencies = [
  "sorted-vec",
  "strum 0.26.3",
  "thiserror 2.0.21",
+ "toml 0.8.2",
  "url",
  "uuid",
 ]
@@ -7761,6 +7785,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.24.0",
+ "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
  "tower-service",
@@ -7809,6 +7834,7 @@ dependencies = [
  "nervix-recovery",
  "reqwest 0.13.5",
  "serde_json",
+ "sqlx",
  "strum 0.26.3",
  "tempfile",
  "testcontainers",
@@ -9492,7 +9518,7 @@ dependencies = [
 [[package]]
 name = "pulsar"
 version = "6.9.0"
-source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-max-message-size#37f70aa16d3a6cc0493d25e0ca73c0e7b0c07f80"
+source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-message-size-ack-receipts#1545163035670abe8996be7bd2610e45421c47ce"
 dependencies = [
  "async-channel",
  "async-trait",

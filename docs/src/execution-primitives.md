@@ -48,7 +48,7 @@ native targets and none of them is compiled there.
 | Barriers, `Once` and the synchronous channel | `sync::blocking` | The standard library's | Modeled: Shuttle's | Real: the standard library's, outside every model |
 | `OnceLock` | `sync::blocking` | The standard library's | Opaque, with a scheduling point before and after each read and write; no initializing read | Real: the standard library's, outside every model |
 | `LazyLock` | `sync::blocking` | The standard library's | Unavailable | Real: the standard library's, outside every model |
-| Task spawning, joining, yielding, aborting, tracking and the cooperative budget | `task` | Tokio's and Tokio Util's | Modeled: Shuttle's Tokio, with the boundary's abort-on-drop handle | Real: Tokio's and Tokio Util's, outside every model |
+| Task spawning, joining, yielding, aborting, tracking, the cooperative budget, and polling a future outside it with `unconstrained` | `task` | Tokio's and Tokio Util's | Modeled: Shuttle's Tokio, with the boundary's abort-on-drop handle; Shuttle keeps no cooperative budget, so `unconstrained` only forwards the poll | Real: Tokio's and Tokio Util's, outside every model |
 | Blocking the runtime worker thread that calls it: the declared owners outside the executor | `task::block_in_place` | Tokio's | Unavailable | Real: Tokio's, outside every model |
 | Running a CPU job the bounded executor admitted | `task::spawn_cpu` | Tokio's blocking pool; under Turmoil, one task of the simulated host's scheduler | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
 | Running a job on the blocking pool itself: the executor's storage jobs, and the declared owners outside the executor | `task::spawn_blocking` | Tokio's blocking pool | Modeled: Shuttle's `spawn_blocking` | Real: Tokio's blocking pool, outside every model |
@@ -134,7 +134,14 @@ which runs only inside a Shuttle execution.
 
 Every async loop whose body performs async work calls `nervix_primitives::task::consume_budget`
 once per iteration near its beginning. The selected scheduler owns that yield opportunity;
-callers do not add their own backend choice. `std::time::Duration` remains a value in every mode.
+callers do not add their own backend choice. `nervix_primitives::task::unconstrained` polls a
+future outside the cooperative budget. Once a task has spent its budget, Tokio's channels and
+timers read as not ready even when their value has arrived. An owner that must learn what has
+already arrived, without waiting for anything, reads through it: the confirmation window settles
+every answer its broker gave before a publish failed this way. A future polled outside the budget
+is never made to yield, so its owner bounds how much it polls. Shuttle keeps no cooperative budget,
+and there `unconstrained` only forwards the poll. `std::time::Duration` remains a value in every
+mode.
 The bounded executor still owns job admission, class isolation, memory charges and cooperative
 cancellation; choosing a task primitive grants none of those permissions by itself.
 
@@ -267,8 +274,12 @@ runs in the command processes and supplies no ordering, wakeups or branches insi
 The per-mode build directories and fresh attempt directories prevent one mode from replacing
 another's executable or counters. Native source-line execution complements each model's claim;
 it does not broaden the ordering or interleaving guarantee. Mode reports remain separate from
-ordinary coverage and its advisory CRAP report. See [native extra coverage](developing-nervix.md) for
-collection, artifacts, filtering and replay commands.
+ordinary coverage and its advisory CRAP report. The
+[full workspace union](./coverage-reports.md#the-full-workspace-union) adds them to the ordinary
+report with their mode attribution, and accepts a Shuttle or Loom collection only with complete,
+unfiltered `models.json` evidence. See
+[native extra coverage](./coverage-reports.md#native-collection) for collection, artifacts,
+filtering and replay commands.
 
 The integrated ordinary cost probe is `just bench-primitives`. It measures the boundary's atomic
 access, `ArcSwap` publication, an uncontended blocking mutex, and shared-reference clone/drop
@@ -322,7 +333,7 @@ a file whose owners block in different ways, such as the CLI's, has a permission
 | Owner | Blocks through | Why it stays outside the executor | What bounds it |
 | --- | --- | --- | --- |
 | The resolver's configuration load in `nervix-dns` | `task::spawn_blocking` | A node reads its resolver configuration before it builds its executor, and the Rust client and the CLI build the same resolver without one | Two small files, read once for each resolver built |
-| The Kafka sink's final producer-queue drain and the Kafka source's partition inspection | `task::spawn_blocking` | librdkafka parks its calling thread until the broker answers; the call waits on the network and computes nothing, so it would hold a CPU or storage worker idle | The host's physical flush deadline, and a five-second metadata timeout per request |
+| The Kafka sink's final producer-queue drain, and the Kafka source's partition inspection and consumer-group offset commits | `task::spawn_blocking` | librdkafka parks its calling thread until the broker answers; the call waits on the network and computes nothing, so it would hold a CPU or storage worker idle | The host's physical flush deadline, a five-second metadata timeout per request, and one commit in flight per source instance, waited for at most thirty seconds |
 | The Rust client's backup download and restore upload, and the CLI's event printer | `task::spawn_blocking` | A client tool is not a node and has no executor | One rename of a written archive, one sequential read of an archive, and one printer thread for the life of the command |
 | The CLI's completion prompt | `task::block_in_place` | A client tool is not a node and has no executor; its line editor asks for completions synchronously on the thread that runs the CLI's main task, so the prompt waits there for the completion while the runtime's workers keep the session running | One completion at a time, only while the operator waits at the prompt; each page of suggestions ends by the client's retry deadline, and a repeated continuation ends the completion |
 | The benchmark driver and the scenario harness | `task::spawn_blocking` | A harness is not a node; it waits on brokers, databases, probe threads and the C binding from its own process | Each call's own timeout, or the probe or thread it joins |

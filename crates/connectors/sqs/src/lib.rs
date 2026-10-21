@@ -28,7 +28,7 @@
 mod connection;
 mod source;
 
-use std::{fmt::Debug, time::Duration};
+use std::fmt::Debug;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use async_trait::async_trait;
@@ -41,15 +41,17 @@ use aws_sdk_sqs::{
     types::{MessageAttributeValue, SendMessageBatchRequestEntry},
 };
 use connection::{FailedRequest, SqsTrust};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult, client_config_value,
-    client_tls_paths, optional_client_config_value, read_tls_file,
+    ConfiguredDeadline, PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish,
+    SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId,
+    SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
+    optional_client_config_value, read_tls_file,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp};
+use nervix_primitives::time::Instant;
 use nervix_simd_kernels::{XmlChars, XmlCharsError};
 pub use source::{
     SqsMessageAttributes, SqsSource, SqsSourceError, SqsSourceMessage, SqsSourcePlan,
@@ -255,19 +257,9 @@ impl SqsSink {
             .unwrap_or("x")
             .to_string();
 
-        let request_timeout = match optional_client_config_value(config, "timeout_ms") {
-            Some(timeout_ms) => {
-                let mapping_input = timeout_ms.parse::<u64>().map(Duration::from_millis);
-                let timeout = match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(_) => Err(Self::config_error(format!(
-                        "invalid SQS timeout_ms '{timeout_ms}'"
-                    ))),
-                }?;
-                Some(timeout)
-            }
-            None => None,
-        };
+        let request_timeout = ConfiguredDeadline::timeout(config)
+            .change_context(SinkStartError::InvalidConfiguration { sink: SQS })?
+            .map(ConfiguredDeadline::bound);
 
         let mut loader = aws_config::defaults(BehaviorVersion::latest())
             .region(aws_sdk_sqs::config::Region::new(region))
@@ -657,11 +649,6 @@ impl SqsSink {
         }
     }
 
-    fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
-        Report::new(SinkStartError::InvalidConfiguration { sink: SQS })
-            .attach_printable(error.to_string())
-    }
-
     fn start_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
         Report::new(SinkStartError::Initialize { sink: SQS }).attach_printable(error.to_string())
     }
@@ -677,7 +664,12 @@ impl SqsSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for SqsSink {}
+impl SinkLifecycle for SqsSink {
+    /// Each send is answered before the publish returns, so the client holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RecordSink for SqsSink {
@@ -718,7 +710,7 @@ mod connection_tests;
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, time::Duration};
 
     use aws_sdk_sqs::{error::ConnectorError, types::error::QueueDoesNotExist};
     use meticulous::ResultExt as _;
@@ -1324,13 +1316,20 @@ mod tests {
     #[nervix_primitives::test]
     async fn client_rejects_an_invalid_request_timeout() {
         let fixture = Fixture::start().await;
-        let error = SqsSink::client_from_config(&client_config("later"), fixture.dns())
-            .await
-            .expect_err("invalid SQS timeout should fail client initialization");
+        for value in ["later", "0"] {
+            let error = SqsSink::client_from_config(&client_config(value), fixture.dns())
+                .await
+                .expect_err("invalid SQS timeout should fail client initialization");
 
-        assert!(
-            format!("{error:?}").contains("invalid SQS timeout_ms 'later'"),
-            "unexpected error: {error:?}"
-        );
+            assert!(
+                error.frames().any(|frame| matches!(
+                    frame.downcast_ref::<nervix_connector::ClientConfigError>(),
+                    Some(nervix_connector::ClientConfigError::InvalidDeadline {
+                        key: "timeout_ms"
+                    })
+                )),
+                "{value}: unexpected error: {error:?}"
+            );
+        }
     }
 }

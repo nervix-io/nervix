@@ -147,6 +147,7 @@ class InventoryTests(unittest.TestCase):
             "task-status-transitions",
             "entity-freeze-transitions",
             "endpoint-route-table",
+            "endpoint-acknowledgement-body",
             "relay-channel-lifetimes",
             "interconnect-slot-lifetimes",
             "runtime-checkpoint-description-wire",
@@ -156,6 +157,7 @@ class InventoryTests(unittest.TestCase):
             "runtime-checkpoint-listing-malformed",
             "remote-correlation-lifetimes",
             "relay-admission-owners",
+            "relay-channel-watermark-turnover",
             "client-emitter-wire",
             "client-requests",
             "client-replies",
@@ -206,6 +208,7 @@ class InventoryTests(unittest.TestCase):
             "models-name-validation",
             "models-external-names",
             "models-external-name-validation",
+            "models-connector-declarations",
             "models-timestamps",
             "models-timestamp-text",
             "models-domain-clock",
@@ -292,6 +295,7 @@ class InventoryTests(unittest.TestCase):
             "codec-json-non-finite-floats",
             "codec-transforming-numbers",
             "jaq-native-numbers",
+            "jaq-yaml-string-values",
             "remote-relay-rows",
             "remote-relay-rows-malformed",
             "relay-wire-messages",
@@ -318,15 +322,20 @@ class InventoryTests(unittest.TestCase):
             "bounded-write-limits",
             "connector-row-request-division",
             "connector-confirmation-window",
+            "pulsar-unconfirmed-receipts",
             "emitter-batch-subdivision",
             "emitter-batch-packing",
             "codec-bounded-encodings",
             "emitter-row-preparations",
             "emitter-retained-payloads",
             "sqs-batch-requests",
+            "iceberg-nested-datetime-staging",
+            "sentry-prepared-envelopes",
+            "http-request-heads",
             "mqtt-publish-packets",
             "postgres-insert-measures",
             "websocket-signaling-protobuf-values",
+            "websocket-acknowledgement-values",
             "websocket-signaling-protobuf-malformed",
             "otel-hex-ids",
             "console-pending-backups",
@@ -335,6 +344,7 @@ class InventoryTests(unittest.TestCase):
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "ingestor-describe-envelope",
+            "dns-operation-budget",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-core",
@@ -354,6 +364,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-simd-kernels",
             "nervix-checkpoint-replication",
             "nervix-connector-syslog",
+            "nervix-connector-pulsar",
             "nervix-connector-kafka",
             "nervix-paced-simulation",
             "nervix-wasm-protocol",
@@ -367,16 +378,23 @@ class InventoryTests(unittest.TestCase):
             "nervix-bounded-write",
             "nervix-connector",
             "nervix-connector-sqs",
+            "nervix-connector-iceberg",
             "nervix-connector-mqtt",
             "nervix-connector-postgres",
             "nervix-connector-websockets",
             "nervix-connector-otel",
+            "nervix-connector-sentry",
+            "nervix-connector-http",
             "nervix-web-console",
+            "nervix-dns",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
             self.assertTrue(target.corpus.is_dir())
-            self.assertIn(target.test_target, {"lib", "test:representations", "bin:nervix-web-console"})
+            self.assertIn(
+                target.test_target,
+                {"lib", "test:representations", "test:connectors", "bin:nervix-web-console"},
+            )
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
 

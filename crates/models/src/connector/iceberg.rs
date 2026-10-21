@@ -14,21 +14,31 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+use std::time::Duration;
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 
-use super::{configured_client::configured_client, entity_union::connector_sinks};
+use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
+    },
+    configured_client::configured_client,
+    entity_union::connector_sinks,
+};
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkValueMapping, SinkValueMappings, TableName,
+    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm,
+    OptionPresence, OptionValue, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkReferenceKind, SinkValueMapping, SinkValueMappings, TableName,
 };
 
-configured_client!(S3: unpooled CreateClientS3 => S3ConfigEntry);
-configured_client!(Gcs: unpooled CreateClientGcs => GcsConfigEntry);
-configured_client!(AzureBlob: unpooled CreateClientAzureBlob => AzureBlobConfigEntry);
-configured_client!(IcebergRest: unpooled CreateClientIcebergRest => IcebergRestConfigEntry);
+configured_client!(S3: unpooled, config NervixWithPropertyNamespaces, CreateClientS3 => S3ConfigEntry);
+configured_client!(Gcs: unpooled, config NervixWithPropertyNamespaces, CreateClientGcs => GcsConfigEntry);
+configured_client!(AzureBlob: unpooled, config NervixWithPropertyNamespaces, CreateClientAzureBlob => AzureBlobConfigEntry);
+configured_client!(IcebergRest: unpooled, config NervixWithPropertyNamespaces, CreateClientIcebergRest => IcebergRestConfigEntry);
 
 pub type IcebergValueMapping = SinkValueMapping;
 
@@ -108,18 +118,86 @@ impl IcebergStorageBackend {
     }
 }
 
+/// What the connector of a ICEBERG TABLE holds and how long it waits.
+const ICEBERG_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "records staged on disk until a commit",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("COMMIT EACH ... MAX SIZE"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "catalog requests",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "object-store metadata and delete operations",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Default(Duration::from_secs(60)),
+            },
+        },
+        DeclaredWait {
+            wait: "object-store reads and writes",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Default(Duration::from_secs(10)),
+            },
+        },
+    ],
+    driver_limits: &[],
+};
+
 impl SinkEntity for IcebergTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
-        requires_codec: false,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        reference: SinkReferenceKind::StorageClient(&[
+            ConnectorKind::S3,
+            ConnectorKind::Gcs,
+            ConnectorKind::AzureBlob,
+        ]),
+        body: EmitterBodyForm::Values,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        locator: Some(LocatorDeclaration {
+            keywords: "TABLE",
+            name: LocatorName::Unquoted {
+                label: "table_name",
+            },
+        }),
+        options: &[
+            OptionDeclaration {
+                keywords: "LOCATION",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Text,
+                    example: "LOCATION 's3://warehouse/orders'",
+                },
+            },
+            OptionDeclaration {
+                keywords: "CATALOG",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Client(ConnectorKind::IcebergRest),
+                    example: "CATALOG catalog",
+                },
+            },
+            OptionDeclaration {
+                keywords: "COMMIT EACH",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Clause,
+                    example: "COMMIT EACH 10s MAX SIZE 64MiB",
+                },
+            },
+        ],
+        envelope: &[],
+        properties: &[],
+        bounds: ICEBERG_BOUNDS,
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::RequestAck { .. })
-    }
 }
 
 impl SinkBody for IcebergTableSink {

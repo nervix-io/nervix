@@ -112,7 +112,7 @@ Feature: Configuration backup into a public archive
       START;
       """
     Given the active domain is "{{primary_domain}}"
-    And the backup cut for domain "{{primary_domain}}" will pause after draining
+    And the backup cut for domain "{{primary_domain}}" will pause before its capture
     Then the current leader node is saved as placeholder "leader"
     When the CLI begins backing up "domain {{primary_domain}} --timeout 30s" from node "{{leader}}" into "isolated-cut.nvxb" in the background
     Then the backup cut for domain "{{primary_domain}}" has reached its pause
@@ -162,7 +162,7 @@ Feature: Configuration backup into a public archive
       CREATE SUBSCRIPTION events_subscription TO events;
       START;
       """
-    Given the backup cut for domain "{{domain}}" will pause after draining
+    Given the backup cut for domain "{{domain}}" will pause before its capture
     Then the current leader node is saved as placeholder "leader"
     When the CLI begins backing up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "dropped.nvxb" in the background
     Then the backup cut for domain "{{domain}}" has reached its pause
@@ -368,7 +368,7 @@ Feature: Configuration backup into a public archive
       """
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "survivor"
-    Given the backup cut for domain "{{domain}}" will pause after draining
+    Given the backup cut for domain "{{domain}}" will pause before its capture
     When the CLI begins backing up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "interrupted.nvxb" in the background
     Then the backup cut for domain "{{domain}}" has reached its pause
     When leadership is transferred from node "{{leader}}" to node "{{survivor}}"
@@ -619,7 +619,7 @@ Feature: Configuration backup into a public archive
       | 1            |
       | 3            |
 
-  @restore_installation @deloxide_stress_restore
+  @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: A quiesced backup restores two WASM branches and Kafka domain offsets
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "10m"
@@ -961,7 +961,7 @@ Feature: Configuration backup into a public archive
     And a node other than placeholder "leader" is saved as placeholder "follower"
     When the CLI backs up "cluster" from node "{{follower}}" into "follower.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
-    When the session backs up the cluster on node "{{leader}}" without downloading its archive
+    When the session backs up the cluster on node "{{follower}}" without downloading its archive
     And the backup's archive is downloaded from node "{{follower}}"
     Then the download is redirected to node "{{leader}}"
 

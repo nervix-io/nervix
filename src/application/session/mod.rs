@@ -126,6 +126,7 @@ pub(in crate::application) enum InboundFrame {
 }
 
 /// A request that changes the session, served in the order the client wrote it.
+#[derive(strum::IntoStaticStr)]
 enum OrderedRequest {
     Command(CommandRequest),
     Attach(AttachTransactionRequest),
@@ -902,7 +903,16 @@ async fn run_ordered_lane(
         if item.admission.is_cancelled() {
             continue;
         }
+        let request_id = item.request_id;
+        let request: &'static str = (&item.request).into();
+        let started = nervix_primitives::time::Instant::now();
         serve_ordered(&shared, item, &mut subscriptions, &mut clock_attachments).await;
+        debug!(
+            %request_id,
+            request,
+            elapsed = ?started.elapsed(),
+            "served an ordered session request"
+        );
         shared.publish_view(&subscriptions);
     }
     clock_attachments.stop_all().await;

@@ -166,59 +166,6 @@ impl RowAnswers {
     }
 }
 
-/// The source row each record of a write carries, for a write whose records carry one row each.
-///
-/// An emitter without `BATCH` publishes one record per row and retains nothing: the next attempt
-/// encodes a row the sink left unanswered again, exactly as it encoded it the first time.
-#[derive(Debug, Default)]
-pub(super) struct RowRecords {
-    rows: Vec<SinkRecordPosition>,
-}
-
-impl RowRecords {
-    pub(super) fn with_capacity(records: usize) -> Self {
-        Self {
-            rows: Vec::with_capacity(records),
-        }
-    }
-
-    /// The identity the record carrying `row` is handed over under.
-    pub(super) fn record(&mut self, row: SinkRecordPosition) -> SinkRecordId {
-        let record = SinkRecordId::new(self.rows.len());
-        self.rows.push(row);
-        record
-    }
-
-    /// The sink's answers for this write, by the row each record carries.
-    pub(super) fn answers(
-        &self,
-        outcome: PerRecordOutcome<SinkRecordId>,
-    ) -> EmitterRuntimeResult<RowAnswers> {
-        let checked = CheckedAnswers::check(outcome, self.rows.len())?;
-        let mut delivered = Vec::with_capacity(checked.delivered.len());
-        for record in checked.delivered {
-            delivered.push(self.row(record));
-        }
-        let mut rejected = Vec::with_capacity(checked.rejected.len());
-        for RejectedSinkRecord { id, error } in checked.rejected {
-            rejected.push(RejectedEmitterRecord {
-                position: self.row(id),
-                reason: String::new(),
-                structured_error: Some(error),
-            });
-        }
-        Ok(RowAnswers {
-            delivered,
-            rejected,
-            unresolved: checked.unresolved,
-        })
-    }
-
-    fn row(&self, record: SinkRecordId) -> SinkRecordPosition {
-        *self.rows.get(record.index()).verified(CHECKED_RECORD)
-    }
-}
-
 /// What a prepared payload hands its sink on every attempt, prepared once and written unchanged.
 pub(super) trait PreparedContent {
     /// The value one write hands the sink for the payload.
@@ -236,14 +183,15 @@ pub(super) trait PreparedContent {
     fn written(&self, record: SinkRecordId, occurred_at: Timestamp) -> Self::Written;
 }
 
-/// A batch payload for a record sink: the envelope every member shares and exactly the bytes the
-/// codec produced.
+/// A payload for a record sink, carrying one row or, with `BATCH`, one packed candidate: the
+/// envelope every member shares and exactly the bytes the connector prepared from the codec output.
 #[derive(Debug)]
 pub(super) struct EncodedPayload {
     /// The key, headers and ordering group every member shares.
     pub(super) envelope: BatchEnvelope,
-    /// Exactly the bytes the codec produced. Every attempt writes these bytes, so a duplicate a
-    /// retry produces is the payload the destination may already hold.
+    /// Exactly the external bytes the connector prepared from the codec output. Every attempt
+    /// writes these bytes, so a duplicate a retry produces is the payload the destination may
+    /// already hold.
     pub(super) payload: Vec<u8>,
 }
 
@@ -1008,35 +956,6 @@ mod tests {
             written(&prepared.next_write()),
             vec![(0, b"second".to_vec())]
         );
-    }
-
-    #[test]
-    fn row_records_answer_for_the_row_each_record_carries() {
-        let mut rows = RowRecords::with_capacity(2);
-        let rejected_record = rows.record(position(0, 3));
-        let delivered_record = rows.record(position(2, 1));
-        let mut outcome = PerRecordOutcome::with_capacity(1);
-        outcome.deliver(delivered_record);
-        outcome.reject(RejectedSinkRecord::external(
-            rejected_record,
-            Timestamp::from_unix_nanos(1),
-            "refused".to_string(),
-        ));
-
-        let answers = rows
-            .answers(outcome)
-            .expect("both answers name records of this write");
-
-        assert_eq!(answers.delivered, vec![position(2, 1)]);
-        assert_eq!(
-            answers
-                .rejected
-                .iter()
-                .map(|rejected| rejected.position)
-                .collect::<Vec<_>>(),
-            vec![position(0, 3)]
-        );
-        assert!(answers.unresolved.is_none());
     }
 
     fn row_request(rows: &[usize], body: &str) -> PreparedRowRequest {

@@ -2,14 +2,16 @@
 //!
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
-//! - **Owns.** Feature-group admission, run-slot admission, and feature take-up priority.
-//! - **Depends on.** Tokio channels, a short synchronous queue lock, and feature names supplied by
-//!   the parser.
+//! - **Owns.** Feature-group admission, run-slot admission, feature take-up priority, and the
+//!   long-running declaration that orders run-slot admission.
+//! - **Depends on.** Tokio channels, a short synchronous queue lock, and feature names and tags
+//!   supplied by the parser.
 //! - **Must not know.** Scenario steps, node state, or Cucumber's result writer.
 
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
+    time::Duration,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -22,6 +24,47 @@ pub(crate) const WEB_CONSOLE_FEATURE_NAMES: [&str; 4] = [
     "Web console domain clock",
 ];
 pub(crate) const WASM_STATE_RESET_FEATURE_NAME: &str = "Coordinated WASM processor state reset";
+
+/// The Gherkin tag, without its `@`, that declares a scenario long-running. It counts on the
+/// scenario, its outline's examples, its rule, or its feature.
+pub(crate) const LONG_RUNNING_TAG: &str = "long_running";
+
+/// How long an attempt runs before the suite summary names its scenario as one that should
+/// declare itself long-running. The scenarios declared so far are those whose attempts reached two
+/// minutes in the canonical producers of 17 October 2026: about one attempt in a hundred, in runs
+/// whose median attempt took 25 seconds.
+pub(crate) const LONG_RUNNING_ATTEMPT: Duration = Duration::from_secs(120);
+
+/// How long one attempt of a scenario is declared to run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ScenarioLength {
+    /// Declared with `@long_running`: an attempt runs for minutes.
+    LongRunning,
+    /// Every scenario without the declaration.
+    Ordinary,
+}
+
+impl ScenarioLength {
+    /// The length a scenario's tags declare, given the tags of the scenario, its rule and its
+    /// feature together.
+    pub(crate) fn declared_by<'a>(tags: impl IntoIterator<Item = &'a str>) -> Self {
+        for tag in tags {
+            if tag == LONG_RUNNING_TAG {
+                return Self::LongRunning;
+            }
+        }
+        Self::Ordinary
+    }
+
+    /// Whether an attempt that ran for `time` shows a scenario of this declared length to be
+    /// long-running without the declaration.
+    pub(crate) fn lacks_declaration_for(self, time: Duration) -> bool {
+        match self {
+            Self::LongRunning => false,
+            Self::Ordinary => time >= LONG_RUNNING_ATTEMPT,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FeatureLimit {
@@ -139,6 +182,10 @@ struct AdmissionState {
     web_console: AttemptQueues,
     web_console_grants: BTreeMap<String, usize>,
     wasm_state_reset: AttemptQueues,
+    /// Declared long-running scenarios of unlimited features. They take a free run slot before
+    /// ordinary first attempts so that one taken up late in feature order cannot start in a run's
+    /// last minutes and keep the suite running after every other scenario has ended.
+    long_running: AttemptQueues,
     ordinary: AttemptQueues,
 }
 
@@ -161,11 +208,20 @@ impl AdmissionState {
         }
     }
 
-    fn queue(&mut self, limit: FeatureLimit, attempt: ScenarioAttempt, waiter: Waiter) {
-        let queue = match limit {
-            FeatureLimit::WebConsole => &mut self.web_console,
-            FeatureLimit::WasmStateReset => &mut self.wasm_state_reset,
-            FeatureLimit::Unlimited => &mut self.ordinary,
+    /// A limited feature's chain keeps its own order whatever its scenarios declare: the feature
+    /// limit already takes it up first and paces it.
+    fn queue(
+        &mut self,
+        limit: FeatureLimit,
+        length: ScenarioLength,
+        attempt: ScenarioAttempt,
+        waiter: Waiter,
+    ) {
+        let queue = match (limit, length) {
+            (FeatureLimit::WebConsole, _) => &mut self.web_console,
+            (FeatureLimit::WasmStateReset, _) => &mut self.wasm_state_reset,
+            (FeatureLimit::Unlimited, ScenarioLength::LongRunning) => &mut self.long_running,
+            (FeatureLimit::Unlimited, ScenarioLength::Ordinary) => &mut self.ordinary,
         };
         queue.for_attempt(attempt).push_back(waiter);
     }
@@ -191,6 +247,9 @@ impl AdmissionState {
                         .verified("the selected web console waiter is still at its queue index");
                     return Some((FeatureLimit::WebConsole, waiter));
                 }
+            }
+            if let Some(waiter) = self.long_running.for_attempt(attempt).pop_front() {
+                return Some((FeatureLimit::Unlimited, waiter));
             }
             if let Some(waiter) = self.ordinary.for_attempt(attempt).pop_front() {
                 return Some((FeatureLimit::Unlimited, waiter));
@@ -219,6 +278,7 @@ impl AdmissionState {
         for (limit, queue) in [
             (FeatureLimit::WasmStateReset, &self.wasm_state_reset),
             (FeatureLimit::WebConsole, &self.web_console),
+            (FeatureLimit::Unlimited, &self.long_running),
             (FeatureLimit::Unlimited, &self.ordinary),
         ] {
             let reason = self.waiting_for(limit);
@@ -298,6 +358,7 @@ impl ScenarioRunSlots {
     pub(crate) async fn admit_with(
         &self,
         limit: FeatureLimit,
+        length: ScenarioLength,
         feature_name: &str,
         attempt: ScenarioAttempt,
         mut waiting_for: impl FnMut(AdmissionWait),
@@ -309,6 +370,7 @@ impl ScenarioRunSlots {
             let (reason_sender, reason_changes) = watch::channel(reason);
             state.queue(
                 limit,
+                length,
                 attempt,
                 Waiter {
                     feature_name: feature_name.to_owned(),

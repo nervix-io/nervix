@@ -350,6 +350,11 @@ nearest to it. The formats set two bounds of their own:
   such a field: a zero of either sign, `false`, empty text or an empty list. An ingestion program
   that needs one restores it, as `(.level // 0)` does; a negative zero comes back positive.
 
+The shared `YAML` writer emits JSON-compatible flow syntax, quoting string keys and values. This
+preserves leading and trailing whitespace, control characters and nested member order when the
+value is read again. The writer still streams into the caller's bounded output. This encoding
+also serves WebSocket signaling and endpoint acknowledgement frames.
+
 `SYSLOG` writes its timestamp to the microsecond in UTC; see [Syslog](syslog.md).
 
 ## JAQ Transformations
