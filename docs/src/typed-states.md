@@ -533,6 +533,12 @@ execution or recovery. Connectors and the session edge validate external represe
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
 
+The Iceberg sink validates its configured location into a URL before creating its storage factory.
+The initialized operator belongs to that storage root: a later object path must match its scheme,
+host, port and container identity before its relative key reaches the operator. Table metadata
+refreshes retain the first table's initialized `FileIO`; they do not install a different storage
+owner alongside refreshed metadata. Invalid object references fail at this boundary.
+
 Generated compiler findings carry a required execution-context field. An explicit null means that
 analysis has not established a source contract; it is an unknown effect, not a cold classification.
 The report decoder requires that field even though its value is optional. Complete compiler,
@@ -611,6 +617,15 @@ A lease loaded before ending may complete; later admission sees absence. Domain 
 teardown end the domain's lifetimes and replace all of its route definitions together, preserving
 other domains. Unbind names the exact binding allocation so a preceding source's close cannot end
 its replacement.
+
+Endpoint request policy is either unacknowledged or a typed acknowledged plan carrying positive
+capacity, physical timeout and retry delay. The decision boundary validates these durations and
+the reject-only quiesce contract once. A WebSocket ACK declaration requires a signaling reference;
+composition verifies its prepared outbound encoder before binding intake. Request outcomes retain
+the distinction between local input refusal, temporary non-admission, downstream failure and an
+interrupted lifetime. Only the public response boundary projects those states onto the shared
+client outcome vocabulary. Exact lifetime ending is a cancellation event distinct from absent
+intake; held replies observe the event while later requests observe absence.
 
 A second in-memory decision, the domain's entrypoint plans, resolves every ingestor's source,
 client, codec and routes and every reingestor's inputs, node filter and routes. It records how a

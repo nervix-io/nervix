@@ -43,7 +43,8 @@ recorded = "OrderAnalysis"
 
 # The active-only build with Deloxide's bounded scheduling disturbance, `StressConfiguration::LANE`.
 # It runs every probe, conformance check and owner test, the lifecycle scenarios of the
-# `stress-scenarios` invocation and the paced-driver scenarios of `stress-paced-simulation`.
+# `stress-scenarios` and `stress-endpoint-acknowledgement` invocations and the paced-driver
+# scenarios of `stress-paced-simulation`.
 [[selection]]
 name = "deloxide-stress"
 recorded = "StressedActiveOnly"
@@ -105,6 +106,7 @@ package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = [
   "@client_wire_pause_leadership",
+  "@client_wire_standalone_preparation",
   "@deadlock_diagnostics",
   "@restore_installation",
   "@client_ingestor_alter_drain",
@@ -131,6 +133,8 @@ tags = [
   "@shutdown_kafka_refused_commit",
   "@shutdown_emitter_finish",
   "@emitter_finish_at_stop",
+  "@iceberg_commit_memory",
+  "@zeromq_emitter_open_deadline",
   "@metrics_checkpoint_handoff",
   "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
@@ -175,6 +179,22 @@ kind = "cucumber"
 package = "nervix-server"
 selections = ["deloxide-stress"]
 tags = ["@deloxide_stress"]
+target = "test:scenarios"
+
+# The ten endpoint ACK lifecycle examples have a separate bounded serial phase. They do not
+# consume the baseline lifecycle process's suite budget; both phases share the lane's unchanged
+# workload budget and retain the same teardown reserve.
+[[invocation]]
+bound_seconds = 900
+concurrency = 1
+evidence = true
+features = ["testing"]
+id = "stress-endpoint-acknowledgement"
+inputs = ["tests/features/runtime/endpoint_acknowledgement.feature"]
+kind = "cucumber"
+package = "nervix-server"
+selections = ["deloxide-stress"]
+tags = ["@deloxide_stress_endpoint_ack"]
 target = "test:scenarios"
 
 # The paced-driver scenarios under the same disturbance, one at a time, with the stressed build of
@@ -649,6 +669,16 @@ scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "An Iceberg commit on one and three nodes whose staged file the bulk memory class has no room for, so the emitter host retries the commit on its policy while the sink keeps the staged file and its acknowledgements, then the commit once the scenario releases its hold. The host's retry status and its tracked publication run beside the commit; the memory charges are semaphore permits and the catalog and object-store clients are asynchronous, so the detector does not see them."
+examples = 2
+feature = "tests/features/runtime/iceberg_emission.feature"
+id = "scenario.iceberg-commit-memory"
+invariant = "An Iceberg commit charges the bulk memory class every staged byte it loads before reading them, keeps its staged file and acknowledgements while the class has no room, and commits the row once the room is there, sending exactly the bytes it asked the class for."
+invocation = "scenarios"
+scenario = "An Iceberg commit the bulk memory class has no room for keeps its row and commits once the room is there"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "STOP on one and three nodes reaches the Pulsar sink's finish after NO ACK delivered one record or a full 100-record producer queue while its broker connection was paused. The measured stop completion follows the endpoint's resumption and the broker receives the payload exactly once. Domain teardown and source controls exercise tracked locks; receipt futures and the proxy's asynchronous gate are untracked."
 examples = 4
 feature = "tests/features/runtime/pulsar_delivery.feature"
@@ -656,6 +686,16 @@ id = "scenario.pulsar-finish-at-stop"
 invariant = "STOP retains a Pulsar producer until every accepted record's receipt arrives within the finish deadline, rather than completing while those records are held behind a broker fault."
 invocation = "scenarios"
 scenario = "STOP waits for the records a NO ACK Pulsar emitter's producer holds"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A connect-mode ZeroMQ emitter on one and three nodes whose sink open runs out of connect_timeout_ms against a port that refuses every connection, the emitter task's reopen on its retry policy, and the reopen that connects once a peer listens, beside the tracked locks of the Plexus commands, the HTTP endpoint intake and the cluster's teardown. The ZeroMQ driver's connection attempts, the connect deadline and the emitter's retry wait are untracked."
+examples = 2
+feature = "tests/features/runtime/zeromq_emission.feature"
+id = "scenario.zeromq-emitter-open-deadline"
+invariant = "A connect-mode ZeroMQ emitter whose peer never accepts fails each open within connect_timeout_ms and reports it, and a reopen on its retry policy delivers the record it buffered once a peer listens."
+invocation = "scenarios"
+scenario = "A connect-mode ZeroMQ emitter whose peer never accepts is reported within connect_timeout_ms and delivers once the peer appears"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1762,6 +1802,16 @@ scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: an Iceberg commit on one and three nodes whose staged file the bulk memory class has no room for, so the emitter host retries the commit on its policy while the sink keeps the staged file and its acknowledgements, then the commit once the scenario releases its hold. The host's retry status and its tracked publication run beside the commit; the memory charges are semaphore permits and the catalog and object-store clients are asynchronous, so the detector does not see them."
+examples = 2
+feature = "tests/features/runtime/iceberg_emission.feature"
+id = "stress.iceberg-commit-memory"
+invariant = "An Iceberg commit charges the bulk memory class every staged byte it loads before reading them, keeps its staged file and acknowledgements while the class has no room, and commits the row once the room is there, sending exactly the bytes it asked the class for."
+invocation = "stress-scenarios"
+scenario = "An Iceberg commit the bulk memory class has no room for keeps its row and commits once the room is there"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: STOP on one and three nodes reaches the Pulsar sink's finish while one NO ACK record or a full 100-record producer queue is held behind a paused broker connection. Source controls and domain teardown reach tracked locks; the receipt futures and asynchronous fault gate remain untracked."
 examples = 4
 feature = "tests/features/runtime/pulsar_delivery.feature"
@@ -1769,6 +1819,16 @@ id = "stress.pulsar-finish-at-stop"
 invariant = "STOP retains a Pulsar producer until every accepted record's receipt arrives within the finish deadline, rather than completing while those records are held behind a broker fault."
 invocation = "stress-scenarios"
 scenario = "STOP waits for the records a NO ACK Pulsar emitter's producer holds"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a connect-mode ZeroMQ emitter on one and three nodes whose sink open runs out of connect_timeout_ms against a port that refuses every connection, the emitter task's reopen on its retry policy, and the reopen that connects once a peer listens, beside the tracked locks of the Plexus commands, the HTTP endpoint intake and the cluster's teardown. The ZeroMQ driver's connection attempts, the connect deadline and the emitter's retry wait are untracked."
+examples = 2
+feature = "tests/features/runtime/zeromq_emission.feature"
+id = "stress.zeromq-emitter-open-deadline"
+invariant = "A connect-mode ZeroMQ emitter whose peer never accepts fails each open within connect_timeout_ms and reports it, and a reopen on its retry policy delivers the record it buffered once a peer listens."
+invocation = "stress-scenarios"
+scenario = "A connect-mode ZeroMQ emitter whose peer never accepts is reported within connect_timeout_ms and delivers once the peer appears"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -2061,6 +2121,26 @@ invocation = "stress-scenarios"
 scenario = "A refused pause release remains recoverable when its coordinator regains leadership"
 selections = ["deloxide-stress"]
 
+[[workload]]
+coverage = "Standalone command preparation, tracked transaction impact recording and domain pause recovery across two controlled leadership transfers. Async preparation barriers remain untracked."
+examples = 1
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "scenario.standalone-preflight"
+invariant = "A stale preflight observes the same command's durable transaction progress before deciding its outcome; exact recovery and a dependent mutation succeed after pause release."
+invocation = "scenarios"
+scenario = "A stale standalone preflight recovers the applying command across repeated leadership changes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: standalone command preparation, tracked transaction impact recording and domain pause recovery across two controlled leadership transfers."
+examples = 1
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "stress.standalone-preflight"
+invariant = "A stale preflight observes the same command's durable transaction progress before deciding its outcome; exact recovery and a dependent mutation succeed after pause release."
+invocation = "stress-scenarios"
+scenario = "A stale standalone preflight recovers the applying command across repeated leadership changes"
+selections = ["deloxide-stress"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -2277,6 +2357,8 @@ workloads = [
 [[owner]]
 path = "src/application/model_mutation.rs"
 workloads = [
+  "scenario.standalone-preflight",
+  "stress.standalone-preflight",
   "scenario.transaction-pause-release",
   "stress.transaction-pause-release",
   "scenario.diagnostic-nodes",
@@ -2363,6 +2445,8 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/application/transaction.rs"
 workloads = [
+  "scenario.standalone-preflight",
+  "stress.standalone-preflight",
   "scenario.transaction-pause-release",
   "stress.transaction-pause-release",
   "scenario.diagnostic-nodes",
@@ -2374,6 +2458,8 @@ workloads = [
 [[owner]]
 path = "src/application/transaction/impact.rs"
 workloads = [
+  "scenario.standalone-preflight",
+  "stress.standalone-preflight",
   "scenario.transaction-pause-release",
   "stress.transaction-pause-release",
   "scenario.client-alter-drain",
@@ -2402,7 +2488,7 @@ workloads = [
 ]
 
 [[owner]]
-gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. The inferencer inspection admission workloads also reach the execution occupancy holders mutex while saturating and releasing the bulk workers. Ordinary branch-state-room scenarios retain their broader capture and restore coverage outside these workloads."
+gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. Ordinary branch-state-room scenarios retain their broader capture and restore coverage outside these workloads."
 path = "src/fault_injection.rs"
 workloads = [
   "scenario.inferencer-inspection-admission",
@@ -2419,6 +2505,13 @@ workloads = [
   "stress.diagnostic-nodes",
   "stress.client-alter-drain",
   "stress.client-alter-rejection",
+]
+
+[[owner]]
+path = "src/fault_injection/execution.rs"
+workloads = [
+  "scenario.inferencer-inspection-admission",
+  "stress.inferencer-inspection-admission",
 ]
 
 [[owner]]
@@ -2488,6 +2581,12 @@ workloads = [
 [[owner]]
 path = "src/runtime/entity_gate.rs"
 workloads = [
+  "scenario.endpoint-ack-decision",
+  "stress.endpoint-ack-decision",
+  "scenario.endpoint-ack-ending",
+  "stress.endpoint-ack-ending",
+  "scenario.endpoint-ack-fanout",
+  "stress.endpoint-ack-fanout",
   "scenario.shutdown-flush-before-freeze",
   "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
@@ -2507,6 +2606,12 @@ workloads = [
 [[owner]]
 path = "src/runtime/force_flush.rs"
 workloads = [
+  "scenario.endpoint-ack-decision",
+  "stress.endpoint-ack-decision",
+  "scenario.endpoint-ack-ending",
+  "stress.endpoint-ack-ending",
+  "scenario.endpoint-ack-fanout",
+  "stress.endpoint-ack-fanout",
   "scenario.shutdown-flush-before-freeze",
   "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
@@ -2523,6 +2628,12 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.endpoint-ack-decision",
+  "stress.endpoint-ack-decision",
+  "scenario.endpoint-ack-ending",
+  "stress.endpoint-ack-ending",
+  "scenario.endpoint-ack-fanout",
+  "stress.endpoint-ack-fanout",
   "scenario.mqtt-parallel-gather-at-quiesce",
   "stress.mqtt-parallel-gather-at-quiesce",
   "scenario.sqs-receive-at-quiesce",
@@ -2760,4 +2871,64 @@ id = "stress.sqs-receive-at-quiesce"
 invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Held request capacity and ACK/NACK resolution through a native consumer, including a remote emitter on three nodes. Window permits, asynchronous cancellation and network waits are untracked; source quiesce and root lifecycle reach tracked owner locks."
+examples = 4
+feature = "tests/features/runtime/endpoint_acknowledgement.feature"
+id = "scenario.endpoint-ack-decision"
+invariant = "A bounded endpoint holds each admitted response until its graph ACK/NACK, deadline or exact intake ending and refuses excess requests immediately."
+invocation = "scenarios"
+scenario = "An HTTP response follows the attached consumer's <decision> decision"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Held request capacity and ACK/NACK resolution through a native consumer, including a remote emitter on three nodes. Window permits, asynchronous cancellation and network waits are untracked; source quiesce and root lifecycle reach tracked owner locks."
+examples = 4
+feature = "tests/features/runtime/endpoint_acknowledgement.feature"
+id = "stress.endpoint-ack-decision"
+invariant = "A bounded endpoint holds each admitted response until its graph ACK/NACK, deadline or exact intake ending and refuses excess requests immediately."
+invocation = "stress-endpoint-acknowledgement"
+scenario = "An HTTP response follows the attached consumer's <decision> decision"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Held HTTP response cancellation on its configured deadline or scenario-driven node stop, on one and three nodes. Window permits, asynchronous cancellation and network waits are untracked; source quiesce and root lifecycle reach tracked owner locks."
+examples = 4
+feature = "tests/features/runtime/endpoint_acknowledgement.feature"
+id = "scenario.endpoint-ack-ending"
+invariant = "A bounded endpoint holds each admitted response until its graph ACK/NACK, deadline or exact intake ending and refuses excess requests immediately."
+invocation = "scenarios"
+scenario = "A held HTTP response ends when <ending>"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Held HTTP response cancellation on its configured deadline or scenario-driven node stop, on one and three nodes. Window permits, asynchronous cancellation and network waits are untracked; source quiesce and root lifecycle reach tracked owner locks."
+examples = 4
+feature = "tests/features/runtime/endpoint_acknowledgement.feature"
+id = "stress.endpoint-ack-ending"
+invariant = "A bounded endpoint holds each admitted response until its graph ACK/NACK, deadline or exact intake ending and refuses excess requests immediately."
+invocation = "stress-endpoint-acknowledgement"
+scenario = "A held HTTP response ends when <ending>"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Shared endpoint fanout to two attached consumers before either acknowledges, through source quiesce and ACK root lifecycle owners. Asynchronous windows and network waits are untracked."
+examples = 2
+feature = "tests/features/runtime/endpoint_acknowledgement.feature"
+id = "scenario.endpoint-ack-fanout"
+invariant = "Every binding receives a shared request before its response waits for all graph acknowledgements, and each window returns its own slot."
+invocation = "scenarios"
+scenario = "Shared endpoint intake reaches both consumers before either acknowledgement"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: shared endpoint fanout to two attached consumers before either acknowledges, through source quiesce and ACK root lifecycle owners. Asynchronous windows and network waits are untracked."
+examples = 2
+feature = "tests/features/runtime/endpoint_acknowledgement.feature"
+id = "stress.endpoint-ack-fanout"
+invariant = "Every binding receives a shared request before its response waits for all graph acknowledgements, and each window returns its own slot."
+invocation = "stress-endpoint-acknowledgement"
+scenario = "Shared endpoint intake reaches both consumers before either acknowledgement"
 selections = ["deloxide-stress"]

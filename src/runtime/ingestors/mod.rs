@@ -86,6 +86,10 @@ pub(crate) enum SourceStartError {
     SignalingProtocolMissing { protocol: SignalingProtocolName },
     #[error("endpoint '{endpoint}' is not instantiated")]
     EndpointNotInstantiated { endpoint: EndpointName },
+    #[error("endpoint '{endpoint}' requires a signaling protocol for MODE ACK")]
+    EndpointAcknowledgementProtocolMissing { endpoint: EndpointName },
+    #[error("endpoint '{endpoint}' cannot encode its acknowledgement in the signaling wire format")]
+    EndpointAcknowledgementEncoding { endpoint: EndpointName },
     #[error("Kafka DOMAIN offsets are not authoritative on this node")]
     KafkaDomainOffsetsNotAuthoritative,
     #[error("invalid {setting} '{value}'")]

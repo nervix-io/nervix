@@ -20,7 +20,7 @@
 
 use std::{
     fmt::{Display, Formatter},
-    num::NonZeroU64,
+    num::{NonZeroU16, NonZeroU64},
 };
 
 use error_stack::Report;
@@ -171,6 +171,8 @@ impl DeclaredQuiesce {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
 pub enum IngestDeliveryKind {
     NoAck,
+    /// Each endpoint request waits independently, within its declared request window.
+    AckRequest,
     AckSequential,
     AckParallel,
 }
@@ -180,8 +182,18 @@ impl IngestDeliveryKind {
     pub const fn phrase(self) -> &'static str {
         match self {
             Self::NoAck => "NO ACK",
+            Self::AckRequest => "ACK",
             Self::AckSequential => "ACK SEQUENTIAL",
             Self::AckParallel => "ACK PARALLEL",
+        }
+    }
+
+    /// A sender must retry an acknowledged request itself; quiesce cannot retain it after the
+    /// endpoint has answered it.
+    pub const fn allows_quiesce(self, quiesce: IngestQuiesceKind) -> bool {
+        match self {
+            Self::AckRequest => matches!(quiesce, IngestQuiesceKind::Reject),
+            Self::NoAck | Self::AckSequential | Self::AckParallel => true,
         }
     }
 }
@@ -198,6 +210,11 @@ pub struct DeclaredDelivery {
 }
 
 impl DeclaredDelivery {
+    pub const ACK_REQUEST: Self = Self {
+        kind: IngestDeliveryKind::AckRequest,
+        example: "ACK MAX 8 ACK TIMEOUT 5s",
+        requires: &[],
+    };
     pub const NO_ACK: Self = Self {
         kind: IngestDeliveryKind::NoAck,
         example: "NO ACK",
@@ -231,6 +248,8 @@ impl DeclaredDelivery {
 pub enum IngestAcknowledgement<'a> {
     /// No message waits on an acknowledgement.
     Unacknowledged,
+    /// An endpoint's independent requests, whose senders own retry.
+    Request { max: NonZeroU16, timeout: &'a str },
     /// One message at a time waits on its acknowledgement.
     Sequential {
         timeout: &'a str,
@@ -305,25 +324,27 @@ impl IngestAcknowledgement<'_> {
     pub const fn kind(&self) -> IngestDeliveryKind {
         match self {
             Self::Unacknowledged => IngestDeliveryKind::NoAck,
+            Self::Request { .. } => IngestDeliveryKind::AckRequest,
             Self::Sequential { .. } => IngestDeliveryKind::AckSequential,
             Self::Parallel { .. } => IngestDeliveryKind::AckParallel,
         }
     }
 }
 
-/// How an endpoint's requests or messages are delivered. The endpoint answers each one when its
-/// ingestor admits it, so none waits on an acknowledgement.
+/// Whether an endpoint answers on admission or after its request's downstream acknowledgement.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum EndpointIngestMode {
     NoAck,
+    Ack { max: NonZeroU16, timeout: String },
 }
 
 impl EndpointIngestMode {
-    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
         match self {
             Self::NoAck => IngestAcknowledgement::Unacknowledged,
+            Self::Ack { max, timeout } => IngestAcknowledgement::Request { max: *max, timeout },
         }
     }
 }
@@ -463,6 +484,9 @@ impl IngestSourceCapabilities {
     /// declares the mode, and the body makes every option choice the declaration requires for
     /// it.
     pub fn honors_quiesce(&self, quiesce: &IngestQuiesceMode, body: &dyn SourceBody) -> bool {
+        if !body.acknowledgement().kind().allows_quiesce(quiesce.kind()) {
+            return false;
+        }
         let Some(declared) = self.declared_quiesce(quiesce.kind()) else {
             return false;
         };

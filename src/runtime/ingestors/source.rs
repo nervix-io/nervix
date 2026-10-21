@@ -651,8 +651,9 @@ impl RuntimeSourceHost {
     /// Every request that arrives on those routes is admitted through this host's quiesce control
     /// and dispatched as its own ingest group through the same outputs, codec and branch senders
     /// the host holds, on the request path rather than in the source loop.
-    pub(super) fn request_intake(&self) -> EndpointIngestBinding {
+    pub(super) fn request_intake(&self, request: EndpointRequestPolicy) -> EndpointIngestBinding {
         EndpointIngestBinding {
+            request,
             handles: self.handles.clone(),
             quiesce: self.quiesce.clone(),
             domain: self.domain.clone(),

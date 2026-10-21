@@ -1,5 +1,54 @@
 @client_wire_pause_recovery
 Feature: Transaction-owned domain pause recovery
+  @client_wire_standalone_preparation @deloxide_stress
+  Scenario: A stale standalone preflight recovers the applying command across repeated leadership changes
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA pause_event (key I64);
+      CREATE RELAY pause_input SCHEMA pause_event UNBRANCHED;
+      START;
+      """
+    Then the current leader node is saved as placeholder "first_leader"
+    And a node other than placeholder "first_leader" is saved as placeholder "second_leader"
+    Given standalone preparation on node "{{first_leader}}" pauses at its lookup boundary
+    And standalone preparation on node "{{first_leader}}" pauses at its preflight boundary
+    And domain resume on node "{{first_leader}}" pauses at its proposal boundary
+    And domain resume on node "{{second_leader}}" pauses at its proposal boundary
+    When the active session begins this Plexus command request with execution reference "stale-preflight-{{test_id}}" in the background
+      """
+      ALTER SCHEMA pause_event ADD FIELD note STRING OPTIONAL;
+      """
+    Then standalone preparation on node "{{first_leader}}" reaches its lookup boundary
+    When leadership is transferred from node "{{first_leader}}" to node "{{second_leader}}"
+    Then node "{{second_leader}}" eventually reports leader "{{second_leader}}"
+    And domain resume on node "{{second_leader}}" reaches its proposal boundary
+    When leadership is transferred from node "{{second_leader}}" to node "{{first_leader}}"
+    Then node "{{first_leader}}" eventually reports leader "{{first_leader}}"
+    When standalone preparation on node "{{first_leader}}" leaves its lookup boundary
+    Then standalone preparation on node "{{first_leader}}" reaches its preflight boundary
+    And domain resume on node "{{first_leader}}" reaches its proposal boundary
+    When domain resume on node "{{first_leader}}" leaves its proposal boundary
+    And domain resume on node "{{second_leader}}" leaves its proposal boundary
+    And standalone preparation on node "{{first_leader}}" leaves its preflight boundary
+    Then the background command request succeeds
+    When this Plexus command request with execution reference "stale-preflight-{{test_id}}" is executed on the leader node
+      """
+      ALTER SCHEMA pause_event ADD FIELD note STRING OPTIONAL;
+      """
+    Then the last command request succeeded
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE RELAY after_pause SCHEMA pause_event UNBRANCHED;
+      SHOW CREATE SCHEMA pause_event;
+      """
+    Then the last command output contains
+      """
+      note STRING OPTIONAL
+      """
+
   Scenario Outline: A completed schema alteration releases its domain before the next command on <cluster_size> nodes
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"

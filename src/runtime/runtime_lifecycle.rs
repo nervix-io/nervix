@@ -371,6 +371,19 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_standalone_transaction_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        boundary: crate::fault_injection::StandaloneTransactionBoundary,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_standalone_transaction_if_armed(node, domain, boundary)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_domain_resume_if_armed(
         &self,
         node: &ClusterNodeName,
@@ -448,10 +461,14 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
-    pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
+    pub(crate) async fn pause_backup_cut_if_armed(
+        &self,
+        domain: &DomainName,
+        boundary: crate::fault_injection::BackupCutBoundary,
+    ) {
         self.inner
             .fault_injection
-            .pause_backup_cut_if_armed(domain)
+            .pause_backup_cut_if_armed(domain, boundary)
             .await;
     }
 

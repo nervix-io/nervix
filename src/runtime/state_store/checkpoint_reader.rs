@@ -735,6 +735,13 @@ pub(super) mod tests {
             .reserve(nervix_execution::MemoryClass::Bulk, 64 * 1024)
             .await
             .assured("capture working memory is admitted");
+        // This node is the guest's primary, so the cut lists its save and only the scheduled
+        // generation decides that the superseded value is never opened.
+        let mut primaries = ahash::HashSet::default();
+        primaries.insert(nervix_models::NodeRef::new(
+            placement.kind,
+            placement.identifier.clone(),
+        ));
         let captured = executor
             .run_storage(
                 nervix_execution::StorageClass::Filesystem,
@@ -744,6 +751,7 @@ pub(super) mod tests {
                         &placement.domain,
                         true,
                         nervix_models::DomainStatus::Stopped,
+                        &primaries,
                         cancellation,
                     )
                 },

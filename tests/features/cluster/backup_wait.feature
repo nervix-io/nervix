@@ -17,8 +17,8 @@ Feature: Bounded multi-domain backup waits and exact recovery
       START;
       """
     Then the current leader node is saved as placeholder "leader"
-    Given the backup cut for domain "{{backup_base}}_a" will pause after draining
-    And the backup cut for domain "{{backup_base}}_b" will pause after draining
+    Given the backup cut for domain "{{backup_base}}_a" will pause before its capture
+    And the backup cut for domain "{{backup_base}}_b" will pause before its capture
     When the CLI begins backing up "cluster --timeout 20s --backup-wait-timeout 1m" from node "{{leader}}" into "cut-expired.nvxb" in the background
     And backup cut "{{backup_base}}_a" is held for 12 seconds and then released
     Then the backup cut for domain "{{backup_base}}_b" has reached its pause
@@ -61,8 +61,8 @@ Feature: Bounded multi-domain backup waits and exact recovery
       """
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "survivor"
-    Given the backup cut for domain "{{backup_base}}_a" will pause after draining
-    And the backup cut for domain "{{backup_base}}_b" will pause after draining
+    Given the backup cut for domain "{{backup_base}}_a" will pause before its capture
+    And the backup cut for domain "{{backup_base}}_b" will pause before its capture
     When the CLI begins backing up "cluster --timeout 30s --backup-wait-timeout 1m" from node "{{leader}}" into "leader-recovery.nvxb" in the background
     And backup cut "{{backup_base}}_a" is held for 2 seconds and then released
     Then the backup cut for domain "{{backup_base}}_b" has reached its pause
@@ -103,8 +103,8 @@ Feature: Bounded multi-domain backup waits and exact recovery
       START;
       """
     Then the current leader node is saved as placeholder "leader"
-    Given the backup cut for domain "{{backup_base}}_a" will pause after draining
-    And the backup cut for domain "{{backup_base}}_b" will pause after draining
+    Given the backup cut for domain "{{backup_base}}_a" will pause before its capture
+    And the backup cut for domain "{{backup_base}}_b" will pause before its capture
     When the CLI begins backing up "cluster --timeout 30s --backup-wait-timeout 3s" from node "{{leader}}" into "pending.nvxb" in the background
     And backup cut "{{backup_base}}_a" is held for 2 seconds and then released
     Then the backup cut for domain "{{backup_base}}_b" has reached its pause
@@ -141,8 +141,8 @@ Feature: Bounded multi-domain backup waits and exact recovery
       """
       START;
       """
-    Given the backup cut for domain "{{backup_base}}_a" will pause after draining
-    And the backup cut for domain "{{backup_base}}_b" will pause after draining
+    Given the backup cut for domain "{{backup_base}}_a" will pause before its capture
+    And the backup cut for domain "{{backup_base}}_b" will pause before its capture
     When a bounded native backup wait is recovered under its original reference
     Then backup archive "native-recovered.nvxb" retains both native recovery cuts
 
@@ -166,8 +166,8 @@ Feature: Bounded multi-domain backup waits and exact recovery
       """
       START;
       """
-    Given the backup cut for domain "{{backup_base}}_a" will pause after draining
-    And the backup cut for domain "{{backup_base}}_b" will pause after draining
+    Given the backup cut for domain "{{backup_base}}_a" will pause before its capture
+    And the backup cut for domain "{{backup_base}}_b" will pause before its capture
     When an NSPL cluster backup crosses two delayed cuts into "cluster-wait.nvxb"
     Then backup archive "cluster-wait.nvxb" contains both delayed quiesced domain cuts
 

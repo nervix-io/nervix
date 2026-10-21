@@ -61,14 +61,24 @@ alone: not in a batch with other statements and not while a transaction is open.
 
 Each domain records the applied configuration revision and Raft log entry of its own capture, and
 every owner applies that revision before it reads state. For a quiesced running domain, the leader
-holds a replicated domain mutation lease, pauses the domain and drains its admitted work across live
-nodes, asks the state owners to publish and stage their checkpoints, and reads the configuration
-while the cut is held. Messages parked by `REQUIRED WAIT` and the rows a window retains do not hold
+holds a replicated domain mutation lease, pauses the domain and drains its admitted work across the
+live nodes and every node the schedule assigns the domain's work to, asks the scheduled state owners
+to publish and stage their checkpoints, and reads the configuration while the cut is held. Messages parked by `REQUIRED WAIT` and the rows a window retains do not hold
 the drain: the cut captures them as state. The leader resumes the domain and releases its lease
 before it copies the staged state into the final archive, and other domains continue
 independently. A stopped domain needs no pause: its owners read their stored checkpoints. A
 `WITHOUT PAUSE` capture takes no lease and reads the latest published checkpoints while the domain
 runs, and reports a live cut even for a stopped domain.
+
+Every state a cut archives comes from the node the domain's schedule names as that placement's
+primary, never from a replica's copy. A cut whose scheduled state owner the cluster does not report
+live fails, and so does a cut whose schedule places such an entity on no node, as when every node
+that could host it is cordoned or down, and a quiesced cut, before it pauses, while a node that
+runs the domain's work is not reported live, so the archive of a quiesced or stopped cut never
+lacks a placement's state.
+A `WITHOUT PAUSE` capture holds no lease, and a placement that failover or relocation moves while it
+runs can be left out. Send the backup again once the node is back, or once failover has moved its
+placements; with replicas, failover promotes one as soon as the failed cut has released its lease.
 
 The cut captures every kind of runtime state the archive holds: WASM guest saves, Kafka source
 offsets, branch lifecycle, fresh materialized relay generations, deduplicator keyspaces and the rows
@@ -874,11 +884,10 @@ size nor the client's download rate lengthens the freeze, and a domain whose sin
 acknowledging stays frozen only until the timeout fails the backup. A state owner that crashes or
 loses contact with its peers during the freeze, while the cluster still reports it live, fails the
 backup with `backup failed:`, and the domain resumes either way, a node that was unreachable
-resuming once it rejoins. A cut asks only the nodes the cluster reports live, and only a
-placement's scheduled primary stages it, so a primary already reported down when the cut starts
-contributes none of its state, and the backup does not report the difference; see [Guarantees And
-Limits](./backup-and-restore-architecture.md#guarantees-and-limits). A leader change refuses the cut
-it interrupted, and the new leader cuts again under the same execution reference. Stopping or
+resuming once it rejoins. A state owner the cluster reports down when the cut captures fails the
+backup as well, naming the node, rather than leaving its state out of the archive; see [Guarantees
+And Limits](./backup-and-restore-architecture.md#guarantees-and-limits). A leader change refuses
+the cut it interrupted, and the new leader cuts again under the same execution reference. Stopping or
 restarting the node that holds an archive ends its download, and the archive is lost with it.
 
 A freeze grows with the branches the domain holds and the state they carry. The freezes measured
@@ -925,6 +934,12 @@ contents. The reasons are:
   `restore_metadata` now, naming the entity; the checkpoint's own conversion charge waits for room
 - a selected WASM guest save cannot be read or its staged write is interrupted; the failure names
   the processor without guest bytes, and its `restore_metadata` conversion charge waits for room
+- a node that runs the domain's work is not reported live when a quiesced cut starts, naming the
+  domain, an entity the node runs and the node; the domain was not paused
+- a placement's scheduled state owner is not reported live when the cut captures, naming the
+  domain, the entity and the node
+- the schedule places an entity whose state the cut archives on no node, naming the domain and the
+  entity; uncordon a node or bring one back so the entity can be placed
 - an owner has not applied the cut revision within five seconds, or cannot capture or stage its
   share, naming the domain
 - a quiesced domain cannot take its lease or capture its owners within its timeout, reported as

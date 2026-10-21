@@ -5,8 +5,9 @@
 //! - **Owns.** The REST catalog and object-store clients one Iceberg table is loaded and committed
 //!   through, the local Arrow IPC staging of every mapped batch, what the staged files wait for —
 //!   the `COMMIT EACH` cadence the host measures from their staging, or the maximum commit size
-//!   that makes them due at once — the Parquet data files one commit writes, and the
-//!   acknowledgements it retains until that commit succeeds.
+//!   that makes them due at once — the Parquet data files one commit writes, the bulk memory
+//!   charge of the staged files it loads, and the acknowledgements it retains until that commit
+//!   succeeds.
 //! - **Depends on.** The connector contract, the bounded executor its host hands it, vocabulary
 //!   values, Arrow arrays, `error-stack`, Tokio, `nervix-dns`, Reqwest, OpenDAL, and the `iceberg`
 //!   crates.
@@ -67,18 +68,21 @@ use arrow_array::{
 };
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{DataType, TimeUnit};
-use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter as filter_arrow_array};
+use arrow_select::filter::filter as filter_arrow_array;
 use error_stack::{Report, ResultExt as _};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    MappedSinkCarrier, MappedSinkRows, PerRecordOutcome, RowSink, SinkAcknowledgementServices,
-    SinkAcknowledgements, SinkCommitReport, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
-    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStagedCommit, SinkStartError,
-    SinkStartResult, physical_time::actual_utc_now,
+    ConfiguredDeadline, MappedSinkCarrier, MappedSinkRows, PerRecordOutcome, RowSink,
+    SinkAcknowledgementServices, SinkAcknowledgements, SinkCommitReport, SinkFinish,
+    SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
+    SinkRecordPosition, SinkStagedCommit, SinkStartError, SinkStartResult,
+    physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
-use nervix_execution::{Executor, MemoryClass, StorageClass};
+use nervix_execution::{
+    AdmissionError, Executor, MemoryClass, QueueAdmission, Reservation, StorageClass,
+};
 use nervix_models::{ClientConfigEntry, IcebergStorageBackend, TableName, Timestamp};
 use nervix_primitives::{sync::StdArc, time::Instant};
 use parquet::file::properties::WriterProperties;
@@ -130,10 +134,9 @@ pub struct IcebergSinkConfig {
     pub writer: String,
 }
 
-/// What one staged write or read is charged. The staged batch is already in memory and a read
-/// holds at most the emitter's declared maximum commit size, so the charge only admits the job onto
-/// the filesystem workers.
-const STAGING_RESERVATION_BYTES: u64 = 1;
+/// What one staged write is charged. The batch is already in memory and the writer streams it to
+/// the file, so the charge only admits the write onto the filesystem workers.
+const STAGED_WRITE_RESERVATION_BYTES: u64 = 1;
 
 /// The Iceberg sink, which stages each mapped batch as a local Arrow IPC file and appends every
 /// staged file to its table in one catalog commit.
@@ -191,28 +194,66 @@ impl SinkAcknowledgementServices for RetainedAcknowledgements {
 
 /// The catalog and table one emitter commits through, and the sequence its data files are named by.
 struct IcebergSinkClient {
-    catalog: StdArc<RestCatalog>,
+    catalog: StdArc<dyn Catalog>,
     table: Table,
     file_name_prefix: String,
     data_file_sequence: u64,
 }
 
-/// The Parquet data files one commit appends, and the append identity that recognizes them again.
-struct IcebergPreparedCommit {
+/// One commit's progress: the leading staged files it publishes, the data files written for those
+/// it has loaded so far, and the append identity that recognizes those data files in the table. A
+/// failed attempt keeps it, so the retry neither writes the data files again nor publishes files
+/// staged after the commit began.
+///
+/// A commit loads the files it covers in groups the bulk memory class can hold at once and writes
+/// each group's rows into data files of their own; the data files of every group join the one
+/// catalog append.
+struct IcebergCommitPreparation {
     append_id: uuid::Uuid,
+    /// The leading staged files this commit publishes.
+    covered: usize,
+    /// The leading staged files whose rows `data_files` already hold.
+    written: usize,
     data_files: Vec<DataFile>,
 }
 
-impl IcebergPreparedCommit {
-    fn new(data_files: Vec<DataFile>) -> Self {
-        Self::with_append_id(data_files, uuid::Uuid::now_v7())
+impl IcebergCommitPreparation {
+    /// A commit of the `covered` leading staged files, none of them written yet.
+    fn new(covered: usize) -> Self {
+        Self::with_append_id(covered, uuid::Uuid::now_v7())
     }
 
-    fn with_append_id(data_files: Vec<DataFile>, append_id: uuid::Uuid) -> Self {
+    fn with_append_id(covered: usize, append_id: uuid::Uuid) -> Self {
         Self {
             append_id,
-            data_files,
+            covered,
+            written: 0,
+            data_files: Vec::new(),
         }
+    }
+
+    /// Where the covered files no data file holds yet are among the staged files.
+    fn unwritten(&self) -> std::ops::Range<usize> {
+        self.written..self.covered
+    }
+
+    /// Whether data files hold every covered file, so the commit can append them.
+    fn is_written(&self) -> bool {
+        self.written == self.covered
+    }
+
+    /// Records that `data_files` hold the rows of the next `files` covered staged files.
+    fn record_written(&mut self, files: usize, data_files: Vec<DataFile>) {
+        let written = self
+            .written
+            .checked_add(files)
+            .assured("a commit writes no more files than it covers");
+        debug_assert!(
+            written <= self.covered,
+            "a commit writes only the files it covers"
+        );
+        self.written = written;
+        self.data_files.extend(data_files);
     }
 
     fn append_id(&self) -> uuid::Uuid {
@@ -260,26 +301,134 @@ impl IcebergPreparedCommit {
     }
 }
 
-/// The prepared commit a failed catalog attempt keeps, so a retry appends the same data files
-/// rather than writing them again.
+/// What the sink's commits carry from one attempt to the next.
 #[derive(Default)]
 struct IcebergCommitState {
-    prepared: Option<IcebergPreparedCommit>,
+    /// The commit in progress, absent between commits.
+    preparation: Option<IcebergCommitPreparation>,
+    /// What commits published during an attempt that went on to fail, which the next attempt that
+    /// succeeds reports beside its own.
+    unreported: Option<SinkCommitReport>,
 }
 
 impl IcebergCommitState {
-    fn store(&mut self, prepared: IcebergPreparedCommit) {
-        debug_assert!(self.prepared.is_none());
-        self.prepared = Some(prepared);
+    /// Adds `published` to what this sink published and has not reported yet.
+    fn record_published(&mut self, published: SinkCommitReport) {
+        let merged = match self.unreported.take() {
+            Some(earlier) => SinkCommitReport {
+                messages: earlier
+                    .messages
+                    .checked_add(published.messages)
+                    .assured("the total counts rows this sink already staged on disk"),
+                bytes: earlier
+                    .bytes
+                    .checked_add(published.bytes)
+                    .assured("the total counts bytes this sink already staged on disk"),
+                domain_timestamp: earlier.domain_timestamp.max(published.domain_timestamp),
+            },
+            None => published,
+        };
+        self.unreported = Some(merged);
+    }
+}
+
+/// The staged files one load reads into memory at once, and what it charges for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IcebergLoadGroup {
+    files: usize,
+    charge: IcebergLoadCharge,
+}
+
+impl IcebergLoadGroup {
+    /// The leading files of `unwritten` a bulk memory class of `capacity` bytes holds together, and
+    /// at least the first. A first file larger than the whole class is read alone, charged with the
+    /// whole class.
+    fn leading(unwritten: &[IcebergStagedBatch], capacity: u64) -> Self {
+        let mut files = 0_usize;
+        let mut bytes = 0_u64;
+        for staged in unwritten {
+            let with_file = bytes
+                .checked_add(staged.bytes)
+                .assured("the total counts bytes this sink already staged on disk");
+            if files > 0 && with_file > capacity {
+                break;
+            }
+            files = files
+                .checked_add(1)
+                .assured("a group counts files this sink already staged");
+            bytes = with_file;
+        }
+        let charge = if bytes > capacity {
+            IcebergLoadCharge::WholeClass {
+                file_bytes: bytes,
+                capacity,
+            }
+        } else {
+            IcebergLoadCharge::Staged { bytes }
+        };
+        Self { files, charge }
+    }
+}
+
+/// What one load charges the bulk memory class for the staged files it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IcebergLoadCharge {
+    /// Every byte of the files, which the class holds together.
+    Staged { bytes: u64 },
+    /// One staged file larger than the whole class, which a route on the same node can produce by
+    /// flushing batches above it. The load charges the whole class: every byte of the file the
+    /// class can account for, leaving none for other bulk work beside the read.
+    WholeClass { file_bytes: u64, capacity: u64 },
+}
+
+impl IcebergLoadCharge {
+    /// The bytes the load reserves in the bulk memory class.
+    fn reserved_bytes(self) -> u64 {
+        match self {
+            Self::Staged { bytes } => bytes,
+            Self::WholeClass { capacity, .. } => capacity,
+        }
     }
 
-    fn prepared(&self) -> Option<&IcebergPreparedCommit> {
-        self.prepared.as_ref()
+    /// The commit failure the class's refusal of this charge becomes. Its description is what the
+    /// emitter shows as its transient error while it retries the commit, which keeps its staged
+    /// files and acknowledgements.
+    fn refused(self, refusal: Report<AdmissionError>) -> Report<SinkPublishError> {
+        let description = match (refusal.current_context(), self) {
+            (AdmissionError::BudgetExhausted { .. }, Self::Staged { bytes }) => format!(
+                "Iceberg commit waits for room in the bulk memory class for {bytes} staged bytes"
+            ),
+            (
+                AdmissionError::BudgetExhausted { .. },
+                Self::WholeClass {
+                    file_bytes,
+                    capacity,
+                },
+            ) => format!(
+                "Iceberg commit waits for the whole bulk memory class of {capacity} bytes for a \
+                 staged file of {file_bytes} bytes"
+            ),
+            (
+                AdmissionError::ExceedsBudget { .. }
+                | AdmissionError::BudgetClosed { .. }
+                | AdmissionError::DifferentBudget { .. },
+                _,
+            ) => format!(
+                "Iceberg commit could not charge the bulk memory class: {}",
+                refusal.current_context()
+            ),
+        };
+        refusal
+            .change_context(SinkPublishError::Commit { sink: ICEBERG })
+            .attach_printable(description)
     }
+}
 
-    fn finish(&mut self) {
-        self.prepared = None;
-    }
+/// The rows of one load group, read back into memory, and the bulk memory charge that covers them
+/// for as long as the commit holds them.
+struct IcebergLoadedGroup {
+    batches: Vec<RecordBatch>,
+    charge: Reservation,
 }
 
 /// The object-store properties one backend's client configuration is translated into.
@@ -321,11 +470,19 @@ impl IcebergSink {
         let staged_schema = Self::staged_arrow_schema(&mapped_schema)?;
         let staging_dir = Self::create_staging_dir(&host)?;
         let executor = host.executor();
-        Self::validate_blob_location(backend, "table", &location)?;
+        let storage_root = Self::validate_blob_location(backend, "table", &location)?;
+        let storage_deadline = ConfiguredDeadline::timeout(&storage_config)
+            .change_context(SinkStartError::InvalidConfiguration { sink: ICEBERG })?;
         let properties = IcebergObjectStoreProperties::from_entries(backend, &storage_config);
-        let catalog = StdArc::new(
+        let catalog: StdArc<dyn Catalog> = StdArc::new(
             properties
-                .rest_catalog(&catalog_name, &catalog_config, &dns)
+                .rest_catalog(
+                    &catalog_name,
+                    &catalog_config,
+                    &dns,
+                    &storage_root,
+                    storage_deadline,
+                )
                 .await
                 .map_err(|error| {
                     Report::new(SinkStartError::Initialize { sink: ICEBERG }).attach_printable(
@@ -536,7 +693,7 @@ impl IcebergSink {
         backend: IcebergStorageBackend,
         label: &str,
         location: &str,
-    ) -> SinkStartResult<()> {
+    ) -> SinkStartResult<Url> {
         let invalid = |reason: String| {
             Report::new(SinkStartError::InvalidConfiguration { sink: ICEBERG })
                 .attach_printable(reason)
@@ -572,7 +729,7 @@ impl IcebergSink {
                 )));
             }
         }
-        Ok(())
+        Ok(url)
     }
 
     /// The staged columns of one carrier: the rows the host selected, in this sink's exact staged
@@ -763,7 +920,7 @@ impl IcebergSink {
             ))
         };
         let reservation = executor
-            .reserve(MemoryClass::Bulk, STAGING_RESERVATION_BYTES)
+            .reserve(MemoryClass::Bulk, STAGED_WRITE_RESERVATION_BYTES)
             .await
             .change_context(SinkPublishError::Publish { sink: ICEBERG })?;
         executor
@@ -794,16 +951,21 @@ impl IcebergSink {
             .change_context(SinkPublishError::Publish { sink: ICEBERG })?
     }
 
-    /// Read every staged file back as one batch on the node's filesystem workers, checking before
-    /// each file whether the commit stopped waiting. What the read holds is bounded by the
-    /// emitter's declared maximum commit size, not by a transient budget, so the charge only
-    /// admits the read.
-    async fn read_ipc_batches(
+    /// Read the staged files at `paths` back on the node's filesystem workers once the bulk memory
+    /// class has granted their `charge`, checking before each file whether the commit stopped
+    /// waiting. The reservation comes back with the rows it covers, so it lasts for as long as the
+    /// commit holds them.
+    ///
+    /// The charge is taken only when the class has room for it now: a place in the class's queue
+    /// would take every byte the class frees until it was satisfied, holding the node's other bulk
+    /// work behind this commit. The read waits for a place among the filesystem workers instead of
+    /// being refused, because nothing could present again the rows the sink already accepted.
+    async fn load_group(
         executor: &Executor,
         schema: StdArc<arrow_schema::Schema>,
-        paths: &[PathBuf],
-    ) -> SinkPublishResult<RecordBatch> {
-        let paths = paths.to_vec();
+        paths: Vec<PathBuf>,
+        charge: IcebergLoadCharge,
+    ) -> SinkPublishResult<IcebergLoadedGroup> {
         let staged = |error: String, path: &PathBuf| {
             Report::new(SinkPublishError::Commit { sink: ICEBERG }).attach_printable(format!(
                 "failed to read Iceberg staged Arrow IPC '{}': {error}",
@@ -811,14 +973,14 @@ impl IcebergSink {
             ))
         };
         let reservation = executor
-            .reserve(MemoryClass::Bulk, STAGING_RESERVATION_BYTES)
-            .await
-            .change_context(SinkPublishError::Commit { sink: ICEBERG })?;
+            .try_reserve(MemoryClass::Bulk, charge.reserved_bytes())
+            .map_err(|refusal| charge.refused(refusal))?;
         executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                QueueAdmission::WaitForPlace,
                 reservation,
-                move |_charge, cancellation| {
+                move |reservation, cancellation| {
                     let mut batches = Vec::new();
                     for path in paths {
                         cancellation
@@ -836,61 +998,14 @@ impl IcebergSink {
                             .map_err(|error| staged(error.to_string(), &path))?;
                         batches.extend(path_batches);
                     }
-                    Self::concat_arrow_batches(schema, batches)
+                    Ok(IcebergLoadedGroup {
+                        batches,
+                        charge: reservation,
+                    })
                 },
             )
             .await
             .change_context(SinkPublishError::Commit { sink: ICEBERG })?
-    }
-
-    fn concat_arrow_batches(
-        schema: StdArc<arrow_schema::Schema>,
-        batches: Vec<RecordBatch>,
-    ) -> SinkPublishResult<RecordBatch> {
-        let commit_failure = |reason: &str| {
-            Report::new(SinkPublishError::Commit { sink: ICEBERG })
-                .attach_printable(format!("failed to read Iceberg staged Arrow IPC: {reason}"))
-        };
-        let Some(first) = batches.first() else {
-            return Err(commit_failure("cannot commit zero staged Iceberg batches"));
-        };
-        if first.schema().as_ref() != schema.as_ref()
-            || batches
-                .iter()
-                .any(|batch| batch.schema().as_ref() != schema.as_ref())
-        {
-            return Err(commit_failure("staged Iceberg batch schemas do not match"));
-        }
-        if batches.len() == 1 {
-            return Ok(first.clone());
-        }
-        let columns = if schema.fields().is_empty() {
-            Vec::new()
-        } else {
-            let mut columns = Vec::with_capacity(schema.fields().len());
-            for column_index in 0..schema.fields().len() {
-                let arrays = batches
-                    .iter()
-                    .map(|batch| batch.column(column_index).as_ref())
-                    .collect::<Vec<_>>();
-                columns.push(
-                    concat_arrow_arrays(&arrays)
-                        .change_context(SinkPublishError::Commit { sink: ICEBERG })?,
-                );
-            }
-            columns
-        };
-        let row_count = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
-        if columns.is_empty() {
-            RecordBatch::try_new_with_options(
-                schema,
-                columns,
-                &RecordBatchOptions::new().with_row_count(Some(row_count)),
-            )
-        } else {
-            RecordBatch::try_new(schema, columns)
-        }
-        .change_context(SinkPublishError::Commit { sink: ICEBERG })
     }
 
     /// Every acknowledgement this sink still holds, newest staged batch last.
@@ -955,64 +1070,16 @@ impl SinkLifecycle for IcebergSink {
                                    effects; no internal runtime ownership is inferred")
     )]
     async fn commit(&mut self) -> SinkPublishResult<Option<SinkCommitReport>> {
-        if self.staged_batches.is_empty() {
-            return Ok(None);
-        }
-        if self.commit_state.prepared().is_none() {
-            let paths = self
-                .staged_batches
-                .iter()
-                .map(|batch| batch.path.clone())
-                .collect::<Vec<_>>();
-            let batch =
-                Self::read_ipc_batches(&self.executor, self.staged_schema.clone(), &paths).await?;
-            let prepared = self.client.prepare_batch(batch).await?;
-            self.commit_state.store(prepared);
-        }
-        self.client
-            .commit_prepared(self.commit_state.prepared().verified(
-                "the commit state holds its prepared commit from preparation until this call \
-                 completes",
-            ))
-            .await?;
-        self.commit_state.finish();
-        let staged = std::mem::take(&mut self.staged_batches);
-        let messages = staged
-            .iter()
-            .map(|batch| batch.rows)
-            .try_fold(0_u64, u64::checked_add)
-            .assured("the total counts rows this sink already staged on disk");
-        let bytes = staged
-            .iter()
-            .map(|batch| batch.bytes)
-            .try_fold(0_u64, u64::checked_add)
-            .assured("the total counts bytes this sink already staged on disk");
-        let domain_timestamp = staged
-            .iter()
-            .map(|batch| batch.domain_timestamp)
-            .max()
-            .verified("this call returns before this point when no batch is staged");
-        let mut acknowledgements = Vec::with_capacity(staged.len());
-        for batch in staged {
-            acknowledgements.extend(batch.acknowledgements);
-            if let Err(error) = tokio::fs::remove_file(&batch.path).await {
-                debug!(
-                    path = %batch.path.display(),
-                    error = %error,
-                    "failed to remove committed Iceberg staged batch"
-                );
+        // A commit that resumes publishes only the files it began with, so the files staged since
+        // then follow in a commit of their own until nothing staged is left.
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if self.staged_batches.is_empty() {
+                return Ok(self.commit_state.unreported.take());
             }
+            let published = self.commit_covered().await?;
+            self.commit_state.record_published(published);
         }
-        self.staged_rows = 0;
-        self.staged_bytes = 0;
-        for acknowledgements in acknowledgements {
-            acknowledgements.acknowledge();
-        }
-        Ok(Some(SinkCommitReport {
-            messages,
-            bytes,
-            domain_timestamp,
-        }))
     }
 }
 
@@ -1072,9 +1139,117 @@ impl IcebergSink {
         );
         Ok(())
     }
+
+    /// Publishes the staged files the commit in progress covers, beginning a commit of every
+    /// staged file when none is in progress, and reports what they held.
+    async fn commit_covered(&mut self) -> SinkPublishResult<SinkCommitReport> {
+        let staged_files = self.staged_batches.len();
+        let capacity = self.executor.memory(MemoryClass::Bulk).capacity_bytes;
+        let preparation = self
+            .commit_state
+            .preparation
+            .get_or_insert_with(|| IcebergCommitPreparation::new(staged_files));
+        while !preparation.is_written() {
+            nervix_primitives::task::consume_budget().await;
+            let unwritten = self
+                .staged_batches
+                .get(preparation.unwritten())
+                .assured("a commit covers files that stay staged until it publishes them");
+            let group = IcebergLoadGroup::leading(unwritten, capacity);
+            let mut paths = Vec::with_capacity(group.files);
+            for staged in unwritten.iter().take(group.files) {
+                paths.push(staged.path.clone());
+            }
+            let IcebergLoadedGroup { batches, charge } = Self::load_group(
+                &self.executor,
+                StdArc::clone(&self.staged_schema),
+                paths,
+                group.charge,
+            )
+            .await?;
+            let data_files = self.client.write_data_files(batches).await?;
+            // The rows the charge covered are in data files now.
+            drop(charge);
+            preparation.record_written(group.files, data_files);
+        }
+        self.client.commit_prepared(preparation).await?;
+        let covered = preparation.covered;
+        self.commit_state.preparation = None;
+        Ok(self.publish_committed(covered).await)
+    }
+
+    /// Removes the `covered` leading staged files a commit appended, resolves the acknowledgements
+    /// they retained, and reports what they held.
+    async fn publish_committed(&mut self, covered: usize) -> SinkCommitReport {
+        let committed = self.staged_batches.drain(..covered).collect::<Vec<_>>();
+        let mut messages = 0_u64;
+        let mut bytes = 0_u64;
+        for batch in &committed {
+            messages = messages
+                .checked_add(batch.rows)
+                .assured("the total counts rows this sink already staged on disk");
+            bytes = bytes
+                .checked_add(batch.bytes)
+                .assured("the total counts bytes this sink already staged on disk");
+        }
+        let domain_timestamp = committed
+            .iter()
+            .map(|batch| batch.domain_timestamp)
+            .max()
+            .assured("a commit begins only over staged files and covers at least one");
+        self.staged_rows = self
+            .staged_rows
+            .checked_sub(messages)
+            .assured("the staged total counts the rows of every staged file");
+        self.staged_bytes = self
+            .staged_bytes
+            .checked_sub(bytes)
+            .assured("the staged total counts the bytes of every staged file");
+        let mut acknowledgements = Vec::with_capacity(committed.len());
+        for batch in committed {
+            nervix_primitives::task::consume_budget().await;
+            acknowledgements.extend(batch.acknowledgements);
+            if let Err(error) = tokio::fs::remove_file(&batch.path).await {
+                debug!(
+                    path = %batch.path.display(),
+                    error = %error,
+                    "failed to remove committed Iceberg staged batch"
+                );
+            }
+        }
+        for acknowledgements in acknowledgements {
+            acknowledgements.acknowledge();
+        }
+        SinkCommitReport {
+            messages,
+            bytes,
+            domain_timestamp,
+        }
+    }
 }
 
 impl IcebergSinkClient {
+    /// Installs catalog metadata while retaining the emitter's initialized storage. Catalog loads
+    /// supply a fresh lazy FileIO; replacing ours would initialize another operator on each commit.
+    fn install_table(&mut self, table: Table) -> SinkPublishResult<()> {
+        let mut builder = Table::builder()
+            .file_io(self.table.file_io().clone())
+            .metadata(table.metadata_ref())
+            .identifier(table.identifier().clone())
+            .readonly(table.readonly())
+            .runtime(
+                ::iceberg::Runtime::try_current()
+                    .change_context(SinkPublishError::Commit { sink: ICEBERG })?,
+            );
+        if let Some(location) = table.metadata_location() {
+            builder = builder.metadata_location(location);
+        }
+        self.table = builder
+            .build()
+            .change_context(SinkPublishError::Commit { sink: ICEBERG })?;
+        Ok(())
+    }
+
     /// The table this commit attempts against, with the catalog library's own retry disabled so
     /// the emitter's declared retry policy is the only one that runs.
     fn single_attempt_table(table: &Table) -> SinkPublishResult<Table> {
@@ -1109,9 +1284,15 @@ impl IcebergSinkClient {
         builder.build().map_err(|error| commit_failure(&error))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external Iceberg catalog owns table loading and its request effects"
+        )
+    )]
     async fn refresh_table(&mut self) -> SinkPublishResult<()> {
         let table_ident = self.table.identifier().clone();
-        self.table = self
+        let table = self
             .catalog
             .load_table(&table_ident)
             .await
@@ -1120,13 +1301,14 @@ impl IcebergSinkClient {
                     "failed to load Iceberg table {table_ident} for commit: {error}"
                 ))
             })?;
-        Ok(())
+        self.install_table(table)
     }
 
-    async fn prepare_batch(
+    /// Writes `batches` into new Parquet data files of the table, without committing them.
+    async fn write_data_files(
         &mut self,
-        batch: RecordBatch,
-    ) -> SinkPublishResult<IcebergPreparedCommit> {
+        batches: Vec<RecordBatch>,
+    ) -> SinkPublishResult<Vec<DataFile>> {
         let commit_failure = |error: &dyn std::fmt::Display| {
             Report::new(SinkPublishError::Commit { sink: ICEBERG })
                 .attach_printable(format!("failed to commit Iceberg staged batches: {error}"))
@@ -1158,22 +1340,24 @@ impl IcebergSinkClient {
             .build(None)
             .await
             .map_err(|error| commit_failure(&error))?;
-        writer
-            .write(batch)
-            .await
-            .map_err(|error| commit_failure(&error))?;
-        let data_files = writer
-            .close()
-            .await
-            .map_err(|error| commit_failure(&error))?;
-        Ok(IcebergPreparedCommit::new(data_files))
+        for batch in batches {
+            nervix_primitives::task::consume_budget().await;
+            writer
+                .write(batch)
+                .await
+                .map_err(|error| commit_failure(&error))?;
+        }
+        writer.close().await.map_err(|error| commit_failure(&error))
     }
 
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the external Iceberg catalog owns commit and request effects")
     )]
-    async fn commit_prepared(&mut self, prepared: &IcebergPreparedCommit) -> SinkPublishResult<()> {
+    async fn commit_prepared(
+        &mut self,
+        prepared: &IcebergCommitPreparation,
+    ) -> SinkPublishResult<()> {
         let commit_failure = |error: &dyn std::fmt::Display| {
             Report::new(SinkPublishError::Commit { sink: ICEBERG })
                 .attach_printable(format!("failed to commit Iceberg staged batches: {error}"))
@@ -1192,7 +1376,7 @@ impl IcebergSinkClient {
         let tx = action.apply(tx).map_err(|error| commit_failure(&error))?;
         match tx.commit(self.catalog.as_ref()).await {
             Ok(table) => {
-                self.table = table;
+                self.install_table(table)?;
                 Ok(())
             }
             Err(error) => {
@@ -1200,7 +1384,7 @@ impl IcebergSinkClient {
                 let table_ident = self.table.identifier().clone();
                 if let Ok(refreshed) = self.catalog.load_table(&table_ident).await {
                     let committed = prepared.is_committed_to(&refreshed);
-                    self.table = refreshed;
+                    self.install_table(refreshed)?;
                     if committed {
                         return Ok(());
                     }
@@ -1312,6 +1496,8 @@ impl IcebergObjectStoreProperties {
         name: &str,
         catalog_config: &[ClientConfigEntry],
         dns: &DnsResolver,
+        storage_root: &Url,
+        storage_deadline: Option<ConfiguredDeadline>,
     ) -> IcebergResult<RestCatalog> {
         let props = self
             .props
@@ -1347,7 +1533,8 @@ impl IcebergObjectStoreProperties {
                     format!("failed to build the Iceberg REST client: {error}"),
                 )
             })?;
-        let storage_factory = DnsStorageFactory::new(self.backend, dns)?;
+        let storage_factory =
+            DnsStorageFactory::new(self.backend, dns, storage_root, storage_deadline)?;
         RestCatalogBuilder::default()
             .with_client(client)
             .with_storage_factory(StdArc::new(storage_factory))
@@ -1509,7 +1696,13 @@ mod tests {
             },
         ];
         let catalog = properties
-            .rest_catalog("fixture", &catalog_config, &dns)
+            .rest_catalog(
+                "fixture",
+                &catalog_config,
+                &dns,
+                &Url::parse("s3://bucket/table").assured("the fixture storage root is a URL"),
+                None,
+            )
             .await
             .assured("the REST catalog can be configured");
         nervix_primitives::time::timeout(Duration::from_secs(10), catalog.invalidate_token())
@@ -1610,45 +1803,219 @@ mod tests {
         );
     }
 
-    #[test]
-    fn iceberg_catalog_retry_retains_prepared_data_files_until_commit_finishes() {
-        let append_id = uuid::Uuid::now_v7();
-        let data_file = DataFileBuilder::default()
-            .content(DataContentType::Data)
-            .file_path("s3://bucket/table/data/prepared.parquet".to_string())
-            .file_format(DataFileFormat::Parquet)
-            .file_size_in_bytes(128)
-            .record_count(2)
-            .partition_spec_id(0)
-            .partition(Struct::empty())
+    #[nervix_primitives::test]
+    async fn installing_catalog_metadata_retains_the_initialized_storage() {
+        const PATH: &str = "memory://warehouse/table/data.parquet";
+        #[expect(
+            clippy::disallowed_types,
+            reason = "Iceberg TableMetadataBuilder requires a standard-library property map at \
+                      its external API boundary"
+        )]
+        let metadata = TableMetadataBuilder::new(
+            Schema::builder()
+                .build()
+                .assured("an empty table schema is valid"),
+            PartitionSpec::unpartition_spec(),
+            SortOrder::unsorted_order(),
+            "memory://warehouse/table".to_string(),
+            FormatVersion::V2,
+            std::collections::HashMap::default(),
+        )
+        .assured("the table metadata has every required field")
+        .build()
+        .assured("the table metadata is valid")
+        .metadata;
+        let table = Table::builder()
+            .metadata(metadata)
+            .identifier(
+                TableIdent::from_strs(["test", "table"])
+                    .assured("the table has a namespace and name"),
+            )
+            .metadata_location("memory://warehouse/table/metadata/initial.json")
+            .file_io(FileIO::new_with_memory())
+            .runtime(::iceberg::Runtime::try_current().assured("the async test runs inside Tokio"))
             .build()
-            .expect("valid prepared Iceberg data file");
-        let mut state = IcebergCommitState::default();
-        state.store(IcebergPreparedCommit::with_append_id(
-            vec![data_file],
-            append_id,
-        ));
-
-        let first_attempt = state.prepared().expect("prepared append must be retained");
-        assert_eq!(first_attempt.append_id(), append_id);
+            .assured("the in-memory table has every required field");
+        table
+            .file_io()
+            .new_output(PATH)
+            .assured("the object URL uses memory storage")
+            .write(bytes::Bytes::from_static(b"retained object"))
+            .await
+            .assured("the fixture can write its object");
+        let refreshed = Table::builder()
+            .metadata(table.metadata_ref())
+            .identifier(table.identifier().clone())
+            .metadata_location("memory://warehouse/table/metadata/refreshed.json")
+            .readonly(true)
+            .file_io(FileIO::new_with_memory())
+            .runtime(::iceberg::Runtime::try_current().assured("the async test runs inside Tokio"))
+            .build()
+            .assured("the refreshed table has every required field");
+        #[expect(
+            clippy::disallowed_types,
+            reason = "Iceberg CatalogBuilder requires a standard-library property map at its \
+                      external API boundary"
+        )]
+        let catalog = ::iceberg::memory::MemoryCatalogBuilder::default()
+            .load(
+                "fixture",
+                std::collections::HashMap::from_iter([(
+                    "warehouse".to_string(),
+                    "memory://warehouse".to_string(),
+                )]),
+            )
+            .await
+            .assured("the fixture catalog has a warehouse");
+        let mut client = IcebergSinkClient {
+            catalog: StdArc::new(catalog),
+            table,
+            file_name_prefix: "fixture".to_string(),
+            data_file_sequence: 0,
+        };
+        client
+            .install_table(refreshed)
+            .assured("catalog metadata can be installed");
+        let content = client
+            .table
+            .file_io()
+            .new_input(PATH)
+            .assured("the retained object URL uses memory storage")
+            .read()
+            .await
+            .assured("the installed table retains its initialized object storage");
+        assert_eq!(content.as_ref(), b"retained object");
         assert_eq!(
-            first_attempt.data_files()[0].file_path(),
-            "s3://bucket/table/data/prepared.parquet"
+            client.table.metadata_location(),
+            Some("memory://warehouse/table/metadata/refreshed.json")
         );
-        let retry_attempt = state
-            .prepared()
-            .expect("a failed catalog attempt must not discard prepared files");
-        assert_eq!(retry_attempt.append_id(), append_id);
-        assert_eq!(retry_attempt.data_files(), first_attempt.data_files());
+        assert!(client.table.readonly());
+    }
 
-        state.finish();
-        assert!(state.prepared().is_none());
+    #[test]
+    fn a_preparation_keeps_its_data_files_and_append_identity_until_every_covered_file_is_written()
+    {
+        let append_id = uuid::Uuid::now_v7();
+        let data_file = |path: &str| {
+            DataFileBuilder::default()
+                .content(DataContentType::Data)
+                .file_path(path.to_string())
+                .file_format(DataFileFormat::Parquet)
+                .file_size_in_bytes(128)
+                .record_count(2)
+                .partition_spec_id(0)
+                .partition(Struct::empty())
+                .build()
+                .expect("valid prepared Iceberg data file")
+        };
+        let mut preparation = IcebergCommitPreparation::with_append_id(3, append_id);
+        assert_eq!(preparation.unwritten(), 0..3);
+        assert!(!preparation.is_written());
+
+        preparation.record_written(2, vec![data_file("s3://bucket/table/data/first.parquet")]);
+        assert_eq!(preparation.unwritten(), 2..3);
+        assert!(!preparation.is_written());
+        preparation.record_written(1, vec![data_file("s3://bucket/table/data/second.parquet")]);
+
+        assert!(preparation.is_written());
+        assert_eq!(preparation.append_id(), append_id);
+        let paths = preparation
+            .data_files()
+            .iter()
+            .map(DataFile::file_path)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [
+                "s3://bucket/table/data/first.parquet",
+                "s3://bucket/table/data/second.parquet"
+            ]
+        );
+    }
+
+    #[test]
+    fn what_commits_published_before_a_failed_attempt_is_reported_with_the_next_success() {
+        let mut state = IcebergCommitState::default();
+        state.record_published(SinkCommitReport {
+            messages: 2,
+            bytes: 100,
+            domain_timestamp: Timestamp::from_unix_nanos(7),
+        });
+        state.record_published(SinkCommitReport {
+            messages: 1,
+            bytes: 40,
+            domain_timestamp: Timestamp::from_unix_nanos(5),
+        });
+
+        assert_eq!(
+            state.unreported,
+            Some(SinkCommitReport {
+                messages: 3,
+                bytes: 140,
+                domain_timestamp: Timestamp::from_unix_nanos(7),
+            })
+        );
+    }
+
+    #[test]
+    fn load_groups_take_the_leading_staged_files_the_class_holds_together() {
+        let staged = |bytes: u64| IcebergStagedBatch {
+            path: PathBuf::from("batch.arrow"),
+            rows: 1,
+            bytes,
+            acknowledgements: None,
+            domain_timestamp: Timestamp::from_unix_nanos(1),
+        };
+        let files = [staged(400), staged(500), staged(300), staged(900)];
+
+        assert_eq!(
+            IcebergLoadGroup::leading(&files, 2_100),
+            IcebergLoadGroup {
+                files: 4,
+                charge: IcebergLoadCharge::Staged { bytes: 2_100 },
+            }
+        );
+        assert_eq!(
+            IcebergLoadGroup::leading(&files, 1_000),
+            IcebergLoadGroup {
+                files: 2,
+                charge: IcebergLoadCharge::Staged { bytes: 900 },
+            }
+        );
+        assert_eq!(
+            IcebergLoadGroup::leading(&files[2..], 1_000),
+            IcebergLoadGroup {
+                files: 1,
+                charge: IcebergLoadCharge::Staged { bytes: 300 },
+            }
+        );
+        // A first file larger than the whole class is a group of its own, charged the whole class.
+        let oversized = IcebergLoadGroup::leading(&files[3..], 800);
+        assert_eq!(
+            oversized,
+            IcebergLoadGroup {
+                files: 1,
+                charge: IcebergLoadCharge::WholeClass {
+                    file_bytes: 900,
+                    capacity: 800,
+                },
+            }
+        );
+        assert_eq!(oversized.charge.reserved_bytes(), 800);
+        // A file larger than the whole class after a smaller one is left for a group of its own.
+        assert_eq!(
+            IcebergLoadGroup::leading(&files[2..], 800),
+            IcebergLoadGroup {
+                files: 1,
+                charge: IcebergLoadCharge::Staged { bytes: 300 },
+            }
+        );
     }
 
     #[test]
     fn iceberg_append_marker_identifies_an_ambiguously_successful_commit() {
         let append_id = uuid::Uuid::now_v7();
-        let prepared = IcebergPreparedCommit::with_append_id(Vec::new(), append_id);
+        let prepared = IcebergCommitPreparation::with_append_id(0, append_id);
         let snapshot = Snapshot::builder()
             .with_snapshot_id(1)
             .with_sequence_number(1)
@@ -1667,7 +2034,7 @@ mod tests {
 
         assert!(prepared.matches_snapshot(&snapshot));
         assert!(
-            !IcebergPreparedCommit::with_append_id(Vec::new(), uuid::Uuid::now_v7())
+            !IcebergCommitPreparation::with_append_id(0, uuid::Uuid::now_v7())
                 .matches_snapshot(&snapshot)
         );
     }
@@ -2122,7 +2489,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn staged_files_are_written_and_read_on_the_filesystem_workers() {
+    async fn staged_files_are_written_and_loaded_on_the_filesystem_workers_under_their_charge() {
         let executor = Executor::default();
         let directory = tempfile::tempdir().assured("the staging directory is created");
         let path = directory.path().join("batch-1.arrow");
@@ -2140,15 +2507,30 @@ mod tests {
         let written = IcebergSink::write_ipc_batch(&executor, path.clone(), batch.clone())
             .await
             .assured("the filesystem workers write the staged file");
-        let read = IcebergSink::read_ipc_batches(&executor, schema, &[path])
-            .await
-            .assured("the filesystem workers read the staged file back");
+        let IcebergLoadedGroup { batches, charge } = IcebergSink::load_group(
+            &executor,
+            schema,
+            vec![path],
+            IcebergLoadCharge::Staged { bytes: written },
+        )
+        .await
+        .assured("the filesystem workers read the staged file back");
 
         assert!(written > 0);
-        assert_eq!(read, batch);
+        assert_eq!(batches, vec![batch]);
+        assert_eq!(charge.bytes(), written);
+        assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, written);
+        drop(charge);
         let snapshot = executor.snapshot();
         assert_eq!(snapshot.filesystem_storage.admitted, 2);
         assert_eq!(snapshot.filesystem_storage.completed, 2);
         assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod commit_tests;

@@ -348,7 +348,7 @@ the first.
 
 A payload the node's extension workers have no room to unfold has not been judged by its codec, so
 it is not a decode rejection; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
-An endpoint ingestor accepts a body its codec refuses and reports it the same way, including a body
+An endpoint ingestor in `MODE NO ACK` accepts a body its codec refuses and reports it the same way, including a body
 its quiesce buffer retained.
 
 ## When The Extension Workers Are Full
@@ -607,10 +607,11 @@ from it. Each value is a positive whole number of milliseconds.
 
 `HTTP` and `PROMETHEUS` clients read `timeout_ms`. `RABBITMQ`, `REDIS` and `WEBSOCKETS` clients read
 `connect_timeout_ms`, and allow 30 seconds when it is left out. A `RABBITMQ` client's deadline
-covers resolving the broker, the address attempts and TLS; the AMQP handshake that follows has no
-deadline. A request or connection that runs out of its deadline becomes the ingestor's transient
-status, and the ingestor retries on its policy; a connection that runs out of `connect_timeout_ms`
-is reported naming the key and its bound.
+covers resolving the broker, the address attempts, TLS, the AMQP handshake, opening the ingestor's
+channel, setting its prefetch window and starting its consumer. A request or connection that runs
+out of its deadline becomes the ingestor's transient status, and the ingestor retries on its
+policy; a connection that runs out of `connect_timeout_ms` is reported naming the key and its
+bound.
 
 A `SYSLOG LISTENER` serves many senders, so a sender that stalls is not the ingestor's status. A TLS
 listener's client bounds the TLS handshake of each connection it accepts by `connect_timeout_ms`, 30
@@ -1164,7 +1165,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
 | Buffers | deliveries the broker sends ahead of their acknowledgement: at most 1 delivery; when full, holds back what fills it |
-| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>the AMQP handshake, channel open and consume: unbounded<br>a silent connection: driver default, twice the negotiated heartbeat |
+| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open and consume: `connect_timeout_ms`; 30s when omitted<br>a silent connection: driver default, twice the negotiated heartbeat |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
@@ -1193,11 +1194,12 @@ reconnect is at least once.
 Each instance resolves the host of the client's `addr` through the node's configured DNS resolver
 every time it connects, so a changed DNS answer takes effect on the next connection, and tries the
 addresses it receives in order. A literal IPv4 address, or an IPv6 address in brackets, is
-connected to as written. Resolution, the TCP connection and, for `amqps`, the TLS handshake have 30
-seconds together; the broker certificate must name the host `addr` names. A connection that fails,
-including a name that does not resolve, is a source error that `DESCRIBE INGESTOR` shows as the
-transient error, and the instance tries again on its `RETRY POLICY` cadence without acknowledging
-anything.
+connected to as written. Resolution, the TCP connection, for `amqps` the TLS handshake, the AMQP
+handshake, opening the channel, setting the prefetch window and starting the consumer share the
+client's `connect_timeout_ms`, 30 seconds when it is left out; the broker certificate must name the
+host `addr` names. A connection that fails or runs out of that deadline, including a name that does
+not resolve, is a source error that `DESCRIBE INGESTOR` shows as the transient error, and the
+instance tries again on its `RETRY POLICY` cadence without acknowledging anything.
 
 ### Redis Pub/Sub
 
@@ -1632,7 +1634,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | --- | --- |
 | Reference | Http endpoint |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
-| Modes (complete bodies after MODE) | NO ACK |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers` |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
@@ -1640,8 +1642,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | a request body: unbounded |
-| Network waits | a client's request head and body: unbounded |
+| Buffers | a request body: unbounded<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |
+| Network waits | a client's request head and body: unbounded<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |
 | Driver limits | Request heads above 100 headers are refused. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1667,7 +1669,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | --- | --- |
 | Reference | Websockets endpoint |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
-| Modes (complete bodies after MODE) | NO ACK |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |
 | Options in statement order | No entity-specific options. |
 | Headers | `read_header`, `read_headers` |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
@@ -1675,8 +1677,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded |
+| Buffers | unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |
+| Network waits | graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending`<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded |
 | Driver limits | A message above 64 MiB or a frame above 16 MiB ends the session. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1690,38 +1692,74 @@ only endpoints of that type. An endpoint of the other type is refused when the s
 applied, with a message such as `requires a TYPE HTTP endpoint, but endpoint 'stream' is TYPE
 WEBSOCKETS`. Both heads take the same body.
 
-Both endpoint entities declare `MODE NO ACK`: a successful response confirms admission, without
-waiting for downstream acknowledgement. Their body takes no `ACK TIMEOUT`, `RETRY POLICY`, or
-`BATCH` clause. Transport headers are available through `read_header` and `read_headers`; there is
-no typed request metadata namespace. Both ingestors execute on every cluster node and are excluded
-from placement members and placement-reference completion.
+Both endpoint entities accept `MODE NO ACK` or `MODE ACK MAX <n> ACK TIMEOUT <duration>`.
+The ACK window is explicit: `MAX` is 1–65,535 outstanding payloads per ingestor on each node.
+An acknowledged endpoint requires `ON QUIESCE REJECT RETRY AFTER <duration>`. The sender owns
+retry; there is no endpoint `RETRY POLICY`, `ACK PARALLEL`, or `BATCH` clause. `BUFFER MAX SIZE`
+is available with `MODE NO ACK`. Transport headers are available through `read_header` and
+`read_headers`; these declarations have no typed request metadata namespace. Both ingestors
+execute on every cluster node and are excluded from placement members and placement completion.
 
-Quiesce is enforced independently on every serving node. With `REJECT`, HTTP requests and new
-WebSocket upgrades receive 503, while established WebSockets close with 1013. With `BUFFER`, bodies
-that fit receive 202 and drain after resume; a full buffer rejects further intake without discarding
-anything already acknowledged. A stopped, absent, or otherwise unable ingestor always rejects and
-never returns a silent 202. If several ingestors share a route, the request is accepted when at least
-one accepts it. It is rejected only when all reject, and `Retry-After` is included only when every
-rejecting ingestor declares `REJECT`.
+For example, this Plexus declaration holds the HTTP response while its payload's acknowledgement
+root waits for every attached downstream route:
 
-A body whose codec runs an `ON INGESTION` transformation is unfolded on the node's extension
-workers. When they cannot take it now, the body is rejected the same way: HTTP answers 503 without
-`Retry-After`, and an established WebSocket closes with 1013. The body was not decoded, so its
-sender may send it again; a body its codec refuses is still accepted, and becomes a decode
-rejection the ingestor's `ON GENERAL ERROR` policy reports; see
-[When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload). A body `BUFFER` retained was
-already answered 202, so when it drains after resume and the extension workers cannot take it, it
-waits for them instead. It stays in the buffer, counted in the ingestor's buffered records and
-bytes, until they unfold it, and the bodies behind it follow in order. A body its codec refuses as it
-drains leaves the buffer as a decode rejection too.
+```plexus
+CREATE HTTP ENDPOINT INGESTOR acknowledged
+  FROM intake MODE ACK MAX 8 ACK TIMEOUT 5s
+  ON QUIESCE REJECT RETRY AFTER 1s
+  DECODE USING event_codec
+  TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+```
 
-A WebSocket connection retains the route and signaling protocol selected at upgrade. Stopping or
-replacing its endpoint source ends that intake lifetime, including signaling data intake. During
-payload ingestion after signaling, the next refused payload closes the connection with 1013,
-even if the source has already restarted. Open a new connection to use the replacement source.
-A request already admitted before source ending may finish. Stopping a domain
-withdraws only that domain's routes and intakes; another domain serving the same host and path
-continues receiving requests. A route whose configuration has been withdrawn returns HTTP 404.
+| HTTP result in `MODE ACK` | Meaning |
+| --- | --- |
+| 200 | The payload's graph acknowledgement root completed under the declared error policies. |
+| 400 | The codec or local route construction refused the input. |
+| 503 with `Retry-After` | The window or execution capacity is full, intake is quiesced, downstream negatively acknowledged, the ACK timeout expired, or the exact intake ended. |
+
+Every ACK response has a JSON object containing exactly `outcome` and `cause`, using the existing
+[client submission outcome vocabulary](client-io-architecture.md). For example, a local refusal
+is `{"outcome":"processing_failed","cause":"rejected"}`. Downstream rejection uses that same
+object with status 503. Timeout uses `processing_failed` / `ack_timeout`; a full window uses
+`not_admitted` / `busy`; intake ending uses `outcome_unknown` / `interrupted`. The response contains
+no payload or diagnostic details. Runtime events retain the ingestor's ordinary diagnostics.
+A 503 uses the declared retry delay, rounded up to whole seconds. A retry can duplicate output
+that already completed; timeout or interruption does not roll back admitted work.
+
+The physical ACK timeout starts when a complete payload obtains its window slot. It is positive
+and fits the supported physical deadline range. Downstream keepalive does not restart it. The
+window uses immediate admission: it never queues a request for a response slot. A window already
+full at the HTTP head refuses before reading the body; dispatch checks capacity again after the
+body completes, so competing requests cannot overrun the window. It does not bound
+HTTP request-head or body reads. HTTP request bodies retain their separately declared unbounded
+limit, and WebSocket messages retain the driver's message and frame limits.
+
+In `MODE NO ACK`, admission still answers HTTP 202 without waiting for downstream acknowledgement.
+A codec refusal becomes a decode rejection consumed by `ON GENERAL ERROR`; it also answers 202.
+With `BUFFER`, bodies that fit receive 202 and drain after resume. A full buffer rejects new intake
+without discarding bodies already accepted. If extension workers cannot unfold a fresh payload,
+HTTP answers 503 and a WebSocket closes with 1013; buffered payloads instead retain their place
+until workers can take them. See [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
+
+Quiesce is enforced independently on every serving node. `REJECT` refuses new requests and
+WebSocket upgrades with 503. A stopped or absent intake refuses new requests too. A route shared
+by unacknowledged ingestors accepts when at least one accepts; it includes `Retry-After` only when
+all refusals supply a delay. When an acknowledged binding participates, success waits for its root;
+a failure after any binding admitted the input is not reported as `not_admitted`.
+
+A WebSocket endpoint in `MODE ACK` requires an explicit signaling protocol. Its outbound wire
+format encodes the same `outcome` / `cause` object for each data frame, both during `ACCEPT DATA`
+and after signaling. JSON and YAML use text; CBOR and protobuf use binary. RAW carries the object's
+JSON text. A protobuf outbound message must represent both string fields; startup validates every
+fixed outcome before binding intake. The protocol's control frames retain their declared meaning.
+
+A WebSocket retains its selected route and signaling protocol throughout the connection. Stopping
+or replacing its source ends that exact intake, including signaling data intake. Held acknowledged
+responses resolve with 503 (or the equivalent outcome frame) when intake stops or ends; the next
+payload on a retained ended route closes with 1013. Open a new connection for a replacement source.
+Stopping a domain withdraws only its routes and intakes; other domains on the same host and path
+continue receiving requests. A withdrawn route returns HTTP 404.
 
 Server-side endpoints are hosted under a `VHOST`. A plain VHOST serves HTTP and WS on the HTTP listener. A TLS-enabled VHOST serves HTTPS and WSS on the separate HTTPS listener.
 
