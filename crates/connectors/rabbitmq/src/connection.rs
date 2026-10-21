@@ -4,10 +4,12 @@
 //!
 //! - **Owns.** Reading a client's `addr`, CA file and `connect_timeout_ms` into the broker it
 //!   connects to, resolving the broker host through the node resolver for every connection, the
-//!   budget and order of the address attempts, the TLS handshake against the configured host, and
-//!   handing the established transport to Lapin for the AMQP handshake.
+//!   budget and order of the address attempts, the TLS handshake against the configured host,
+//!   handing the established transport to Lapin for the AMQP handshake, the budget its owner opens
+//!   a channel within, and ending a connection that does not open within that budget.
 //! - **Depends on.** The connector contract's client configuration helpers, `nervix-dns`,
-//!   `error-stack`, Tokio, the URL grammar, and Lapin's transport hook and its async runtime.
+//!   `error-stack`, Tokio, the URL grammar, Lapin's transport hook and its async runtime, and
+//!   `socket2` for the second handle on a connection's socket.
 //! - **Must not know.** Queues, consumers, publisher confirms, the host's retry policy, or Models.
 //!
 //! # One connection
@@ -15,15 +17,28 @@
 //! Every connection resolves the broker host again through the node resolver, so an expired answer
 //! is replaced before anything is dialled. The addresses are tried in resolution order, each within
 //! an equal share of what remains of the client's `connect_timeout_ms`, so an address that cannot
-//! connect leaves time for the next. A connection that runs out of that deadline is reported naming
-//! the key and its bound. An `amqps` connection then completes its TLS handshake within what is left,
-//! verifying the broker certificate against the host the address names, whichever of its addresses
-//! was dialled. Only then does Lapin start, and it runs the AMQP handshake over that transport.
+//! connect leaves time for the next. An `amqps` connection then completes its TLS handshake within
+//! what is left, verifying the broker certificate against the host the address names, whichever of
+//! its addresses was dialled. Only then does Lapin start, and it runs the AMQP handshake over that
+//! transport within what is still left. The source or sink then opens the channel it reads or
+//! publishes through within the rest, so `connect_timeout_ms` bounds every step before the entity
+//! is ready, and a connection that runs out of it at any step is reported naming the key and its
+//! bound.
 //!
 //! Lapin's own reconnection stays off, so it asks for a transport exactly once per connection. A
 //! connection that is lost is replaced by the caller opening a new one, which resolves again.
-//! Nothing here outlives the connection: the resolver belongs to the node, and a connection that
-//! fails before the AMQP handshake has started no Lapin thread.
+//!
+//! # A connection that does not open
+//!
+//! Lapin runs a connection's IO on a thread of its own from the start of the AMQP handshake, and
+//! that thread ends only once its socket fails or the broker closes the connection, so a broker
+//! that never answers would keep both for ever. Before the transport is handed over, the connection
+//! therefore takes a second handle on its TCP socket. Until the connection is open, its handshake
+//! done and its owner's channel opened, dropping that handle shuts the socket down, whether the
+//! budget ran out, a step failed or the caller stopped waiting. Every read and write of Lapin's loop
+//! then fails, the loop and its thread end, and the socket closes. A connection that opened lets
+//! the handle go and keeps its socket. Nothing here outlives the connection: the resolver belongs
+//! to the node, and a connection that fails before its AMQP handshake has started no Lapin thread.
 //!
 //! # Addresses
 //!
@@ -43,20 +58,28 @@
     )
 )]
 
-use std::{io, net::SocketAddr, str::FromStr as _};
+use std::{
+    io,
+    net::{Shutdown, SocketAddr},
+    str::FromStr as _,
+};
 
 use async_rs::{Tokio, TokioRuntime, traits::Reactor};
-use error_stack::{Report, ResultExt as _};
+use error_stack::{Context, Report, ResultExt as _};
 use lapin::{
     AsyncTcpStream, Connection, ConnectionProperties,
     tcp::TLSConfig,
     uri::{AMQPScheme, AMQPUri},
 };
 use meticulous::OptionExt as _;
-use nervix_connector::{ConfiguredDeadline, client_config_value, client_tls_paths, read_tls_file};
+use nervix_connector::{
+    ConfiguredDeadline, DeadlineElapsed, client_config_value, client_tls_paths, read_tls_file,
+};
 use nervix_dns::{DnsLookupFailure, DnsResolver, LookupShare, OperationBudget};
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::{collections::ConcurrentQueue, time::timeout};
+use nervix_recovery::Discarded as _;
+use socket2::{SockRef, Socket};
 use thiserror::Error;
 use url::{Host, Url};
 
@@ -84,6 +107,11 @@ pub enum RabbitMqConnectError {
     /// No address of the broker host accepted a TCP connection within the budget.
     #[error("no address of RabbitMQ host '{host}' accepted a connection")]
     Unreachable { host: String },
+    /// The node could not take the second handle on the connection's socket that ends the
+    /// connection if it does not open within the budget, such as when it has no file descriptor
+    /// left.
+    #[error("the socket of the connection to RabbitMQ host '{host}' could not be held")]
+    SocketUnavailable { host: String },
     /// The TLS handshake failed or did not finish within the budget, including a broker
     /// certificate that does not name the host.
     #[error("the TLS handshake with RabbitMQ host '{host}' failed")]
@@ -91,7 +119,7 @@ pub enum RabbitMqConnectError {
     #[error("the RabbitMQ client runtime is unavailable")]
     RuntimeUnavailable,
     /// The broker refused or broke off the AMQP handshake, such as for rejected credentials or an
-    /// unknown virtual host.
+    /// unknown virtual host, or did not finish it within the budget.
     #[error("the AMQP handshake with RabbitMQ host '{host}' failed")]
     AmqpHandshake { host: String },
 }
@@ -104,11 +132,148 @@ impl RabbitMqConnectError {
             Self::InvalidAddress | Self::InvalidConnectTimeout | Self::InvalidCaCertificate => true,
             Self::Resolve { .. }
             | Self::Unreachable { .. }
+            | Self::SocketUnavailable { .. }
             | Self::TlsHandshake { .. }
             | Self::RuntimeUnavailable
             | Self::AmqpHandshake { .. } => false,
         }
     }
+}
+
+/// Why one round trip that opens a connection's channel did not complete.
+#[derive(Debug)]
+pub(crate) enum OpeningStepFailure {
+    /// The broker or the connection failed the round trip.
+    Failed(lapin::Error),
+    /// The round trip ran out of what remained of the client's `connect_timeout_ms`.
+    Elapsed(DeadlineElapsed),
+}
+
+impl OpeningStepFailure {
+    /// This failure beneath `context`, its owner's name for the step that failed, with its text
+    /// leading the report. A deadline that ran out stays the typed cause beneath `context`, and
+    /// Lapin's failure is attached as its text.
+    pub(crate) fn beneath<C: Context>(self, context: C) -> Report<C> {
+        match self {
+            Self::Failed(error) => Report::new(context).attach_printable(error.to_string()),
+            Self::Elapsed(elapsed) => {
+                let message = elapsed.to_string();
+                Report::new(elapsed)
+                    .change_context(context)
+                    .attach_printable(message)
+            }
+        }
+    }
+}
+
+/// What remains of one connection's `connect_timeout_ms` for the steps that open it after its TLS
+/// handshake: the AMQP handshake and its owner's channel.
+struct OpeningBudget {
+    deadline: OperationBudget,
+    connect_timeout: ConfiguredDeadline,
+}
+
+impl OpeningBudget {
+    /// `step`, one round trip that opens the connection, within what remains of the budget.
+    /// Running out of it is reported as `operation`, naming `connect_timeout_ms`.
+    async fn within<T>(
+        &self,
+        operation: &'static str,
+        step: impl Future<Output = lapin::Result<T>>,
+    ) -> Result<T, OpeningStepFailure> {
+        match timeout(self.deadline.remaining(), step).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(OpeningStepFailure::Failed(error)),
+            Err(_) => Err(OpeningStepFailure::Elapsed(
+                self.connect_timeout.elapsed(operation),
+            )),
+        }
+    }
+}
+
+/// A connection the broker accepted, whose owner is still opening the channel it reads or
+/// publishes through within what remains of the client's `connect_timeout_ms`.
+///
+/// Dropped before [`Self::opened`], it shuts its socket down, which ends Lapin's IO loop and the
+/// thread it runs on, and closes the socket.
+pub(crate) struct OpeningConnection {
+    connection: Connection,
+    socket: OpeningSocket,
+    budget: OpeningBudget,
+}
+
+impl OpeningConnection {
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// `step`, one round trip that opens the channel, within what remains of the connection's
+    /// budget. Running out of it is reported as `operation`, naming `connect_timeout_ms`.
+    pub(crate) async fn within_budget<T>(
+        &self,
+        operation: &'static str,
+        step: impl Future<Output = lapin::Result<T>>,
+    ) -> Result<T, OpeningStepFailure> {
+        self.budget.within(operation, step).await
+    }
+
+    /// The connection, open: it keeps its socket from now on.
+    pub(crate) fn opened(self) -> Connection {
+        let Self {
+            connection, socket, ..
+        } = self;
+        socket.release();
+        connection
+    }
+}
+
+/// A second handle on the TCP socket of a connection that is still opening, whose other handle
+/// Lapin's IO loop owns.
+///
+/// Dropping it shuts the socket down: every read and write of that loop fails, so the loop and its
+/// thread end and the socket closes. A connection that opened releases it instead.
+struct OpeningSocket {
+    socket: Option<Socket>,
+}
+
+impl OpeningSocket {
+    /// A second handle on the socket of `stream`, which the connection to `host` dialled.
+    fn hold(stream: &<Tokio as Reactor>::TcpStream, host: &str) -> RabbitMqConnectResult<Self> {
+        let socket = SockRef::from(stream.get_ref())
+            .try_clone()
+            .map_err(|error| {
+                Report::new(RabbitMqConnectError::SocketUnavailable {
+                    host: host.to_string(),
+                })
+                .attach_printable(error)
+            })?;
+        Ok(Self {
+            socket: Some(socket),
+        })
+    }
+
+    /// Lets the socket go without shutting it down, once its connection is open.
+    fn release(mut self) {
+        drop(self.socket.take());
+    }
+}
+
+impl Drop for OpeningSocket {
+    fn drop(&mut self) {
+        let Some(socket) = self.socket.take() else {
+            return;
+        };
+        socket.shutdown(Shutdown::Both).discarded(
+            "shutting a socket down fails only once it is no longer connected, and Lapin's loop \
+             already sees that connection end",
+        );
+    }
+}
+
+/// The transport a connection dialled, with the second handle on its socket.
+struct DialledBroker {
+    stream: BrokerStream,
+    socket: OpeningSocket,
 }
 
 pub(crate) type RabbitMqConnectResult<T> = Result<T, Report<RabbitMqConnectError>>;
@@ -119,7 +284,8 @@ pub(crate) struct RabbitMqBroker {
     uri: AMQPUri,
     transport: BrokerTransport,
     dns: DnsResolver,
-    /// How long one connection may take, from resolving the host through the TLS handshake.
+    /// How long one connection may take, from resolving the host until its owner's channel is
+    /// open.
     connect_timeout: ConfiguredDeadline,
 }
 
@@ -201,26 +367,36 @@ impl RabbitMqBroker {
         &self.uri.authority.host
     }
 
-    /// Open a connection to the broker within the client's `connect_timeout_ms`; the module
+    /// Start a connection to the broker within the client's `connect_timeout_ms`, through its
+    /// AMQP handshake; its owner opens its channel within the rest of the budget. The module
     /// documentation describes each step.
-    pub(crate) async fn connect(&self) -> RabbitMqConnectResult<Connection> {
+    pub(crate) async fn connect(&self) -> RabbitMqConnectResult<OpeningConnection> {
         self.connect_within(self.connect_timeout).await
     }
 
     async fn connect_within(
         &self,
         connect_timeout: ConfiguredDeadline,
-    ) -> RabbitMqConnectResult<Connection> {
+    ) -> RabbitMqConnectResult<OpeningConnection> {
         let deadline = OperationBudget::start(connect_timeout.bound(), LookupShare::Whole);
         let runtime = lapin::runtime::default_runtime().map_err(|error| {
             Report::new(RabbitMqConnectError::RuntimeUnavailable).attach_printable(error)
         })?;
         let addresses = self.resolve(&deadline).await?;
-        let stream = self
+        let DialledBroker { stream, socket } = self
             .dial(&runtime, &addresses, &deadline, connect_timeout)
             .await?;
         let stream = self.secure(stream, &deadline, connect_timeout).await?;
-        self.handshake(runtime, stream).await
+        let budget = OpeningBudget {
+            deadline,
+            connect_timeout,
+        };
+        let connection = self.handshake(runtime, stream, &budget).await?;
+        Ok(OpeningConnection {
+            connection,
+            socket,
+            budget,
+        })
     }
 
     /// Every address the broker host resolves to now, within the connection budget.
@@ -243,22 +419,29 @@ impl RabbitMqBroker {
     }
 
     /// A TCP stream to the first of `addresses` that accepts one, trying them in order, each within
-    /// an equal share of what remains of the connection budget. When no address accepted and the
-    /// budget ran out, the failure names `connect_timeout` beneath the unreachable host.
+    /// an equal share of what remains of the connection budget, with the second handle on its
+    /// socket. When no address accepted and the budget ran out, the failure names
+    /// `connect_timeout` beneath the unreachable host.
     async fn dial(
         &self,
         runtime: &TokioRuntime,
         addresses: &[SocketAddr],
         deadline: &OperationBudget,
         connect_timeout: ConfiguredDeadline,
-    ) -> RabbitMqConnectResult<BrokerStream> {
+    ) -> RabbitMqConnectResult<DialledBroker> {
         let mut failures = Vec::new();
         for attempt in deadline.attempts(addresses) {
             nervix_primitives::task::consume_budget().await;
             let address = attempt.address;
             let share = attempt.budget;
-            match timeout(share, AsyncTcpStream::connect(runtime, address)).await {
-                Ok(Ok(stream)) => return Ok(stream),
+            match timeout(share, runtime.tcp_connect_addr(address)).await {
+                Ok(Ok(stream)) => {
+                    let socket = OpeningSocket::hold(&stream, self.host())?;
+                    return Ok(DialledBroker {
+                        stream: AsyncTcpStream::Plain(stream),
+                        socket,
+                    });
+                }
                 Ok(Err(error)) => failures.push(format!("{address}: {error}")),
                 Err(_) => failures.push(format!("{address}: no connection within {share:?}")),
             }
@@ -311,14 +494,17 @@ impl RabbitMqBroker {
         }
     }
 
-    /// Run the AMQP handshake over `stream`.
+    /// Run the AMQP handshake over `stream`, within what remains of the budget.
     ///
     /// Lapin asks its transport hook for a stream once per connection, since its own reconnection
-    /// stays off; the hook takes the stream established here from a queue of one.
+    /// stays off; the hook takes the stream established here from a queue of one. A handshake that
+    /// runs out of the budget names `connect_timeout_ms` beneath the failed handshake; the caller
+    /// drops the socket's second handle, which ends the loop Lapin started.
     async fn handshake(
         &self,
         runtime: TokioRuntime,
         stream: BrokerStream,
+        budget: &OpeningBudget,
     ) -> RabbitMqConnectResult<Connection> {
         let handed_over = ConcurrentQueue::bounded(1);
         handed_over
@@ -339,14 +525,15 @@ impl RabbitMqBroker {
                 }
             },
             ConnectionProperties::default(),
-        )
-        .await;
-        connected.map_err(|error| {
-            Report::new(RabbitMqConnectError::AmqpHandshake {
-                host: self.host().to_string(),
+        );
+        budget
+            .within("the AMQP handshake with the RabbitMQ broker", connected)
+            .await
+            .map_err(|failure| {
+                failure.beneath(RabbitMqConnectError::AmqpHandshake {
+                    host: self.host().to_string(),
+                })
             })
-            .attach_printable(error)
-        })
     }
 }
 

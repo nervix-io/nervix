@@ -995,12 +995,14 @@ address attempts, TLS and the protocol's own handshake. Each value is a positive
 milliseconds.
 
 `HTTP`, `SENTRY`, `OTEL`, `SQS` and `CLICKHOUSE` clients read `timeout_ms`; an `HTTP` request
-emitter's client requires it. `RABBITMQ`, `REDIS` and `SYSLOG` clients read `connect_timeout_ms`, and
-allow 30 seconds when it is left out; a `REDIS` command pool also waits no longer than that to check
-out a connection. A `RABBITMQ` client's deadline covers resolving the broker, the address attempts
-and TLS; the AMQP handshake that follows has no deadline. A request or connection that runs out of
-its deadline becomes the emitter's transient status, and the emitter retries on its policy; a
-connection that runs out of `connect_timeout_ms` is reported naming the key and its bound.
+emitter's client requires it. A `RABBITMQ` client's `timeout_ms` bounds the round trip that ends a
+`NO_ACK` write. `RABBITMQ`, `REDIS` and `SYSLOG` clients read `connect_timeout_ms`, and allow 30
+seconds when it is left out; a `REDIS` command pool also waits no longer than that to check out a
+connection. A `RABBITMQ` client's `connect_timeout_ms` covers resolving the broker, the address
+attempts, TLS, the AMQP handshake, opening the emitter's channel, selecting publisher confirms under
+`ACK` and checking its queue. A request, connection or round trip that runs out of its deadline
+becomes the emitter's transient status, and the emitter retries on its policy; a deadline that runs
+out is reported naming the key and its bound.
 [Connector Capabilities](connector-capabilities.md) lists each entity's network waits and what
 bounds each one, including the waits nothing bounds yet.
 
@@ -1176,9 +1178,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>unroutable messages the broker returns under NO ACK: unbounded |
-| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>the AMQP handshake, channel open and confirm select: unbounded<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: unbounded |
+| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the queue check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |
 
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-emit).
 <!-- connector-matrix:emit-rabbitmq-queue:end -->
@@ -1189,7 +1191,10 @@ so once a write's messages are on the channel, the emitter asks the channel for 
 which the broker answers only after it has taken every message written before it, and that answer
 acknowledges them. A `NO_ACK` write therefore waits for one round trip to the broker however many
 messages it carries, and a channel or connection lost before the answer leaves the write's messages
-to the retry.
+to the retry. When the client sets `timeout_ms`, a round trip the broker does not answer within it
+fails the write, reported naming the key and its bound, and leaves the write's messages to the
+retry, which reopens the emitter's connection first. Without `timeout_ms` the round trip waits as
+long as the connection lives.
 
 The broker's `max_message_size`, 16 MiB by default in RabbitMQ 4.x, bounds each message body;
 headers do not count. The broker closes the channel a larger body arrives on, and the emitter
@@ -1200,11 +1205,13 @@ acknowledging it, then keeps publishing on a new channel of the same connection;
 The emitter resolves the host of the client's `addr` through the node's configured DNS resolver
 when it opens and whenever it reopens after a failed publish, so a changed DNS answer takes effect
 on the next connection, and tries the addresses it receives in order. A literal IPv4 address, or
-an IPv6 address in brackets, is connected to as written. Resolution, the TCP connection and, for
-`amqps`, the TLS handshake have 30 seconds together; the broker certificate must name the host
-`addr` names. A connection that fails, including a name that does not resolve, leaves the emitter
-unavailable with the failure as its transient error; it confirms nothing, so its input stays
-unacknowledged, and it reopens on its `RETRY POLICY` backoff.
+an IPv6 address in brackets, is connected to as written. Resolution, the TCP connection, for
+`amqps` the TLS handshake, the AMQP handshake, opening the channel, selecting publisher confirms
+under `ACK` and checking the queue share the client's `connect_timeout_ms`, 30 seconds when it is
+left out; the broker certificate must name the host `addr` names. A connection that fails or runs
+out of that deadline, including a name that does not resolve, leaves the emitter unavailable with
+the failure as its transient error; it confirms nothing, so its input stays unacknowledged, and it
+reopens on its `RETRY POLICY` backoff.
 
 ### Redis Pub/Sub
 
@@ -2436,14 +2443,15 @@ The REST catalog is the authority for namespace and table metadata. Nervix does 
 
 Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and writes them to
 local Arrow IPC files under the runtime temporary-file root. `COMMIT EACH <duration> MAX SIZE
-<bytes>` reads the staged Arrow IPC batches, concatenates them into one Arrow batch, appends that
-batch to the Iceberg table, and commits the catalog update. The commit duration starts when a flush
-stages rows while none are staged, and rows later flushes stage join that commit without moving it,
-so a row waits at most `FLUSH EACH` in memory and then at most `COMMIT EACH` after it is staged.
-Staged files that reach `MAX SIZE` are committed at once. Both durations are domain-logical, so a
-paced domain's `TIME RATE` moves the flush and commit boundaries together; the maximum batch and
-commit sizes, the catalog retry backoff, and a drain remain independent of domain pace. The
-temporary-file root defaults to `/tmp` and can be changed with `--temp-dir` or `NERVIX_TEMP_DIR`.
+<bytes>` reads the staged Arrow IPC files back, writes their rows into Parquet data files, and
+appends every one of those data files to the Iceberg table in one catalog commit. The commit
+duration starts when a flush stages rows while none are staged, and rows later flushes stage join
+that commit without moving it, so a row waits at most `FLUSH EACH` in memory and then at most
+`COMMIT EACH` after it is staged. Staged files that reach `MAX SIZE` are committed at once. Both
+durations are domain-logical, so a paced domain's `TIME RATE` moves the flush and commit boundaries
+together; the maximum batch and commit sizes, the catalog retry backoff, and a drain remain
+independent of domain pace. The temporary-file root defaults to `/tmp` and can be changed with
+`--temp-dir` or `NERVIX_TEMP_DIR`.
 
 The sink completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
 ACK boundary. Commit conflicts, table evolution after open, a dropped table, and unavailable
@@ -2453,6 +2461,29 @@ backpressure. Record-level expression and construction errors are attributed thr
 ERROR` before staging. An ambiguous failure after the catalog commit can append the rows again;
 Iceberg appends are not idempotent. See [ACK Semantics And Effective
 Delivery](#ack-semantics-and-effective-delivery) for attachment and fan-out behavior.
+
+A commit holds the rows it reads back in memory until it has written them, so before it reads the
+staged files it charges every byte of them to the node's bulk memory class, and returns the charge
+once their rows are in data files. It takes the charge only when the class has room for it now
+rather than waiting in the class's queue, where a commit's charge would take every byte the class
+frees and hold the node's other bulk work behind it. When the class has no room, the commit keeps
+its staged files and their acknowledgements, `DESCRIBE EMITTER` shows `Iceberg commit waits for
+room in the bulk memory class for <bytes> staged bytes` as the emitter's transient error, and the
+emitter retries the commit with its declared policy and backpressure. The bulk class holds 32 MiB.
+Staged files that together exceed it are read in groups, each the run of consecutive files the
+class can hold, and each group's rows are written into data files of their own and its charge
+returned before the next group is read; the data files of every group are still appended in the
+one catalog commit. A single staged file holds the mapped rows of one input batch, which can be
+larger than the class when a route on the same node flushes batches above 32 MiB. Such a file is
+read alone once the whole class is free, charged with the whole class: that is every byte of it
+the class can account for, and it leaves no room for other bulk work beside the read. Until
+then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of <capacity>
+bytes for a staged file of <bytes> bytes`, and the emitter retries the commit as before.
+
+A commit publishes the staged files it found when it began. Rows a flush stages while a failed
+commit waits for its retry are not in that commit's data files, so the retry first appends what the
+commit began with and then commits the newer rows: a retry still publishes everything staged, and
+acknowledges only rows a catalog commit holds.
 
 ## Codec Behavior On Emission
 
