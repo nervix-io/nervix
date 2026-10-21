@@ -731,6 +731,12 @@ connector's description of the failure for the emitter's transient error. A mess
 server's `max_payload` becomes a record rejection with code `external` and operation `publish`, and a
 missed `ACK TIMEOUT` is the confirmation window's `ConfirmationWindowError`.
 
+A ZeroMQ source keeps the driver's `ZmqError` as the typed cause of its `ZeroMqSourceError`. `Bind`
+and `Connect` name the configured address and sit beneath `SourceError::Resume`, and `Receive` sits
+beneath `SourceError::Read`. The rendered chain therefore names both the address and the driver's
+cause, and the source host shows the deepest cause as the ingestor's transient error, such as the
+operating system refusing a bind because another socket holds the address.
+
 ### Connector Status Observation
 
 An outbound WebSocket peer's Close is a typed read failure preserving its status code and reason;
