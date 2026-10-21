@@ -668,18 +668,18 @@ jobs:
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # The harness watchdog derives its budget from this limit and leaves time for logs and reports.
-    timeout-minutes: 60
+    # The harness derives 75 minutes of scenarios from this limit, with 30 for setup/builds and
+    # 15 for cleanup/export/uploads. Keep tests/common/suite_watchdog.rs in step.
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      # The loaded inventory consumed 117,622 slot-seconds with 274 attempts still active.
-      # 48 slots supply only 118,080 in 41 minutes; 64 supply 157,440 in the same budget.
-      # Scenario CPU averaged 63% and memory peaked at 13.4 GiB on this 16-CPU/64-GiB runner.
-      NERVIX_TEST_CONCURRENCY_FACTOR: "4"
+      # Keep the qualified 48-slot load. Recent slow runs need more time at this concurrency:
+      # 39656928785 used 117,587 slot-seconds with 833 attempts still active after 41 minutes.
+      NERVIX_TEST_CONCURRENCY_FACTOR: "3"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
