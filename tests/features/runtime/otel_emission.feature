@@ -82,7 +82,7 @@ Feature: OTEL emission
         'deployment.environment.name' = '{{test_id}}'
       }
       SCOPE 'nervix/audit' VERSION '1.0'
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
@@ -110,7 +110,7 @@ Feature: OTEL emission
         'deployment.environment.name' = '{{test_id}}'
       }
       SCOPE 'nervix/audit' VERSION '1.0'
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;

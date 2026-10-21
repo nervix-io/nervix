@@ -120,6 +120,19 @@ def mirror(surface, side, row, notes):
     return f"Compare {names}: {compared}. {reason}"
 
 
+def bounds_rows(bounds):
+    """The rows that state what an entity's connector holds and how long it waits."""
+    buffers = "\n".join(f"{buffer['holds']}: {buffer['bound']}" for buffer in bounds["buffers"])
+    waits = "\n".join(f"{wait['wait']}: {wait['bound']}" for wait in bounds["waits"])
+    checks = "\n".join(f"`STALLED PEER {key}`" for key in bounds["deadline_keys"])
+    return [
+        ("Buffers", buffers or "The connector holds no buffer between its transport and the host."),
+        ("Network waits", waits or "The connector waits on no network peer of its own."),
+        ("Driver limits", "\n".join(bounds["driver_limits"]) or "None declared."),
+        ("Stalled-peer checks", checks or "None: no client deadline key bounds a wait."),
+    ]
+
+
 def entity_rows(row, side, notes):
     location = row["locator"]
     if location is None:
@@ -137,6 +150,7 @@ def entity_rows(row, side, notes):
             ("Every live node", "yes" if row["every_node"] else "no; scheduled owner"),
             ("Position class", row["position"]), ("Acknowledgement confirmation", row["confirmation"]),
         ])
+        rows.extend(bounds_rows(row["bounds"]))
     else:
         rows.extend([
             ("Body", row["body"]), ("BATCH", row["batch"]),
@@ -145,6 +159,7 @@ def entity_rows(row, side, notes):
             ("Envelope", "\n".join(row["envelope"]) or absent(notes, row, "envelope")),
             ("PROPERTIES keys and exact types", "\n".join(row["properties"]) or absent(notes, row, "properties")),
         ])
+        rows.extend(bounds_rows(row["bounds"]))
     return rows
 
 

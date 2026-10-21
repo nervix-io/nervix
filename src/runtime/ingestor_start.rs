@@ -79,6 +79,9 @@ pub(super) struct IngestorRuntime {
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) branched: Vec<Arc<IngestorRouteRuntime>>,
     pub(super) tasks: Vec<JoinHandle<()>>,
+    /// The originator a domain-offset Kafka ingestor commits through, which schedule application
+    /// replaces while this instance runs; absent for every other ingestor.
+    pub(super) domain_offsets: Option<StdArc<KafkaOffsetOriginatorSlot>>,
 }
 
 /// A locally owned input that the committed revision replaces or removes. Both sides are typed
@@ -259,10 +262,12 @@ impl Runtime {
             }));
         };
 
+        // The stopped instance's originator ends with it, so no reassignment reaches it again.
         let IngestorRuntime {
             shutdown,
             branched,
             tasks,
+            domain_offsets: _,
         } = runtime;
         if shutdown.send(true).is_err() {
             warn!(

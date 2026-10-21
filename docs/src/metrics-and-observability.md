@@ -240,7 +240,7 @@ identity, a domain, or an operation identifier.
 
 `class` is the traffic class on transport series — `management`, `commands`, `replication`, `relay`,
 or `bulk` — and the execution class on admission series — `management`, `commands`, `relay`, `bulk`,
-`credentials` for memory, and `control_cpu`, `credentials_cpu`, `data_cpu`, `extension_cpu`,
+`restore_metadata`, `credentials` for memory, and `control_cpu`, `credentials_cpu`, `data_cpu`, `extension_cpu`,
 `bulk_cpu`, `consensus_storage`, `filesystem_storage` for workers. `operation` is the reserved request subquota: `shared`, `append`, `resource`, `snapshot`,
 `discovery`, `liveness`, `progress`, `admission`, `cancellation`, or `terminal`.
 
@@ -328,6 +328,19 @@ byte count at its capacity, or running jobs at its worker count with pending job
 while the other classes stay free — that is the isolation the pools exist for. A control answer
 arriving late while bulk work runs shows up as reactor delay and as request seconds rising for the
 `shared` or `liveness` operation, not as a connection failure.
+
+## Restore Staging Metrics
+
+Every node publishes its restore checkpoint maintenance after each sweep that completes:
+`nervix_restore_staging_bytes`, `nervix_restore_staging_keys` and
+`nervix_restore_staging_limit_bytes` are gauges of the unpublished restored checkpoint key and
+value bytes, their key count and the configured allowance; `nervix_restore_staging_reclaimed_bytes_total`
+and `nervix_restore_staging_sweeps_total` count the bytes completed sweeps removed and the sweeps
+themselves; and `nervix_restore_keyspaces_disk_bytes` is the disk allocation of the shared
+checkpoint keyspaces. They read zero until the node's first sweep completes. Backups have no metric
+family of their own: their transfers appear in the interconnection series and their conversions in
+the `bulk` and `restore_metadata` memory classes. [Backup And
+Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) defines each series.
 
 ## DESCRIBE Metrics
 

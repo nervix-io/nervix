@@ -25,6 +25,7 @@
 
 mod assembly;
 mod branch_state_sections;
+pub(in crate::application) mod cut_reach;
 pub(in crate::application) mod interconnect;
 mod materialized_sections;
 mod native_metadata_sections;
@@ -33,7 +34,11 @@ pub(in crate::application) mod retained;
 mod state_sections;
 mod stored_materialized_sections;
 
-use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
+    time::Duration,
+};
 
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
@@ -47,9 +52,9 @@ use nervix_execution::{ChargedBytes, Executor, MemoryClass};
 use nervix_interconnect::InterconnectStreamRequest as _;
 use nervix_models::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupDomainSummary,
-    BackupQuiesceCounters, BackupResources, BackupScope, CoordinationIdentity, DomainName,
-    DomainStatus, IngestorName, ModelKind, PLEXUS_LANGUAGE_VERSION, ResourceId, ResourceName,
-    Timestamp,
+    BackupQuiesceCounters, BackupResources, BackupScope, ClusterNodeName, CoordinationIdentity,
+    DomainName, DomainSchedule, DomainStatus, IngestorName, ModelKind, NodeRef,
+    PLEXUS_LANGUAGE_VERSION, ResourceId, ResourceName, Timestamp,
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
@@ -57,6 +62,7 @@ use tracing::info;
 
 use self::{
     assembly::{PlannedContent, PlannedScope, PlannedSection, plan_sections},
+    cut_reach::{CutReach, RequiredNode},
     interconnect::{
         CaptureDomainStateRequest, CaptureInventoryRequest, CapturedSectionInventory,
         FetchCapturedSection,
@@ -153,10 +159,64 @@ pub(in crate::application) enum BackupError {
     CaptureTimeout { domain: DomainName, reason: String },
     #[error("failed to capture domain '{domain}': {reason}")]
     CaptureDomain { domain: DomainName, reason: String },
+    #[error(
+        "node '{node}', the scheduled owner of {kind} '{name}' in domain '{domain}', is not live, \
+         so the cut cannot capture its state",
+        kind = .entity.kind.as_str(),
+        name = .entity.identifier.as_str()
+    )]
+    StateOwnerUnreachable {
+        domain: DomainName,
+        entity: NodeRef,
+        node: ClusterNodeName,
+    },
+    #[error(
+        "node '{node}', which runs {kind} '{name}' of domain '{domain}', is not live, so the \
+         quiesced cut cannot drain its work",
+        kind = .entity.kind.as_str(),
+        name = .entity.identifier.as_str()
+    )]
+    ExecutorUnreachable {
+        domain: DomainName,
+        entity: NodeRef,
+        node: ClusterNodeName,
+    },
+    #[error(
+        "{kind} '{name}' of domain '{domain}' is placed on no node, so the cut cannot capture its \
+         state",
+        kind = .entity.kind.as_str(),
+        name = .entity.identifier.as_str()
+    )]
+    StateUnplaced { domain: DomainName, entity: NodeRef },
     #[error("backup coordinator lost its leader tenure while capturing domain '{domain}'")]
     CoordinatorChanged { domain: DomainName },
     #[error("quiesce counters of domain '{domain}' overflowed or regressed during its cut")]
     QuiesceCounters { domain: DomainName },
+}
+
+impl BackupError {
+    fn state_owner_unreachable(domain: &DomainName, unreached: RequiredNode) -> Self {
+        Self::StateOwnerUnreachable {
+            domain: domain.clone(),
+            entity: unreached.entity,
+            node: unreached.node,
+        }
+    }
+
+    fn executor_unreachable(domain: &DomainName, unreached: RequiredNode) -> Self {
+        Self::ExecutorUnreachable {
+            domain: domain.clone(),
+            entity: unreached.entity,
+            node: unreached.node,
+        }
+    }
+
+    fn state_unplaced(domain: &DomainName, entity: &NodeRef) -> Self {
+        Self::StateUnplaced {
+            domain: domain.clone(),
+            entity: entity.clone(),
+        }
+    }
 }
 
 impl RetainedArtifact for StagedArtifact {
@@ -196,8 +256,37 @@ enum SectionSource {
     Captured(Arc<StagedArtifact>),
 }
 
+/// What holds a domain still while its owners capture it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureHold {
+    /// The cut's lease and pause: each owner forces its publications and closes the capture fence.
+    Quiesced,
+    /// The cut's lease over a stopped domain: each owner reads its stored checkpoints.
+    Stopped,
+    /// Nothing: the latest published checkpoints, while the schedule may move a placement.
+    Live,
+}
+
+impl CaptureHold {
+    /// Whether the owners capture a quiesced cut.
+    fn is_quiesced(self) -> bool {
+        match self {
+            Self::Quiesced => true,
+            Self::Stopped | Self::Live => false,
+        }
+    }
+
+    /// Whether the cut's mutation lease keeps the domain's schedule from moving a placement.
+    fn holds_schedule(self) -> bool {
+        match self {
+            Self::Quiesced | Self::Stopped => true,
+            Self::Live => false,
+        }
+    }
+}
+
 struct StateInventory {
-    node: nervix_models::ClusterNodeName,
+    node: ClusterNodeName,
     coordination: CoordinationIdentity,
     domain: DomainName,
     sections: Vec<CapturedSectionInventory>,
@@ -377,7 +466,7 @@ impl SessionServiceImpl {
                 let deadline = nervix_primitives::time::Instant::now()
                     + self.inner.runtime.domain_drain_timeout();
                 let inventories = self
-                    .capture_owner_state(domain, capture.applied.index, false, deadline)
+                    .capture_owner_state(domain, &capture, CaptureHold::Live, deadline)
                     .await?;
                 return Ok((capture, BackupCut::Live, domain_captured_at, inventories));
             }
@@ -447,9 +536,17 @@ impl SessionServiceImpl {
                 }));
             };
             if domain_state.status == DomainStatus::Stopped {
+                #[cfg(feature = "testing")]
+                self.inner
+                    .runtime
+                    .pause_backup_cut_if_armed(
+                        domain,
+                        crate::fault_injection::BackupCutBoundary::Capture,
+                    )
+                    .await;
                 let domain_captured_at = current_timestamp();
                 let inventories = self
-                    .capture_owner_state(domain, before_cut.applied.index, false, deadline)
+                    .capture_owner_state(domain, &before_cut, CaptureHold::Stopped, deadline)
                     .await?;
                 return Ok((
                     before_cut,
@@ -470,7 +567,14 @@ impl SessionServiceImpl {
                 }
                 nervix_primitives::time::sleep(std::time::Duration::from_millis(50)).await;
             };
+            #[cfg(feature = "testing")]
+            self.inner
+                .runtime
+                .pause_backup_cut_if_armed(domain, crate::fault_injection::BackupCutBoundary::Lease)
+                .await;
             let schedule = self.inner.consensus.current_schedule().await;
+            self.refuse_unreached_quiesced_cut(domain, schedule.domain(domain))
+                .await?;
             let timed_out = || {
                 Report::new(BackupError::CaptureTimeout {
                     domain: domain.clone(),
@@ -509,7 +613,13 @@ impl SessionServiceImpl {
             })?;
             let cut_result = nervix_primitives::time::timeout_at(deadline, async {
                 #[cfg(feature = "testing")]
-                self.inner.runtime.pause_backup_cut_if_armed(domain).await;
+                self.inner
+                    .runtime
+                    .pause_backup_cut_if_armed(
+                        domain,
+                        crate::fault_injection::BackupCutBoundary::Capture,
+                    )
+                    .await;
                 if self.inner.consensus.current_leader_tenure().as_ref()
                     != Some(&coordinator_tenure)
                 {
@@ -525,7 +635,7 @@ impl SessionServiceImpl {
                     .ok_or_else(|| Report::new(BackupError::NoConfiguration))?;
                 let domain_captured_at = current_timestamp();
                 let inventories = self
-                    .capture_owner_state(domain, capture.applied.index, true, deadline)
+                    .capture_owner_state(domain, &capture, CaptureHold::Quiesced, deadline)
                     .await?;
                 let after = self
                     .read_backup_quiesce_counters(domain, schedule.domain(domain))
@@ -653,17 +763,73 @@ impl SessionServiceImpl {
         Ok(totals)
     }
 
-    /// Makes every owner, including this leader, stage its state while the domain cut is held.
-    /// Inventory arrives in the same publication round; transfer waits until after resume. A
-    /// remote owner's capture shares the cut's budget, which ends at `deadline`, rather than a
-    /// request deadline of its own: staging a domain's state takes as long as that state is large.
+    /// The nodes a cut can reach: every node the cluster reports live, and this coordinator.
+    pub(in crate::application) async fn cut_live_nodes(&self) -> BTreeSet<ClusterNodeName> {
+        let mut live = BTreeSet::new();
+        live.extend(self.inner.cluster.live_node_ids().await);
+        live.insert(self.inner.consensus.local_node_id().clone());
+        live
+    }
+
+    /// Refuses a quiesced cut, before it pauses anything, when it could not capture or drain all
+    /// of the domain: the schedule places an entity whose state the archive captures on no node, or
+    /// the cluster does not report live a scheduled state owner, whose state the archive would
+    /// lack, or a node that runs the domain's work, whose admitted work the drain could not observe.
+    async fn refuse_unreached_quiesced_cut(
+        &self,
+        domain: &DomainName,
+        schedule: Option<&DomainSchedule>,
+    ) -> error_stack::Result<(), BackupError> {
+        let reach = CutReach::of(schedule);
+        if let Some(entity) = reach.unplaced_state() {
+            return Err(Report::new(BackupError::state_unplaced(domain, entity)));
+        }
+        let live = self.cut_live_nodes().await;
+        if let Some(unreached) = reach.unreached_state_owner(&live) {
+            return Err(Report::new(BackupError::state_owner_unreachable(
+                domain, unreached,
+            )));
+        }
+        if let Some(unreached) = reach.unreached_executor(&live) {
+            return Err(Report::new(BackupError::executor_unreachable(
+                domain, unreached,
+            )));
+        }
+        Ok(())
+    }
+
+    /// Makes every scheduled state owner stage its state at the revision `capture` read, and for
+    /// a live cut every other live node too. Inventory arrives in the same publication round;
+    /// transfer waits until after resume. A remote owner's capture shares the cut's budget, which
+    /// ends at `deadline`, rather than a request deadline of its own: staging a domain's state
+    /// takes as long as that state is large. A scheduled owner the cluster does not report live,
+    /// or state the schedule places on no node, refuses the cut, because the archive would lack it.
     async fn capture_owner_state(
         &self,
         domain: &DomainName,
-        revision: u64,
-        quiesced: bool,
+        capture: &ConfigurationCapture,
+        hold: CaptureHold,
         deadline: nervix_primitives::time::Instant,
     ) -> error_stack::Result<Vec<StateInventory>, BackupError> {
+        let reach = CutReach::of(capture.schedule.domain(domain));
+        if let Some(entity) = reach.unplaced_state() {
+            return Err(Report::new(BackupError::state_unplaced(domain, entity)));
+        }
+        let live = self.cut_live_nodes().await;
+        if let Some(unreached) = reach.unreached_state_owner(&live) {
+            return Err(Report::new(BackupError::state_owner_unreachable(
+                domain, unreached,
+            )));
+        }
+        let mut nodes = BTreeSet::new();
+        nodes.extend(reach.state_owners().cloned());
+        if !hold.holds_schedule() {
+            // Nothing keeps a live cut's schedule from moving a placement while its owners capture,
+            // so every live node is asked and stages what its own applied schedule assigns it.
+            nodes.extend(live);
+        }
+        let revision = capture.applied.index;
+        let quiesced = hold.is_quiesced();
         let coordination = self
             .inner
             .interconnect
@@ -674,12 +840,6 @@ impl SessionServiceImpl {
                     reason: error.to_string(),
                 })
             })?;
-        let mut nodes = self.inner.cluster.live_node_ids().await;
-        if !nodes.contains(self.inner.consensus.local_node_id()) {
-            nodes.push(self.inner.consensus.local_node_id().clone());
-        }
-        nodes.sort();
-        nodes.dedup();
         let results = futures_util::future::join_all(nodes.into_iter().map(|node| {
             let coordination = coordination.clone();
             let domain = domain.clone();

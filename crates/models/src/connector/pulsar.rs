@@ -20,6 +20,10 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
     external_name::{ExternalNameError, external_names, refuse_control_characters, require_length},
@@ -160,6 +164,87 @@ impl PulsarSubscriptionOwnership {
 /// A Pulsar subscription acknowledges exactly as a Kafka consumer does.
 pub type PulsarIngestMode = KafkaIngestMode;
 
+/// What the connector of a PULSAR TOPIC ingestor holds and how long it waits.
+const PULSAR_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "messages each partition consumer receives ahead of the host",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Driver("a receiver queue of 1000 messages"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "name resolution",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "connection: TCP, TLS and CONNECT",
+            bound: WaitBound::Driver("10 s per address, 12 retries"),
+        },
+        DeclaredWait {
+            wait: "topic lookup and subscribe",
+            bound: WaitBound::Driver("30 s per attempt, retried without limit"),
+        },
+        DeclaredWait {
+            wait: "an acknowledgement under ACK",
+            bound: WaitBound::Driver("30 s operation timeout"),
+        },
+        DeclaredWait {
+            wait: "close",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &["Inbound frames have no size limit."],
+};
+
+/// What the connector of a PULSAR TOPIC emitter holds and how long it waits.
+const PULSAR_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[
+        DeclaredBuffer {
+            holds: "receipts held under NO ACK",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 100,
+                    unit: "receipts",
+                },
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "messages the driver queues for its connection",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Driver("100 messages"),
+                overflow: BufferOverflow::FailPublish,
+            },
+        },
+        DeclaredBuffer {
+            holds: "records awaiting confirmation under ACK",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("ACK PARALLEL MAX"),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+    ],
+    waits: &[
+        DeclaredWait {
+            wait: "name resolution",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "connection",
+            bound: WaitBound::Driver("10 s per address"),
+        },
+        DeclaredWait {
+            wait: "topic lookup, producer creation and receipts",
+            bound: WaitBound::Driver(
+                "the operation timeout: ACK TIMEOUT under ACK, 30 s under NO ACK",
+            ),
+        },
+    ],
+    driver_limits: &["Messages above the broker's announced maximum are rejected."],
+};
+
 impl SourceEntity for PulsarTopicSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
         reads_headers: true,
@@ -200,6 +285,7 @@ impl SourceEntity for PulsarTopicSource {
             },
             OptionDeclaration::INSTANCES,
         ],
+        bounds: PULSAR_SOURCE_BOUNDS,
     };
 }
 
@@ -262,6 +348,7 @@ impl SinkEntity for PulsarTopicSink {
         options: &[],
         envelope: &[],
         properties: &[],
+        bounds: PULSAR_SINK_BOUNDS,
     };
 }
 

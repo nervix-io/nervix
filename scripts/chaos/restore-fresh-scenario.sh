@@ -124,29 +124,6 @@ fresh_start_cluster() {
         || fresh_fail product 'the fresh cluster never formed with its three node names'
 }
 
-# True when the original domain's ingestor reports stopped on the original cluster.
-fresh_original_stopped() {
-    local case_dir="$1"
-    domain_cli_command 'DESCRIBE INGESTOR chaos_ingestor;' >"${case_dir}/original-ingestor.attempt.txt" 2>&1 \
-        || return 1
-    grep -Fxq 'status: stopped' "${case_dir}/original-ingestor.attempt.txt"
-}
-
-# True once the output topic has not moved for five seconds; records the boundary it stopped at
-# in fresh_output_boundary.
-fresh_output_settled() {
-    local end
-    end="$(topic_end_offset chaos_output)" || return 1
-    local now
-    now="$(epoch_ms)"
-    if [[ "${end}" != "${fresh_output_boundary:-}" ]]; then
-        fresh_output_boundary="${end}"
-        fresh_output_since_ms="${now}"
-        return 1
-    fi
-    ((now - fresh_output_since_ms >= 5000))
-}
-
 # True when the restored domain's ingestor runs on a fresh node.
 fresh_restored_running() {
     local case_dir="$1"
@@ -185,12 +162,12 @@ run_restore_fresh_cluster() {
     phase 'fresh restore: original domain stopped'
     domain_cli_command 'STOP;' >"${case_dir}/stop-original.txt" 2>&1 \
         || fresh_fail product 'the original domain could not be stopped'
-    wait_for 'the original ingestor stopped' 60 fresh_original_stopped "${case_dir}" \
+    wait_for 'the original ingestor stopped' 60 backup_original_stopped "${case_dir}" \
         || fresh_fail product 'the original domain did not stop its ingestor'
-    fresh_output_boundary=""
-    wait_for 'the original output settled' 120 fresh_output_settled \
+    backup_output_boundary=""
+    wait_for 'the original output settled' 120 backup_output_settled \
         || fresh_fail product 'the original domain kept emitting after it stopped'
-    local original_output_end="${fresh_output_boundary}"
+    local original_output_end="${backup_output_boundary}"
     ((original_output_end >= archived_offset)) \
         || recovery_finding "${case_dir}" "the original domain emitted ${original_output_end} records, fewer than the archived offset ${archived_offset}"
     local source_at_stop

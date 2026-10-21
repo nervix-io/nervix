@@ -208,56 +208,67 @@ async fn then_materialized_generators_report_every_row(
     let length = kibibytes
         .checked_mul(1024)
         .assured("bounded row length fits");
-    while !pending.is_empty() {
-        let now = Instant::now();
-        let event = if now < deadline {
-            world
-                .active_session
-                .as_mut()
-                .assured("the summary subscription exists")
-                .try_next_subscription(deadline.saturating_duration_since(now))
-                .await
-                .assured("subscription remains connected")
-        } else {
-            None
-        };
-        let Some(event) = event else {
-            println!(
-                "missing materialized generator rows at the observation deadline: {pending:?}; \
-                 domain={}, round={round}, value_bytes={length}, subscription_node={:?}",
-                world.domain, world.active_session_node
-            );
-            capture_missing_materialized_state(world, &pending).await;
-            panic!("missing materialized generator rows: {pending:?}");
-        };
-        if !event.payload.contains(&format!("\"round\":{round}")) {
-            continue;
-        }
-        assert!(
-            event.payload.contains(&format!("\"length\":{length}")),
-            "{}",
-            event.payload
+    let mut session = world
+        .active_session
+        .take()
+        .assured("the summary subscription exists");
+    let (session, pending) =
+        crate::common::runner_observation::observe_off_the_runner(async move {
+            while !pending.is_empty() {
+                nervix_primitives::task::consume_budget().await;
+                let now = Instant::now();
+                let event = if now < deadline {
+                    session
+                        .try_next_subscription(deadline.saturating_duration_since(now))
+                        .await
+                        .assured("subscription remains connected")
+                } else {
+                    None
+                };
+                let Some(event) = event else {
+                    break;
+                };
+                if !event.payload.contains(&format!("\"round\":{round}")) {
+                    continue;
+                }
+                assert!(
+                    event.payload.contains(&format!("\"length\":{length}")),
+                    "{}",
+                    event.payload
+                );
+                if let Some(found) = pending
+                    .iter()
+                    .find(|(relay, tenant)| {
+                        event
+                            .payload
+                            .contains(&format!("\"relay\":\"state_{relay}\""))
+                            && event.payload.contains(&format!(
+                                "key={{\"tenant\":\"restore-tenant-{tenant}\"}}"
+                            ))
+                    })
+                    .copied()
+                {
+                    assert!(
+                        event
+                            .payload
+                            .contains(&format!("\"tenant\":\"restore-tenant-{}\"", found.1)),
+                        "payload and typed branch agree"
+                    );
+                    pending.remove(&found);
+                }
+            }
+            (session, pending)
+        })
+        .await;
+    world.active_session = Some(session);
+    if !pending.is_empty() {
+        println!(
+            "missing materialized generator rows at the observation deadline: {pending:?}; \
+             domain={}, round={round}, value_bytes={length}, subscription_node={:?}",
+            world.domain, world.active_session_node
         );
-        if let Some(found) = pending
-            .iter()
-            .find(|(relay, tenant)| {
-                event
-                    .payload
-                    .contains(&format!("\"relay\":\"state_{relay}\""))
-                    && event
-                        .payload
-                        .contains(&format!("key={{\"tenant\":\"restore-tenant-{tenant}\"}}"))
-            })
-            .copied()
-        {
-            assert!(
-                event
-                    .payload
-                    .contains(&format!("\"tenant\":\"restore-tenant-{}\"", found.1)),
-                "payload and typed branch agree"
-            );
-            pending.remove(&found);
-        }
+        capture_missing_materialized_state(world, &pending).await;
+        panic!("missing materialized generator rows: {pending:?}");
     }
 }
 

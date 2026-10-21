@@ -336,14 +336,17 @@ single frame:
 | Refused `Expired` | The retry validity of the execution reference has ended. |
 | Refused `NotOwner` | Another user ran the backup. |
 | Redirect to the leader | The node does not retain the archive and is not the leader. |
-| Refused `NotRetained` | The leader does not retain the archive: a download already collected it, the node that assembled it restarted, or the reference names no backup. |
+| Refused `NotRetained` | The leader does not retain the archive: the backup is still assembling it, the command assembled no archive, a download already collected it, the node that assembled it restarted, or the reference names no backup. |
 | Refused `ReadFailed` | The node could not read the archive it retains; the archive stays retained. |
 
 The first download whose completion frame was queued collects the archive, and a later download of
 it is refused. A download whose client goes away releases only its own hold, so the archive stays
 retained for the client to download again. The call is not bounded by the request timeout; the
 Rust client bounds the wait for each frame by it instead, and starts a failed download again from
-the first byte. [Backup And Restore](backup-and-restore.md) describes backups and their archives.
+the first byte. [Backup And Restore](backup-and-restore.md) describes backups and their archives,
+and [Transfer, Assembly And
+Retention](backup-and-restore-architecture.md#transfer-assembly-and-retention) how a node retains
+and serves one.
 
 The web console makes the same call over a WebSocket of its own on the console listener,
 `/console/backups/download`, authenticated like the console session. The connection carries the one
@@ -360,8 +363,10 @@ before it reads a frame, like every session method, and a call without valid cre
 
 The first frame is the restore's start. It names the request identity of the reply, the restore's
 execution reference, the `RESTORE` statement as canonical Plexus, and the archive's exact size and
-BLAKE3 digest. Every later frame carries the next bytes of the archive, at most 256 KiB each. The
-execution reference, the statement, and the archive's size and digest together are the restore's
+BLAKE3 digest. Every later frame carries the next non-empty bytes of the archive, at most 256 KiB
+each from the Rust client and the console; the leader accepts any non-empty chunk that fits one
+frame. The execution reference, the statement, and the archive's size and digest together are the
+restore's
 request identity, so sending them again joins the same restore.
 
 The reply is either the restore's outcome as a command outcome, or a typed refusal of the stream
@@ -373,7 +378,7 @@ itself, which leaves nothing changed:
 | Refused `InvalidStatement` | The start does not name exactly one `RESTORE` statement. |
 | Refused `SizeMismatch` | The chunks add up to more, or fewer, bytes than the start declares. |
 | Refused `DigestMismatch` | The archive's bytes do not have the digest the start declares. |
-| Refused `QuotaExceeded` | The archive is larger than the leader stages, or its staging area cannot hold the archive now. |
+| Refused `QuotaExceeded` | The archive is larger than one staged artifact may be, or the leader's staging area cannot hold it now. |
 | Refused `StagingFailed` | The leader could not write the archive to its staging area. |
 | A redirect outcome | The node is not the leader. |
 | An outcome at once | A restore under the reference already finished, which answers with its recorded outcome, or still applies on this node, which answers `OutcomeUnknown` with the `StillApplying` cause. |

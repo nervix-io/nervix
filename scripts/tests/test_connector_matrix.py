@@ -20,7 +20,14 @@ def declarations():
             "modes": ["NO ACK", "ACK SEQUENTIAL ACK TIMEOUT 5s"],
             "quiesce": ["SUSPEND"], "metadata": ["metadata.offset: I64 OPTIONAL"],
             "headers": True, "every_node": False, "position": "replayable",
-            "confirmation": "answered", "template": "CREATE KAFKA TOPIC INGESTOR <name>\n  FROM <client> TOPIC 'orders'\n  MODE <mode> ON QUIESCE <quiesce>\n  DECODE USING <codec> TO <relay> <route>;",
+            "confirmation": "answered",
+            "bounds": {
+                "buffers": [{"holds": "messages prefetched per partition", "bound": "driver default: queued.min.messages 100000; holds the peer back when full"}],
+                "waits": [{"wait": "connection setup", "bound": "driver default: socket.connection.setup.timeout.ms, 30 s"}],
+                "driver_limits": ["receive.message.max.bytes 100000000"],
+                "deadline_keys": [],
+            },
+            "template": "CREATE KAFKA TOPIC INGESTOR <name>\n  FROM <client> TOPIC 'orders'\n  MODE <mode> ON QUIESCE <quiesce>\n  DECODE USING <codec> TO <relay> <route>;",
         }],
         "emit": [{
             "entity": "KAFKA TOPIC", "connector": "KAFKA", "reference": "KAFKA client",
@@ -28,7 +35,14 @@ def declarations():
             "modes": ["NO_ACK RETRY POLICY BACKOFF 1s MAX 30s"],
             "headers": True, "batch": "optional", "batch_maximum": None,
             "body": "ENCODE USING <codec>", "batch_transformation": False,
-            "envelope": [], "properties": [], "template": "CREATE EMITTER <name>\n  FROM <relay> TO KAFKA <client> TOPIC orders\n  MODE <mode> ENCODE USING <codec>\n  FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+            "envelope": [], "properties": [],
+            "bounds": {
+                "buffers": [],
+                "waits": [{"wait": "produce request", "bound": "`timeout_ms`; unbounded when omitted"}],
+                "driver_limits": [],
+                "deadline_keys": ["timeout_ms"],
+            },
+            "template": "CREATE EMITTER <name>\n  FROM <relay> TO KAFKA <client> TOPIC orders\n  MODE <mode> ENCODE USING <codec>\n  FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         }],
         "clients": [{"kind": "KAFKA", "pool": "unpooled", "config_owner": "driver", "options": []}],
     }
@@ -68,7 +82,11 @@ class ConnectorMatrixTests(unittest.TestCase):
         text = matrix.render_matrix(declarations(), reasons())
         for value in ["KAFKA TOPIC", "metadata.offset: I64 OPTIONAL", "replayable", "answered",
                       "kafka_topic", "ACK SEQUENTIAL ACK TIMEOUT 5s", "unpooled", "driver",
-                      "producer reports", "no AMQP or MQTT"]:
+                      "producer reports", "no AMQP or MQTT",
+                      "messages prefetched per partition: driver default: queued.min.messages 100000",
+                      "receive.message.max.bytes 100000000", "produce request: `timeout_ms`",
+                      "`STALLED PEER timeout_ms`", "holds no buffer between its transport",
+                      "no client deadline key bounds a wait"]:
             self.assertIn(value, text)
 
     def test_each_absence_and_mirror_requires_a_nonempty_reason(self):

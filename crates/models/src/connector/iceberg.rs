@@ -14,11 +14,20 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+use std::time::Duration;
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 
-use super::{configured_client::configured_client, entity_union::connector_sinks};
+use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
+    },
+    configured_client::configured_client,
+    entity_union::connector_sinks,
+};
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
     EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm,
@@ -109,6 +118,38 @@ impl IcebergStorageBackend {
     }
 }
 
+/// What the connector of a ICEBERG TABLE holds and how long it waits.
+const ICEBERG_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "records staged on disk until a commit",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("COMMIT EACH ... MAX SIZE"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "catalog requests",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "object-store metadata and delete operations",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Default(Duration::from_secs(60)),
+            },
+        },
+        DeclaredWait {
+            wait: "object-store reads and writes",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Default(Duration::from_secs(10)),
+            },
+        },
+    ],
+    driver_limits: &[],
+};
+
 impl SinkEntity for IcebergTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
         writes_headers: false,
@@ -155,6 +196,7 @@ impl SinkEntity for IcebergTableSink {
         ],
         envelope: &[],
         properties: &[],
+        bounds: ICEBERG_BOUNDS,
     };
 }
 

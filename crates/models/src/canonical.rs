@@ -3016,7 +3016,10 @@ fn endpoint_intake_to_plexus(
     quiesce: &IngestQuiesceMode,
 ) -> String {
     let mode = match mode {
-        EndpointIngestMode::NoAck => NO_ACK,
+        EndpointIngestMode::NoAck => NO_ACK.to_owned(),
+        EndpointIngestMode::Ack { max, timeout } => {
+            format!("ACK MAX {max} ACK TIMEOUT {timeout}")
+        }
     };
     format!(
         "{} MODE {} ON QUIESCE {}",

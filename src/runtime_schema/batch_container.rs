@@ -773,7 +773,7 @@ mod tests {
             ),
             (
                 CodecJaqFormat::Yaml,
-                "[{seq: 1, note: a}, {seq: 2, note: b}, {seq: 3, note: c}]\n",
+                r#"[{"seq": 1, "note": "a"}, {"seq": 2, "note": "b"}, {"seq": 3, "note": "c"}]"#,
                 event_values(),
             ),
             (

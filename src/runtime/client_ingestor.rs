@@ -805,6 +805,7 @@ impl Runtime {
                 shutdown: shutdown_tx,
                 branched: branched_runtime.runtimes,
                 tasks: vec![worker, watcher],
+                domain_offsets: None,
             },
         );
     }

@@ -1673,15 +1673,8 @@ fn placement_member_model_is_eligible<Version>(model: &Model<Version>) -> bool {
         | Model::Reorderer(_)
         | Model::WindowProcessor(_)
         | Model::Emitter(_) => true,
-        // An endpoint ingestor executes on every node that serves its endpoint, so no placement
-        // can hold it.
-        Model::Ingestor(ingestor) => ingestor
-            .input
-            .source_kind()
-            .capabilities()
-            .reference
-            .endpoint_type()
-            .is_none(),
+        // Ingestors that execute on every node are outside placement rules.
+        Model::Ingestor(ingestor) => !ingestor.input.executes_on_every_cluster_node(),
         Model::Relay(_) => true,
         _ => false,
     }
@@ -1888,5 +1881,57 @@ mod tests {
             ]),
             "source, sink"
         );
+    }
+
+    #[test]
+    fn placement_completion_respects_every_node_ingestor_declarations() {
+        use nervix_models::{
+            EndpointIngestMode, HttpEndpointSource, IngestQuiesceMode, IngestSource,
+            SyslogIngestMode, SyslogListenerSource, WebsocketsEndpointSource,
+        };
+
+        use super::super::test_fixtures::{named, scheduled_node};
+
+        let scheduled = scheduled_node("intake", ModelKind::Ingestor);
+        assert!(placement_member_model_is_eligible(
+            scheduled.config.as_ref()
+        ));
+
+        let sources: [IngestSource; 3] = [
+            HttpEndpointSource {
+                endpoint: named("http_intake"),
+                mode: EndpointIngestMode::NoAck,
+                quiesce: IngestQuiesceMode::Reject {
+                    retry_after: "1s".to_owned(),
+                },
+            }
+            .into(),
+            WebsocketsEndpointSource {
+                endpoint: named("websocket_intake"),
+                mode: EndpointIngestMode::NoAck,
+                quiesce: IngestQuiesceMode::EndpointBuffer {
+                    max_size: "1MiB".to_owned(),
+                },
+            }
+            .into(),
+            SyslogListenerSource {
+                client: named("syslog_listener"),
+                mode: SyslogIngestMode::NoAck,
+                quiesce: IngestQuiesceMode::Suspend,
+            }
+            .into(),
+        ];
+        for source in sources {
+            let mut model = scheduled.config.clone();
+            let Model::Ingestor(ingestor) = model.as_mut() else {
+                panic!("the fixture constructs an ingestor");
+            };
+            let IngestorInput::Transport(input) = &mut ingestor.input else {
+                panic!("the fixture constructs a transport ingestor");
+            };
+            input.source = source;
+            assert!(model.executes_on_every_cluster_node());
+            assert!(!placement_member_model_is_eligible(model.as_ref()));
+        }
     }
 }

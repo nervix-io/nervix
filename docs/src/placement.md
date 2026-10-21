@@ -122,7 +122,9 @@ dependency behavior.
 
 `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors execute on every cluster
 node and therefore cannot be constrained by a placement rule. An ingestor's head fixes the pair it
-reads, so altering an ingestor never changes whether it can be a placement member. Member names are unqualified; a name shared by more than one
+reads, so altering an ingestor never changes whether it can be a placement member. Completion in
+`FROM` and `TO` offers only placement-eligible runtime nodes, applying the same exclusion to all
+three listener kinds. Member names are unqualified; a name shared by more than one
 eligible entity kind is ambiguous and must be changed before it can be used in a placement.
 
 Duplicate names on one side collapse. Both sides must contain at least one member after duplicate
@@ -393,6 +395,14 @@ source has drained, and the handoff gates have opened. A following command can u
 immediately. Cordon and uncordon similarly return after the eligibility state is authoritative;
 drain and node removal return after resulting ownership and schedules are usable on the remaining
 live set.
+
+The leader refuses the relocation's schedule write when it lost its leadership or cannot confirm it,
+for example because its lease lapsed. Such a relocation moves nothing and is not reported as failed.
+Its outcome stays unknown until the statement is repeated under the same execution reference,
+which a client that follows the session protocol does on its own, and the leader that serves the
+repetition plans the unit again from the schedule committed by then. A relocation whose plan went
+stale before its write, for example because the schedule changed, fails, and you retry the
+statement.
 
 The reported quiesce level is `ENTITY_PAUSE` when the plan moves at least one runtime node in a
 running domain, and `DYNAMIC` when the plan moves nothing or the domain is stopped. A stopped

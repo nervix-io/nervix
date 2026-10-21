@@ -46,7 +46,9 @@ Options:
                          cluster-restart; domain-time fault: none, voter-crash, voter-pause,
                          voter-partition, voter-stop or cluster-restart. One node supports none and
                          cluster-restart (default: ${fault}). backup-fault requires one of
-                         owner-crash, leader-crash, owner-partition or rolling-restart.
+                         owner-crash, leader-crash, owner-partition or rolling-restart, and
+                         restore-fault one of leader-crash, leader-partition, owner-crash or
+                         reclamation-owner-crash.
   --profile NAME         degraded-links profile: all, delay, jitter, random-loss,
                          burst-loss, rate-limit, combined (default: ${degradation_profile}).
   --load-interval-ms N   Fixed producer interval, 100..5000 (default: ${load_interval_ms}).
@@ -144,6 +146,9 @@ while [[ "$#" -gt 0 ]]; do
                 record_count=1000
                 overall_timeout=1800
             elif [[ "${scenario}" == backup-fault || "${scenario}" == restore-fresh-cluster || "${scenario}" == backup-cycles ]]; then
+                record_count=1000
+                overall_timeout=2400
+            elif [[ "${scenario}" == restore-fault || "${scenario}" == restore-volume ]]; then
                 record_count=1000
                 overall_timeout=2400
             elif [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
@@ -378,33 +383,43 @@ fi
 
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | mixed-instability) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | mixed-instability) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
     || setup_error '--nodes must be 1 or 3'
-# The restart, recovery, stateful, domain-time, mixed-instability, backup fault and fresh-cluster
-# restore scenarios share their traffic, findings and exit handling.
+# The restart, recovery, stateful, domain-time, mixed-instability, backup fault and restore
+# scenarios share their traffic, findings and exit handling.
 recovery_scenario=false
 case "${scenario}" in
-    stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | mixed-instability | backup-fault | restore-fresh-cluster) recovery_scenario=true ;;
+    stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | mixed-instability | backup-fault | restore-fresh-cluster | restore-fault | restore-volume) recovery_scenario=true ;;
 esac
 # The backup scenarios install the backup form of the baseline graph, whose Kafka ingestor keeps
 # domain-owned offsets instead of a consumer group.
 backup_graph=false
 case "${scenario}" in
-    backup | backup-cycles | backup-fault | restore-fresh-cluster) backup_graph=true ;;
+    backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume) backup_graph=true ;;
 esac
-# The backup scenarios without node faults also install a deduplicator and a detached window on the
-# backup graph's relay, whose outputs they judge exactly after backups and restores.
+# The backup scenarios without node faults, and the restore scenarios, also install a deduplicator
+# and a detached window on the backup graph's relay. Their archives carry that state, and the runs
+# that crash no node judge its outputs exactly after backups and restores.
 backup_state_graph=false
 case "${scenario}" in
-    backup-cycles | restore-fresh-cluster) backup_state_graph=true ;;
+    backup-cycles | restore-fresh-cluster | restore-fault | restore-volume) backup_state_graph=true ;;
+esac
+# The restore scenarios also install fixtures/restore-state.plexus, a WASM processor whose guest
+# saves this many padded bytes for every branch: a restore-fault archive's guest saves hold its
+# staging long enough under the hold delay, and a restore-volume archive's exceed the node's 32 MiB
+# bulk budget.
+restore_guest_bytes=""
+case "${scenario}" in
+    restore-fault) restore_guest_bytes=$((2 * 1024 * 1024)) ;;
+    restore-volume) restore_guest_bytes=$((40 * 1024 * 1024)) ;;
 esac
 # Every scenario that injects a fault drives Pumba through the local Docker daemon.
 uses_pumba=true
 case "${scenario}" in
-    baseline | backup | backup-cycles | restore-fresh-cluster) uses_pumba=false ;;
+    baseline | backup | backup-cycles | restore-fresh-cluster | restore-volume) uses_pumba=false ;;
 esac
 if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != backup-cycles && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${scenario}" != stateful && "${scenario}" != domain-time && "${node_count}" != 3 ]]; then
     setup_error "${scenario} requires --nodes 3"
@@ -428,9 +443,15 @@ case "${scenario}" in
             *) setup_error "--fault for backup-fault must be owner-crash, leader-crash, owner-partition or rolling-restart, not ${fault}" ;;
         esac
         ;;
+    restore-fault)
+        case "${fault}" in
+            leader-crash | leader-partition | owner-crash | reclamation-owner-crash) ;;
+            *) setup_error "--fault for restore-fault must be leader-crash, leader-partition, owner-crash or reclamation-owner-crash, not ${fault}" ;;
+        esac
+        ;;
     *)
         [[ "${fault_option_set}" != true ]] \
-            || setup_error '--fault applies only to stateful, domain-time and backup-fault'
+            || setup_error '--fault applies only to stateful, domain-time, backup-fault and restore-fault'
         ;;
 esac
 if [[ "${node_count}" == 1 && "${fault}" != none && "${fault}" != cluster-restart ]]; then
@@ -447,6 +468,12 @@ if [[ "${scenario}" != partition-recovery && "${partition_option_set}" == true ]
 fi
 if [[ ( "${scenario}" == stale-follower || "${scenario}" == former-owner-restart ) && "${outage_option_set}" == true ]]; then
     setup_error "${scenario} holds its outage until its recovery conditions; --outage-seconds is for crash and cluster-restart scenarios"
+fi
+if [[ "${scenario}" == restore-volume && "${outage_option_set}" == true ]]; then
+    setup_error 'restore-volume injects no fault; --outage-seconds is for crash scenarios'
+fi
+if [[ "${scenario}" == restore-fault && "${fault}" == leader-partition && "${outage_option_set}" == true ]]; then
+    setup_error 'leader-partition holds its isolation until the restore ends; --outage-seconds is for the crash faults'
 fi
 if [[ "${scenario}" != former-owner-restart && "${isolation_option_set}" == true ]]; then
     setup_error '--isolation-seconds applies only to former-owner-restart'
@@ -642,7 +669,7 @@ case "${scenario}" in
         # One record every two seconds keeps the bounded fixture flowing through all four cases.
         load_interval_ms=2000
         ;;
-    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | backup-fault | restore-fresh-cluster)
+    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | backup-fault | restore-fresh-cluster | restore-fault | restore-volume)
         # One record a second keeps the bounded fixture flowing through the slowest case.
         load_interval_ms=1000
         ;;
@@ -670,6 +697,15 @@ if [[ "${scenario}" == stateful ]]; then
     if [[ "${node_count}" == 3 ]]; then
         export CHAOS_REPLICA_COUNT=1
     fi
+fi
+if [[ -n "${restore_guest_bytes}" ]]; then
+    # One state replica, so every restore stages each guest save on an owner and a replica.
+    export CHAOS_REPLICA_COUNT=1
+fi
+if [[ "${scenario}" == restore-fault && "${fault}" == reclamation-owner-crash ]]; then
+    # A restore whose coordinator and client are both lost stays applying until the retry validity
+    # of its execution reference ends; three minutes bound the run's wait for that failure.
+    export CHAOS_COMMAND_RETRY_VALIDITY=3m
 fi
 export CHAOS_STATE_LOAD_FILE="${artifact_dir}/fixtures/state-input.ndjson"
 export CHAOS_PACED_LOAD_FILE="${artifact_dir}/fixtures/paced-input.ndjson"
@@ -1352,10 +1388,17 @@ finish() {
             if [[ "${outage_option_set}" == true ]]; then
                 reproducer+="$(printf ' --outage-seconds %q' "${outage_seconds}")"
             fi
-        elif [[ "${scenario}" == restore-fresh-cluster ]]; then
-            # A fresh-cluster restore runs only on three nodes and holds no outage.
+        elif [[ "${scenario}" == restore-fresh-cluster || "${scenario}" == restore-volume ]]; then
+            # A fresh-cluster restore and the restore volume run only on three nodes and hold no outage.
             reproducer="$(printf 'just chaos run %q --image %q --records %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}")"
+        elif [[ "${scenario}" == restore-fault ]]; then
+            # A restore fault runs only on three nodes and requires its fault.
+            reproducer="$(printf 'just chaos run %q --image %q --fault %q --records %q' \
+                "${scenario}" "${reproducer_image}" "${fault}" "${record_count}")"
+            if [[ "${outage_option_set}" == true ]]; then
+                reproducer+="$(printf ' --outage-seconds %q' "${outage_seconds}")"
+            fi
         else
             reproducer="$(printf 'just chaos run %q --image %q --nodes %q --records %q --outage-seconds %q' \
                 "${scenario}" "${reproducer_image}" "${node_count}" "${record_count}" "${outage_seconds}")"
@@ -1930,7 +1973,7 @@ if [[ "${uses_pumba}" == true ]]; then
     resolve_tool_image pumba "${CHAOS_PUMBA_IMAGE}"
     pumba_image_id="${tool_image_ids[pumba]}"
 fi
-if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability || "${scenario}" == backup-fault ]]; then
+if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability || "${scenario}" == backup-fault || "${scenario}" == restore-fault ]]; then
     resolve_tool_image nettools "${CHAOS_NETTOOLS_IMAGE}"
 fi
 # A recorded tool image is the one its recorded image ID names in a store of the recording kind, or
@@ -1994,7 +2037,7 @@ if [[ "${uses_pumba}" == true ]]; then
         >"${artifact_dir}/diagnostics/pumba-docker-preflight.txt" 2>&1 \
         || setup_error 'Pumba cannot access the selected Docker daemon'
 fi
-if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability || "${scenario}" == backup-fault ]]; then
+if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability || "${scenario}" == backup-fault || "${scenario}" == restore-fault ]]; then
     # Pumba's netem and iptables faults must take effect on this worker's kernel and heal on SIGTERM.
     network_preflight_status=0
     run_bounded 120 "${script_dir}/network-faults.sh" preflight --run-id "${run_id}" \
@@ -2051,6 +2094,14 @@ elif [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
     update_manifest '.fault = $fault | .deployment = {replica_count: ($replicas | tonumber), state_snapshot_interval: $interval}' \
         --arg fault "${fault}" --arg replicas "${CHAOS_REPLICA_COUNT:-0}" \
         --arg interval "${CHAOS_STATE_SNAPSHOT_INTERVAL:-30s}"
+elif [[ -n "${restore_guest_bytes}" ]]; then
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.fault = (if $fault == "none" then null else $fault end)
+        | .deployment = {replica_count: ($replicas | tonumber), command_retry_validity: $validity}
+        | .restore = {guest_save_bytes: ($bytes | tonumber), branches: 3}' \
+        --arg fault "${fault}" --arg replicas "${CHAOS_REPLICA_COUNT:-0}" \
+        --arg validity "${CHAOS_COMMAND_RETRY_VALIDITY:-15m}" --arg bytes "${restore_guest_bytes}"
 fi
 if [[ "${scenario}" == degraded-links ]]; then
     # The dollars in this jq filter are jq variables, not shell expansion.
@@ -2128,6 +2179,9 @@ elif [[ "${scenario}" == domain-time ]]; then
     scenario_topics=(chaos_paced_input chaos_paced_output)
 elif [[ "${backup_state_graph}" == true ]]; then
     scenario_topics=(chaos_unique_output chaos_window_output)
+    if [[ -n "${restore_guest_bytes}" ]]; then
+        scenario_topics+=(chaos_padded_input)
+    fi
 fi
 for scenario_topic in ${scenario_topics[@]+"${scenario_topics[@]}"}; do
     broker_admin /opt/kafka/bin/kafka-topics.sh \
@@ -2219,6 +2273,33 @@ fi
 if [[ "${backup_state_graph}" == true ]]; then
     domain_cli_command "$(<"${script_dir}/fixtures/backup-state.plexus")" \
         >"${artifact_dir}/public/configure-backup-state-plexus.txt" 2>&1
+fi
+if [[ -n "${restore_guest_bytes}" ]]; then
+    # The padded guest is WebAssembly text generated for this run's save size, which the packaged
+    # server loads directly; the run uploads exactly that file and records its identity.
+    mkdir -p "${artifact_dir}/fixtures/padded-wasm/processors"
+    "${script_dir}/fixtures/wasm/padded-state-wat.sh" "${restore_guest_bytes}" \
+        >"${artifact_dir}/fixtures/padded-wasm/processors/padded-state.wat"
+    chmod 0755 "${artifact_dir}/fixtures/padded-wasm" "${artifact_dir}/fixtures/padded-wasm/processors"
+    chmod 0644 "${artifact_dir}/fixtures/padded-wasm/processors/padded-state.wat"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.fixtures.padded_wasm = {resource: "chaos_padded_guest", resource_version: 1,
+        file: "processors/padded-state.wat", format: "WebAssembly text", sha256: $digest,
+        guest_save_bytes: ($bytes | tonumber), source: "scripts/chaos/fixtures/wasm/padded-state-wat.sh"}' \
+        --arg digest "$(openssl dgst -sha256 -r "${artifact_dir}/fixtures/padded-wasm/processors/padded-state.wat" | awk '{ print $1 }')" \
+        --arg bytes "${restore_guest_bytes}"
+    domain_cli_command 'CREATE RESOURCE chaos_padded_guest;' \
+        >"${artifact_dir}/public/create-padded-resource.txt" 2>&1
+    compose run --rm --no-deps -v "${artifact_dir}/fixtures/padded-wasm:/chaos-wasm:ro" admin \
+        nervix-cli --server "http://${cli_host}:47391" --domain chaos_baseline \
+        --password "${CHAOS_PASSWORD}" \
+        --command "UPLOAD RESOURCE chaos_padded_guest VERSION '/chaos-wasm';" \
+        >"${artifact_dir}/public/upload-padded-resource.txt" 2>&1
+    grep -Fxq 'uploaded resource version 1' "${artifact_dir}/public/upload-padded-resource.txt" \
+        || setup_error 'the packaged CLI did not upload the padded guest as resource version 1'
+    domain_cli_command "$(<"${script_dir}/fixtures/restore-state.plexus")" \
+        >"${artifact_dir}/public/configure-restore-state-plexus.txt" 2>&1
 fi
 domain_cli_command 'START;' >"${artifact_dir}/public/start-domain.txt" 2>&1
 if [[ "${scenario}" == domain-time ]]; then
@@ -2312,6 +2393,17 @@ if [[ "${scenario}" != "baseline" ]]; then
         # shellcheck source=restore-fresh-scenario.sh
         source "${script_dir}/restore-fresh-scenario.sh"
         run_restore_fresh_cluster
+    elif [[ "${scenario}" == restore-volume ]]; then
+        # Graph installation sourced backup-scenario.sh, whose archive steps this scenario reuses.
+        # shellcheck source=restore-scenario.sh
+        source "${script_dir}/restore-scenario.sh"
+        run_restore_volume
+    elif [[ "${scenario}" == restore-fault ]]; then
+        # shellcheck source=restore-scenario.sh
+        source "${script_dir}/restore-scenario.sh"
+        # shellcheck source=restore-fault-scenario.sh
+        source "${script_dir}/restore-fault-scenario.sh"
+        run_restore_fault
     elif [[ "${scenario}" == stale-follower ]]; then
         # shellcheck source=stale-follower-scenario.sh
         source "${script_dir}/stale-follower-scenario.sh"

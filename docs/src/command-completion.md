@@ -41,7 +41,10 @@ has expired, and a report that inspection no longer knows does not make its refe
 Finalization accepts a terminal command result. An `OutcomeUnknown`, leader redirect, or detached
 transaction leaves the execution applying and preserves the disposition and diagnostics for its
 current waiter. Reconciliation and repetition under the same reference resume that execution;
-an interrupted attempt never supplies a definitive failure for the execution ledger. A resumed
+an interrupted attempt never supplies a definitive failure for the execution ledger. An attempt
+whose proposal the leader refused because it lost its leadership, or could not confirm it, is
+interrupted in this sense. A leader whose lease lapsed refuses that way while it still leads. The
+attempt answers as a node that does not lead, never as a failure. A resumed
 transaction request whose transaction already finished answers each of its operations from what
 the finished transaction recorded: the same transaction for its opening, each append's recorded
 admission, and the transaction's terminal outcome for its commit or revert. The result it finalizes
@@ -61,6 +64,16 @@ An ordinary configuration command applies through a frozen internal transaction 
 captured planning inputs change before the effect is recorded, the command retains that failed
 attempt and starts a revision-derived attempt under the same execution reference. An explicit
 transaction remains frozen after `COMMIT` admission and reports the conflict instead of replanning.
+
+More than one coordinator can act on the same attempt: the leader that admitted the command and,
+after a leadership change, each leader whose reconciliation resumes the applying execution. A
+coordinator decides each preflight, queue, and commit-planning refusal against its own observation
+of the attempt, and another coordinator may have opened, committed, or paused the domain for that
+same attempt since then. Before a refusal becomes the command's outcome, its coordinator reads the
+attempt again. When the attempt moved since the observation the refusal was decided against, the
+coordinator recovers that progress under the same execution reference, joining the commit or
+returning its recorded outcome. Only a refusal decided against the attempt as it still stands
+becomes the command's outcome. A command's own domain pause therefore never fails that command.
 
 Resource uploads follow the same replay rule with an upload identity instead. It is scoped to the
 user, domain, and resource, bound to the verified archive digest, and retained without expiry; see
@@ -140,9 +153,10 @@ target node. A failure names the step, and the steps before it stay applied. An 
 retains a replicated start gate even after failure releases the execution's mutation lease.
 Retrying the reference while the restore applies on the leader returns `OutcomeUnknown` with the
 `StillApplying` cause at once, and after it finished returns the recorded outcome with the typed
-restore report. Only the leader the archive was streamed to holds it, so a new leader resumes an
-applying restore from its first step not recorded when a retry streams the archive again, and ends
-it as failed once the reference's retry validity passes without one. See
+restore report. Only the leader the archive was streamed to holds it, so a leader that holds it
+resumes an applying restore from its first step not recorded, another leader does so when a retry
+streams the archive again, and a leader without the archive ends the restore as failed once the
+reference's retry validity passes without one. See
 [Backup And Restore](./backup-and-restore.md#retries-disconnects-and-leader-changes).
 
 `RESET WASM PROCESSOR ... STATE` uses the same durable execution reference and retained outcome.

@@ -126,16 +126,15 @@ Feature: Logical ingestion time and admission
   @logical_ingestion_time
   Scenario Outline: Logical ingestion timestamps feed isolated duration windows at different rates
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these Plexus commands
+    And the leader node is configured with these Plexus statements
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 1s;
       CREATE SCHEMA event ( tenant STRING, value I64, occurred_at DATETIME );
       CREATE SCHEMA summary ( tenant STRING, total I64, samples I64, source_at DATETIME );
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH tenants SCHEMA tenant_key TTL 1h;
-      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer, occurred_at string );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
-        ENCODE occurred_at AS RFC3339;
+      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
       CREATE RELAY summaries SCHEMA summary BRANCHED BY tenants;
       CREATE VHOST edge ingestion-window-{{test_id}}.example.com;
@@ -155,19 +154,10 @@ Feature: Logical ingestion time and admission
       """
     When http payload is posted to host "ingestion-window-{{test_id}}.example.com" path "/events"
       """
-      {"tenant":"acme","value":10,"occurred_at":"2000-01-01T00:00:00Z"}
-      """
-    And http payload is posted to host "ingestion-window-{{test_id}}.example.com" path "/events"
-      """
-      {"tenant":"beta","value":100,"occurred_at":"2000-01-01T00:00:00Z"}
-      """
-    And http payload is posted to host "ingestion-window-{{test_id}}.example.com" path "/events"
-      """
-      {"tenant":"acme","value":20,"occurred_at":"2000-01-01T00:00:00Z"}
-      """
-    And http payload is posted to host "ingestion-window-{{test_id}}.example.com" path "/events"
-      """
-      {"tenant":"beta","value":200,"occurred_at":"2000-01-01T00:00:00Z"}
+      [{"tenant":"acme","value":10,"occurred_at":"2000-01-01T00:00:00Z"},
+       {"tenant":"beta","value":100,"occurred_at":"2000-01-01T00:00:00Z"},
+       {"tenant":"acme","value":20,"occurred_at":"2000-01-01T00:00:00Z"},
+       {"tenant":"beta","value":200,"occurred_at":"2000-01-01T00:00:00Z"}]
       """
     Then within "10s" the relay subscription receives payloads
       """

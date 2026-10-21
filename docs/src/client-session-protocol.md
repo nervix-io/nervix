@@ -376,6 +376,10 @@ and report the refusal if they find the session full. A request identity that is
 is refused with `DuplicateRequestId`, and that refusal necessarily names the same identity as the
 request still in flight.
 
+Semantic completion of placement members offers only placement-eligible runtime nodes. HTTP
+endpoint, WebSocket endpoint and Syslog listener ingestors execute on every cluster node, so their
+declared execution policy excludes them from these suggestions.
+
 Choice lookups on the concurrent lane return typed values for structured client controls. A domain
 dependency selects internal schemas, branches, relays, codecs, VHOSTs, signaling protocols,
 JSON/CBOR/AVRO wire schemas, or resource catalogs; a domain and relay reference select relay
@@ -511,7 +515,10 @@ Consensus proposal failures reach the session with typed leadership, conflict, s
 transaction-mutation causes in local reports. The session selects its disposition from those
 causes and the command's admission phase, while the display message retains the underlying Raft
 or I/O reason. Report carriage does not change request correlation, the durable acknowledgement
-boundary, or the stored transaction response.
+boundary, or the stored transaction response. A leader whose lease lapsed, because no quorum
+acknowledged it within the lease, refuses a proposal before appending it and names no leader. The
+session answers that refusal as leadership loss, never as a failure of the command, even though the
+same node may still lead when it answers.
 
 | Disposition | Phase | What it establishes | What a client does |
 | --- | --- | --- | --- |
@@ -520,7 +527,7 @@ boundary, or the stored transaction response.
 | `LeaderRedirect` | Before admission | The serving node is not the leader, and nothing was admitted there. The leader's endpoints are absent while no leader is known or discovery cannot reach it. | Reconnect to the leader, or wait for one, and repeat the command under the same reference. |
 | `TransactionDetached` | Before admission | The leader holds no binding for the session's transaction, typically after a reconnect or leader change. | Attach the transaction again and repeat the command under the same reference. |
 | `TransactionTakenOver` | Before admission | Another session attached this session's transaction, and nothing was admitted for this request. | Report it. Attaching the transaction again would take it back, which is the user's decision rather than a retry. |
-| `OutcomeUnknown` | Admission, execution, or finalization | The command may have been admitted and its outcome is not known yet: leadership moved while it was admitted or applied (`LeadershipLost`), it is still applying (`StillApplying`), or it finished but its outcome is not yet authoritative on every live node (`NotYetAuthoritative`). | Repeat the command under the same reference until the outcome is known. Never report success or failure from this disposition. |
+| `OutcomeUnknown` | Admission, execution, or finalization | The command may have been admitted and its outcome is not known yet: leadership moved, or the leader could not confirm it still leads, while the command was admitted or applied (`LeadershipLost`), it is still applying (`StillApplying`), or it finished but its outcome is not yet authoritative on every live node (`NotYetAuthoritative`). | Repeat the command under the same reference until the outcome is known. Never report success or failure from this disposition. |
 | `ExecutionReferenceConflict` | Before admission | The reference already identifies a different command, which differs in its owner, domain, transaction position, or content. Nothing was admitted for this request. | Treat it as a defect in the client's use of references. |
 | `ExecutionReferenceExpired` | Before admission | The reference aged out of execution history. Its outcome can no longer be recovered, and the command was not executed again. | Report that the outcome is unknown; issuing the work again is a new command. |
 | `PreviewStale` | Commit admission | The commit named a preview that no longer describes the transaction. Nothing was applied, and the transaction stays open. The reply names both the expected and the current preview. | Inspect the transaction again and decide whether to commit against the current preview. |
@@ -741,7 +748,12 @@ planned before a schedule revision fails rather than overwrite that revision.
 What happens after such a refusal depends on who owns the plan. An ordinary command applies through
 a frozen internal attempt; when its captured inputs change before its effect is recorded, it keeps
 the failed attempt and starts a new attempt derived from the current revision under the same
-execution reference, so its caller sees one outcome. An explicit transaction freezes its plan when
+execution reference, so its caller sees one outcome. A refusal reached against an out-of-date view
+of the attempt is not that outcome either. After leadership changes, the leader that admitted the
+command can still hold an observation from before a successor opened, committed, or paused the
+domain for the same attempt. That coordinator reads the attempt again before accepting a preflight,
+queue, or commit-planning refusal. If the attempt moved, it recovers that progress under the same
+reference, and only a refusal against the attempt as it still stands is recorded. An explicit transaction freezes its plan when
 `COMMIT` is admitted: stale inputs at admission leave the transaction `OPEN`, and a step whose
 inputs changed after admission fails the transaction with the applied prefix preserved, rather than
 being replanned against state the client never reviewed. [Transaction Quiescence And Impact
@@ -886,8 +898,8 @@ call fails as uncertain and names the execution reference. The Rust client, the 
 never send `CancelRequest`: a caller that stops waiting only drops its waiter, and the reply, when
 it comes, is discarded.
 
-`nervix-cli backup --timeout` extends its request and retry budgets by the named quiesce timeout,
-leaving the ordinary request budget for command admission, capture and the reply.
+`nervix-cli backup --timeout` sets only each running domain's quiesce timeout; its request and
+retry budgets stay at their defaults, and `--backup-wait-timeout` bounds the overall command wait.
 
 For native Rust sessions, the client loads a Hickory resolver during setup or uses one its owner
 provided. It resolves the hostname of each selected server, seed, and redirect on a new connection
@@ -1605,7 +1617,7 @@ a `BackupArchiveComplete`. Every other answer is one frame:
 | `BackupDownloadFailed` with `Expired` | The retry validity of the reference has ended. |
 | `BackupDownloadFailed` with `NotOwner` | Another user ran the backup. |
 | `LeaderRedirect` | The node does not retain the archive and does not lead. |
-| `BackupDownloadFailed` with `NotRetained` | The leader does not retain the archive: a download already collected it, the node that assembled it restarted, or the reference names no backup. |
+| `BackupDownloadFailed` with `NotRetained` | The leader does not retain the archive: the backup is still assembling it, the command assembled no archive, a download already collected it, the node that assembled it restarted, or the reference names no backup. |
 | `BackupDownloadFailed` with `ReadFailed` | The node could not read the archive it retains; the archive stays retained. |
 
 An archive is retained on the node that assembled it until the first download whose completion
@@ -1654,8 +1666,9 @@ the leader before the restore can even be planned. `RESTORE` therefore never tra
 sent as a command with `RequestFailed`. [Backup And Restore](./backup-and-restore.md#restoring)
 owns what a restore recreates and the order of its steps.
 
-The client streams one `RestoreStart`, then the archive in order as non-empty `RestoreChunk` frames
-of at most 256 KiB, and half-closes the stream. The start carries the request identity of the
+The client streams one `RestoreStart`, then the archive in order as non-empty `RestoreChunk`
+frames, and half-closes the stream. The Rust client and the console send chunks of at most
+256 KiB; the leader accepts any non-empty chunk that fits one frame. The start carries the request identity of the
 reply, the restore's execution reference, the statement as canonical Plexus, and the archive's exact
 size and BLAKE3 digest. The reference is a persistent command's execution reference, and the
 request it is bound to is the statement together with the archive's size and digest: a restore is

@@ -17,6 +17,10 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, DEFAULT_CONNECT_TIMEOUT, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
 };
@@ -40,6 +44,54 @@ pub struct ZeroMqPullSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a ZEROMQ PULL holds and how long it waits.
+const ZEROMQ_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "the frame a peer is sending",
+        bound: BufferBound::Unbounded,
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "connecting, retried without limit",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "the ZMTP handshake",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "receiving the next message",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &["The driver has no high-water mark, maximum message size or heartbeat."],
+};
+
+/// What the connector of a ZEROMQ PUSH holds and how long it waits.
+const ZEROMQ_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "bytes queued for a peer",
+        bound: BufferBound::Unbounded,
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "connecting and the ZMTP handshake",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "a send",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
+        },
+    ],
+    driver_limits: &["The driver has no high-water mark, maximum message size or heartbeat."],
+};
+
 impl SourceEntity for ZeroMqPullSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
         reads_headers: false,
@@ -56,6 +108,7 @@ impl SourceEntity for ZeroMqPullSource {
         ],
         locator: None,
         options: &[],
+        bounds: ZEROMQ_SOURCE_BOUNDS,
     };
 }
 
@@ -124,6 +177,7 @@ impl SinkEntity for ZeroMqPushSink {
         options: &[],
         envelope: &[],
         properties: &[],
+        bounds: ZEROMQ_SINK_BOUNDS,
     };
 }
 

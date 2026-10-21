@@ -153,6 +153,12 @@ inspection but publishes none for request routing. HTTP resolves one route per r
 WebSocket retains the route and signaling protocol selected at upgrade. The detailed admission and
 publication contract remains in [Data-Plane Concurrency](./data-plane-concurrency.md).
 
+The endpoint ingestor plan also lowers request policy once: `NoAck`, or an acknowledged policy
+with positive response capacity, physical timeout and retry delay. The decision rejects an
+unusable duration, incompatible quiesce policy or missing WebSocket signaling reference. Source
+composition creates the intake's window and checks its prepared signaling encoder. Runtime
+requests consume that prepared policy and never read configuration Models or parse durations.
+
 [Data-Plane Concurrency](./data-plane-concurrency.md) owns the publication and branch refresh
 protocols. [Domain Clock](./domain-clock.md) owns the execution-time capability bound during
 installation. [Client Session Protocol](./client-session-protocol.md) owns how a client observes
@@ -182,7 +188,11 @@ same desired revision rather than reconstructing one from live tasks.
 The swap sequence fences delivery before stopping an owner, prepares new local placement and
 programs, replaces relay owner and remote-consumer edges, and publishes the routing snapshot
 before waking materialized-state waiters. An owner that still executes locally across a placement
-change keeps its task; a moved owner rebinds only its affected runtime and state placement.
+change keeps its task; a moved owner rebinds only its affected runtime and state placement. A
+reassignment rebinds the replicated state of every node it names, so a Kafka ingestor kept this way
+takes the originator its domain offsets' new binding issued: a change that only replaces a replica
+of those offsets never refuses the ingestor's commits. An ingestor instance the schedule stopped
+keeps the originator it last held, which every later binding refuses.
 
 The affected relay gates remain closed through publication. An already buffered owner batch takes
 a nonwaiting permit before fan-out: it finishes under the prior consumer set if admitted before
@@ -234,7 +244,11 @@ same plans, so removing an ingestor after `STOP` can still release its MQTT sess
 connector compares validated session identities and subscriptions, cleans up obsolete identities
 best-effort, and prepares changed sessions at the replacement endpoint before its source starts.
 No Model, source driver, or registry guard is retained across this transition. Ordinary shutdown
-and ownership transfer with an unchanged input preserve external sessions.
+and ownership transfer with an unchanged input preserve external sessions. For Pulsar, a changed
+owned input reaches retirement too: the connector compares the two resolved service endpoints,
+qualified topics and subscription names before deciding whether to remove the preceding
+subscription. An unchanged subscription is retained even when the replacement declares it
+`PROVISIONED`; replacing its routes, codec, mode or instance count does not remove its backlog.
 
 The emitter plan pairs its ordered relay inputs with one typed sink and its applicable client,
 codec, expression, flush, batching, and error contracts. A native `TO CLIENT` sink has no
@@ -307,8 +321,9 @@ archived domain start generation. Native loading retains one database snapshot w
 bounded sections. A `RESUME` completion changes the domain to running at that same generation
 and mapping only after publication and passive-handle clearing on every target node. The new
 running revision therefore binds generators and branch tasks to installed materialized rows.
-[Backup And Restore](./backup-and-restore.md) owns archive cut modes, state selection, skipped
-sections, and the operator-visible restore guarantees.
+[Backup And Restore Architecture](./backup-and-restore-architecture.md) owns archive cut modes,
+state selection, skipped sections and the restore guarantees, and [Backup And
+Restore](./backup-and-restore.md) the operator-visible statements, reports and limits.
 
 Resource plans carry concrete pinned version numbers from the committed Models. Node binding
 loads exactly those versions from its local resource store; it never resolves `LATEST` or reads

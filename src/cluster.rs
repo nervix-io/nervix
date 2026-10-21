@@ -1598,6 +1598,15 @@ impl ClusterHandle {
         );
     }
 
+    /// Whether this process incarnation has advertised that it is terminating. It reads the
+    /// node's own state, so the answer never waits for gossip to carry the advertisement, and an
+    /// incarnation keeps the advertisement until it exits.
+    pub async fn local_incarnation_is_terminating(&self) -> bool {
+        let chitchat_handle = self.chitchat.clone();
+        let mut chitchat = chitchat_handle.lock().await;
+        chitchat.self_node_state().get(KEY_TERMINATING).is_some()
+    }
+
     pub async fn set_local_runtime_revision_ready(&self, revision: u64) {
         self.set_local_revision(KEY_RUNTIME_REVISION_READY, revision)
             .await;

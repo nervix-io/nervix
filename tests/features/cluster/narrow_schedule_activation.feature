@@ -1004,3 +1004,75 @@ Feature: Narrow schedule activation on ownership change
       """
       {"source":"acme-state","tenant":"acme","user_id":10}
       """
+
+  @kept_ingestor_offsets @deloxide_stress
+  Scenario: A Kafka ingestor keeps committing its domain offsets after their replica is lost
+    Given Kafka is running
+    And runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And Kafka topic "offset_replica_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32, tenant STRING );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'offset_replica_{{test_id}}'
+          OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+            RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING metric_codec
+        TO raw_metrics
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And these Plexus commands are executed through the client on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "metric_source" is saved as placeholder "offset_owner"
+    And the first replica for scheduled "ingestor" "metric_source" in the last cluster status is saved as placeholder "offset_replica"
+    When these Plexus commands are executed on node "{{offset_owner}}"
+      """
+      CREATE SUBSCRIPTION raw_metrics_subscription TO raw_metrics;
+      """
+    And Kafka message is published to topic "offset_replica_{{test_id}}"
+      """
+      {"value":1,"tenant":"alpha"}
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "value":1
+      """
+    When node "{{offset_replica}}" is stopped
+    Then node "{{offset_owner}}" eventually observes a stable leader
+    And within "30s" node "{{offset_owner}}" eventually reports scheduled "ingestor" "metric_source" replicas without placeholder "offset_replica"
+    And within "5s" node "{{offset_owner}}" eventually reports scheduled "ingestor" "metric_source" owner equals placeholder "offset_owner"
+    When Kafka message is published to topic "offset_replica_{{test_id}}"
+      """
+      {"value":2,"tenant":"alpha"}
+      """
+    And Kafka message is published to topic "offset_replica_{{test_id}}"
+      """
+      {"value":3,"tenant":"alpha"}
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "value":2
+      "value":3
+      """
+    When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{offset_owner}}" into "offsets.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When the CLI describes backup archive "offsets.nvxb" as json through node "{{offset_owner}}"
+    Then the described backup records Kafka domain offset 3 for ingestor "metric_source"

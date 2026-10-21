@@ -86,6 +86,10 @@ pub(crate) enum SourceStartError {
     SignalingProtocolMissing { protocol: SignalingProtocolName },
     #[error("endpoint '{endpoint}' is not instantiated")]
     EndpointNotInstantiated { endpoint: EndpointName },
+    #[error("endpoint '{endpoint}' requires a signaling protocol for MODE ACK")]
+    EndpointAcknowledgementProtocolMissing { endpoint: EndpointName },
+    #[error("endpoint '{endpoint}' cannot encode its acknowledgement in the signaling wire format")]
+    EndpointAcknowledgementEncoding { endpoint: EndpointName },
     #[error("Kafka DOMAIN offsets are not authoritative on this node")]
     KafkaDomainOffsetsNotAuthoritative,
     #[error("invalid {setting} '{value}'")]
@@ -139,9 +143,26 @@ impl Runtime {
                     .retire_before(self, &retirement.previous.ingestor, replacement)
                     .await
             }
-            // The plan retires a Pulsar input only once no replacement reads in its place.
             SourceStartPlan::Pulsar(source) => {
-                source.retire(self, &retirement.previous.ingestor).await;
+                let replacement = match retirement.replacement.as_deref() {
+                    Some(IngestorStartPlan {
+                        input: IngestorInputPlan::Transport(input),
+                        ..
+                    }) => {
+                        if let SourceStartPlan::Pulsar(source) = &input.source {
+                            Some(source)
+                        } else {
+                            None
+                        }
+                    }
+                    Some(_) | None => None,
+                };
+                if let Err(error) = source
+                    .retire_before(self, &retirement.previous.ingestor, replacement)
+                    .await
+                {
+                    self.events().report_error(format!("{error:#}"));
+                }
                 Ok(())
             }
             SourceStartPlan::Http(_)

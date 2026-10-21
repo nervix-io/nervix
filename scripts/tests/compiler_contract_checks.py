@@ -91,6 +91,7 @@ class CompilerContractTests(unittest.TestCase):
             "NERVIX_LINT_CONFIGURATION": "compiler-contract",
             "NERVIX_LINT_REPORTS": str(output),
             "NERVIX_LINT_DRIVER": str(runner.driver),
+            "NERVIX_LINT_ADMISSION": runner.admission.encode(),
             "KACHE_KEY_SALT": runner.identity + ":contract:" + name,
         })
         compiler = subprocess.run(["rustup", "which", "--toolchain", TOOLCHAIN, "rustc"],

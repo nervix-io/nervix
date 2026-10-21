@@ -23,7 +23,7 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
-use std::{io::Write, num::NonZeroU64, ops::Range, str::FromStr, time::Duration};
+use std::{io::Write, ops::Range, str::FromStr, time::Duration};
 
 use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use arrow_array::{
@@ -33,17 +33,17 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, TimeUnit};
 use async_trait::async_trait;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use flate2::{Compression as GzipLevel, write::GzEncoder};
 use hyper_util::client::legacy::connect::HttpConnector;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_connector::{
-    HttpClientConfig, MappedSinkCarrier, MappedSinkRows, MeasuredRequest, PerRecordOutcome,
-    PreparedRowRequest, RejectedSinkRecord, RowRequest, RowRequestLimits, RowRequestPreparation,
-    RowRequestSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkPublishResult, SinkRecordId, SinkRecordPosition, SinkRetryDelay, SinkRowRequest,
-    SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
+    ConfiguredDeadline, HttpClientConfig, MappedSinkCarrier, MappedSinkRows, MeasuredRequest,
+    PerRecordOutcome, PreparedRowRequest, RejectedSinkRecord, RowRequest, RowRequestLimits,
+    RowRequestPreparation, RowRequestSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
+    SinkPublishError, SinkPublishResult, SinkRecordId, SinkRecordPosition, SinkRetryDelay,
+    SinkRowRequest, SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
     optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, EmitterBatchPolicy, FieldPath, Timestamp};
@@ -582,19 +582,9 @@ impl OtelClientSettings {
                 )));
             }
         };
-        let timeout = match optional_client_config_value(config, "timeout_ms") {
-            Some(raw) => {
-                // `NonZeroU64` rejects both a non-number and a zero, so a request budget that
-                // could never allow a request is not representable past this point.
-                let millis = raw.parse::<NonZeroU64>().map_err(|_| {
-                    invalid_configuration(format!(
-                        "invalid OTEL timeout_ms '{raw}'; expected a positive integer"
-                    ))
-                })?;
-                Some(Duration::from_millis(millis.get()))
-            }
-            None => None,
-        };
+        let timeout = ConfiguredDeadline::timeout(config)
+            .change_context(SinkStartError::InvalidConfiguration { sink: OTEL })?
+            .map(ConfiguredDeadline::bound);
         let headers = optional_client_config_value(config, "headers")
             .map(Self::parse_headers)
             .transpose()?

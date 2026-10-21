@@ -26,11 +26,11 @@ use meticulous::OptionExt as _;
 use nervix_models::{
     AckWindow, ClientConfigEntry, ClientEndpointContract, ClientName, ClientProducerPolicy,
     ClientProducerSource, ClientResourceMount, ClusterNodeName, CodecName, CreateIngestor,
-    CreateSchema, DomainName, EndpointName, FlushPolicy, GeneralErrorPolicy, HttpEndpointSource,
-    HttpRequestSource, HttpSource, IngestAcknowledgement, IngestQuiesceMode, IngestSource,
-    IngestSourceKind, IngestTimestampSource, IngestorInput, IngestorName, KafkaIngestMode,
-    KafkaOffsetMode, KafkaSource, KafkaTopicSource, MessageErrorOperation, Model, ModelName,
-    MqttIngestMode, MqttSource, MqttTopicSource, NatsSource, NatsSubjectSource,
+    CreateSchema, DomainName, EndpointIngestMode, EndpointName, FlushPolicy, GeneralErrorPolicy,
+    HttpEndpointSource, HttpRequestSource, HttpSource, IngestAcknowledgement, IngestQuiesceMode,
+    IngestSource, IngestSourceKind, IngestTimestampSource, IngestorInput, IngestorName,
+    KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource, MessageErrorOperation, Model,
+    ModelName, MqttIngestMode, MqttSource, MqttTopicSource, NatsSource, NatsSubjectSource,
     PrometheusQuerySource, PrometheusSource, PulsarIngestMode, PulsarSource,
     PulsarSubscriptionOwnership, PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource,
     RabbitMqSource, RedisPubSubSource, RedisSource, ResolvedBranching, ScheduledNode, SchemaField,
@@ -209,7 +209,104 @@ client_plan!(SyslogIngestorStartPlan {});
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EndpointIngestorStartPlan {
     pub(crate) endpoint: EndpointName,
-    pub(crate) mode: nervix_models::EndpointIngestMode,
+    pub(crate) mode: EndpointRequestPlan,
+}
+
+impl EndpointIngestorStartPlan {
+    fn decide(
+        ingestor: &IngestorName,
+        expected: &EndpointName,
+        resolved: &nervix_models::CreateEndpoint,
+        mode: &EndpointIngestMode,
+        quiesce: &IngestQuiesceMode,
+    ) -> Result<Self, Report<EntrypointPlanError>> {
+        if expected != &resolved.name {
+            return Err(Report::new(EntrypointPlanError::SourceIdentityMismatch {
+                ingestor: ingestor.clone(),
+                expected: ModelName::from(expected),
+                resolved: ModelName::from(&resolved.name),
+            }));
+        }
+        if matches!(mode, EndpointIngestMode::Ack { .. })
+            && resolved.endpoint_type == nervix_models::EndpointType::Websockets
+            && resolved.signaling_protocol.is_none()
+        {
+            return Err(Report::new(
+                EntrypointPlanError::MissingEndpointAckProtocol {
+                    ingestor: ingestor.clone(),
+                    endpoint: resolved.name.clone(),
+                },
+            ));
+        }
+        Ok(Self {
+            endpoint: resolved.name.clone(),
+            mode: EndpointRequestPlan::decide(ingestor, mode, quiesce)?,
+        })
+    }
+}
+
+/// A request policy already checked and converted at the decision boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EndpointRequestPlan {
+    NoAck,
+    Ack {
+        max: NonZeroUsize,
+        timeout: Duration,
+        retry_after: Duration,
+    },
+}
+
+impl EndpointRequestPlan {
+    fn decide(
+        ingestor: &IngestorName,
+        mode: &EndpointIngestMode,
+        quiesce: &IngestQuiesceMode,
+    ) -> Result<Self, Report<EntrypointPlanError>> {
+        match mode {
+            EndpointIngestMode::NoAck => Ok(Self::NoAck),
+            EndpointIngestMode::Ack { max, timeout } => {
+                let invalid = EntrypointPlanError::InvalidEndpointDuration {
+                    ingestor: ingestor.clone(),
+                    clause: "ACK TIMEOUT",
+                    value: timeout.clone(),
+                };
+                let timeout =
+                    parse_duration_text(timeout).change_context_lazy(|| invalid.clone())?;
+                if timeout.is_zero() || timeout > nervix_models::ClientDeadline::LONGEST {
+                    return Err(Report::new(invalid));
+                }
+                let IngestQuiesceMode::Reject { retry_after } = quiesce else {
+                    return Err(Report::new(
+                        EntrypointPlanError::UnsupportedEndpointAckQuiesce {
+                            ingestor: ingestor.clone(),
+                            quiesce: quiesce.kind(),
+                        },
+                    ));
+                };
+                let retry_after = parse_duration_text(retry_after).change_context_lazy(|| {
+                    EntrypointPlanError::InvalidEndpointDuration {
+                        ingestor: ingestor.clone(),
+                        clause: "ON QUIESCE REJECT RETRY AFTER",
+                        value: retry_after.clone(),
+                    }
+                })?;
+                if retry_after > nervix_models::ClientDeadline::LONGEST {
+                    return Err(Report::new(EntrypointPlanError::InvalidEndpointDuration {
+                        ingestor: ingestor.clone(),
+                        clause: "ON QUIESCE REJECT RETRY AFTER",
+                        value: humantime::format_duration(retry_after).to_string(),
+                    }));
+                }
+                let max = NonZeroUsize::new(usize::from(max.get()))
+                    .assured("a positive u16 fits every supported native usize");
+                Ok(Self::Ack {
+                    max,
+                    timeout,
+                    retry_after,
+                })
+            }
+        }
+    }
 }
 
 /// Everything the host needs to start one ingestor: the ingestor itself and the plan of the input
@@ -292,8 +389,8 @@ pub(crate) enum SourceStartPlan {
 impl IngestorStartPlan {
     /// Whether replacing this input retires external state that outlives its execution.
     /// Routes and codecs do not identify the MQTT session, so changing them alone retains it.
-    /// A Pulsar subscription its ingestor owns is removed only once no replacement reads in its
-    /// place: dropping the ingestor or its domain removes it, and a replacement keeps it.
+    /// A changed owned Pulsar source needs a resolved subscription comparison at composition;
+    /// an absent replacement removes the owned subscription after its source tasks stop.
     pub(crate) fn requires_source_retirement(&self, replacement: Option<&Self>) -> bool {
         let IngestorInputPlan::Transport(input) = &self.input else {
             return false;
@@ -310,7 +407,16 @@ impl IngestorStartPlan {
             }
             SourceStartPlan::Pulsar(source) => {
                 let owned = source.subscription.ownership == PulsarSubscriptionOwnership::Ingestor;
-                owned && replacement.is_none()
+                if !owned {
+                    return false;
+                }
+                if let Some(replacement) = replacement
+                    && let IngestorInputPlan::Transport(input) = &replacement.input
+                    && let SourceStartPlan::Pulsar(replacement) = &input.source
+                {
+                    return source != replacement;
+                }
+                true
             }
             SourceStartPlan::Http(_)
             | SourceStartPlan::Kafka(_)
@@ -386,7 +492,9 @@ impl IngestorStartPlan {
             SourceStartPlan::RedisPubSub(plan) => plan.mode.acknowledgement(),
             SourceStartPlan::ZeroMq(plan) => plan.mode.acknowledgement(),
             SourceStartPlan::Sqs(plan) => plan.mode.acknowledgement(),
-            SourceStartPlan::Endpoint(plan) => plan.mode.acknowledgement(),
+            // Endpoint windows and durations are already typed and belong to request intake,
+            // which never runs the broker acknowledgement loop.
+            SourceStartPlan::Endpoint(_) => return None,
             SourceStartPlan::Websockets(plan) => plan.mode.acknowledgement(),
             SourceStartPlan::Http(_)
             | SourceStartPlan::Prometheus(_)
@@ -809,27 +917,19 @@ impl SourceStartPlan {
                 IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
                     endpoint: expected,
                     mode,
+                    quiesce,
                     ..
                 }))
                 | IngestSource::Websockets(WebsocketsSource::Endpoint(WebsocketsEndpointSource {
                     endpoint: expected,
                     mode,
+                    quiesce,
                     ..
                 })),
                 Model::Endpoint(resolved),
-            ) => {
-                if expected != &resolved.name {
-                    return Err(Report::new(EntrypointPlanError::SourceIdentityMismatch {
-                        ingestor: name.clone(),
-                        expected: ModelName::from(expected),
-                        resolved: ModelName::from(&resolved.name),
-                    }));
-                }
-                Ok(Self::Endpoint(EndpointIngestorStartPlan {
-                    endpoint: resolved.name.clone(),
-                    mode: mode.clone(),
-                }))
-            }
+            ) => Ok(Self::Endpoint(EndpointIngestorStartPlan::decide(
+                name, expected, resolved, mode, quiesce,
+            )?)),
             (
                 IngestSource::Websockets(WebsocketsSource::Connection(
                     WebsocketsConnectionSource {
@@ -1263,7 +1363,7 @@ mod tests {
             }),
             plan: SourceStartPlan::Endpoint(EndpointIngestorStartPlan {
                 endpoint: named("upstream"),
-                mode: nervix_models::EndpointIngestMode::NoAck,
+                mode: EndpointRequestPlan::NoAck,
             }),
             reads_headers: true,
         }
@@ -1348,11 +1448,103 @@ mod tests {
             plan.ingestor.declared_input.quiesce_mode(),
             declared.quiesce()
         );
-        assert_eq!(
-            plan.transport_acknowledgement(),
-            Some(declared.acknowledgement())
-        );
         assert!(!plan.keeps_domain_offsets());
+    }
+
+    #[test]
+    fn endpoint_ack_plan_converts_its_declared_window_and_durations_once() {
+        for max in [1, 8, u16::MAX] {
+            let mode = EndpointIngestMode::Ack {
+                max: std::num::NonZeroU16::new(max).assured("the declared boundaries are positive"),
+                timeout: "250ms".to_owned(),
+            };
+            let plan = EndpointRequestPlan::decide(
+                &named("source"),
+                &mode,
+                &IngestQuiesceMode::Reject {
+                    retry_after: "1500ms".to_owned(),
+                },
+            )
+            .assured("a bounded acknowledged endpoint has a request plan");
+            assert_eq!(
+                plan,
+                EndpointRequestPlan::Ack {
+                    max: NonZeroUsize::new(usize::from(max)).assured("a positive u16 fits usize"),
+                    timeout: Duration::from_millis(250),
+                    retry_after: Duration::from_millis(1500),
+                }
+            );
+        }
+    }
+
+    #[rstest]
+    #[case("0s")]
+    #[case("not-a-duration")]
+    #[case("1000000years")]
+    fn endpoint_ack_plan_refuses_an_unusable_deadline(#[case] timeout: &str) {
+        let mode = EndpointIngestMode::Ack {
+            max: nonzero!(8u16),
+            timeout: timeout.to_owned(),
+        };
+        let error = EndpointRequestPlan::decide(
+            &named("source"),
+            &mode,
+            &IngestQuiesceMode::Reject {
+                retry_after: "1s".to_owned(),
+            },
+        )
+        .expect_err("the deadline must be positive and representable by the physical timer");
+        assert!(
+            matches!(error.current_context(), EntrypointPlanError::InvalidEndpointDuration {
+            ingestor, clause: "ACK TIMEOUT", ..
+        } if ingestor == &named::<IngestorName>("source"))
+        );
+    }
+
+    #[test]
+    fn endpoint_ack_plan_refuses_quiesce_buffering_at_the_model_boundary() {
+        let mode = EndpointIngestMode::Ack {
+            max: nonzero!(8u16),
+            timeout: "5s".to_owned(),
+        };
+        let error = EndpointRequestPlan::decide(
+            &named("source"),
+            &mode,
+            &IngestQuiesceMode::EndpointBuffer {
+                max_size: "1MiB".to_owned(),
+            },
+        )
+        .expect_err("request acknowledgement requires sender-owned retries");
+        assert!(matches!(
+            error.current_context(),
+            EntrypointPlanError::UnsupportedEndpointAckQuiesce { .. }
+        ));
+    }
+
+    #[test]
+    fn an_acknowledged_websocket_endpoint_requires_its_declared_wire_protocol() {
+        let source =
+            IngestSource::Websockets(WebsocketsSource::Endpoint(WebsocketsEndpointSource {
+                endpoint: named("upstream"),
+                mode: EndpointIngestMode::Ack {
+                    max: nonzero!(8u16),
+                    timeout: "5s".to_owned(),
+                },
+                quiesce: IngestQuiesceMode::Reject {
+                    retry_after: "1s".to_owned(),
+                },
+            }));
+        let endpoint = Model::Endpoint(CreateEndpoint {
+            name: named("upstream"),
+            on_vhost: named("public"),
+            path: "/events".to_owned(),
+            endpoint_type: EndpointType::Websockets,
+            signaling_protocol: None,
+        });
+        let error = planned_entrypoints(domain_models(source, endpoint))
+            .expect_err("there is no implicit wire protocol for acknowledged frames");
+        assert!(error.contains::<EntrypointPlanError>());
+        assert!(format!("{error:#}").contains("requires a signaling protocol"));
     }
 
     #[test]
@@ -1421,7 +1613,7 @@ mod tests {
     }
 
     #[test]
-    fn retirement_removes_an_owned_pulsar_subscription_only_with_its_ingestor() {
+    fn retirement_checks_changed_owned_pulsar_inputs_and_keeps_unchanged_inputs() {
         let case = pulsar_case();
         let plans = planned_entrypoints(domain_models(case.source, case.source_model))
             .assured("a matching source and ingestor produce a plan");
@@ -1429,7 +1621,14 @@ mod tests {
         assert!(owned.requires_source_retirement(None));
         assert!(!owned.requires_source_retirement(Some(owned)));
 
-        // A replacement keeps the owned subscription, whatever it reads.
+        // Codec and route changes do not change the source that reads the subscription.
+        let mut replacement = owned.clone();
+        let mut input = transport_plan(owned).clone();
+        input.codec = named("alternate_json");
+        replacement.input = IngestorInputPlan::Transport(input);
+        assert!(!owned.requires_source_retirement(Some(&replacement)));
+
+        // Changed sources require the composition root to compare their resolved subscriptions.
         let mut input = transport_plan(owned).clone();
         let SourceStartPlan::Pulsar(source) = &mut input.source else {
             panic!("the Pulsar fixture produces a typed Pulsar source");
@@ -1437,10 +1636,10 @@ mod tests {
         source.subscription.name = named("replacement");
         let mut replacement = owned.clone();
         replacement.input = IngestorInputPlan::Transport(input.clone());
-        assert!(!owned.requires_source_retirement(Some(&replacement)));
+        assert!(owned.requires_source_retirement(Some(&replacement)));
         input.source = http_case().plan;
         replacement.input = IngestorInputPlan::Transport(input);
-        assert!(!owned.requires_source_retirement(Some(&replacement)));
+        assert!(owned.requires_source_retirement(Some(&replacement)));
 
         // A provisioned subscription is the operator's, so even a drop keeps it.
         let mut provisioned = owned.clone();

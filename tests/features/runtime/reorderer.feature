@@ -13,14 +13,10 @@ Feature: Reorderer
         sequence I64,
         payload STRING
       );
-        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
-        tenant string,
-        sequence integer,
-        payload string
-      );
         CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
-        TO SCHEMA notification;
+        FROM JSON
+        TO SCHEMA notification
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
@@ -59,17 +55,14 @@ Feature: Reorderer
         CREATE SUBSCRIPTION filtered_notifications_subscription TO filtered_notifications WHERE tenant = 'acme';
         START;
       """
+    # Keep every ordering key in one unfolded input batch.
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """
-      {"tenant":"acme","sequence":3,"payload":"third"}
-      """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
-      """
-      {"tenant":"acme","sequence":1,"payload":"first"}
-      """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
-      """
-      {"tenant":"acme","sequence":2,"payload":"second"}
+      [
+        {"tenant":"acme","sequence":3,"payload":"third"},
+        {"tenant":"acme","sequence":1,"payload":"first"},
+        {"tenant":"acme","sequence":2,"payload":"second"}
+      ]
       """
     Then within "5s" the relay subscription receives a payload
       """
@@ -109,15 +102,10 @@ Feature: Reorderer
         priority I32,
         payload STRING
       );
-        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
-        tenant string,
-        category string,
-        priority integer,
-        payload string
-      );
         CREATE CODEC notification_codec
-        FROM WIRE JSON SCHEMA notification_wire
-        TO SCHEMA notification;
+        FROM JSON
+        TO SCHEMA notification
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
@@ -149,21 +137,15 @@ Feature: Reorderer
         CREATE SUBSCRIPTION ordered_notifications_subscription TO ordered_notifications WHERE tenant = 'acme';
         START;
       """
+    # Keep every ordering key in one unfolded input batch.
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """
-      {"tenant":"acme","category":" B ","priority":-1,"payload":"b-low"}
-      """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
-      """
-      {"tenant":"acme","category":"a","priority":-5,"payload":"a-high"}
-      """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
-      """
-      {"tenant":"acme","category":" A ","priority":-2,"payload":"a-low"}
-      """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
-      """
-      {"tenant":"acme","category":"b","priority":-3,"payload":"b-high"}
+      [
+        {"tenant":"acme","category":" B ","priority":-1,"payload":"b-low"},
+        {"tenant":"acme","category":"a","priority":-5,"payload":"a-high"},
+        {"tenant":"acme","category":" A ","priority":-2,"payload":"a-low"},
+        {"tenant":"acme","category":"b","priority":-3,"payload":"b-high"}
+      ]
       """
     Then within "5s" the relay subscription receives a payload
       """

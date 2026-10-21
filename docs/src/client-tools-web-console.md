@@ -82,6 +82,10 @@ it follows the clock, `INTERRUPTED` while the connection is lost, which shows no
 once the server ends the attachment, which the console does not attach again until the selection
 or connection changes.
 
+The terminal's connected-to-leader message confirms the new session's serving node. The selected
+clock remains `ATTACHING` until its own attach reply arrives, including when a new session restores
+it after a leader change. Its `PACED` state and advancing ticks establish restored-clock readiness.
+
 ## Creating Entities From Forms
 
 The top bar's **Create** menu opens keyboard-accessible forms for domains, users, resource
@@ -552,10 +556,12 @@ The console then downloads the archive from the leader that assembled it, and ch
 arrives. It accepts the archive only once every byte arrived and the size and BLAKE3 digest match
 the summary, and only then hands it to the browser as a download, saved under the last component of
 the file the statement names; the browser chooses the directory. A partial or altered archive never
-reaches the browser's downloads. The first complete download releases the archive on the leader.
+reaches the browser's downloads. The first download whose last frame the leader queued releases
+the archive on the leader.
 
-A download that fails in transport, stalls, or ends early starts again from the first byte while
-the leader retains the archive, and **Download again** retries one that stopped for such a reason.
+A download that fails in transport, stalls, or ends early starts again from the first byte after a
+one-second pause, for up to eight attempts and redirects in all, while the leader retains the
+archive, and **Download again** retries one that stopped for such a reason.
 A download the leader refuses, because the archive expired, a download already collected it, or the
 node that assembled it restarted, ends with that reason; the backup itself completed, and running
 it again assembles a new archive.

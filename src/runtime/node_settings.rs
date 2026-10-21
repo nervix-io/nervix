@@ -63,6 +63,12 @@ impl Runtime {
     ) -> error_stack::Result<SourceAckPolicy, IngestorStartError> {
         match acknowledgement {
             IngestAcknowledgement::Unacknowledged => Ok(SourceAckPolicy::None),
+            IngestAcknowledgement::Request { timeout, .. } => {
+                Self::parse_ack_timeout(domain, ingestor, timeout)?;
+                // Request intake owns this window; there is no broker position for the polling
+                // source loop to confirm.
+                Ok(SourceAckPolicy::None)
+            }
             IngestAcknowledgement::Sequential { timeout, retry } => {
                 let timeout = Self::parse_ack_timeout(domain, ingestor, timeout)?;
                 let retry = Self::parse_retry_policy(domain, ingestor, retry)?;

@@ -784,6 +784,9 @@ pub(super) struct IngestRouteCollector {
     pub(super) pending: PendingIngestGroup,
     pub(super) routed: IndexMap<RoutedGroupKey, Vec<RelayMessage>, RandomState>,
     pub(super) flush_at: Option<Instant>,
+    /// Whether local input construction was refused during this collector's lifetime. This stays
+    /// distinct from downstream ACK failure, which can arrive concurrently with dispatch.
+    input_refused: bool,
 }
 
 impl IngestRouteCollector {
@@ -805,7 +808,12 @@ impl IngestRouteCollector {
             pending: PendingIngestGroup::new(scope, row_bound),
             routed: IndexMap::with_hasher(RandomState::default()),
             flush_at: None,
+            input_refused: false,
         }
+    }
+
+    pub(super) fn input_refused(&self) -> bool {
+        self.input_refused
     }
 
     /// Decodes one source payload into the group's record builder, its unfolding admitted to the
@@ -1612,6 +1620,9 @@ impl Runtime {
                         ..
                     } => {
                         keep.append(false);
+                        collector.input_refused |= output_routes.routes.iter().any(|output| {
+                            matches!(output.message_error_policy, MessageErrorPolicy::Log)
+                        });
                         let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
                         self.handle_ingestor_message_error(IngestorMessageError {
                             routing,
@@ -1667,6 +1678,10 @@ impl Runtime {
                 if admitted.value(row) {
                     continue;
                 }
+                collector.input_refused |= output_routes
+                    .routes
+                    .iter()
+                    .any(|output| matches!(output.message_error_policy, MessageErrorPolicy::Log));
                 let missing = event_timestamps.is_null(row);
                 let error = structured_message_error(
                     execution_now,
@@ -1931,6 +1946,9 @@ impl Runtime {
                     .pop_front()
                     .verified("the queue above was filled with one ACK entry per route");
                 let output = &output_routes.routes[route_error.output_index];
+                if let MessageErrorPolicy::Log = output.message_error_policy {
+                    collector.input_refused = true;
+                }
                 self.handle_structured_message_error(MessageErrorHandling {
                     routing: Some(routing),
                     domain,

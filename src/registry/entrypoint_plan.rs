@@ -79,6 +79,27 @@ pub(crate) enum EntrypointPlanError {
         clause: &'static str,
         value: String,
     },
+    #[error("endpoint ingestor '{ingestor}' declares invalid {clause} '{value}'")]
+    InvalidEndpointDuration {
+        ingestor: IngestorName,
+        clause: &'static str,
+        value: String,
+    },
+    #[error(
+        "endpoint ingestor '{ingestor}' in MODE ACK requires ON QUIESCE REJECT, found {quiesce:?}"
+    )]
+    UnsupportedEndpointAckQuiesce {
+        ingestor: IngestorName,
+        quiesce: nervix_models::IngestQuiesceKind,
+    },
+    #[error(
+        "WebSocket endpoint ingestor '{ingestor}' in MODE ACK requires a signaling protocol on \
+         endpoint '{endpoint}'"
+    )]
+    MissingEndpointAckProtocol {
+        ingestor: IngestorName,
+        endpoint: nervix_models::EndpointName,
+    },
     #[error("ingestor '{ingestor}' has an endpoint contract canonical Plexus cannot render")]
     UnrenderableClientContract { ingestor: IngestorName },
     #[error("{kind:?} '{node}' declares no input relay")]

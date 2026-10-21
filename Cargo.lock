@@ -6814,6 +6814,7 @@ name = "nervix-connector-http"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
  "error-stack",
  "httparse",
  "httpdate",
@@ -6825,6 +6826,7 @@ dependencies = [
  "reqwest 0.13.5",
  "rustls",
  "rustls-pki-types",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
@@ -6869,6 +6871,7 @@ dependencies = [
  "tokio",
  "tracing",
  "typetag",
+ "ubyte",
  "url",
  "uuid",
  "webpki-roots 1.0.9",
@@ -6878,6 +6881,7 @@ dependencies = [
 name = "nervix-connector-kafka"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "async-trait",
  "bolero",
  "criterion 0.5.1",
@@ -6929,12 +6933,14 @@ dependencies = [
  "nervix-connector",
  "nervix-dns",
  "nervix-execution",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
  "nervix-test-environment",
  "nonzero_ext",
  "rumqttc-core-next",
  "rumqttc-next",
+ "shuttle",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7079,6 +7085,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio-util",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -7096,7 +7103,9 @@ dependencies = [
  "nervix-dns",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "nervix-test-environment",
+ "socket2 0.6.5",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7161,10 +7170,13 @@ dependencies = [
  "meticulous",
  "nervix-connector",
  "nervix-dns",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "nervix-simd-kernels",
  "nervix-test-environment",
+ "shuttle",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7230,6 +7242,7 @@ version = "0.1.0-dev"
 dependencies = [
  "async-trait",
  "error-stack",
+ "meticulous",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
@@ -7310,6 +7323,7 @@ version = "0.1.0-dev"
 dependencies = [
  "arch-into",
  "aws-smithy-runtime-api",
+ "bolero",
  "bytes",
  "error-stack",
  "hickory-resolver 0.26.3",

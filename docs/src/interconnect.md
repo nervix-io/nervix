@@ -181,8 +181,9 @@ A discovered peer is registered at the interconnect endpoint it advertised, and 
 open one of its pool connections resolves that endpoint again, inside the attempt's connection setup
 deadline. The attempt dials the resolved addresses in order, giving each an equal share of the time
 that remains, so an address that refuses or never answers leaves time for the next one. The
-connection budget and ordered address-attempt policy are owned by `nervix-dns` and shared with
-outbound connector transports; interconnect retains its socket and peer failure classification.
+operation budget and ordered address-attempt policy are owned by `nervix-dns` and shared with
+outbound connector transports; an attempt's lookup may take the whole of its deadline, and
+interconnect retains its socket and peer failure classification.
 The first address that accepts carries the TLS handshake, HTTP/2 and the connection hello, inside
 the same deadline; a failure there fails the attempt. The advertised host stays the TLS server
 name, which the peer's certificate must name, and the authority of every request on the connection;
@@ -321,7 +322,11 @@ therefore remains explicit cleanup work. A participant that refuses capture, pre
 recovery preparation, confirmation, activation, or reconciliation answers with a rejection whose
 text is its complete failure chain rather than only the outermost failure, so the coordinator
 reports, for example, a destination WASM guest's classified restore failure with its stage, branch,
-module, and saved state revision. Discard is exact and idempotent over the coordination
+module, and saved state revision. A destination whose own process incarnation has advertised that
+it is terminating refuses a planned-handoff preparation before it validates the request, with
+`destination node '<node_id>' is terminating`: the coordinator plans from its gossip view, which can
+still list a stopping peer as eligible, while the destination's own advertisement is authoritative.
+Discard is exact and idempotent over the coordination
 identity, transition ID, domain, and entity; a delayed discard for one operation cannot remove a
 replacement prepared by another operation.
 
@@ -347,7 +352,11 @@ classification.
 
 After a receiver admits a new gate engagement or release, a receiver-owned task finishes that state
 transition even if the requesting connection disappears. Coordinator loss therefore cannot strand
-an operation in a partially engaged state or cancel cleanup after the receiver accepted it.
+an operation in a partially engaged state or cancel cleanup after the receiver accepted it. Those
+tasks and each lease's deadline task belong to the receiver's runtime. A receiver that stops ends
+every lease it holds once its domains have stopped and waits for those tasks, so a lease its
+coordinator never released ends with the receiver rather than at a deadline past its stop, and an
+engagement that reaches a receiver whose runtime has stopped fails.
 
 Each receiver lease is a distinct in-memory instance even when an identical request is re-engaged
 after release. Its deadline task may remove only that exact instance. An earlier deadline can
@@ -439,7 +448,7 @@ each message's metadata, its body, and each column buffer inside that body. A bo
 otherwise is refused as misframed, so a declared length never sizes an allocation the body does not
 back, and a column buffer is never sliced outside its message. The same scan refuses, as
 undecodable, a body whose schema declares a field type Nervix does not carry, a dictionary encoding
-among them, or whose record batch is at odds with that schema. It opens every Arrow section of a
+among them, or whose record batch is compressed or at odds with that schema. It opens every Arrow section of a
 sealed snapshot, a checkpoint or a backup archive.
 
 HTTP/2 flow control adds another bound. Each stream begins with a 64 KiB receive window, each
@@ -708,6 +717,11 @@ remaining handoff shares are parked, on `REQUIRED WAIT` or in a window that reta
 own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
 The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
 source or persist an acknowledgement. Admission progress carries no parked state.
+
+Progress and terminal acknowledgements share the bounded application receive queue. The application
+keeps consuming progress while terminal delivery waits for queue capacity. The one-slot transport
+capacity test explicitly queues progress, consumes it while sending the terminal acknowledgement,
+and verifies that the next relay grant fits only after that terminal send completes.
 
 ### Acknowledgement Registrations
 
@@ -1099,10 +1113,15 @@ the active decoded section are resident at once.
 node fetches a resource archive and how it verifies and records the fetched version.
 
 Backup state capture uses typed drain, capture, inventory, and fetch operations. The leader reads
-each node's admitted work through a management-class drain request and requests a separate
-confirming force-flush round after all nodes appear quiet. The leader sends a management-class capture
-request with its coordination identity and applied cut revision to each live node, then reads each
-node's management-class inventory of staged sections. A capture request's deadline is the remaining
+the admitted work of every live node and every node the domain's schedule assigns its work to
+through a management-class drain request, and requests a separate confirming force-flush round after
+all nodes appear quiet. The leader sends a management-class capture request with its coordination
+identity and applied cut revision to the scheduled primary of every placement whose state the
+archive captures, and for a `WITHOUT PAUSE` capture, whose schedule may move, to every other live
+node too, then reads each node's management-class inventory of staged sections. A cut refuses
+before it sends a request when the cluster does not report one of those nodes live, or when the
+schedule places an entity whose state the archive captures on no node, so a scheduled owner is
+never silently left out of an archive. A capture request's deadline is the remaining
 budget of the domain's cut rather than a fixed request deadline, because an owner stages its share of
 the domain's state before it answers; a `WITHOUT PAUSE` capture takes the default cut budget. A receiver waits up to five seconds for its
 state machine to apply that revision, installs its current runtime plan, and rechecks the sending
@@ -1111,7 +1130,9 @@ capture; a follower that is still applying the cut does not produce an archive f
 A captured section is fetched over a
 snapshot-subquota bulk response: the inventory declares its path, length, content kind and digest,
 and the leader stages and verifies the stream before adding it to the archive. The owner keeps a
-staged section only for the coordinator process that requested it and releases expired stages.
+staged section only for the coordinator process that requested it, serves it once in 1 MiB reads,
+and releases a stage nobody fetched 600 seconds after staging it. One owner's inventory of a
+domain's capture is one management reply, at most 64 KiB.
 The fetch stream authenticates that process identity before its handler can consume the stage; a
 partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
 An owner streams each branch lifecycle and Kafka offset section from the cut's database snapshot
@@ -1135,8 +1156,9 @@ The coordinator streams native lifecycle and Kafka metadata into quota-owned fil
 installation. It retains the verified description's separate `restore_metadata` preparation
 charge through conversion, while buffered file I/O reserves 2 MiB of bulk memory. Complete
 encoded records are never copied into a local request or retained for remote transmission.
-Native checkpoints and guest saves share the file source and bounded chunk path. See
-[Backup And Restore](backup-and-restore.md#restoring) for preparation admission and its limits.
+Native checkpoints and guest saves share the file source and bounded chunk path. See [Restore
+Intake And Preparation](./backup-and-restore-architecture.md#restore-intake-and-preparation) for
+preparation admission and [Backup And Restore](./backup-and-restore.md#limits) for its limits.
 
 Restore state installation uses the snapshot bulk subquota after the stopped-domain schedule is
 published. The leader admits a replicated installation authority carrying its identity and term,
@@ -1155,8 +1177,6 @@ snapshot as the other captured state. Each reader retains its selected namespace
 bounded identity conversion and raw Arrow staging finish. Running and paused domains use fresh generation
 capture under their assignment barriers. The capture inventory carries both through the existing
 materialized section kinds and Snapshot stream contract. Stored capture never activates the domain.
-
-Large materialized containers never use the encoded metadata install request.
 
 After all checkpoints are staged, the leader sends each target node a publish request with the
 complete checkpoint and byte counts. The receiver reserves a fixed 2 MiB, validates receipts,
@@ -1183,8 +1203,8 @@ finish and publishes only after a complete new 36 MiB transfer. The handlers ret
 digests; these checks qualify the authenticated transport, while the public restore scenarios
 and storage checks qualify native containers, atomic publication and activation.
 Their 300-second simulated completion deadline follows two intentional request deadlines and
-allows the 64 KiB fetch and install chunks to traverse a seeded link at its 100 ms maximum
-latency. The enclosing 320-second simulated horizon, 400,000-step cap and 90-second wall cap
+allows the fixture's 64 KiB fetch and install chunks to traverse a seeded link at its 100 ms
+maximum latency. The enclosing 320-second simulated horizon, 400,000-step cap and 90-second wall cap
 still fail a transfer that does not complete.
 
 The registered `backup-capture-wire` property checks complete drain, capture, inventory and fetch
@@ -1201,9 +1221,10 @@ archive paths. These properties supply wire and mapping evidence; the transport 
 public scenarios retain the authentication, fencing and recovery evidence described above. See
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md) for their domains and commands.
 
-Capture fetch and state installation share the peer connection's one reserved snapshot stream
-slot. The archive staging phase finishes and releases its fetch stream before installation starts;
-an installer cannot retain a fetch stream while awaiting another snapshot request to that peer.
+A backup's capture fetches and a restore's installation requests share the peer connection's one
+reserved snapshot stream slot. A completed fetch releases its stream before the coordinator verifies
+and stages what it received, and every installation action is one request that holds no stream while
+the installer awaits its next snapshot request to that peer.
 Staging and publication run on the admitted filesystem worker class. Authority is checked inside
 the storage job after admission, so waiting for a worker cannot preserve an expired installation
 right. Durable synchronization does not run on the async reactor.
@@ -1783,7 +1804,8 @@ receiver restart is reported as indeterminate, and why an acknowledgement regist
 run of the node that registered it.
 
 An ownership-handoff gate lease is also in-memory coordination state. Releasing or expiring that
-lease removes the runtime fence but does not report a persisted preparation as cleaned up. Only an
+lease, or ending it with its node's runtime, removes the runtime fence but does not report a
+persisted preparation as cleaned up. Only an
 exact durable discard, activation, or schedule-based reconciliation resolves that preparation.
 
 ## Observability
@@ -1796,9 +1818,12 @@ whether pressure originates in transport, execution, or the protocol using it. A
 that could not resolve its peer's advertised host is counted with reason `resolution`, apart from
 setup, handshake, capacity, and closed failures, so a DNS outage is visible as itself.
 
-Typed-request observations identify application health as operation `liveness` and replaceable
-domain-clock delivery and HTTPS listener installation probes as operation `progress`, so their
-request counts, outcomes, latency, and quota failures can be evaluated independently. A client
+Typed-request observations are labeled by the subquota a request uses: operation `liveness` counts
+application health together with the other requests of that subquota, the drain-status polls of
+backups, domains and entities among them, and operation `progress` counts replaceable domain-clock
+delivery and HTTPS listener installation probes, so their request counts, outcomes, latency, and
+quota failures can be evaluated independently. Only unary requests are counted there; a streamed
+response, such as a backup section fetch, appears in the bulk-transfer byte series. A client
 producer link's opening, failure, silence, and the producers it ends or detaches are logged at
 `debug` on both ends; the owning node's client-ingestor metrics count forwarded producers apart
 from local ones.

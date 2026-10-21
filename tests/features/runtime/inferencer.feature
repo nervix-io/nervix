@@ -46,6 +46,10 @@ Feature: Inferencer resources
       """
       quiesce level: DYNAMIC
       """
+    And within "30s" node "{{inspection_leader}}" observability metric "nervix_execution_memory_reserved_bytes" with labels eventually equals 0
+      """
+      class="bulk"
+      """
 
     Examples:
       | cluster_size | vector_type   | score_type    | input_tensor_type    | output_tensor_type   |
