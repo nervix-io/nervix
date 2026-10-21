@@ -132,6 +132,7 @@ tags = [
   "@shutdown_kafka_refused_commit",
   "@shutdown_emitter_finish",
   "@emitter_finish_at_stop",
+  "@iceberg_commit_memory",
   "@metrics_checkpoint_handoff",
   "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
@@ -544,6 +545,14 @@ selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "runtime::remote_dispatch::tests::deloxide_remote_ack_silence_sweeps"
 
 [[workload]]
+coverage = "Bulk queue recovery, charged sequential image preparation, cancellation and memory admission through the production metadata owner. Native and filesystem waits remain untracked."
+id = "owner.onnx-metadata-inspection"
+invariant = "Each fresh diagnostic owner process recovers from a full bulk queue, validates exact tensor bindings, bounds memory admission, stops image reads after cancellation and returns every buffer charge."
+invocation = "owner-tests"
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+test = "application::model_validation::tests::deloxide_onnx_metadata_inspection"
+
+[[workload]]
 coverage = "Processor and entrypoint branch expiry and LRU eviction, which end the channels their lanes publish through and stop each processor branch task under its tracked task guard."
 id = "owner.branch-lane-channel-retirement"
 invariant = "One fresh diagnostic process expires and evicts processor and entrypoint branches, ends only the channels each lane publishes through, and records no finding."
@@ -639,6 +648,16 @@ id = "scenario.emitter-finish-at-stop"
 invariant = "STOP finishes every emitter's sink by the domain drain timeout, so a NO ACK Kafka emitter's producer sends the records it still queued before the domain stops."
 invocation = "scenarios"
 scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "An Iceberg commit on one and three nodes whose staged file the bulk memory class has no room for, so the emitter host retries the commit on its policy while the sink keeps the staged file and its acknowledgements, then the commit once the scenario releases its hold. The host's retry status and its tracked publication run beside the commit; the memory charges are semaphore permits and the catalog and object-store clients are asynchronous, so the detector does not see them."
+examples = 2
+feature = "tests/features/runtime/iceberg_emission.feature"
+id = "scenario.iceberg-commit-memory"
+invariant = "An Iceberg commit charges the bulk memory class every staged byte it loads before reading them, keeps its staged file and acknowledgements while the class has no room, and commits the row once the room is there, sending exactly the bytes it asked the class for."
+invocation = "scenarios"
+scenario = "An Iceberg commit the bulk memory class has no room for keeps its row and commits once the room is there"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1755,6 +1774,16 @@ scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: an Iceberg commit on one and three nodes whose staged file the bulk memory class has no room for, so the emitter host retries the commit on its policy while the sink keeps the staged file and its acknowledgements, then the commit once the scenario releases its hold. The host's retry status and its tracked publication run beside the commit; the memory charges are semaphore permits and the catalog and object-store clients are asynchronous, so the detector does not see them."
+examples = 2
+feature = "tests/features/runtime/iceberg_emission.feature"
+id = "stress.iceberg-commit-memory"
+invariant = "An Iceberg commit charges the bulk memory class every staged byte it loads before reading them, keeps its staged file and acknowledgements while the class has no room, and commits the row once the room is there, sending exactly the bytes it asked the class for."
+invocation = "stress-scenarios"
+scenario = "An Iceberg commit the bulk memory class has no room for keeps its row and commits once the room is there"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: STOP on one and three nodes reaches the Pulsar sink's finish while one NO ACK record or a full 100-record producer queue is held behind a paused broker connection. Source controls and domain teardown reach tracked locks; the receipt futures and asynchronous fault gate remain untracked."
 examples = 4
 feature = "tests/features/runtime/pulsar_delivery.feature"
@@ -2421,7 +2450,7 @@ workloads = [
 ]
 
 [[owner]]
-gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. The inferencer inspection admission workloads also reach the execution occupancy holders mutex while saturating and releasing the bulk workers. Ordinary branch-state-room scenarios retain their broader capture and restore coverage outside these workloads."
+gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. Ordinary branch-state-room scenarios retain their broader capture and restore coverage outside these workloads."
 path = "src/fault_injection.rs"
 workloads = [
   "scenario.inferencer-inspection-admission",
@@ -2438,6 +2467,13 @@ workloads = [
   "stress.diagnostic-nodes",
   "stress.client-alter-drain",
   "stress.client-alter-rejection",
+]
+
+[[owner]]
+path = "src/fault_injection/execution.rs"
+workloads = [
+  "scenario.inferencer-inspection-admission",
+  "stress.inferencer-inspection-admission",
 ]
 
 [[owner]]

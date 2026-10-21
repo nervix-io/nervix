@@ -293,7 +293,7 @@ name again for every new connection it opens.
 | Iceberg REST catalog and its OAuth token request | Reqwest 0.12's `dns_resolver` on the client given to `RestCatalogBuilder::with_client` | The thirty-second hook budget | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | Iceberg S3, GCS and Azure object storage and its credential providers | Reqwest 0.13's `dns_resolver` on the client the connector installs through OpenDAL's `HttpClientLayer` | The thirty-second hook budget, inside OpenDAL's own operation timeouts | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | HTTP request emitter | The connector resolves each request's target host itself | The request's one physical `timeout_ms` | [Request Preparation And Transport Ownership](./http-emitter-architecture.md#request-preparation-and-transport-ownership) |
-| RabbitMQ sources and sinks | The connector resolves and dials, then hands the transport to Lapin's `Connection::connector` | The client's `connect_timeout_ms`, 30 seconds by default, shared with the address attempts and TLS | [DNS for RabbitMQ](./connector-contract.md#dns-for-rabbitmq) |
+| RabbitMQ sources and sinks | The connector resolves and dials, then hands the transport to Lapin's `Connection::connector` | The client's `connect_timeout_ms`, 30 seconds by default, shared with the address attempts, TLS, the AMQP handshake and the entity's channel | [DNS for RabbitMQ](./connector-contract.md#dns-for-rabbitmq) |
 | Syslog UDP, TCP and TLS senders | The connector resolves and dials each new sender | The client's `connect_timeout_ms`, 30 seconds by default, shared with socket setup, or with the attempts and TLS | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
 | WebSocket `ws` and `wss` client sources | The connector resolves and dials each connection and resume | The client's `connect_timeout_ms`, 30 seconds by default, shared with the attempts, TLS and the upgrade | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
 | ClickHouse sinks, with and without TLS entries | Hyper's resolver service on `hyper-util`'s `HttpConnector` | The insert's `timeout_ms` when it is set, otherwise the thirty-second hook budget | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
@@ -325,7 +325,7 @@ before any IPv6 answer and no attempt races another:
 | Caller | Budget | One address attempt | After an address succeeds |
 | --- | --- | --- | --- |
 | Interconnect pool connection | The connection setup timeout, five seconds | TCP connection | TLS, HTTP/2 and the connection hello within the same timeout; a failure there fails the attempt |
-| RabbitMQ source or sink | `connect_timeout_ms`, 30 seconds by default | TCP connection | TLS within the same budget, then Lapin's AMQP handshake, which has no deadline of its own |
+| RabbitMQ source or sink | `connect_timeout_ms`, 30 seconds by default | TCP connection | TLS, then Lapin's AMQP handshake and the entity's channel, all within the same budget; a step that runs out of it shuts the socket down, which ends Lapin's IO thread |
 | Syslog TCP sender | `connect_timeout_ms`, 30 seconds by default | TCP connection | No further step |
 | Syslog TLS sender | `connect_timeout_ms`, 30 seconds by default | TCP connection and TLS | No further step |
 | WebSocket client source | `connect_timeout_ms`, 30 seconds by default | TCP connection, TLS and the opening upgrade | The client's signaling protocol, when it declares one, under that protocol's own `TIMEOUT` |
@@ -547,6 +547,11 @@ lazy channel; it does not attribute a historical Collector observation timeout o
 external collector. The public one- and three-node log/trace outline retains that timeout's
 failed attempt separately from successful controls and later qualification.
 
+The public log/trace recovery outline configures a 250ms initial retry delay and one-second
+maximum, within its ten-second Collector observation. It keeps the five-second RPC timeout,
+observes the missing-name failure and a DNS question, then requires both exact exports after the
+answer returns. These are the fixture's declared retry bounds.
+
 | Evidence | Command | What it establishes | What it does not |
 | --- | --- | --- | --- |
 | The resolver's own checks against an in-process DNS authority | `just test-dns` | Literal and hosts-file answers without a question; search completion and fully qualified names; IPv4-first dual-stack answers; positive and negative TTL reuse and expiry; missing names, empty answers, refusals and invalid names as distinct failures; a silent server ended by the budget and, sooner, by the configured `timeout` and `attempts`; lookups beyond 64 waiting and freed by cancellation; a resolver rebuilt and torn down with its runtime; the configuration grammar and its rejections; both Reqwest hooks, the Hyper connector and the Smithy hook dialling a later answer, keeping the URL authority, following a redirect, reconnecting after TTL expiry, being cancelled by a request timeout, and keeping the typed failure and the lookup's whole report as a cause | The authority answers over UDP only, so truncation and DNS over TCP, a name server that cannot be reached, and the order in which several servers are asked are not exercised |
@@ -620,6 +625,12 @@ describes.
 
 A failed lookup is visible through the path that asked. The resolver itself logs no individual
 lookup and exports no metric of its own.
+
+An emitter's description includes both its task failure and its retained connector's failure when
+both are present. An MQTT DNS failure therefore remains visible alongside a refused queued publish;
+each owner clears its own diagnostic when it recovers. The task's pending retry continues to govern
+publishing work and drain accounting, as [Connector Crates And The Connector Contract](./connector-contract.md)
+describes.
 
 | Where | What shows the failure |
 | --- | --- |

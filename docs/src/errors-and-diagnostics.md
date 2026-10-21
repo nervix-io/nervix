@@ -238,7 +238,7 @@ subsections after the boundary table follow this order.
 | Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical NSPL cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
 | NSPL language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
-| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. The unfolding of a payload a quiesce buffer retained, or of a poll a paced source handed over, is not refused at all: nothing could present it again, so it waits for a place. The job that admits one key group into a keyspace a restore is converting waits for a place too, because the keys admitted so far could be presented again only by converting the keyspace from its first group. So does a payload a source handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. A panic is the job's own defect. |
+| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. The unfolding of a payload a quiesce buffer retained, or of a poll a paced source handed over, is not refused at all: nothing could present it again, so it waits for a place. The job that admits one key group into a keyspace a restore is converting waits for a place too, because the keys admitted so far could be presented again only by converting the keyspace from its first group. So does a payload a source handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. An Iceberg commit's read of the staged files its sink already accepted waits for a place as well, while the bulk memory charge it takes first, without queueing, is refused when the class has no room and the emitter retries the commit with its policy. A panic is the job's own defect. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures, and a processor task's restore of the branches its lifecycle checkpoint names (`ProcessorBranchTaskError`) | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. A restore that fails installs no branch and stays pending: the task retries it after a backoff, holds its input, and refuses a lifecycle checkpoint or guest-state reset with `BranchesUnrestored` until an attempt succeeds. [Shutdown And Recovery](./shutdown.md#restoring-processor-branches) owns that sequence. |
 | Connector crates and host | Integration-specific configuration, decoding, external source and sink outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from a source or sink failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
@@ -534,13 +534,20 @@ sink failure and retry path; they do not release a staged record's acknowledgeme
 
 A RabbitMQ connection that fails is a `RabbitMqConnectError`, owned by the connector's connection
 module: an invalid address or CA file, a lookup failure that keeps the resolver's `DnsLookupFailure`
-as a typed field, no address that accepted a connection, a failed or overdue TLS handshake, a Lapin
-runtime that could not be created, or a failed AMQP handshake, each naming the broker host where one
-is involved. The source keeps it beneath its connect and resume contexts, so `DESCRIBE INGESTOR`
-shows the deepest cause, such as the resolver's own lookup error. The sink changes it into a
-configuration failure for an invalid address or CA file and an initialization failure otherwise,
-leading with the connection error's chain, down to a `connect_timeout_ms` it ran out of, which
-`DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
+as a typed field, no address that accepted a connection, a socket the node could not hold the
+second handle on that ends an unopened connection, a failed or overdue TLS handshake, a Lapin
+runtime that could not be created, or a failed or overdue AMQP handshake, each naming the broker
+host where one is involved. An overdue step keeps the elapsed `connect_timeout_ms` as its typed
+cause. A step of opening the entity's channel that fails or runs out of the same deadline is
+reported beneath the source's or sink's own context for that step, with the elapsed deadline as its
+typed cause and its text leading the report. The source keeps these beneath its connect and resume
+contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the resolver's own lookup error or
+the deadline that ran out. The sink changes them into a configuration failure for an invalid
+address, CA file or deadline key and an initialization failure otherwise, leading with the failure's
+chain, down to a `connect_timeout_ms` it ran out of, which `DESCRIBE EMITTER` shows. Neither
+attaches credentials from the address. A `NO_ACK` round trip that runs out of the client's
+`timeout_ms` fails the write as a publish failure with the elapsed deadline as its typed cause and
+its text leading the report.
 
 A RabbitMQ publish that ends with the broker closing the sink's channel is classified by the
 broker's own reason, which the sink reads from its connection. A refusal of a message body larger
@@ -730,10 +737,15 @@ broker source's acknowledgement that its transport fails to confirm, and a rejec
 take back, become the ingestor's transient status with the innermost context of the source's
 report as the reason, and only a later confirmed acknowledgement clears it.
 
-Each source or sink publishes its safe transient error and optional retry together. Repeated healthy
-operations read the retained status without writing it; a transition clears an active failure.
-Reporting a different error without selecting a new retry preserves the active retry. DESCRIBE
-renders error, backoff and remaining wait from one immutable observation. A failed record obtains
+Each source or sink publishes its safe transient error and optional retry together. An emitter
+retains task-owned and connector-owned failures independently in one atomic publication. A publish
+or commit outcome clears the task failure; a retained connector's progress clears the connector
+failure. MQTT packet progress therefore preserves the host's unanswered-publish diagnostic until
+the task succeeds. Repeated healthy operations only read, and reporting a task error without
+selecting a new retry preserves that task's active retry. DESCRIBE renders both retained errors
+with their `task` and `connector` owners when both fail. It selects an active task retry, then an
+active connector retry, then a task error without a retry, rendering that retry's backoff and
+remaining wait from the same immutable publication as the errors. A failed record obtains
 its prepared message-error route from its task's retained routing publication and preserves that
 plan while its VM program and delivery execute.
 
@@ -862,10 +874,14 @@ failure when the pinned file is decoded. Neither failure silently selects anothe
 ONNX binding preflight preserves the distinction between invalid tensor bindings, an ONNX loading
 failure, worker refusal, worker panic and inspection timeout. Worker refusal retains the bounded
 executor's report beneath the inferencer context; it does not classify an uninspected model as
-malformed. The thirty-second inspection bound covers admission to a bulk worker through release of
-the temporary session. Debug events record submission, worker entry, builder initialization, model
-loading and session release. A timeout also records the bulk class's configured workers, running
-jobs and pending jobs, so an operator can correlate queue delay with dependency work. These are
+malformed. The thirty-second inspection bound begins before the bulk-memory reservation and ends
+after release of the temporary session. A cancelled image read preserves the executor's ordinary
+`Cancelled` outcome beneath its inspection context; the awaiting request still receives its timeout
+or ends with its caller. Advisory image-read failures leave native image selection and load errors
+to ONNX Runtime. Debug events record memory admission, submission, worker entry, native-image
+preparation, builder initialization, model loading and session release. A timeout also records bulk
+memory capacity and reserved bytes beside configured workers, running jobs and pending jobs, so an
+operator can distinguish memory waiting, worker waiting and dependency work. These are
 observations of the run; a successful later inspection does not identify the cause of an earlier
 timeout.
 
@@ -946,6 +962,16 @@ absent from the table or with an incompatible type returns `SinkStartError::Inva
 before staging records. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg
 conversion error beneath that context. The check compares names and nested types after narrowing
 UTC datetimes to microseconds; table changes after open can still fail a later catalog commit.
+
+An Iceberg commit charges the bulk memory class for the staged files it reads back with
+`Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The
+refusal keeps the typed `AdmissionError` beneath `SinkPublishError::Commit` and attaches the
+description the emitter shows as its transient error: `Iceberg commit waits for room in the bulk
+memory class for <bytes> staged bytes` when the class has no room now, and `Iceberg commit waits
+for the whole bulk memory class of <capacity> bytes for a staged file of <bytes> bytes` when one
+staged file is larger than the class, which charges the whole class and so waits until all of it
+is free. The emitter retries either with its policy, and neither releases a staged record's
+acknowledgement.
 
 Starting an emitter on a node returns an `EmitterStartError` report. `EmitterStartError::Start`
 names the emitter and its domain, and the step that failed stays beneath it: an input relay the

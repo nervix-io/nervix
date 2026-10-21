@@ -603,11 +603,12 @@ milliseconds.
 
 `HTTP` and `PROMETHEUS` clients read `timeout_ms`. `RABBITMQ`, `REDIS` and `WEBSOCKETS` clients read
 `connect_timeout_ms`, and allow 30 seconds when it is left out. A `RABBITMQ` client's deadline
-covers resolving the broker, the address attempts and TLS; the AMQP handshake that follows has no
-deadline. A request or connection that runs out of its deadline becomes the ingestor's transient
-status, and the ingestor retries on its policy; a connection that runs out of `connect_timeout_ms`
-is reported naming the key and its bound. [Connector Capabilities](connector-capabilities.md) lists
-each entity's network waits and what bounds each one, including the waits nothing bounds yet.
+covers resolving the broker, the address attempts, TLS, the AMQP handshake, opening the ingestor's
+channel, setting its prefetch window and starting its consumer. A request or connection that runs
+out of its deadline becomes the ingestor's transient status, and the ingestor retries on its
+policy; a connection that runs out of `connect_timeout_ms` is reported naming the key and its
+bound. [Connector Capabilities](connector-capabilities.md) lists each entity's network waits and
+what bounds each one, including the waits nothing bounds yet.
 
 ## Client Ingestors
 
@@ -1154,7 +1155,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
 | Buffers | deliveries the broker sends ahead of their acknowledgement: at most 1 delivery; when full, holds back what fills it |
-| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>the AMQP handshake, channel open and consume: unbounded<br>a silent connection: driver default, twice the negotiated heartbeat |
+| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open and consume: `connect_timeout_ms`; 30s when omitted<br>a silent connection: driver default, twice the negotiated heartbeat |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
@@ -1183,11 +1184,12 @@ reconnect is at least once.
 Each instance resolves the host of the client's `addr` through the node's configured DNS resolver
 every time it connects, so a changed DNS answer takes effect on the next connection, and tries the
 addresses it receives in order. A literal IPv4 address, or an IPv6 address in brackets, is
-connected to as written. Resolution, the TCP connection and, for `amqps`, the TLS handshake have 30
-seconds together; the broker certificate must name the host `addr` names. A connection that fails,
-including a name that does not resolve, is a source error that `DESCRIBE INGESTOR` shows as the
-transient error, and the instance tries again on its `RETRY POLICY` cadence without acknowledging
-anything.
+connected to as written. Resolution, the TCP connection, for `amqps` the TLS handshake, the AMQP
+handshake, opening the channel, setting the prefetch window and starting the consumer share the
+client's `connect_timeout_ms`, 30 seconds when it is left out; the broker certificate must name the
+host `addr` names. A connection that fails or runs out of that deadline, including a name that does
+not resolve, is a source error that `DESCRIBE INGESTOR` shows as the transient error, and the
+instance tries again on its `RETRY POLICY` cadence without acknowledging anything.
 
 ### Redis Pub/Sub
 
@@ -1489,29 +1491,43 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sqs-queue-ingest).
 <!-- connector-matrix:ingest-sqs-queue:end -->
 
-Suspension stops polling. Messages remain only for the queue's configured retention period. An
-already received message remains invisible until its visibility timeout and may then be redelivered
-as a duplicate; the ingestor resumes by polling past anything the service expired. A poll still
-waiting when the ingestor quiesces or stops is never abandoned, because the service takes the
-message it answers with off the queue: the poll completes within its one-second wait, and a message
-it brings dispatches before the source suspends or closes. Only a service that has not answered
-within 10 seconds ends that poll unanswered, which `DESCRIBE INGESTOR` shows as a transient error;
-a message the poll was returning then stays invisible until its visibility timeout.
-
 Starting the ingestor sends no request to the service. Each source instance looks its queue up
-before its first poll and keeps the queue's URL from then on. The source resolves the host of its
-client's `endpoint` through the node's asynchronous resolver each time it opens a connection, and
-tries the answers in order. Every request is still signed for the configured host, and over HTTPS
-the service certificate must name that host. Without `tls_ca_file` the client trusts the platform's
-native roots and follows the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` environment
-variables; with it, the client trusts that CA alone and connects directly. A missing name, a silent
-name server or an unreachable answer fails the queue lookup, a poll, or a deletion. The AWS SDK's
-standard retry mode makes up to three attempts at each such request. A failed lookup, poll or
-deletion is then a transient source failure that `DESCRIBE INGESTOR` shows and the source retries
-on its `RETRY POLICY`, so an ingestor started while the service is unreachable consumes once the
-service answers. A queue that does not exist fails the lookup with its name, such as
-`SQS queue 'orders' does not exist`, and is retried the same way; Nervix never creates it. A message
-is deleted only once it is acknowledged, so a lookup failure never removes one from the queue.
+before its first poll and keeps the queue's URL from then on, suspensions included. The source
+resolves the host of its client's `endpoint` through the node's asynchronous resolver each time it
+opens a connection, and dials the answers as [Dialling The
+Answers](name-resolution.md#dialling-the-answers) describes for Smithy's client. Every request is
+still signed for the configured host, and over HTTPS the service certificate must name that host.
+Without `tls_ca_file` the client trusts the platform's native roots and follows the `HTTP_PROXY`,
+`HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` environment variables; with it, the client trusts that CA
+alone and connects directly. A missing name, a silent name server or an unreachable answer fails the
+queue lookup, a poll, or a deletion. The AWS SDK's standard retry mode makes up to three attempts at
+each such request. A failed lookup or poll is then a transient source failure that
+`DESCRIBE INGESTOR` shows and the source retries on its `RETRY POLICY`, so an ingestor started while
+the service is unreachable consumes once the service answers. A queue that does not exist fails the
+lookup with its name, such as `SQS queue 'orders' does not exist`, and is retried the same way;
+Nervix never creates it.
+
+Each poll is a `ReceiveMessage` for one message with all of its attributes, which the service
+answers as soon as a message arrives or after a one-second wait without one. The service hides the
+message it returns from every other receive until the queue's visibility timeout ends, and the
+source deletes it only once it is acknowledged, so a failed lookup or poll never removes a message
+from the queue. A message whose acknowledgement fails or does not arrive within the mode's
+`ACK TIMEOUT` is rejected, which leaves it in the queue. So is one whose deletion fails, which
+`DESCRIBE INGESTOR` shows as a transient error; the source does not repeat the deletion. Either way
+the message becomes visible again once its visibility timeout ends and is received again, as a
+duplicate if the graph had already processed it, and the source polls again after its
+`RETRY POLICY` delay. A queue whose visibility timeout is shorter than the mode's `ACK TIMEOUT` can
+also hand a message that still awaits its acknowledgement to another receive.
+
+Suspension stops polling. Messages wait in the queue only for its configured retention period, and
+the ingestor resumes by polling past anything the service expired. A poll still waiting when the
+ingestor quiesces or stops is never abandoned, because the service hides the message it answers
+with until its visibility timeout ends: the source sends no further poll and waits for that answer,
+which a responsive service gives within the poll's one-second wait, and a message it brings
+dispatches before the source suspends or closes. Only a service that has not answered within
+10 seconds of the quiesce change or the stop ends that poll unanswered, which `DESCRIBE INGESTOR`
+shows as a transient error; a message the poll was returning then stays invisible until its
+visibility timeout ends.
 
 ### Prometheus
 
