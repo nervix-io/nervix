@@ -50,6 +50,9 @@ use acknowledgement::{BatchRoots, RuntimeBatchAcknowledgement};
 mod read;
 use read::{ReadOutcome, read_batch};
 
+#[path = "source_poll.rs"]
+mod poll;
+
 const SOURCE_ERROR_RETRY: Duration = Duration::from_millis(100);
 
 /// How a source whose delivery mode declares no retry policy reopens after a failure: the delay
@@ -612,30 +615,6 @@ impl RuntimeSourceHost {
             decode_rejections,
             confirmation_delay,
         }
-    }
-
-    async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
-        for failure in poll.failures {
-            nervix_primitives::task::consume_budget().await;
-            self.report_error(format!(
-                "source poll could not materialize one message: {failure:?}"
-            ));
-        }
-        if poll.messages.is_empty() {
-            return Ok(false);
-        }
-        let entries = poll
-            .messages
-            .into_iter()
-            .map(|message| {
-                (
-                    message.payload,
-                    BufferedIngestMetadata::Headers(message.headers),
-                )
-            })
-            .collect();
-        let payload = BufferedIngestPayload::batch(entries, poll.observed_at);
-        self.intake_unacknowledged_payload(payload).await
     }
 
     /// The intake a request-scoped source binds its routes to.
