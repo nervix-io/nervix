@@ -490,7 +490,10 @@ that run in parallel, each in a job of its own:
   select every registered target once. The job then writes the combined record and the merged Rust
   source report.
 
-Each shard job allows 180 minutes. `bolero-gate` requires the randomized job, every shard and the
+Each shard job allows 240 minutes. The 205-target inventory's three-shard plan estimates at most
+114 minutes per shard before discovery, failure qualification and uploads. Funding 1.5 times that
+estimate leaves 69 minutes for those surrounding operations and cold-build variation, including
+the separately bounded server preparation. `bolero-gate` requires the randomized job, every shard and the
 combined proof when the PR carries `fuzz`, and requires all of the sanitizer jobs to be skipped
 otherwise. `tests/release-evidence.toml` holds a qualifying revision to the same checks, every shard
 of the matrix included.
@@ -519,8 +522,10 @@ Ordinary execution prepares each selected package, harness and exact feature set
 the union of a package's features; its binary does not prepare a target with a different declared
 feature set. Each property still has a 240-second execution bound and must complete its exact
 randomized iteration count and replay every checked-in corpus input. A failed preparation ends
-the run before that harness executes any property. The ordinary CI job reserves 60 minutes for
-discovery, the declared feature builds and every registered target.
+the run before that harness executes any property. The ordinary CI job reserves 90 minutes for
+discovery, the declared feature builds and every registered target. Run 39649567371 took 47m10s;
+1.5 times that measurement is 70m45s, leaving more than 19 minutes for publication and further
+runner variation.
 
 Install the dated sanitizer nightly named in the inventory and the pinned CLI. Server properties
 also require the native server build dependencies, including `protoc` for the Pulsar driver;
