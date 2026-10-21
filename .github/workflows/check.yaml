@@ -676,10 +676,10 @@ jobs:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      # The retained loaded run consumed 78,433 slot-seconds before 115 attempts finished.
-      # 32 slots supply only 78,720 in 41 minutes; 48 leave capacity for that demand and retries.
-      # Its suite CPU use averaged 67% and memory 9.0 GiB on this 16-CPU/64-GiB runner.
-      NERVIX_TEST_CONCURRENCY_FACTOR: "3"
+      # The loaded inventory consumed 117,622 slot-seconds with 274 attempts still active.
+      # 48 slots supply only 118,080 in 41 minutes; 64 supply 157,440 in the same budget.
+      # Scenario CPU averaged 63% and memory peaked at 13.4 GiB on this 16-CPU/64-GiB runner.
+      NERVIX_TEST_CONCURRENCY_FACTOR: "4"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
