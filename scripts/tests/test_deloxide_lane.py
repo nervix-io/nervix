@@ -434,7 +434,7 @@ class InventoryTests(unittest.TestCase):
         ]
         identities = [{(scenario.feature, scenario.name) for scenario in group} for group in groups]
         self.assertTrue(identities[0].isdisjoint(identities[1]))
-        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [94, 10])
+        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [96, 10])
         for invocation, group in zip((baseline, endpoint), groups, strict=True):
             registered = inventory.workloads_of(invocation.id, "deloxide-stress")
             self.assertEqual(deloxide_lane.scenario_problems(invocation, registered, group), [])

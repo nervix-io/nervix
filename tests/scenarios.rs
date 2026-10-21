@@ -31364,6 +31364,9 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
                 world.port_takers.clear();
+                // A scenario that ended before a peer listened still holds its refused ZeroMQ
+                // emission port.
+                world.zeromq_emit_refusal = None;
                 // The ZeroMQ and syslog ports the scenario drew for itself were bound by its nodes
                 // and its observers, and both are gone by now, so the holds on the addresses its
                 // nodes bound let go, and the ports go back to the pool the next scenario draws
