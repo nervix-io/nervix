@@ -258,6 +258,6 @@ Client types that currently support TLS-oriented configuration through mounted r
 - SQS
 - Syslog
 
-`ZEROMQ` remains plain pass-through transport configuration and does not currently expose a Nervix-specific TLS helper surface.
+A `ZEROMQ` client has no TLS: its driver offers plain `tcp://` and `ipc://` transports and no ZMTP security mechanism. Its `CONFIG` values are still rendered over its `MOUNT`, for its ingestors and its emitters alike.
 
 Pulsar currently supports mounted `tls_ca_file` server trust configuration, but not mounted client certificate authentication.
