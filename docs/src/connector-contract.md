@@ -419,7 +419,9 @@ reading, and the transport's own window or prefetch keeps the peer from sending 
 waits for the buffer to drain. A protocol without flow control drops what does not fit and counts
 it. A buffer that drops without counting, or whose overflow fails the publish for the host to retry,
 is declared as it behaves, and a buffer that nothing bounds yet is declared unbounded, so the matrix
-shows each gap until its connector closes it.
+shows each gap until its connector closes it. A polled source's response is bounded by its
+statement's `MAX BODY SIZE`: a response that exceeds it fails the poll, which the ingestor reports
+as its transient error, and the next poll reads again.
 
 A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a fixed bound Nervix
 sets, or the driver's own default. A wait that only the host's stop ends is declared unbounded. The
@@ -649,7 +651,7 @@ The host runs three source loop families, with a listener using the broker loop:
 | Family | Host behavior | Source behavior |
 | --- | --- | --- |
 | Broker and listener | Open instances, manage readiness and quiesce, request batches and await each read to completion, cancelling a read that a quiesce change or a stop meets, decode and dispatch, wait for ACK roots when configured, then acknowledge or reject positions and pace retry. | Subscribe, receive and end a cancelled read with what it already took, expose transport positions and metadata, and perform transport ACK or rejection. Syslog is a listener with no broker ACK. |
-| Paced | Bind and wait on the domain cadence, hand the scheduled instant to one poll, admit its returned messages without broker ACKs, and report poll failures. | HTTP and Prometheus perform one transport poll; they do not bind a domain clock or choose the cadence. |
+| Paced | Bind and wait on the domain cadence, hand the scheduled instant to one poll, admit its returned messages without broker ACKs in intake batches no larger than the bound its composition declares, each executed as its own ingest group, and report poll failures. | HTTP and Prometheus perform one transport poll; they do not bind a domain clock or choose the cadence. An HTTP poll answers one message; Prometheus declares 1024 samples per intake batch. |
 | Request scoped | Bind endpoint routes to request intake, admit and dispatch each request there, replay retained quiesce work, then unbind on close. | The endpoint source has no polling transport or broker position. |
 | Client batches | Keep the producers of one client ingestor, admit their batches one at a time through one admission worker per execution, give each admitted batch one ACK root, and answer each batch with its outcome. | There is no source connector: producers submit Arrow IPC batches through the session protocol. |
 

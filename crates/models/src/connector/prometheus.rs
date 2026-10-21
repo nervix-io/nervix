@@ -3,9 +3,11 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The Prometheus client Model with the `CONFIG` keys it declares and the API root
-//!   its address names, the query source Model with its delivery mode, and what each declares.
+//!   its address names, the query source Model with its delivery mode and response bound, and what
+//!   each declares.
 //! - **Depends on.** The shared source and client declarations, the HTTP transport's request
-//!   timeout, the URL Standard parser, the domain clock's period and the names a body references.
+//!   timeout, the URL Standard parser, the domain clock's period, the byte size a limit holds and
+//!   the names a body references.
 //! - **Must not know.** The Prometheus HTTP API's endpoints and answers, how a client is built, or
 //!   how a query is evaluated on its cadence.
 
@@ -14,7 +16,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::{collections::BTreeMap, str::FromStr as _};
+use std::{collections::BTreeMap, num::NonZeroU64, str::FromStr as _};
 
 use error_stack::{Report, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -24,18 +26,18 @@ use url::Url;
 
 use super::{
     bounds::{
-        BufferBound, DeadlineKey, DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline,
-        WaitBound,
+        BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
     entity_union::connector_sources,
 };
 use crate::{
-    AcknowledgementConfirmation, ClientConfigEntry, ClientDeadline, ClientDeadlineError,
-    ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce, DomainClockPeriod,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, PositionClass, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind,
+    AcknowledgementConfirmation, ByteSizeUnit, ClientConfigEntry, ClientDeadline,
+    ClientDeadlineError, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    DomainClockPeriod, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    OptionDeclaration, OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass,
+    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Prometheus: unpooled, config Nervix, CreateClientPrometheus => PrometheusConfigEntry);
@@ -203,6 +205,22 @@ impl PrometheusApiRoot {
     }
 }
 
+/// The most bytes of one query response a poll reads where its statement leaves `MAX BODY SIZE`
+/// out.
+///
+/// A policy input: room for tens of thousands of samples with their labels, while the response a
+/// poll holds for decoding stays a small share of a node's memory.
+pub const PROMETHEUS_DEFAULT_MAX_BODY_SIZE: PayloadSizeLimit =
+    match PayloadSizeLimit::new(nonzero_ext::nonzero!(16u64), ByteSizeUnit::MiB) {
+        Some(limit) => limit,
+        None => panic!("16 MiB fits in a 64-bit byte count"),
+    };
+
+/// The most samples of one query response the host takes in as one intake batch. It decodes and
+/// routes each batch as an ingest group of its own before it takes in the next, so a large vector
+/// never becomes one batch of any size.
+pub const PROMETHEUS_SAMPLES_PER_INTAKE_BATCH: NonZeroU64 = nonzero_ext::nonzero!(1024u64);
+
 /// One PromQL query a Prometheus client evaluates on a cadence of domain time.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -210,17 +228,44 @@ impl PrometheusApiRoot {
 pub struct PrometheusQuerySource {
     pub client: ClientName,
     pub query: String,
+    /// `MAX BODY SIZE <bytes>`, where the statement writes it. A statement that leaves it out reads
+    /// at most [`PROMETHEUS_DEFAULT_MAX_BODY_SIZE`].
+    pub max_body_size: Option<PayloadSizeLimit>,
     pub every: DomainClockPeriod,
     pub mode: PrometheusIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
 
+impl PrometheusQuerySource {
+    /// The most bytes of one query response a poll reads: the statement's `MAX BODY SIZE`, or the
+    /// declared default where it writes none.
+    pub fn max_body_size_in_effect(&self) -> PayloadSizeLimit {
+        self.max_body_size
+            .unwrap_or(PROMETHEUS_DEFAULT_MAX_BODY_SIZE)
+    }
+}
+
 /// What the connector of a PROMETHEUS QUERY holds and how long it waits.
 const PROMETHEUS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
-    buffers: &[DeclaredBuffer {
-        holds: "the query response",
-        bound: BufferBound::Unbounded,
-    }],
+    buffers: &[
+        DeclaredBuffer {
+            holds: "the query response",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("MAX BODY SIZE"),
+                overflow: BufferOverflow::FailPoll,
+            },
+        },
+        DeclaredBuffer {
+            holds: "samples the host takes in as one intake batch",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: PROMETHEUS_SAMPLES_PER_INTAKE_BATCH.get(),
+                    unit: "samples",
+                },
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+    ],
     waits: &[DeclaredWait {
         wait: "a query: name resolution, connection, TLS and the response",
         bound: WaitBound::Key {
@@ -251,6 +296,16 @@ impl SourceEntity for PrometheusQuerySource {
                 form: OptionForm::Value {
                     value: OptionValue::Text,
                     example: "QUERY 'up'",
+                },
+            },
+            OptionDeclaration {
+                keywords: "MAX BODY SIZE",
+                presence: OptionPresence::Optional {
+                    default: Some("16MiB"),
+                },
+                form: OptionForm::Value {
+                    value: OptionValue::Size,
+                    example: "MAX BODY SIZE 16MiB",
                 },
             },
             OptionDeclaration {

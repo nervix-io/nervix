@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //!
 //! - **Owns.** Composing the Prometheus connector plan with the domain cadence the host polls it
-//!   on.
+//!   on and the intake batch bound the entity declares for its samples.
 //! - **Depends on.** The connector source contract, typed Prometheus plans and pre-resolved runtime
 //!   handles.
 //! - **Must not know.** Prometheus query or sample details, NSPL parsing, registry validation, or
@@ -16,6 +16,7 @@
 
 use error_stack::ResultExt as _;
 use nervix_connector_prometheus::{PrometheusSource, PrometheusSourcePlan};
+use nervix_models::PROMETHEUS_SAMPLES_PER_INTAKE_BATCH;
 
 use super::{
     super::*,
@@ -32,6 +33,7 @@ impl PrometheusIngestorStartPlan {
         let PrometheusIngestorStartPlan {
             client,
             query,
+            max_body_size,
             every,
         } = self;
         let resolved = runtime
@@ -40,14 +42,18 @@ impl PrometheusIngestorStartPlan {
         let Some(dns) = runtime.dns() else {
             return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
         };
+        let intake_batch = NonZeroUsize::try_from(PROMETHEUS_SAMPLES_PER_INTAKE_BATCH)
+            .assured("the declared sample count per intake batch fits every supported usize");
         PacedSourceStart {
             connector: PrometheusSourcePlan {
                 config: resolved.entries,
                 query,
+                max_body_size,
                 dns: dns.clone(),
             },
             every,
             cadence_start: DomainCadenceStart::AfterInterval,
+            intake_batch,
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "prometheus",
         }

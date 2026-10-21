@@ -198,14 +198,14 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Reference | PROMETHEUS client |  |
 | Locator and validation rule | Not offered: QUERY is a PromQL expression option rather than an external entity name. |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
-| Options in statement order | `QUERY 'up'` (string literal); required<br>`EVERY 15s` (duration); required |  |
+| Options in statement order | `QUERY 'up'` (string literal); required<br>`MAX BODY SIZE 16MiB` (byte size); optional; default 16MiB<br>`EVERY 15s` (duration); required |  |
 | Headers | Not offered: The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |  |
 | Metadata | Not offered: The current query result is decoded as payload; no separate typed query or evaluation-time metadata namespace is declared. |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | the query response: unbounded |  |
+| Buffers | the query response: set by MAX BODY SIZE; when exceeded, fails the poll; the next poll reads again<br>samples the host takes in as one intake batch: at most 1024 samples; when full, holds back what fills it |  |
 | Network waits | a query: name resolution, connection, TLS and the response: `timeout_ms`; required |  |
 | Driver limits | Response heads above 100 headers or 417,792 bytes are refused. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |

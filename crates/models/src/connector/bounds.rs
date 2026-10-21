@@ -118,6 +118,9 @@ pub enum BufferOverflow {
     FailPublish,
     /// The request is refused immediately; its sender owns retry.
     RefuseRequest,
+    /// A response that exceeds the bound fails the poll that read it: the ingestor reports the
+    /// failure as its transient error, and the next poll reads again.
+    FailPoll,
 }
 
 /// One network wait a connector performs.

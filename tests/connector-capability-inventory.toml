@@ -614,6 +614,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "MAX BODY SIZE"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_ingestion.feature", scenario = "A Prometheus response above the ingestor's MAX BODY SIZE fails the poll" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "PROMETHEUS QUERY INGESTOR"
 scenarios = [

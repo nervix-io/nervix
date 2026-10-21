@@ -542,6 +542,16 @@ request is not an attempt failure: it is a record rejection with code `external`
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the sink.
 
+A Prometheus query that fails is a `PrometheusSourceError` beneath `SourceError::Read`: a request
+that could not be sent, a status other than success, a response whose announced length or body
+exceeds the ingestor's `MAX BODY SIZE`, a body that could not be read, a payload that does not
+decode, a query Prometheus answers with an error status, or a result that is not a vector. The
+oversized response is `ResponseTooLarge`, which names the bound and never the body, such as
+`Prometheus query response exceeds MAX BODY SIZE 16MiB`. The host shows the chain as the
+ingestor's transient error, which `DESCRIBE INGESTOR` prints, and the next poll queries again. A
+sample whose value or timestamp cannot be read fails only its own record, reported beside the
+poll's other messages.
+
 Iceberg object storage retains the Iceberg storage error contract when it installs the node's
 HTTP resolver. Invalid object URLs are `DataInvalid`, and an unsupported Azure connection string
 is `FeatureUnsupported`. Building the storage HTTP client or an OpenDAL operation can fail as
