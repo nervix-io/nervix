@@ -55,6 +55,13 @@ exactly once after recovery. The longer receipt scenario uses the same fault con
 beyond thirty seconds under an explicitly declared forty-five-second `ACK TIMEOUT`. These
 dependency faults do not widen a product deadline or replace a readiness observation with a sleep.
 
+The Kafka control-execution scenario uses librdkafka's mock broker to hold replies after a DOMAIN
+source delivered its first record. A codec alteration resumes that source, and the scenario waits
+for a running connector-storage job before sending a record through another HTTP ingestor. The
+same oracle runs on one and three nodes. The broker's native round-trip control releases replies
+in the scenario and again during teardown before diagnostics or node drain, including after a
+failed assertion. It does not change a product deadline or use a readiness sleep.
+
 The Pulsar fault forwarder decodes broker frames and advertises its own plain-text service URL
 in topic lookup responses, retaining every other command and payload field. The driver's discovered
 producer and consumer connections therefore stay behind the same pause gate as bootstrap traffic.
@@ -205,6 +212,18 @@ replica checkpoints beside the other diagnostic workloads. The full active diagn
 reached 77 of 80 inputs at the former 30-second bound, while the exact same binary reached all
 inputs and preserved every branch in the focused four-case replay. This condition ends as soon as
 the exact expected count is observed; it retains the complete output, state and branch assertions.
+
+The deduplicator keyspace and window fixture above the bulk budget posts its payments through an
+acknowledged HTTP endpoint, `MODE ACK MAX 8 ACK TIMEOUT 60s` with `ON QUIESCE REJECT RETRY AFTER
+1s`, and repeats a payment the endpoint answers with 503 until it answers 200 with a completed
+outcome, for at most 300 seconds per payment. Under `MODE NO ACK` the endpoint answers 202 before
+the payment reaches the deduplicator. Under load, the routed delivery of a one-mebibyte payment to
+the deduplicator's node failed when its relay body transfer did not complete or its send timed out,
+and the payment was lost without a trace, so the exact summary oracle waited for a key that never
+arrived. The deduplicator forgets a key whose summary it could not forward and
+drops one it already forwarded, so a repeated payment yields its summary exactly once. The window's
+rows keep `MODE NO ACK`: a window acknowledges a row only when it steps past it, so an acknowledged
+post of one row would wait for the rows after it.
 
 The large materialized restore fixture prepares its rows through an acknowledged client producer.
 One round has a 120-second budget and one in-flight batch, including explicit replays of reported
@@ -815,6 +834,7 @@ ordering fails to build rather than producing a harness that outwaits itself.
 | Cluster cleanup, 60 seconds | The slowest healthy cluster stop, rounded up to 15 seconds, times a headroom of 4 | 12.2 seconds at the slowest over 163 cleanups, with a 0.15-second median and 1.6 seconds at the 90th percentile |
 | Upload command, 10 minutes | The slowest healthy upload of a 48 MiB archive, rounded up to 120 seconds, times a headroom of 5, and shorter than the suite budget | With 48 such uploads on one shared, disk-backed host, those that completed did so inside the client's 120-second window and 35 others expired it; 72 on an idle host took at most 52 seconds |
 | Suite, 75 minutes | The 120-minute scenario job limit, less 30 minutes for pre-suite work and a 15-minute reserve after it | Run 39569675589 completed 3,336 attempts in 34m28s; twice the rounded 35-minute healthy ceiling plus five minutes of slack fits the budget. Run 39656928785's partial progress projects about 55 minutes |
+| CLI backup or restore, 900 seconds | The slowest healthy three-node restore, rounded up to 300 seconds, times three installations: a leader change while a restore installs its state makes the next leader install it again once the CLI sends the archive again | The three-node restores that completed in the scenarios jobs of Check runs 39683355582 and 39683521277, both on slow runners, took 291 seconds at the slowest for a 42 MB archive and 260 seconds for the 84 MB keyspace and window archives; restores that took longer ended at the former 300-second budget. Six concurrent local copies of the keyspace and window scenario saw a restore start installing its state three times |
 
 The assertions keep these orderings, among others:
 
@@ -827,6 +847,7 @@ The assertions keep these orderings, among others:
   test shutdown timeout lies between the default shutdown phases and that watchdog.
 - The suite watchdog's cleanup window fits inside the reserve, and so do the dependency stop and the
   runtime shutdown together.
+- A CLI backup or restore ends inside the suite budget, so its scenario fails with its own reason.
 
 The suite funds a runner at half the measured healthy throughput, with five further minutes for
 retries and the final active attempts. Slow-run variation multiplies the whole workload, so the

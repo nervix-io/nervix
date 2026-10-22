@@ -302,6 +302,7 @@ impl KafkaIngestorStartPlan {
                     domain.as_str(),
                     ingestor.name.as_str(),
                 ),
+                runtime.executor().clone(),
             )
             .change_context_lazy(|| ingestor.initialize_failure())?;
             companions.push(Box::new(KafkaPartitionWatch {
@@ -354,6 +355,7 @@ impl KafkaIngestorStartPlan {
         };
         let source_plan = SourcePlan {
             connector: KafkaSourcePlan {
+                executor: runtime.executor().clone(),
                 config: resolved_client.entries,
                 topic,
                 offset_mode: source_offset_mode,
@@ -413,8 +415,12 @@ mod tests {
         let mut events = runtime.subscribe_events();
         let (rebalance, _changes) = watch::channel(0);
         let watch = KafkaPartitionWatch {
-            inspector: TopicPartitionInspector::new(&[], "report-chain-test".into())
-                .assured("an inspector without brokers can be initialized without a lookup"),
+            inspector: TopicPartitionInspector::new(
+                &[],
+                "report-chain-test".into(),
+                runtime.executor().clone(),
+            )
+            .assured("an inspector without brokers can be initialized without a lookup"),
             domain: domain("orders"),
             ingestor: named("source"),
             topic: named("orders"),

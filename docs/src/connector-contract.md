@@ -452,16 +452,25 @@ accepted.
 
 No driver call that parks its thread runs on an asynchronous worker. A connector runs such a call
 in the executor's storage class with a declared deadline as its bound, or as a declared owner of the
-runtime's blocking pool. The Kafka source's metadata fetches, watermark and offset-for-time lookups,
-seeks, assignment calls and consumer drop still run inline on its worker and are the remaining
-exceptions to this rule.
+runtime's blocking pool. Kafka source control calls use the connector storage class: metadata,
+watermark and timestamp lookups, seeks and assignments run off the async workers. Consumer
+destruction remains an exception: it can wait for librdkafka's threads on the thread that drops
+the last consumer handle.
 
-A driver call that parks its thread while it waits on the network computes nothing, and admitting
-it would hold a worker idle for the whole wait. librdkafka's producer flush, metadata fetch and
-synchronous offset commit are such calls, so the Kafka connector runs them on the runtime's blocking
-pool as declared owners outside the executor, bounded by the host's flush deadline, a per-request
-metadata timeout, and one commit in flight per source instance that the source waits for at most
-thirty seconds.
+Network control calls have their own bounded connector storage admission, separate from filesystem
+and consensus storage. A broker that does not answer therefore cannot consume those classes'
+worker permits. Kafka metadata, watermark, timestamp and seek operations take their control-call
+budget from the effective native `socket.timeout.ms`, including its driver default. The budget
+includes admission and the consumer's serialized control-operation turn. A cancelled running call
+keeps its worker and that turn until the driver returns, so a later assignment or seek cannot
+overtake it. Group commits have their separate one-in-flight owner; a failed commit does not
+prevent attempting unsubscribe.
+Consumer-group commits retain one admitted job per source instance until the coordinator answers,
+including when the waiting caller is cancelled or its thirty-second deadline expires. Admission
+refusals remain transient source failures; they never reject a record as invalid.
+
+librdkafka's producer flush still runs on the runtime's blocking pool as a declared owner outside
+the executor, bounded by the host's physical flush deadline.
 [Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor)
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
@@ -489,7 +498,9 @@ reading, and the transport's own window or prefetch keeps the peer from sending 
 waits for the buffer to drain. A protocol without flow control drops what does not fit and counts
 it. A buffer that drops without counting, or whose overflow fails the publish for the host to retry,
 is declared as it behaves, and a buffer that nothing bounds yet is declared unbounded, so the matrix
-shows each gap until its connector closes it.
+shows each gap until its connector closes it. A polled source's response is bounded by its
+statement's `MAX BODY SIZE`: a response that exceeds it fails the poll, which the ingestor reports
+as its transient error, and the next poll reads again.
 
 A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a fixed bound Nervix
 sets, or the driver's own default. A wait that only the host's stop ends is declared unbounded. The
@@ -499,14 +510,15 @@ deadline keys mean the same thing for every connector:
 | --- | --- |
 | `timeout_ms` | The whole of one request or operation: name resolution, connection setup, TLS and the answer. |
 | `connect_timeout_ms` | Establishing a connection: name resolution, the address attempts, TLS and the protocol's own handshake. |
+| `idle_timeout_ms` | How long a connection may carry nothing while its connector waits to read from it, after which the connector closes it. |
 
-A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or a
-declared idle key, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
+A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or by
+`idle_timeout_ms`, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
 number of milliseconds no longer than about 146 years, the vocabulary's `ClientDeadline` rule, and
-the connector contract's `ConfiguredDeadline` reads both keys once, so no connector parses its own. A
+the connector contract's `ConfiguredDeadline` reads each key once, so no connector parses its own. A
 connector that dials for itself and reads `connect_timeout_ms` allows 30 seconds where the client
-leaves the key out, and a connection that runs out of its deadline is reported naming the key and
-its bound.
+leaves the key out, and so does a listener that bounds the TLS handshake of a connection it accepted
+by that key. A connection that runs out of its deadline is reported naming the key and its bound.
 
 A connector that dials for itself spends one `OperationBudget` from `nervix-dns` on an operation. The
 caller declares how much of it the name lookup may take: whatever is left for an operation that is
@@ -520,9 +532,12 @@ bounds the handshake and the request that follow.
 Each deadline key an entity's waits name is a runtime capability, `STALLED PEER <key>`, and the
 capability inventory names a scenario that observes it: a peer that stops answering during a wait
 the key bounds surfaces as the entity's transient status within that bound, and the connector
-retries on its policy. A silent endpoint accepts connections and never answers, a stallable endpoint
-in front of a dependency stops carrying bytes in both directions while its connections stay open,
-and the HTTP and gRPC receivers can hold a response; scenarios stand them where the stall belongs.
+retries on its policy. A listener serves many peers, so one that stalls is not the entity's status:
+the bound closes that peer's connection, and the scenario observes the connection end no sooner than
+the bound while the listener goes on reading its other peers. A silent endpoint accepts connections
+and never answers or reads, a stallable endpoint in front of a dependency stops carrying bytes in
+both directions while its connections stay open, and the HTTP and gRPC receivers can hold a
+response; scenarios stand them where the stall belongs.
 
 #### Review checklist
 
@@ -772,7 +787,7 @@ The host runs three source loop families, with a listener using the broker loop:
 | Family | Host behavior | Source behavior |
 | --- | --- | --- |
 | Broker and listener | Open instances, manage readiness and quiesce, request batches and await each read to completion, cancelling a read that a quiesce change or a stop meets, decode and dispatch, wait for ACK roots when configured, then acknowledge or reject positions and pace retry. | Subscribe, receive and end a cancelled read with what it already took, expose transport positions and metadata, and perform transport ACK or rejection. Syslog is a listener with no broker ACK. |
-| Paced | Bind and wait on the domain cadence, hand the scheduled instant to one poll, admit its returned messages without broker ACKs, and report poll failures. | HTTP and Prometheus perform one transport poll; they do not bind a domain clock or choose the cadence. |
+| Paced | Bind and wait on the domain cadence, hand the scheduled instant to one poll, admit its returned messages without broker ACKs in intake batches no larger than the bound its composition declares, each executed as its own ingest group, and report poll failures. | HTTP and Prometheus perform one transport poll; they do not bind a domain clock or choose the cadence. An HTTP poll answers one message; Prometheus declares 1024 samples per intake batch. |
 | Request scoped | Bind endpoint routes to request intake, admit and dispatch each request there, replay retained quiesce work, then unbind on close. | The endpoint source has no polling transport or broker position. |
 | Client batches | Keep the producers of one client ingestor, admit their batches one at a time through one admission worker per execution, give each admitted batch one ACK root, and answer each batch with its outcome. | There is no source connector: producers submit Arrow IPC batches through the session protocol. |
 
@@ -928,6 +943,16 @@ returns a queued publish first, so a dropped poll loses no publish it read. It c
 acknowledgement still waiting for room in a send buffer the broker has stopped draining; a
 persistent session then delivers that publish again when it resumes, as it does any publish whose
 acknowledgement never reached the broker.
+
+### Oversized payloads
+
+A source whose transport delivers each payload on its own, so dropping one leaves the next intact,
+drops a payload larger than its client's message size bound and returns `SourceBatch::Oversized`
+with how many it dropped. The host counts them in `nervix_ingestor_oversized_payloads_total`, which
+`DESCRIBE INGESTOR` renders, and reads again at once; the drop is neither a read failure nor a
+decode rejection, because the payload never reached the codec. A `SYSLOG LISTENER` does this for a
+UDP datagram larger than `max_message_size`. A stream transport cannot find the frame after an
+oversized one, so its source closes that connection instead and counts nothing.
 
 ### MQTT session retirement
 
@@ -1641,6 +1666,8 @@ sequenceDiagram
   a topic. A topic the broker does not have is the typed missing-topic failure, from the
   subscription's error or from the topic's metadata, and the host shows it as the ingestor's
   transient error until the topic is provisioned.
+  Partition inspectors preserve that typed outcome across their admitted control call so their
+  watches observe an empty topology until provisioning, then publish the available partitions.
   Under `OFFSET BY CONSUMER GROUP` in an `ACK` mode, the source commits the latest offset of each
   partition of an acknowledged batch and waits for the coordinator's answer, one round trip per
   batch, which `ACK PARALLEL` amortizes over the batch. A commit the coordinator refuses fails the
@@ -1649,7 +1676,8 @@ sequenceDiagram
   long as the group has no reachable coordinator, so the source waits for an answer at most thirty
   seconds and then fails the acknowledgement the same way. Such a commit stays in flight until
   librdkafka answers it, and the source's next commit waits for it first, so an instance never
-  parks more than one blocking-pool thread on commits. In `MODE NO ACK` the driver commits on its
+  holds more than one connector storage job on commits. Cancelling an awaiting caller retains
+  that same job. In `MODE NO ACK` the driver commits on its
   own cadence, and suspending or closing the source commits what it delivered since.
   A rejection seeks each rejected partition the consumer is still assigned back to its earliest
   unacknowledged record. A consumer-group rebalance can move a partition to another group member

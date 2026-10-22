@@ -3,6 +3,9 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use error_stack::Report;
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
+use nervix_primitives::sync::Semaphore;
 use thiserror::Error;
 use ubyte::ByteUnit;
 
@@ -43,8 +46,7 @@ pub enum CpuClass {
     Bulk,
 }
 
-/// A bounded share of admission onto the blocking pool for synchronous filesystem and database
-/// work.
+/// A bounded share of admission onto the blocking pool for synchronous storage and connector I/O.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StorageClass {
     /// Consensus storage, admitted one job at a time. Admission is granted in the order it was
@@ -53,6 +55,9 @@ pub enum StorageClass {
     Consensus,
     /// Every other synchronous filesystem and database operation.
     Filesystem,
+    /// Blocking connector control I/O. A driver may retain a call after its caller stops waiting,
+    /// so these jobs never take filesystem or consensus worker permits.
+    Connector,
 }
 
 /// A reserved transient-memory budget. A class cannot borrow beyond its own ceiling, so a
@@ -100,6 +105,7 @@ impl WorkerClassName {
             Self::Cpu(CpuClass::Bulk) => "bulk_cpu",
             Self::Storage(StorageClass::Consensus) => "consensus_storage",
             Self::Storage(StorageClass::Filesystem) => "filesystem_storage",
+            Self::Storage(StorageClass::Connector) => "connector_storage",
         }
     }
 }
@@ -126,6 +132,7 @@ pub struct WorkerCounts {
     pub bulk_cpu: NonZeroUsize,
     pub consensus_storage: NonZeroUsize,
     pub filesystem_storage: NonZeroUsize,
+    pub connector_storage: Setting<ConnectorStorageWorkers>,
     /// The number of jobs one class may hold waiting for a worker. Beyond it, admission is refused
     /// with typed backpressure rather than growing an unbounded queue in front of the pool.
     pub pending_jobs: NonZeroUsize,
@@ -159,8 +166,47 @@ impl Default for WorkerCounts {
             bulk_cpu: data,
             consensus_storage: NonZeroUsize::MIN,
             filesystem_storage: NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
+            connector_storage: ConnectorStorageWorkers::resolve(None)
+                .assured("two connector workers fit the primitive's permit representation"),
             pending_jobs: NonZeroUsize::new(1024).unwrap_or(NonZeroUsize::MIN),
         }
+    }
+}
+
+/// Node-local capacity for synchronous connector control I/O.
+pub struct ConnectorStorageWorkers;
+
+impl SettingDefinition for ConnectorStorageWorkers {
+    type Class = NodeCapabilities;
+    type Value = NonZeroUsize;
+    type Context = ();
+    type Error = ExecutionConfigError;
+
+    const NAME: &'static str = "execution-connector-storage-workers";
+    const DERIVATION: Option<&'static str> = None;
+
+    fn default_value(_: &()) -> NonZeroUsize {
+        NonZeroUsize::new(2).verified("two connector workers are nonzero")
+    }
+
+    fn validate(value: &NonZeroUsize, _: &()) -> Result<(), Report<ExecutionConfigError>> {
+        if value.get() > Semaphore::MAX_PERMITS {
+            return Err(Report::new(ExecutionConfigError::WorkerCountTooLarge {
+                class: WorkerClassName::Storage(StorageClass::Connector).as_str(),
+                workers: value.get(),
+                maximum: Semaphore::MAX_PERMITS,
+            }));
+        }
+        Ok(())
+    }
+}
+
+impl ConnectorStorageWorkers {
+    /// Resolve the default or a local capacity claim through the same validation boundary.
+    pub fn resolve(
+        value: Option<NonZeroUsize>,
+    ) -> Result<Setting<Self>, Report<ExecutionConfigError>> {
+        Setting::resolve(value, &())
     }
 }
 
@@ -314,6 +360,12 @@ pub(crate) struct ValidatedBudgets {
 /// contradiction by waiting forever for a budget that cannot hold it.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ExecutionConfigError {
+    #[error("the {class} worker count {workers} exceeds the primitive's {maximum} permits")]
+    WorkerCountTooLarge {
+        class: &'static str,
+        workers: usize,
+        maximum: usize,
+    },
     #[error(
         "the {class} memory budget of {budget} bytes cannot hold its largest {operation} of \
          {required} bytes"

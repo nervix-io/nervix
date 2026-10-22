@@ -21,7 +21,10 @@ use nervix_connector::{
 };
 use nervix_primitives::sync::{Notify, blocking::Mutex, mpsc};
 
-use super::{read::ReadEnd, *};
+use super::{
+    read::{BrokerRead, ReadEnd},
+    *,
+};
 
 /// Whether a source double has a read in flight.
 ///
@@ -68,6 +71,8 @@ pub(super) enum ReadEvent {
     Acknowledged(Vec<u64>),
     /// The host flushed the positions it had taken in since its last flush.
     Flushed,
+    /// The host counted payloads the source dropped for their size.
+    CountedOversized(NonZeroUsize),
     Suspended,
     Closed,
 }
@@ -119,7 +124,10 @@ pub(super) fn assert_every_taken_position_taken_in_first(events: &[ReadEvent]) {
                      {events:?}"
                 );
             }
-            ReadEvent::Cancelled | ReadEvent::Acknowledged(_) | ReadEvent::Flushed => {}
+            ReadEvent::Cancelled
+            | ReadEvent::Acknowledged(_)
+            | ReadEvent::Flushed
+            | ReadEvent::CountedOversized(_) => {}
         }
     }
     assert_eq!(
@@ -435,6 +443,9 @@ impl SourceHostServices for RecordingHost {
     }
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a replayable test source discarded {positions} positions after a reconnect");
+    }
+    fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+        self.events.record(ReadEvent::CountedOversized(payloads));
     }
     fn record_unconfirmed_stop(&self, positions: usize) {
         panic!("a test graph that acknowledges at once left {positions} positions unconfirmed");
@@ -807,5 +818,33 @@ async fn only_a_read_the_host_did_not_cancel_waits_out_a_retry_delay() {
     assert!(
         Instant::now() >= delay_end,
         "a read that returned on its own waits out the retry delay"
+    );
+}
+
+#[nervix_primitives::test]
+async fn payloads_a_source_dropped_for_their_size_are_counted_and_nothing_is_taken_in() {
+    let Fixture {
+        host, observers, ..
+    } = Fixture::new();
+    let host = SourceHost::new(host);
+    let payloads = NonZeroUsize::new(3).assured("three is nonzero");
+    let read = BrokerRead::<GatheredMessage> {
+        batch: Ok(SourceBatch::Oversized { payloads }),
+        end: ReadEnd::Returned,
+    };
+
+    let ReadOutcome::TakeIn(messages) = read.into_outcome(&host) else {
+        panic!("a source that dropped oversized payloads leaves the loop reading");
+    };
+
+    assert!(messages.is_empty(), "a dropped payload is never taken in");
+    assert_eq!(
+        observers.events(),
+        vec![ReadEvent::CountedOversized(payloads)]
+    );
+    assert_eq!(
+        observers.reported_errors.lock().clone(),
+        Vec::<String>::new(),
+        "a dropped oversized payload is no ingestor error"
     );
 }

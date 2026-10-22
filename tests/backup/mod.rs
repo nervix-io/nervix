@@ -22,6 +22,7 @@ use crate::common::{
     cluster::test_basic_authorization,
     raw_session::{TestDownload, TestDownloadEnd, download_backup},
     runner_offload::off_the_runner,
+    suite_watchdog::SUITE_BUDGET,
 };
 
 mod branch_keys;
@@ -45,8 +46,28 @@ pub(crate) struct TestBackup {
     summary: BackupArchiveSummary,
 }
 
-/// How long a backup the CLI runs may take, download included.
-const CLI_BACKUP_TIMEOUT: Duration = Duration::from_secs(300);
+/// The slowest three-node restore the CLI completed in the scenarios jobs of Check runs
+/// 39683355582 and 39683521277, both on slow runners, rounded up: 291 seconds for a 42 MB archive,
+/// and up to 260 seconds for the 84 MB keyspace and window archives. Restores that took longer
+/// were ended at the former 300-second budget, so none of them is part of the measurement. A
+/// policy input: measure it again when the backup scenarios, their archives or the suite's
+/// concurrency change.
+const SLOWEST_HEALTHY_CLI_RESTORE: Duration = Duration::from_secs(300);
+/// How many times the slowest healthy restore one CLI run may take. A leader change while a
+/// restore installs its state makes the next leader install it again once the CLI sends the
+/// archive again, and six concurrent local copies of the keyspace and window scenario saw a
+/// restore start installing its state three times. A policy input.
+const CLI_RESTORE_INSTALLATIONS: u32 = 3;
+/// How long a backup or restore the CLI runs may take, download included.
+const CLI_BACKUP_TIMEOUT: Duration =
+    match SLOWEST_HEALTHY_CLI_RESTORE.checked_mul(CLI_RESTORE_INSTALLATIONS) {
+        Some(budget) => budget,
+        None => panic!("the CLI budget must fit in Duration"),
+    };
+const _: () = assert!(
+    CLI_BACKUP_TIMEOUT.as_nanos() < SUITE_BUDGET.as_nanos(),
+    "a CLI run must end inside the suite budget, so its scenario fails with its own reason"
+);
 
 /// The largest `models.nspl` a scenario reads back.
 const MODELS_LIMIT: u64 = 64 * 1024 * 1024;

@@ -287,6 +287,9 @@ relay. Do not use them to scan across branches.
 - A Kafka client never sets `allow.auto.create.topics`; `CREATE KAFKA CLIENT` refuses it. Provision each
   topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
   it exists.
+- For Kafka source control-call deadlines and bounded execution, follow `Ingestors` → `Client
+  Deadlines`. Keep `socket.timeout.ms` distinct from the consumer-group commit caller deadline;
+  an unanswered commit is retained before another can start.
 - Kafka `OFFSET BY DOMAIN` commits and start-point resets wait up to the native checkpoint bulk
   operation's thirty-second budget for all assigned state replicas. A missing acknowledgement
   follows the source's existing rejection and retry policy; this mode remains at least once.
@@ -352,6 +355,10 @@ relay. Do not use them to scan across branches.
   query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
   the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. Read
   `Ingestors` → `Prometheus` for the keys.
+- A `PROMETHEUS QUERY` ingestor reads at most `MAX BODY SIZE` bytes of each response, written
+  between `QUERY` and `EVERY` and `16MiB` when left out. A larger response fails the poll as the
+  ingestor's transient error rather than delivering part of it; raise the bound for a query that
+  legitimately returns more. Samples enter the graph in batches of at most 1024.
 - Treat Kafka `NO_ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces any

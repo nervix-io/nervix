@@ -1,4 +1,75 @@
 Feature: Kafka ingestor domain pacing
+  @kafka_control_execution
+  Scenario Outline: A stalled Kafka domain resume uses bounded connector execution while another ingestor delivers on <cluster_size> nodes
+    Given a mock Kafka broker serves topic "control_wait_{{test_id}}"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE CODEC resume_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE KAFKA CLIENT slow_kafka CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'socket.timeout.ms' = '30000'
+      };
+      CREATE KAFKA TOPIC INGESTOR stalled_source
+        FROM slow_kafka TOPIC 'control_wait_{{test_id}}'
+        OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+        RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE VHOST edge control-{{test_id}}.example.com;
+      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR healthy_source
+        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION healthy_subscription TO events;
+      START;
+      """
+    When mock Kafka message is published to topic "control_wait_{{test_id}}"
+      """
+      {"seq":1}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "seq":1
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "stalled_source" is saved as placeholder "kafka_owner"
+    Given the mock Kafka broker holds every answer
+    When these Plexus statements are executed on the leader node
+      """
+      ALTER KAFKA TOPIC INGESTOR stalled_source
+        SET DECODE USING resume_codec;
+      """
+    Then within "30s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_running" with labels eventually reaches at least 1
+      """
+      class="connector_storage"
+      """
+    When http payload is posted to host "control-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":42}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "seq":42
+      """
+    When the mock Kafka broker releases its answers
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Unpaced Kafka ingestors consume messages without an explicit timestamp field
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
