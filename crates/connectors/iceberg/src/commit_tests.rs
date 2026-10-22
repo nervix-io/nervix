@@ -4,7 +4,7 @@
 use ::iceberg::{
     MemoryCatalog, Namespace, TableCommit, TableCreation,
     memory::{MEMORY_CATALOG_WAREHOUSE, MemoryCatalogBuilder},
-    spec::{NestedField, PrimitiveType, Schema},
+    spec::{NestedField, PrimitiveType, Schema, Type},
 };
 use arrow_array::{Int64Array, StringArray};
 use arrow_schema::Field;
