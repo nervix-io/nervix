@@ -92,7 +92,7 @@ const SYSLOG_COLLECTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for SyslogListenerSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
+        headers: None,
         metadata: SourceMetadataScope::Syslog,
         executes_on_every_cluster_node: true,
         reference: SourceReferenceKind::Client(ConnectorKind::Syslog),
@@ -167,7 +167,7 @@ pub struct SyslogCollectorSink {
 
 impl SinkEntity for SyslogCollectorSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::Client(ConnectorKind::Syslog),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },

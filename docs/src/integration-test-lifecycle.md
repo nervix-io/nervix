@@ -399,7 +399,42 @@ so a failed checkout does not add a second failure that obscures the original on
 existing deadlines and test budgets are unchanged.
 
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
-seconds. Every kache-backed job uses kache 1.2.1, records `doctor` output without making it a
+seconds, with UTC timestamps, guest-reported MHz and Linux PSI CPU, memory and I/O `some avg10`
+pressure. Missing VM counters are blank, not zero measurements.
+
+Every authored Rust build step in Check, Bolero and Docker Build is preceded by the shared
+`runner-diagnostics` action. It prints CPU identity/topology, allowed CPUs and visible ancestor
+cgroup quotas, exposed frequency/governor/boost controls, memory, filesystem and block-device
+information in the step log and job summary. The `runner-diagnostics-<job>-<matrix-index>-<step>`
+artifact retains JSON and Markdown with UTC, revision, run/attempt/job identity, tool versions
+and exact arguments. Compare matching tool versions, architectures and arguments;
+these are observations, not performance gates or sustained hardware benchmarks.
+
+The action installs distro-packaged [sysbench](https://github.com/akopytov/sysbench) and
+[fio](https://fio.readthedocs.io/en/latest/fio_doc.html) once per job. The tools run on one allowed
+CPU where `taskset` is available. Sysbench runs one second each of CPU work (prime limit 20,000),
+sequential memory reads and uniformly random memory reads across a 64 MiB block. Its event latency
+measures a whole block operation, not an individual hardware memory load. Fio uses one worker and
+queue depth one: 64 MiB of direct writes with `end_fsync`, 64 MiB of direct sequential reads and
+128 random direct 4 KiB reads. It touches only a private temporary file on the build filesystem.
+The write report's sync statistics and the process duration are retained; its per-I/O bandwidth
+must not be mistaken for a measurement including the final sync.
+
+Raw tool reports, wall time and process CPU time are retained separately. Sysbench invocations
+have three-second process-group guards and fio a four-second guard, all within a ten-second
+calibration allowance. Completed tool reports survive a later timeout; the supervisor kills the
+tool's process group and removes its temporary directory. Missing tools and unsupported direct
+I/O retain their actual error, with no buffered-read substitute and no global cache drops.
+
+Native actions probe the workspace filesystem. Docker's builder also runs the probe against its
+mounted `/app/target`, recording the full result in its plain BuildKit log; host workspace and
+builder storage observations are distinct. No diagnostics are added to the release image.
+Direct I/O requests still traverse the guest filesystem and storage stack and do not establish
+physical SSD latency. Reported MHz and cpufreq policy values do not measure effective physical
+clocks. Low steal alone does not show a host is fast: CPU execution, cache/memory contention and
+storage can slow work without stolen time. The samples support comparison, not a specific cause.
+
+Every kache-backed job uses kache 1.2.1, records `doctor` output without making it a
 test failure, publishes a cache report, and diagnoses its five most expensive misses with
 `why-miss`. The shared S3 cache keeps executable and test-binary outputs, with stores sized for
 the full builds: every kache-backed job and Docker image build uses a 1 TiB store ceiling. This is

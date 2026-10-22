@@ -72,7 +72,7 @@ const MYSQL_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SinkEntity for MySqlTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::Client(ConnectorKind::MySql),
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },

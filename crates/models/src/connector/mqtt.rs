@@ -187,7 +187,7 @@ const MQTT_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for MqttTopicSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
+        headers: None,
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Mqtt),
@@ -431,7 +431,7 @@ pub struct MqttTopicSink {
 
 impl SinkEntity for MqttTopicSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::Client(ConnectorKind::Mqtt),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
