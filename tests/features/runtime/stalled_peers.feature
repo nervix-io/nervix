@@ -832,3 +832,72 @@ Feature: Stalled peers
       | cluster_size |
       | 1            |
       | 3            |
+
+  # A core NATS write hands its records to the client and flushes them to the client's socket. The
+  # emitter publishes through an endpoint the scenario controls, which goes down: it ends the
+  # client's connection and refuses every reconnection, so the client holds what the emitter hands
+  # it and the write's flush cannot finish until the client is back.
+  Scenario Outline: A NATS emitter whose server goes down is reported within timeout_ms
+    Given NATS is running
+    And a NATS endpoint the scenario controls is configured
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And NATS subject "stalled_{{test_id}}" is observed
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge stalled-nats-{{test_id}}.example.com;
+      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM notifications_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE NATS CLIENT nats_main CONFIG {
+        'addr' = '{{nats_controlled_addr}}',
+        'timeout_ms' = '1000'
+      };
+      CREATE EMITTER nats_out FROM notifications
+        TO NATS nats_main SUBJECT stalled_{{test_id}}
+        MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING notification_codec
+        INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "stalled-nats-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":1}
+      """
+    Then the observed broker receives a payload
+      """
+      {"user_id":1}
+      """
+    When the controlled NATS endpoint goes down
+    Then the controlled NATS endpoint refuses a client that reconnects
+    When http payload is posted to host "stalled-nats-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":2}
+      """
+    Then within "20s" DESCRIBE EMITTER "nats_out" on the leader node contains
+      """
+      did not finish within timeout_ms 1s
+      """
+    When the controlled NATS endpoint forwards everything
+    Then the observed broker receives a payload
+      """
+      {"user_id":2}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
