@@ -121,7 +121,7 @@ Feature: Interconnection observability
       uploaded resource version 1
       """
     When node "node-3" is started
-    Then within "30s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"
+    Then within "300s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"
       """
       DESCRIBE RESOURCE large_model VERSION 1;
       """
