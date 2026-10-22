@@ -251,7 +251,8 @@ pub(crate) fn external_identifier(text: &str) -> Result<(), ExternalNameError> {
         nervix_lint,
         nervix::constant(
             fixed,
-            reason = "the Plexus table and collection locator grammar fixes the name at 1–128 ASCII bytes, as specified in docs/src/emitters.md"
+            reason = "the Plexus table and collection locator grammar fixes the name at 1–128 \
+                      ASCII bytes, as specified in docs/src/emitters.md"
         )
     )]
     const MAX_IDENTIFIER_BYTES: usize = 128;
