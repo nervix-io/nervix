@@ -87,6 +87,7 @@ Bolero obligation, and none of those discharges a suite.
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
 | `docker-event-recording.sh` | The run's live Docker event recording and its marker windows |
 | `output-boundary.sh`, `consumer-group.sh`, `startup-status.sh`, `image-package-check.sh`, `image-identity.sh`, `tool-images.sh`, `select-subnet.sh`, `require-jq.sh` | Kafka end-offset observations and the output boundary, the source consumer group's members and the nodes that run them, startup status publication, the image-package check, image identity rules, the tool image pins, network selection and the jq requirement |
+| `verifier-self-check.sh` | The verifier self-check's bound, the identity of the chaos scripts and the judgement of the record a suite hands its runs |
 | `cleanup.sh` | Removal of one run's labeled resources, with optional evidence capture |
 | `suite.sh`, `suites.json`, `suite-report.jq` | The suites: catalog, shard budgets, runs, verdict records, summaries and suite cleanup |
 | `compose.yaml`, `compose.diagnostic.yaml` | The deployment and its diagnostic overlay |
@@ -231,8 +232,8 @@ A run needs a Linux Docker host with the following.
   - GitHub-hosted `ubuntu-24.04` workers qualify once the job has loaded `sch_prio`, `sch_sfq` and
     `sch_netem`.
   - The repository's Blacksmith workers do not qualify. Their kernel offers none of those
-    disciplines, so every network run there stops in its preflight, and every other run stops in
-    the network-healing exercise of its verifier self-check.
+    disciplines, so every network run there stops in its preflight, and every other run, or a
+    suite before its first run, stops in the network-healing exercise of its verifier self-check.
 
 A host may run several runs and suites at once. Each run owns its Compose project, network, volumes
 and labels, and runs share nothing but the Docker daemon and the host's capacity. Concurrent runs
@@ -321,10 +322,10 @@ Every container, network and volume a run owns carries `io.nervix.chaos.run=<run
 | --- | --- |
 | `just chaos list` | Lists the scenarios with their topologies, cases, profiles and faults |
 | `just chaos run SCENARIO --image IMAGE [OPTIONS]` | Runs one scenario. `--help` after the scenario prints its options |
-| `just chaos replay RUN_DIRECTORY [--artifacts DIR] [--run-id ID] [--timeout SECONDS] [--keep]` | Replays a recorded mixed-instability run |
+| `just chaos replay RUN_DIRECTORY [--artifacts DIR] [--run-id ID] [--timeout SECONDS] [--verifier-self-check RECORD] [--keep]` | Replays a recorded mixed-instability run |
 | `just chaos suite list` | Lists the suites, their shards, and each entry's command and budget |
 | `just chaos suite smoke\|soak --image IMAGE [--image-kind KIND] [--image-revision REVISION] [--shard N] [--entry ID]... [--artifacts DIR] [--suite-id ID]` | Runs a suite, one shard of it, or named entries |
-| `just chaos suite shards SUITE` | Prints the suite's CI matrix as JSON: each shard's entries with its execution, step and job budgets |
+| `just chaos suite shards SUITE` | Prints the suite's CI matrix as JSON: each shard's entries with its execution, preparation, step and job budgets |
 | `just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY` | Ends what a suite left behind |
 | `just chaos suite report [--expect-shards N] SUITE_JSON...` | Renders one summary of several shards' records, and fails unless every one passed |
 | `just chaos cleanup --run-id RUN_ID [--evidence DIR]` | Removes one run's labeled resources, first capturing them into `DIR` |
@@ -342,6 +343,7 @@ take.
 | `--timeout SECONDS` | Every scenario | 120 to 3,600; mixed instability from its duration plus 600 through 21,600. Defaults are in the catalog |
 | `--artifacts DIR` | Every scenario | Default `target/chaos` |
 | `--run-id ID` | Every scenario | 1 to 96 letters, digits, dots, underscores or hyphens, starting with a letter or digit. Generated when omitted. A run ID whose directory already exists is refused |
+| `--verifier-self-check RECORD` | Every scenario | The record of the verifier self-check a suite executed, which the run adopts instead of executing `tests/self-test.sh`. A record that did not pass on this worker, during this boot, for exactly the run's chaos scripts is refused as a setup error before the run creates anything. A suite passes it to every run; a standalone run omits it |
 | `--keep` | Every scenario | Keeps the run's resources after diagnostics and prints their cleanup command |
 | `--outage-seconds N` | The crash scenarios, `cluster-restart`, `stateful`, `domain-time`, `backup-fault` and the crash faults of `restore-fault` | 5 to 120. Default 8; in `stateful`, 45 for `owner-pause` and `owner-partition`; 30 for `voter-pause` and `voter-partition`. The `owner-partition` fault of `backup-fault` holds a fixed 35-second isolation. In `restore-fault --fault reclamation-owner-crash` the killed owner stays down at least until the other target reclaims its staging |
 | `--case CASE`, `--partition-seconds N` | `partition-recovery` | `all`, `follower`, `asymmetric`, `leader` or `quorum-loss`, default `all`; 20 to 600, default 45 |
@@ -363,7 +365,8 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-degraded-evidence` | The degraded-link controller, parser and effect limits at 40 and 400 packets |
 | `just test-chaos-hold-quorum` | The mixed-instability hold check for a degraded link that leaves every voter in a quorum |
 | `just test-chaos-pause-delivery` | A failover-length pause's sink check on the retained leader and relay-owner pause timelines: the source consumer group's handoff from a paused ingestor owner, read before the relocated consumer joins and after the handoff deadline; a handoff that never comes or comes after the unpause; a stalled sink; the window that opens at placement when the consumer stayed in place; and sink progress sampled after the unpause |
-| `just test-chaos-output-boundary [SELECTION]` | The preparation budget and the Kafka end-offset observations, without Docker |
+| `just test-chaos-output-boundary [SELECTION]` | The suite preparation and baseline execution budgets and the Kafka end-offset observations, without Docker |
+| `just test-chaos-verifier-self-check` | The identity of the chaos scripts, every reason a verifier self-check record does not apply, and a run's refusal of such a record before it creates anything, without Docker |
 | `just test-chaos-image-package` | The image-package check and its refused or invalid observations |
 | `just test-chaos-startup-status` | Bounded startup status publication |
 | `just test-chaos-backup-fixture` | Derivation of the backup graph from the baseline fixture |
@@ -388,7 +391,7 @@ A run records each phase it enters in `phases.ndjson` and its final phase in `ma
 | --- | --- |
 | `action plan and fixtures` | Mixed instability only: it generates or copies the plan and validates it, then sizes and generates the fixture, before any container exists |
 | `preflight` | Arguments and host tools; the tool images; the Nervix image; the live Docker event recording; the image-package check; a diagnostic image's evidence directories; Pumba's version and Docker access; the [network preflight](#network-preflight) |
-| `verifier self-check` | `tests/self-test.sh`, bounded to 600 seconds, which proves the external verifiers on this worker before they judge the run |
+| `verifier self-check` | `tests/self-test.sh`, bounded to 600 seconds, which proves the external verifiers on this worker before they judge the run. A run of a suite instead adopts the record of the check its suite executed once before its first run: it copies the record into `results/verifier-self-check.json` and the check's output into `results/verifier-self-test.txt`, and its manifest names the record under `verifier_self_check` |
 | `TLS generation` | The run's certificate authority and node certificates |
 | `Compose validation` | `docker compose config`, rendered into `compose.rendered.yaml`. Mixed instability also records the node settings and load interval Compose renders |
 | `broker startup and provisioning` | The broker, within 90 seconds, and every topic the scenario uses |
@@ -851,11 +854,14 @@ public metrics to count every record along the path:
 `results/remote-path.json` records the owners and the metric evidence, and `results/baseline.json`
 the verdict.
 
-Before it deploys traffic, the baseline runs its verifier self-check, which can take minutes on a
-loaded worker. The suite budgets fund that preparation explicitly: the full self-check's 600-second
-cap, plus 180 seconds for the one-node baseline or 240 seconds for the three-node baseline. That
-gives the suite bounds of 13 and 14 minutes. These allowances change no product deadline, no
-output-stability window and no ledger assertion.
+Before it deploys traffic, a standalone baseline executes its verifier self-check, which takes
+minutes on a loaded worker. In a suite that check executes once, before the first run, within the
+shard's [preparation budget](#shard-budgets), so a baseline entry's budget funds only its
+execution: 180 seconds for the one-node baseline and 240 seconds for the three-node baseline, the
+suite budgets of 3 and 4 minutes. Everything the baseline did after its verifier self-check,
+teardown included, took 30 to 37 seconds on GitHub-hosted workers in the nightly soak of 22
+October. These allowances change no product deadline, no output-stability window and no ledger
+assertion.
 
 ### Backup Under Load
 
@@ -2020,8 +2026,9 @@ The replay refuses in two ways:
   fixture that no longer matches, fails before the replay creates anything.
 - An unavailable image fails it in preflight with exit status 2, before it records a Docker event.
 
-`--artifacts`, `--run-id`, `--timeout` and `--keep` are the only options a replay accepts, and its
-manifest names the run it replays under `replay_of`.
+`--artifacts`, `--run-id`, `--timeout`, `--verifier-self-check` and `--keep` are the only options a
+replay accepts, because none of them changes the recorded experiment, and its manifest names the run
+it replays under `replay_of`.
 
 Once a run's manifest records its deployment, a failure prints the replay command and records it as
 the reproducer in `results/finding.json`. A run that fails earlier records the run command instead.
@@ -2106,7 +2113,9 @@ Two kinds of violation are handled differently:
 
 Every run has a whole-run bound, `--timeout`, and every bounded command and wait is clipped to what
 remains of it. A suite passes each entry's budget as that entry's `--timeout`, so a run that
-overruns fails by its own bound, with its own diagnostics.
+overruns fails by its own bound, with its own diagnostics. An entry's budget funds only its
+execution: the suite executes the verifier self-check once, before its first run, within the
+preparation its shard's step budget funds, and every run of the suite adopts that check's record.
 
 After the bound, the teardown has a reserve of 15 minutes. Every teardown step is bounded on its own
 and together they fit the reserve, which the live event subscriber also outlives the bound by. The
@@ -2120,7 +2129,7 @@ The controller's own bounds:
 | Image-package predicate, its inspection | 30 s, 20 s |
 | Pumba version and Docker access dry run | 30 s each |
 | Network preflight; its rules inspection | 120 s; 30 s |
-| Verifier self-check | 600 s |
+| Verifier self-check, once for a suite or a standalone run | 600 s |
 | Broker readiness | 90 s |
 | Each node's readiness and listeners; every node in `SHOW CLUSTER STATUS` | 120 s; 120 s |
 | Startup status publication | 30 s |
@@ -2154,13 +2163,20 @@ A run that ends on the runner's own budget is never a product verdict. [Cluster 
 53](https://app.clickup.com/t/86bcdkckc) owns sizing those budgets for loaded workers.
 Measurements on a diagnostic image are not product performance evidence.
 
-Suite budgets are sized for one suite on a dedicated CI worker. On a shared or loaded host, the
-verifier self-check alone can use most of a short entry's budget, so the run reaches its bound
-before its fault and fails with exit status 124. Such a failure is a limit of the host, not a
-verdict. There are three remedies:
+When every run still executed its own verifier self-check, the check took 139 to 164 seconds of
+each run on GitHub-hosted workers in the nightly soak of 22 October. That is about two thirds of
+the four-minute `stale-follower` entry, which then reached its bound in its last phase on both
+images, although its recovery had already passed. A suite therefore proves the verifiers once
+and keeps that preparation out of every entry's budget.
+
+Suite budgets are sized for one suite on a dedicated CI worker. A standalone `just chaos run` still
+executes its own check within its whole-run bound. On a shared or loaded host the check and the
+run's own work both stretch, so a standalone run given a short `--timeout` can reach its bound and
+fail with exit status 124. Such a failure is a limit of the host, not a verdict. There are three
+remedies:
 
 - run one suite per host
-- run the entry alone with `just chaos run`, whose default bound is larger
+- run the entry through its suite, or alone with `just chaos run` under its larger default bound
 - pass a larger `--timeout` to the run
 
 ## Artifacts
@@ -2175,7 +2191,7 @@ Each run writes bounded evidence under `ARTIFACTS/RUN_ID/`, by default `target/c
 | `fixtures/` | The generated records and every graph and guest the run installed |
 | `public/` | Every packaged-CLI command and its output: domain and graph creation, placements, descriptions, cluster status and metrics |
 | `traffic/` | Accepted input, observed output, every Kafka end-offset read, the output-boundary polls, consumer groups, load timestamps and producer results |
-| `results/` | The verdicts: the scenario's result and progress, the ledger, the output boundary, load pacing, container images, a diagnostic run's evidence verdict, `finding.json` |
+| `results/` | The verdicts: the scenario's result and progress, the ledger, the output boundary, load pacing, container images, a diagnostic run's evidence verdict, `finding.json`. Also the verifier self-check's output, `verifier-self-test.txt`, and in a run of a suite the record it adopted, `verifier-self-check.json` |
 | `diagnostics/` | The live event recording and its bounds, container inspection, Compose logs (a fresh-cluster restore adds `fresh-compose-ps.json` and `fresh-compose.log` for its second project), the image-package and startup-status records, preflight and healing records, cleanup output |
 | `backup/`, `backup-cycles/`, `backup-fault/`, `restore-fresh/`, `restore-fault/`, `restore-volume/`, `restarts/`, `crash/`, `pauses/`, `partitions/`, `degraded/`, `stale/`, `former-owner/`, `restart/`, `stateful/`, `domain-time/`, `mixed/` | Each scenario's own evidence, in catalog order: `restarts/` belongs to rolling restarts and `restart/` to cluster restarts |
 | `deadlock/` | A diagnostic run's per-node evidence files, their inspections and qualifications, in `node-N/` for the run's nodes and `fresh-N/` for a fresh-cluster restore's |
@@ -2320,7 +2336,7 @@ The `smoke` suite is one shard:
 
 | Entry | Command | Budget (min) |
 | --- | --- | ---: |
-| `baseline-3` | `baseline --nodes 3` | 14 |
+| `baseline-3` | `baseline --nodes 3` | 4 |
 | `leader-crash-3` | `leader-crash --nodes 3` | 7 |
 | `partition-follower` | `partition-recovery --case follower` | 9 |
 
@@ -2328,7 +2344,7 @@ The `soak` suite runs every delivered scenario, topology, case, profile and faul
 
 | Shard | Entries, with budgets in minutes |
 | ---: | --- |
-| 1 | `mixed-seed-42` (seed 42, `preserve-quorum`, 30 minutes) 60; `baseline-1` 13; `baseline-3` 14; `cluster-restart-1` 6; `cluster-restart-3` 7 |
+| 1 | `mixed-seed-42` (seed 42, `preserve-quorum`, 30 minutes) 60; `baseline-1` 3; `baseline-3` 4; `cluster-restart-1` 6; `cluster-restart-3` 7 |
 | 2 | `mixed-seed-45` (seed 45, `temporary-quorum-loss`) 60; `leader-crash-1` 6; `leader-crash-3` 7; `follower-crash` 5 |
 | 3 | `mixed-seed-136` (seed 136, `temporary-quorum-loss`) 60; `ingestor-owner-crash` 6; `emitter-owner-crash` 5; `stale-follower` 4; `former-owner-restart` 10 |
 | 4 | `mixed-rotating-preserve` 60; `rolling-restart-1` 5; `rolling-restart-3` 7; `backup-1` 4; `backup-3` 4 |
@@ -2357,7 +2373,18 @@ A few soak entries need explanation:
 - **Selection.** `--shard` selects one shard and `--entry` selects named entries. Together they
   select both.
 - **Before the first run.** The suite checks its own verdict logic with `tests/suite-self-test.sh`,
-  which `just chaos self-test` also runs.
+  which `just chaos self-test` also runs. After it has resolved the image, it executes the full
+  verifier self-check, `tests/self-test.sh`, once and within its 600-second bound. The check leads
+  a session of its own, as a run does. It passes only when it exits 0 and the chaos scripts were
+  the same when it ended as when it began. The suite then writes `verifier-self-check.json`: the
+  check's outcome and timing, the digest of its output, the identity of the chaos scripts it
+  checked and the boot identity of the worker. Every run receives that record with
+  `--verifier-self-check` and adopts it instead of executing its own check. A run refuses a record
+  that did not pass on its worker, during its boot, for exactly its scripts, as a setup error
+  before it creates anything.
+- **A failed verifier self-check.** A check that fails, or whose scripts change while it executes,
+  starts no run and leaves no record a run could adopt. The suite fails as a controller failure,
+  with exit status 1, and records every entry as not started.
 - **Image resolution.** The suite resolves the image once. A digest reference stays as given, and
   any other reference runs as the local image ID it resolves to, so every run of the suite uses one
   immutable image. It records the revision and diagnostic selection that the image's labels
@@ -2389,7 +2416,12 @@ A suite writes `ARTIFACTS/SUITE_ID/`, by default `target/chaos/<suite>-<time>-<p
   - a mixed run's peak memory, backlog and output stall
   - a diagnostic run's evidence verdict and counts
   - the result files
-- **`summary.md`.** The same verdicts rendered for a reader. The suite also prints it at the end.
+- **`verifier-self-test.txt`, `verifier-self-check.json` and `verifier-self-test/`.** The verifier
+  self-check's whole output, the record every run adopts, and the probe records a failed rate-probe
+  self-test keeps. `suite.json` records the check under `verifier_self_check`: its status, exit
+  status, start, end, duration, bound, process, output and record.
+- **`summary.md`.** The same verdicts rendered for a reader, with the verifier self-check's outcome.
+  The suite also prints it at the end.
 - **`suite.log`.** The suite's whole console, which it keeps writing after its caller stops reading.
 
 An entry passes only when its command exits 0 and its manifest records a passing run of the suite's
@@ -2413,39 +2445,47 @@ Each run executes in the background and leads a session of its own. An interrupt
 hangup therefore reaches the suite at once, and reaches the run only through the suite, even when a
 terminal signals the suite's whole process group. The suite passes one TERM to the run. The run's
 own exit trap then heals, captures and cleans up as on any exit, and records the run as interrupted.
-The suite starts no later entry. Its console reaches its caller through a tee that ignores a
-terminal's interrupts and hangups and keeps writing `suite.log` when the caller stops reading, so the
-suite outlives its console and still records every verdict.
+The suite starts no later entry. The verifier self-check executes the same way: a signal while it
+executes reaches it as the suite's one TERM, the suite records the check as interrupted, and no
+entry starts. Its console reaches its caller through a tee that ignores a terminal's interrupts and
+hangups and keeps writing `suite.log` when the caller stops reading, so the suite outlives its
+console and still records every verdict.
 
 `just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY` ends what a suite left behind. The suite
-records the process of its controller and of every run it starts, and cleanup works in this order:
+records the process of its controller, of its verifier self-check and of every run it starts, and
+cleanup works in this order:
 
-1. A controller that still executes receives one TERM, which it passes to its run as on any signal.
-   A run whose controller is gone receives one TERM itself.
+1. A controller that still executes receives one TERM, which it passes to its run or verifier
+   self-check as on any signal. A run or verifier self-check whose controller is gone receives one
+   TERM itself.
 2. Each has `--wait` seconds, 300 by default, to finish its exit work.
 3. Cleanup then kills the controller if it still executes, and every process left in each run's
-   session.
+   session and in the session of a verifier self-check that still executed.
 4. For every run the suite started, cleanup runs `just chaos cleanup --evidence` into
    `cleanup/<run-id>/`, and removes the private keys of any run whose exit trap never ran.
 5. It keeps the verdict of a run that finished before its controller ended. It records entries that
    never reported an exit status as interrupted, and entries never started as not-started.
-6. It records how the controller ended and which runs it signalled or killed, and renders the
-   summary again.
+6. It records how the controller ended, which runs it signalled or killed, and under
+   `cleanup.verifier_self_check` whether it signalled a verifier self-check that still executed and
+   how many of its processes it killed. A check that still executed is recorded as interrupted.
+   Cleanup then renders the summary again.
 
 ### Shard Budgets
 
 `just chaos suite shards SUITE` prints the budgets CI applies to each shard:
 
 - **Execution budget.** The sum of the shard's entry budgets.
-- **Step budget.** The execution budget plus one 15-minute run teardown reserve, within which a run
-  that reached its own bound finishes its teardown.
+- **Preparation budget.** 10 minutes, the verifier self-check's 600-second bound in whole minutes.
+  The suite executes that check once, before its first run, so no entry's budget funds it.
+- **Step budget.** The execution budget plus the preparation budget plus one 15-minute run teardown
+  reserve, within which a run that reached its own bound finishes its teardown.
 - **Job budget.** The step budget plus the suite's 21-minute CI reserve. The reserve funds the
   separate network-control qualification, with its 600-second cap and 10-second termination grace,
   and the steps after the suite: cleanup, which has its own 8-minute bound holding its five-minute
   wait, plus the summary and the uploads.
 
-The smoke shard therefore runs 30 minutes of entries in a 45-minute step and a 66-minute job. The
-soak's eleven shards hold 946 minutes of entries.
+The smoke shard therefore runs 20 minutes of entries in a 45-minute step and a 66-minute job. The
+soak's eleven shards hold 926 minutes of entries.
 
 `just chaos suite report [--expect-shards N] SUITE_JSON...` renders one summary of several shards.
 It fails unless each shard passed and `N` of them are present.
@@ -2513,8 +2553,9 @@ order:
        --image-revision <revision> --artifacts <dir> --suite-id ci-<run>-<attempt>-<suite>-<n>
    ```
 
-   For a diagnostic image, the suite ID adds `-diagnostic` before the shard. The suite step ends at
-   the shard's step budget, and the job ends at its job budget.
+   For a diagnostic image, the suite ID adds `-diagnostic` before the shard. The suite executes
+   the verifier self-check once, inside the step's preparation budget, before its first run. The
+   suite step ends at the shard's step budget, and the job ends at its job budget.
 7. It always runs `just chaos suite cleanup` next. Cleanup waits up to five minutes for a
    controller that is still finishing its run's exit work, kills whatever still executes, and, as a
    second witness after the runs' own traps, captures and removes what any run left behind.
@@ -2718,6 +2759,7 @@ and requalified with the scenario that found it:
 | [Keep a caught-up leader during directed burst loss](https://app.clickup.com/t/86bcjn14h) | A hold no longer requires the lagging end of a randomly or burst-lossy link to join a connected quorum's leader agreement. `mixed-burst-loss-leader-peer` replays the step that found it |
 | [Restore backup soak setup](https://app.clickup.com/t/86bcjn14f) | The backup graph derived again after the Kafka ingestor statement gained its connector and entity kind |
 | [A combined degradation's sample that lost nothing](https://app.clickup.com/t/86bcm0fq2) | Random and combined loss judge their floors over 400 packets, as burst loss already did. Forty packets of a working 20% loss missed the combined floor about once in 700 samples |
+| [Finish stale-follower inside its controller budget](https://app.clickup.com/t/86bcpkw1q) | Every run executed the full verifier self-check, 139 to 164 seconds on CI workers, inside its own entry budget, so the four-minute `stale-follower` entry reached its bound in its last phase on both images. A suite now executes the check once, before its first run, within its shard's preparation budget, and every run adopts the record. The baseline entries no longer fund the check, so their budgets are their 3- and 4-minute execution allowances |
 
 The suite also corrected defects of its own that surfaced in its qualification runs:
 

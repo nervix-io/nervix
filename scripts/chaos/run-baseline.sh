@@ -17,6 +17,8 @@ source "${script_dir}/image-identity.sh"
 source "${script_dir}/output-boundary.sh"
 # shellcheck source=image-package-check.sh
 source "${script_dir}/image-package-check.sh"
+# shellcheck source=verifier-self-check.sh
+source "${script_dir}/verifier-self-check.sh"
 
 usage() {
     cat <<EOF
@@ -72,6 +74,10 @@ Options:
                          quorum-loss under temporary-quorum-loss).
   --plan FILE            mixed-instability explicit action plan instead of a seeded one.
   --max-memory-bytes, --max-recovery-backlog and --max-pending also bound mixed-instability.
+  --verifier-self-check RECORD
+                         Adopt the record of the verifier self-check a suite executed instead of
+                         executing tests/self-test.sh; refused unless it passed on this worker,
+                         during this boot, for these chaos scripts.
   --keep                 Retain labeled Docker resources after diagnostics.
   -h, --help             Show this help.
 EOF
@@ -120,6 +126,9 @@ mixed_plan_file=""
 # No mixed-instability run, its default bound included, lasts longer than six hours.
 mixed_max_timeout=21600
 replay_dir=""
+# The verifier self-check record of the suite that runs this entry; a standalone run has none and
+# executes the check itself.
+verifier_record=""
 records_option_set=false
 timeout_option_set=false
 mixed_option_set=false
@@ -187,6 +196,11 @@ while [[ "$#" -gt 0 ]]; do
             [[ "$#" -ge 2 ]] || setup_error '--timeout requires seconds'
             overall_timeout="$2"
             timeout_option_set=true
+            shift 2
+            ;;
+        --verifier-self-check)
+            [[ "$#" -ge 2 && -n "$2" ]] || setup_error '--verifier-self-check requires a record'
+            verifier_record="$2"
             shift 2
             ;;
         --seed | --duration | --policy | --coverage | --plan)
@@ -374,7 +388,7 @@ if [[ -n "${replay_dir}" ]]; then
     [[ "${scenario}" == mixed-instability ]] || setup_error 'only mixed-instability runs can be replayed'
     for option in "${given_options[@]}"; do
         case "${option}" in
-            --replay | --scenario | --artifacts | --run-id | --timeout | --keep) ;;
+            --replay | --scenario | --artifacts | --run-id | --timeout | --verifier-self-check | --keep) ;;
             *) setup_error "a replay reuses the experiment its run directory recorded, so ${option} cannot change it" ;;
         esac
     done
@@ -586,6 +600,14 @@ if [[ -z "${run_id}" ]]; then
 fi
 [[ "${run_id}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}$ ]] \
     || setup_error '--run-id must be 1..96 letters, numbers, dots, underscores, or hyphens'
+# A suite's verifier self-check stands in for this run's own only when it passed on this worker,
+# during this boot, for exactly these scripts; any other record is refused before the run creates
+# anything.
+if [[ -n "${verifier_record}" ]]; then
+    verifier_record_refusal="$(chaos_verifier_record_refusal "${verifier_record}" "${script_dir}")" \
+        || setup_error "the verifier self-check record ${verifier_record} does not apply to this run: ${verifier_record_refusal}"
+    verifier_record="$(cd "$(dirname "${verifier_record}")" && pwd)/$(basename "${verifier_record}")"
+fi
 
 mkdir -p "${artifact_root}"
 artifact_root="$(cd "${artifact_root}" && pwd)"
@@ -2122,13 +2144,32 @@ if [[ "${scenario}" == degraded-links ]]; then
 fi
 
 phase "verifier self-check"
-# The self-check drives Docker as a scenario does, so the worker's load stretches it: it takes half
-# a minute on a quiet worker and took 247 seconds beside three chaos runs on a loaded one. The bound
-# only ends a self-check that hangs. A failed rate-probe self-test keeps its probes' records under
-# diagnostics/verifier-self-test.
-run_bounded 600 "${script_dir}/tests/self-test.sh" \
-    --evidence "${artifact_dir}/diagnostics/verifier-self-test" \
-    >"${artifact_dir}/results/verifier-self-test.txt" 2>&1
+if [[ -n "${verifier_record}" ]]; then
+    # The suite executed the full check once before its first run; the run keeps that check's
+    # record and output as its own evidence instead of spending its budget on the same check.
+    cp "${verifier_record}" "${artifact_dir}/results/verifier-self-check.json"
+    cp "$(dirname "${verifier_record}")/$(jq -r '.output' "${verifier_record}")" \
+        "${artifact_dir}/results/verifier-self-test.txt"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.verifier_self_check = ($record | {executed_by: "suite", source: $source,
+            suite_id, finished_at, duration_seconds, scripts_sha256})' \
+        --argjson record "$(cat "${verifier_record}")" --arg source "${verifier_record}"
+    printf 'adopted the verifier self-check its suite executed: %s\n' "${verifier_record}"
+else
+    # The self-check drives Docker as a scenario does, so the worker's load stretches it: it takes
+    # two and a half minutes on a CI worker and longer beside other chaos runs. The bound only ends a
+    # self-check that hangs. A failed rate-probe self-test keeps its probes' records under
+    # diagnostics/verifier-self-test.
+    verifier_started="${SECONDS}"
+    run_bounded "${chaos_verifier_self_check_seconds}" "${script_dir}/tests/self-test.sh" \
+        --evidence "${artifact_dir}/diagnostics/verifier-self-test" \
+        >"${artifact_dir}/results/verifier-self-test.txt" 2>&1
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.verifier_self_check = {executed_by: "run", duration_seconds: $duration}' \
+        --argjson duration "$((SECONDS - verifier_started))"
+fi
 
 phase "TLS generation"
 generate_tls
