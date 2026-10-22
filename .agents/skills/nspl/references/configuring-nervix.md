@@ -272,10 +272,13 @@ relay. Do not use them to scan across branches.
   its staged files to the node's 32 MiB bulk memory class and reads a larger staged batch only once
   the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
   transient error while the emitter retries.
-- Provision Iceberg table columns with names and nested types matching the emitter's `VALUES`.
-  Opening the emitter rejects an incompatible mapped schema before staging records. UTC
-  `DATETIME` values, including values inside lists and nested structures, use the containing
-  microsecond in Iceberg; a table changed after open can still fail a later commit.
+- Provision Iceberg table columns with names and types matching the emitter's `VALUES`. A
+  `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
+  microsecond and needs a `timestamptz` column, not `timestamptz_ns`. Opening the emitter refuses
+  a mapped column the table lacks or types differently, before staging records, but a commit
+  writes the mapped columns by position in the table's column order: map every table column, in
+  that order, and map only values that are never null into required columns. A table changed
+  after open can still fail a later commit.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
   an ingestor's `NO ACK` or an emitter's `NO_ACK`.
