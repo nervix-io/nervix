@@ -87,7 +87,8 @@ and queued checkpoint writers cannot cross an installation namespace.
 The every-node checkpoint maintenance owner also reclaims restored chunks after ordinary,
 replica, handoff or recovery checkpoints replace their selected header, or after state purge.
 It retains the exact revision a selected segmented header names, and preexisting snapshot readers
-keep complete saves across deletion. [Backup And Restore](./backup-and-restore.md) owns the sweep's
+keep complete saves across deletion. [Backup And Restore
+Architecture](./backup-and-restore-architecture.md#restore-staging-maintenance) owns the sweep's
 bounded buffers, accounting, cancellation and separate database allocation limits.
 The replicated start gate remains closed until every node completes publication, even if the
 restore fails or its mutation lease is released. Authority binds leader tenure, execution, lease
@@ -425,6 +426,13 @@ is reset. The destination restores every staged checkpoint into a guest before t
 published, a promoted replica from the module it compiled while it was a replica, and activation
 publishes the staged checkpoints in the new generation. `SHOW CLUSTER STATUS` reports the transition
 with `state_recovery=reset` and `resets=wasm_processor:<cause>` when it reset branches.
+
+Before selecting checkpoints, the destination waits for its local execution schedule to finish
+installing within the same five-second preparation budget. Domain lifecycle publication alone
+does not release that wait: the schedule application must also finish. The installed schedule must
+match the requested fingerprint and still assign the processor to the former owner. A promoted
+replica whose graph is still starting therefore retains its checkpoints rather than treating that
+temporary absence as missing state.
 
 A preparation that fails for any reason — a guest that refuses or fails to restore a staged
 checkpoint, a module the destination cannot compile, or the five seconds running out — makes the

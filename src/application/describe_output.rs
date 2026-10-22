@@ -21,33 +21,35 @@ use ahash::{HashMap, HashSet};
 use arch_into::ArchInto;
 use nervix_dataflow_graph::{DataflowNodeHealth, DataflowNodeStatus};
 use nervix_interconnect::{
-    DataflowNodeStatusEnvelope, IngestorDescribeEnvelope, LookupDescribeEnvelope,
+    DataflowNodeStatusEnvelope, DecodeRejectionEnvelope, IngestorDescribeEnvelope,
+    LookupDescribeEnvelope, TransportPositionEnvelope,
 };
 use nervix_models::{
     BranchSelection, CanonicalNsplError, ClickHouseSink, ClickHouseTableSink, ClientConsumerSink,
     ClientSink, ClusterNodeName, CreateCorrelator, CreateDeduplicator, CreateEmitter,
     CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor, CreateReorderer,
-    CreateWindowProcessor, EmitSink, EmitterBody, HttpRequestSink, HttpSink, IcebergCatalog,
-    IcebergSink, IcebergTableSink, IngestSource, IngestTimestampSource, IngestorInput,
-    KafkaOffsetMode, KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource, Model, ModelKind,
-    ModelName, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MqttSink, MqttTopicSink,
-    MySqlConflictAction, MySqlSink, MySqlTableSink, NatsSink, NatsSubjectSink, NodeRef,
-    OtelMetricsSink, OtelSink, PlacementName, PlacementPolicy, PostgresConflictAction,
-    PostgresSink, PostgresTableSink, ProcessorInputs, ProcessorOutputs, PulsarSink, PulsarSource,
-    PulsarTopicSink, PulsarTopicSource, RabbitMqQueueSink, RabbitMqSink, RedisPubSubSink,
-    RedisSink, RelayName, RequestedResourceVersion, ResourceDescription, ResourceEntryContent,
-    ResourceManifestEntry, ResourceUsage, ResourceVersionEntries, ScheduledNode, SentryEventSink,
-    SentrySink, SqsQueueSink, SqsSink, SyslogCollectorSink, SyslogSink, WasmStateInspection,
-    ZeroMqPushSink, ZeroMqSink, expression_to_nspl, ingest_quiesce_to_nspl,
-    ingestor_input_body_to_nspl,
+    CreateWindowProcessor, EmitSink, EmitterBody, FieldPath, HeaderModel, HttpRequestSink,
+    HttpSink, IcebergCatalog, IcebergSink, IcebergTableSink, IngestSource, IngestTimestampSource,
+    IngestorInput, KafkaOffsetMode, KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource,
+    Model, ModelKind, ModelName, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink,
+    MqttSink, MqttTopicSink, MySqlConflictAction, MySqlSink, MySqlTableSink, NatsSink,
+    NatsSubjectSink, NodeRef, OtelMetricsSink, OtelSink, PlacementName, PlacementPolicy,
+    PostgresConflictAction, PostgresSink, PostgresTableSink, ProcessorInputs, ProcessorOutputs,
+    PulsarSink, PulsarSource, PulsarTopicSink, PulsarTopicSource, RabbitMqQueueSink, RabbitMqSink,
+    RedisPubSubSink, RedisSink, RelayName, RequestedResourceVersion, ResourceDescription,
+    ResourceEntryContent, ResourceManifestEntry, ResourceUsage, ResourceVersionEntries,
+    ScheduledNode, SentryEventSink, SentrySink, SqsQueueSink, SqsSink, SyslogCollectorSink,
+    SyslogSink, WasmStateInspection, ZeroMqPushSink, ZeroMqSink, expression_to_nspl,
+    ingest_quiesce_to_nspl, ingestor_input_body_to_nspl,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
+use sorted_vec::SortedSet;
 
 use crate::{
     registry::{
         PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
     },
-    runtime::IngestorDescribe as RuntimeIngestorDescribe,
+    runtime::{DecodeRejection, IngestorDescribe as RuntimeIngestorDescribe, TransportPosition},
 };
 
 pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
@@ -63,6 +65,10 @@ pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
         quiesce_dropped_total: summary.quiesce_counters.dropped_total,
         quiesce_rejected_total: summary.quiesce_counters.rejected_total,
         transport_redeliveries_total: summary.transport_redeliveries_total,
+        decode_rejections_total: summary.decode_rejections_total,
+        last_decode_rejection: summary
+            .last_decode_rejection
+            .map(decode_rejection_to_envelope),
         memory_backpressure_paused: summary.memory_backpressure_paused,
         transient_error: summary.transient_error,
         reconnect_backoff: summary.reconnect_backoff,
@@ -104,6 +110,10 @@ pub(in crate::application) fn runtime_ingestor_describe_from_envelope(
                 rejected_total: summary.quiesce_rejected_total,
             },
             transport_redeliveries_total: summary.transport_redeliveries_total,
+            decode_rejections_total: summary.decode_rejections_total,
+            last_decode_rejection: summary
+                .last_decode_rejection
+                .map(decode_rejection_from_envelope),
             memory_backpressure_paused: summary.memory_backpressure_paused,
             transient_error: summary.transient_error,
             reconnect_backoff: summary.reconnect_backoff,
@@ -129,6 +139,68 @@ pub(in crate::application) fn runtime_ingestor_describe_from_envelope(
         },
         summary.metrics,
     )
+}
+
+/// The envelope a decode rejection crosses between nodes in.
+fn decode_rejection_to_envelope(rejection: DecodeRejection) -> DecodeRejectionEnvelope {
+    let mut fields = Vec::with_capacity(rejection.fields.len());
+    for field in rejection.fields.iter() {
+        fields.push(field.as_str().to_string());
+    }
+    let position = match rejection.position {
+        Some(TransportPosition::Kafka {
+            topic,
+            partition,
+            offset,
+        }) => Some(TransportPositionEnvelope::Kafka {
+            topic,
+            partition,
+            offset,
+        }),
+        Some(TransportPosition::Syslog { peer }) => {
+            Some(TransportPositionEnvelope::Syslog { peer })
+        }
+        None => None,
+    };
+    DecodeRejectionEnvelope {
+        reference: rejection.reference.as_u128(),
+        codec: rejection.codec,
+        position,
+        fields,
+        message: rejection.message,
+        occurred_at: rejection.occurred_at,
+    }
+}
+
+/// The decode rejection a node reported in `envelope`.
+fn decode_rejection_from_envelope(envelope: DecodeRejectionEnvelope) -> DecodeRejection {
+    let mut fields = Vec::with_capacity(envelope.fields.len());
+    for field in envelope.fields {
+        fields.push(FieldPath::new(field));
+    }
+    let position = match envelope.position {
+        Some(TransportPositionEnvelope::Kafka {
+            topic,
+            partition,
+            offset,
+        }) => Some(TransportPosition::Kafka {
+            topic,
+            partition,
+            offset,
+        }),
+        Some(TransportPositionEnvelope::Syslog { peer }) => {
+            Some(TransportPosition::Syslog { peer })
+        }
+        None => None,
+    };
+    DecodeRejection {
+        reference: uuid::Uuid::from_u128(envelope.reference),
+        codec: envelope.codec,
+        position,
+        fields: SortedSet::from_unsorted(fields),
+        message: envelope.message,
+        occurred_at: envelope.occurred_at,
+    }
 }
 
 pub(in crate::application) fn dataflow_node_status_to_envelope(
@@ -288,7 +360,16 @@ pub(in crate::application) fn format_ingestor_describe_output(
             "nervix_ingestor_transport_redeliveries_total: {}",
             summary.transport_redeliveries_total
         ),
+        format!(
+            "nervix_ingestor_decode_rejections_total: {}",
+            summary.decode_rejections_total
+        ),
     ]);
+    let last_decode_rejection = match summary.last_decode_rejection.as_ref() {
+        Some(rejection) => rejection.to_string(),
+        None => "-".to_string(),
+    };
+    lines.push(format!("last decode rejection: {last_decode_rejection}"));
     if let IngestorInput::Client(_) = &ingestor.input {
         lines.extend(format_client_producer_lines(summary));
     }
@@ -366,11 +447,31 @@ pub(in crate::application) fn format_ingestor_describe_output(
     }))) = ingestor.input.transport_source()
     {
         lines.push(format!("pulsar topic: {}", topic.as_str()));
-        lines.push(format!("pulsar subscription: {}", subscription.as_str()));
+        lines.push(format!(
+            "pulsar subscription: {}",
+            subscription.name.as_str()
+        ));
+        lines.push(format!(
+            "pulsar subscription ownership: {}",
+            subscription.ownership.keywords()
+        ));
         lines.push(format!("pulsar instances: {instances}"));
     }
+    lines.push(format!(
+        "headers: {}",
+        format_header_model(ingestor.input.source_kind().capabilities().headers)
+    ));
 
     lines.join("\n")
+}
+
+/// How `DESCRIBE` shows the header model of one side: the model, or `none` where that side's
+/// messages carry no transport headers.
+fn format_header_model(model: Option<HeaderModel>) -> String {
+    match model {
+        Some(model) => model.to_string(),
+        None => "none".to_string(),
+    }
 }
 
 /// One line of `SHOW INGESTORS`: the pair the ingestor reads, its schema or codec, the node that
@@ -891,6 +992,10 @@ pub(in crate::application) fn format_emitter_describe_output(
             } else {
                 "none"
             }
+        ),
+        format!(
+            "headers: {}",
+            format_header_model(emitter.sink.capabilities().headers)
         ),
     ]);
     Ok(lines.join("\n"))
@@ -1585,15 +1690,8 @@ fn placement_member_model_is_eligible<Version>(model: &Model<Version>) -> bool {
         | Model::Reorderer(_)
         | Model::WindowProcessor(_)
         | Model::Emitter(_) => true,
-        // An endpoint ingestor executes on every node that serves its endpoint, so no placement
-        // can hold it.
-        Model::Ingestor(ingestor) => ingestor
-            .input
-            .source_kind()
-            .capabilities()
-            .reference
-            .endpoint_type()
-            .is_none(),
+        // Ingestors that execute on every node are outside placement rules.
+        Model::Ingestor(ingestor) => !ingestor.input.executes_on_every_cluster_node(),
         Model::Relay(_) => true,
         _ => false,
     }
@@ -1800,5 +1898,57 @@ mod tests {
             ]),
             "source, sink"
         );
+    }
+
+    #[test]
+    fn placement_completion_respects_every_node_ingestor_declarations() {
+        use nervix_models::{
+            EndpointIngestMode, HttpEndpointSource, IngestQuiesceMode, IngestSource,
+            SyslogIngestMode, SyslogListenerSource, WebsocketsEndpointSource,
+        };
+
+        use super::super::test_fixtures::{named, scheduled_node};
+
+        let scheduled = scheduled_node("intake", ModelKind::Ingestor);
+        assert!(placement_member_model_is_eligible(
+            scheduled.config.as_ref()
+        ));
+
+        let sources: [IngestSource; 3] = [
+            HttpEndpointSource {
+                endpoint: named("http_intake"),
+                mode: EndpointIngestMode::NoAck,
+                quiesce: IngestQuiesceMode::Reject {
+                    retry_after: "1s".to_owned(),
+                },
+            }
+            .into(),
+            WebsocketsEndpointSource {
+                endpoint: named("websocket_intake"),
+                mode: EndpointIngestMode::NoAck,
+                quiesce: IngestQuiesceMode::EndpointBuffer {
+                    max_size: "1MiB".to_owned(),
+                },
+            }
+            .into(),
+            SyslogListenerSource {
+                client: named("syslog_listener"),
+                mode: SyslogIngestMode::NoAck,
+                quiesce: IngestQuiesceMode::Suspend,
+            }
+            .into(),
+        ];
+        for source in sources {
+            let mut model = scheduled.config.clone();
+            let Model::Ingestor(ingestor) = model.as_mut() else {
+                panic!("the fixture constructs an ingestor");
+            };
+            let IngestorInput::Transport(input) = &mut ingestor.input else {
+                panic!("the fixture constructs a transport ingestor");
+            };
+            input.source = source;
+            assert!(model.executes_on_every_cluster_node());
+            assert!(!placement_member_model_is_eligible(model.as_ref()));
+        }
     }
 }

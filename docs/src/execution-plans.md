@@ -99,6 +99,12 @@ predecessor for a retry, including after a local WASM reset operation. A node st
 forced ending first establishes its committed-state catch-up fence before installing execution;
 an earlier owner's local state cannot make it act under an obsolete assignment.
 
+Forced-recovery preparation subscribes to domain installation before checking for its execution,
+and takes the runtime's application sequence while selecting that execution. This waits for a
+startup installation whose lifecycle is already visible but whose graph is still being built.
+The same preparation deadline bounds the wait. A completed installation must match the requested
+schedule fingerprint; the sequence is released before transferring checkpoints or restoring guests.
+
 A full running build binds the domain clock, pinned resources, codecs, relay boundaries, state
 placements, processor and error plans, connectors, and node tasks from the revision. Its
 `DomainExecution` retains the revision and node-local task ownership. The domain routing snapshot
@@ -145,6 +151,12 @@ inspection but publishes none for request routing. HTTP resolves one route per r
 WebSocket retains the route and signaling protocol selected at upgrade. The detailed admission and
 publication contract remains in [Data-Plane Concurrency](./data-plane-concurrency.md).
 
+The endpoint ingestor plan also lowers request policy once: `NoAck`, or an acknowledged policy
+with positive response capacity, physical timeout and retry delay. The decision rejects an
+unusable duration, incompatible quiesce policy or missing WebSocket signaling reference. Source
+composition creates the intake's window and checks its prepared signaling encoder. Runtime
+requests consume that prepared policy and never read configuration Models or parse durations.
+
 [Data-Plane Concurrency](./data-plane-concurrency.md) owns the publication and branch refresh
 protocols. [Domain Clock](./domain-clock.md) owns the execution-time capability bound during
 installation. [Client Session Protocol](./client-session-protocol.md) owns how a client observes
@@ -167,18 +179,47 @@ The schedule classifier retains Model-based change-aspect and quiescence decisio
 registry. The runtime receives typed dynamic values, affected node identities, state purges,
 and gate relays. It does not reclassify the new schedule. An entity swap that fails locally
 falls back to a full rebuild of the desired revision; the actual wider engagement is reported as
-a recovery expansion. If that rebuild also fails, application fails and the committed revision
-remains eligible for retry. A plan is complete even for a narrow change, so fallback uses the
-same desired revision rather than reconstructing one from live tasks.
+a recovery expansion. A failed emitter stop is returned instead: its task is retained with the
+sink's held records, and rebuilding would discard the stop's exact finish outcome. If a fallback
+rebuild also fails, application fails and the committed revision remains eligible for retry. A plan
+is complete even for a narrow change, so fallback uses the same desired revision rather than
+reconstructing one from live tasks.
 
 The swap sequence fences delivery before stopping an owner, prepares new local placement and
 programs, replaces relay owner and remote-consumer edges, and publishes the routing snapshot
 before waking materialized-state waiters. An owner that still executes locally across a placement
-change keeps its task; a moved owner rebinds only its affected runtime and state placement.
+change keeps its task; a moved owner rebinds only its affected runtime and state placement. A
+reassignment rebinds the replicated state of every node it names, so a Kafka ingestor kept this way
+takes the originator its domain offsets' new binding issued: a change that only replaces a replica
+of those offsets never refuses the ingestor's commits. An ingestor instance the schedule stopped
+keeps the originator it last held, which every later binding refuses.
 
 The affected relay gates remain closed through publication. An already buffered owner batch takes
 a nonwaiting permit before fan-out: it finishes under the prior consumer set if admitted before
 the fence, or fails its record ACKs so its source retries under the published consumer set.
+
+A forced ownership change additionally identifies the input relays of its reassigned nodes. Once
+their local dispatch gates close, installation retires the preceding channel generation of each
+selected relay whose owner or remote-consumer routes change, before waiting for existing dispatch
+permits. It leaves the preceding routes published and creates no successor channel until normal
+post-swap publication. A dispatch already using a retired channel cancels its unresolved remote
+admission; another destination or branch selected during the fence cannot open a fresh delivery
+under the preceding routes. Unchanged routing and completed planned handoffs retain their ordinary
+drain path.
+
+The decision requires an actual execution-owner change: retained recovery metadata on a later
+replica-only assignment change does not retire delivery channels.
+
+This removes the remote admission wait on a paused or partitioned former owner from graph
+installation. Admission reconciliation retains its existing five-second budget per interrupted
+attempt, independently of the entity gate deadline and the remote admission's longer total budget.
+Other local preparation and drain work retain their own bounds. Admission that already won keeps
+its record-ACK obligations; an unconfirmed outcome fails those obligations and the acknowledged
+source retries using the replacement channel. Recovery can replay records already processed, so
+this is not an exactly-once guarantee. Prepared forced-recovery checkpoints still activate under
+the desired placement before its tasks start. [Cluster Interconnect](./interconnect.md#cancellation-and-branch-changes)
+owns cancellation and its uncertainty; [Data-Plane Concurrency](./data-plane-concurrency.md#dispatch-gate-engagement)
+owns the local routing-generation fence.
 
 Dynamic processor revisions reuse unchanged prepared plans, while a changed node gets a new
 typed plan identity. [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md)
@@ -194,6 +235,20 @@ swap, reassignment, memory-pressure resume, and Kafka domain-offset placement al
 typed contracts. Route plans decide whether output is unbranched, preserves an incoming key, or
 constructs a new key; the actual branch state remains local to each concrete branch. Transport
 headers remain connector-owned and enter a relay only when copied into schema-backed fields.
+
+An input that owns external session state is retired from its previous typed plan after its source
+tasks stop. `IngestorStartPlan` decides whether the source changed, independently of codec or route
+changes. Runtime installation snapshots locally owned retiring inputs before withdrawing the
+installed revision, and the composition root dispatches retirement. Passive revisions retain the
+same plans, so removing an ingestor after `STOP` can still release its MQTT sessions. The MQTT
+connector compares validated session identities and subscriptions, cleans up obsolete identities
+best-effort, and prepares changed sessions at the replacement endpoint before its source starts.
+No Model, source driver, or registry guard is retained across this transition. Ordinary shutdown
+and ownership transfer with an unchanged input preserve external sessions. For Pulsar, a changed
+owned input reaches retirement too: the connector compares the two resolved service endpoints,
+qualified topics and subscription names before deciding whether to remove the preceding
+subscription. An unchanged subscription is retained even when the replacement declares it
+`PROVISIONED`; replacing its routes, codec, mode or instance count does not remove its backlog.
 
 The emitter plan pairs its ordered relay inputs with one typed sink and its applicable client,
 codec, expression, flush, batching, and error contracts. A native `TO CLIENT` sink has no
@@ -266,8 +321,9 @@ archived domain start generation. Native loading retains one database snapshot w
 bounded sections. A `RESUME` completion changes the domain to running at that same generation
 and mapping only after publication and passive-handle clearing on every target node. The new
 running revision therefore binds generators and branch tasks to installed materialized rows.
-[Backup And Restore](./backup-and-restore.md) owns archive cut modes, state selection, skipped
-sections, and the operator-visible restore guarantees.
+[Backup And Restore Architecture](./backup-and-restore-architecture.md) owns archive cut modes,
+state selection, skipped sections and the restore guarantees, and [Backup And
+Restore](./backup-and-restore.md) the operator-visible statements, reports and limits.
 
 Resource plans carry concrete pinned version numbers from the committed Models. Node binding
 loads exactly those versions from its local resource store; it never resolves `LATEST` or reads

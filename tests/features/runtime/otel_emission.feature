@@ -82,7 +82,7 @@ Feature: OTEL emission
         'deployment.environment.name' = '{{test_id}}'
       }
       SCOPE 'nervix/audit' VERSION '1.0'
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
@@ -110,7 +110,7 @@ Feature: OTEL emission
         'deployment.environment.name' = '{{test_id}}'
       }
       SCOPE 'nervix/audit' VERSION '1.0'
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
@@ -290,3 +290,103 @@ Feature: OTEL emission
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 1             |
+
+  Scenario Outline: OTEL gauge and histogram metric emitters export their points
+    Given OpenTelemetry Collector is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA latency_point (
+        observed_at DATETIME,
+        temperature F64,
+        count U64,
+        bucket_counts <count_vector>,
+        explicit_bounds <bound_vector>
+      );
+      CREATE WIRE JSON SCHEMA latency_point_wire MODE STRICT (
+        observed_at string,
+        temperature number,
+        count integer,
+        bucket_counts array,
+        explicit_bounds array
+      );
+      CREATE CODEC latency_point_codec
+      FROM WIRE JSON SCHEMA latency_point_wire
+      TO SCHEMA latency_point
+      ENCODE observed_at AS RFC3339;
+      CREATE RELAY latency_points SCHEMA latency_point UNBRANCHED;
+      CREATE VHOST edge otel-points-{{test_id}}.example.com;
+      CREATE ENDPOINT point_ingress
+      ON edge
+      PATH '/points'
+      TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR point_source
+      FROM point_ingress MODE NO ACK
+      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING latency_point_codec
+      TO latency_points
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE CLIENT otel_main
+      TYPE OTEL
+      CONFIG {
+        'endpoint' = '{{otel_collector_http_addr}}',
+        'protocol' = 'http/protobuf',
+        'timeout_ms' = 5000
+      };
+      CREATE EMITTER temperature_to_otel
+      FROM latency_points
+      TO OTEL otel_main
+      METRIC 'nervix.test.gauge.{{test_id}}' UNIT 'Cel' DESCRIPTION 'Cucumber gauge'
+      GAUGE
+      VALUES {
+        'time' = input.observed_at,
+        'value' = input.temperature
+      }
+      RESOURCE { 'service.name' = 'nervix-cucumber' }
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE EMITTER latency_to_otel
+      FROM latency_points
+      TO OTEL otel_main
+      METRIC 'nervix.test.histogram.{{test_id}}' UNIT 'ms' DESCRIPTION 'Cucumber histogram'
+      HISTOGRAM CUMULATIVE
+      VALUES {
+        'time' = input.observed_at,
+        'count' = input.count,
+        'bucket_counts' = input.bucket_counts,
+        'explicit_bounds' = input.explicit_bounds
+      }
+      RESOURCE { 'service.name' = 'nervix-cucumber' }
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    When http payload is posted to host "otel-points-{{test_id}}.example.com" path "/points"
+      """
+      {
+        "observed_at":"2026-08-24T12:35:00Z",
+        "temperature":21.5,
+        "count":3,
+        "bucket_counts":[1,2,0],
+        "explicit_bounds":[10.0,100.0]
+      }
+      """
+    Then OpenTelemetry Collector eventually contains "nervix.test.gauge.{{test_id}}"
+    And OpenTelemetry Collector eventually contains "nervix.test.histogram.{{test_id}}"
+
+    Examples:
+      | cluster_size | count_vector | bound_vector |
+      | 1            | VEC<U64>     | VEC<F64>     |
+      | 3            | VEC<U64>     | VEC<F64>     |

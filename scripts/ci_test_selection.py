@@ -25,11 +25,57 @@ def commit_sha(value: str) -> str:
 
 
 @dataclasses.dataclass(frozen=True)
+class Checkout:
+    """The tested repository, which only an explicit fetch of commit history extends.
+
+    A filtered fetch turns the checkout into a partial clone, and a partial clone answers a question
+    about an object it lacks by fetching it. Every read passes `--no-lazy-fetch`, so a commit the
+    checkout does not hold stays unknown instead of becoming a network question.
+    """
+
+    root: Path
+
+    def git(self, *args: str) -> str:
+        return subprocess.check_output(["git", "--no-lazy-fetch", *args], cwd=self.root, text=True).strip()
+
+    def fetch_history(self, commit: str) -> None:
+        """Complete the history a shallow checkout truncated, as commits without trees or contents."""
+        if self.git("rev-parse", "--is-shallow-repository") == "true":
+            self.git(
+                "-c", "protocol.version=2", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
+                "--filter=tree:0", "--unshallow", "origin", commit,
+            )
+
+    def is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        """Decide from the descendant's complete local history, which holds every one of its ancestors."""
+        known = subprocess.run(
+            ["git", "--no-lazy-fetch", "rev-parse", "--verify", "--quiet", f"{ancestor}^{{commit}}"],
+            cwd=self.root, stdout=subprocess.DEVNULL,
+        )
+        if known.returncode != 0:
+            return False
+        ancestry = subprocess.run(
+            ["git", "--no-lazy-fetch", "merge-base", "--is-ancestor", ancestor, descendant], cwd=self.root,
+        )
+        if ancestry.returncode not in (0, 1):
+            raise subprocess.CalledProcessError(ancestry.returncode, ancestry.args)
+        return ancestry.returncode == 0
+
+    def changed_paths(self, base: str, tested: str) -> tuple[str, ...]:
+        changed = subprocess.check_output([
+            "git", "--no-lazy-fetch", "diff", "--no-ext-diff", "--no-renames", "--name-only", "-z",
+            base, tested, "--",
+        ], cwd=self.root)
+        return tuple(os.fsdecode(path) for path in changed.split(b"\0") if path)
+
+
+@dataclasses.dataclass(frozen=True)
 class TestSelection:
     event: str
     action: str | None
     tested_sha: str
-    base_sha: str | None
+    event_base_sha: str | None
+    tested_base_sha: str | None
     head_sha: str | None
     paths: tuple[str, ...] | None
     labels: tuple[str, ...]
@@ -38,23 +84,34 @@ class TestSelection:
     def read(cls, event: str, payload: dict, tested_sha: str, root: Path = Path(".")) -> TestSelection:
         tested_sha = commit_sha(tested_sha)
         if event != "pull_request":
-            return cls(event, payload.get("action"), tested_sha, None, None, None, ())
+            return cls(
+                event=event, action=payload.get("action"), tested_sha=tested_sha, event_base_sha=None,
+                tested_base_sha=None, head_sha=None, paths=None, labels=(),
+            )
         pull = payload["pull_request"]
-        base_sha = commit_sha(pull["base"]["sha"])
+        event_base_sha = commit_sha(pull["base"]["sha"])
         head_sha = commit_sha(pull["head"]["sha"])
-        checkout = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
-        parents = subprocess.check_output(
-            ["git", "show", "--no-patch", "--format=%P", tested_sha], cwd=root, text=True,
-        ).split()
-        if checkout != tested_sha or parents != [base_sha, head_sha]:
-            raise ValueError("checkout must be the event's tested merge of its exact base and head")
-        changed = subprocess.check_output([
-            "git", "diff", "--no-ext-diff", "--no-renames", "--name-only", "-z",
-            base_sha, tested_sha, "--",
-        ], cwd=root)
-        paths = tuple(os.fsdecode(path) for path in changed.split(b"\0") if path)
+        checkout = Checkout(root)
+        if checkout.git("rev-parse", "HEAD") != tested_sha:
+            raise ValueError("checkout must be the event's tested merge")
+        parents = checkout.git("show", "--no-patch", "--format=%P", tested_sha).split()
+        if len(parents) != 2 or parents[1] != head_sha:
+            raise ValueError("the tested merge must merge the event's exact head into one base")
+        tested_base_sha = parents[0]
+        # The event names the base GitHub recorded for the pull request: the base branch's tip when it
+        # opened, or the newest base commit a later head merged. GitHub builds the tested merge on the
+        # base branch's tip whenever the head changes, so a base branch that advanced in between leaves
+        # a tested base that descends from the event's base.
+        if tested_base_sha != event_base_sha:
+            checkout.fetch_history(tested_base_sha)
+            if not checkout.is_ancestor(event_base_sha, tested_base_sha):
+                raise ValueError("the tested merge's base must be the event's base or descend from it")
+        paths = checkout.changed_paths(tested_base_sha, tested_sha)
         labels = tuple(label["name"] for label in pull["labels"])
-        return cls(event, payload.get("action"), tested_sha, base_sha, head_sha, paths, labels)
+        return cls(
+            event=event, action=payload.get("action"), tested_sha=tested_sha, event_base_sha=event_base_sha,
+            tested_base_sha=tested_base_sha, head_sha=head_sha, paths=paths, labels=labels,
+        )
 
     @property
     def documentation_only(self) -> bool:
@@ -76,7 +133,8 @@ class TestSelection:
             "event": self.event,
             "action": self.action,
             "tested_sha": self.tested_sha,
-            "base_sha": self.base_sha,
+            "event_base_sha": self.event_base_sha,
+            "tested_base_sha": self.tested_base_sha,
             "head_sha": self.head_sha,
             "paths": self.paths,
             "labels": self.labels,

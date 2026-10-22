@@ -17,17 +17,22 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
+        DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
 };
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SinkBody,
+    SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity,
+    SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
-configured_client!(Syslog: unpooled CreateClientSyslog => SyslogConfigEntry);
+configured_client!(Syslog: unpooled, config Nervix, CreateClientSyslog => SyslogConfigEntry);
 
 /// The listener a syslog client's configuration binds, which every node of the cluster serves.
 #[derive(
@@ -39,13 +44,69 @@ pub struct SyslogListenerSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a SYSLOG LISTENER holds and how long it waits.
+const SYSLOG_LISTENER_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "frames read from TCP and TLS connections",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Items {
+                count: 64,
+                unit: "frames",
+            },
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "the TLS handshake of an accepted connection",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "reading a connection",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &[
+        "Datagrams wait in the kernel's UDP receive buffer, which drops what does not fit.",
+    ],
+};
+
+/// What the connector of a SYSLOG COLLECTOR holds and how long it waits.
+const SYSLOG_COLLECTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, address attempts and TLS",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "a write",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &[],
+};
+
 impl SourceEntity for SyslogListenerSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
+        headers: None,
         metadata: SourceMetadataScope::Syslog,
         executes_on_every_cluster_node: true,
         reference: SourceReferenceKind::Client(ConnectorKind::Syslog),
         position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::NO_ACK],
+        quiesce: &[
+            DeclaredQuiesce::SUSPEND,
+            DeclaredQuiesce::BUFFER,
+            DeclaredQuiesce::DROP,
+        ],
+        locator: None,
+        options: &[],
+        bounds: SYSLOG_LISTENER_BOUNDS,
     };
 }
 
@@ -60,13 +121,6 @@ impl SourceBody for SyslogListenerSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(
-            quiesce,
-            IngestQuiesceMode::Suspend | IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop
-        )
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -113,16 +167,18 @@ pub struct SyslogCollectorSink {
 
 impl SinkEntity for SyslogCollectorSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        headers: None,
+        reference: SinkReferenceKind::Client(ConnectorKind::Syslog),
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::NoAck],
+        locator: None,
+        options: &[],
+        envelope: &[],
+        properties: &[],
+        bounds: SYSLOG_COLLECTOR_BOUNDS,
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::NoAck { .. })
-    }
 }
 
 impl SinkBody for SyslogCollectorSink {

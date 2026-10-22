@@ -568,6 +568,77 @@ Feature: HTTP emitter
       | 1            |
       | 3            |
 
+  @http_emitter_requests @http_emitter_bodyless_length
+  Scenario Outline: A bodyless POST, PUT or PATCH declares its empty content, which a strict endpoint requires, and a bodyless DELETE declares none
+    # The receiver answers a POST, PUT or PATCH that declares no length with 411 and does not
+    # capture it, as a strict origin server does.
+    Given HTTP receiver "api" is running and requires a declared length on POST, PUT and PATCH requests
+    And HTTP receiver "api" answers unscripted requests with "respond 204"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA outbound_event (event_id STRING, request_method STRING);
+      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
+      CREATE VHOST edge http-emitter-{{test_id}}.example.com;
+      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE CLIENT api TYPE HTTP CONFIG {
+        'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
+      };
+      CREATE EMITTER published FROM outgoing
+        TO HTTP api
+          METHOD input.request_method
+          PATH concat('/events/', input.event_id)
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
+          WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "http-emitter-{{test_id}}.example.com" path "/events"
+      """
+      [{"event_id":"1","request_method":"POST"},{"event_id":"2","request_method":"PUT"},{"event_id":"3","request_method":"PATCH"},{"event_id":"4","request_method":"DELETE"}]
+      """
+    # One emitter execution sends its requests one at a time in record order, and a refused request
+    # would be answered 411 rather than captured.
+    Then HTTP receiver "api" eventually receives at least 4 requests
+    And HTTP receiver "api" request 1 is
+      """
+      POST /events/1
+      Content-Length: 0
+      """
+    And HTTP receiver "api" request 2 is
+      """
+      PUT /events/2
+      Content-Length: 0
+      """
+    And HTTP receiver "api" request 3 is
+      """
+      PATCH /events/3
+      Content-Length: 0
+      """
+    And HTTP receiver "api" request 4 is
+      """
+      DELETE /events/4
+      """
+    And HTTP receiver "api" request 4 has no header "Content-Length"
+    And HTTP receiver "api" has captured exactly 4 requests
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @http_emitter_requests
   Scenario Outline: HTTP emitters send constant requests, and GET and HEAD only without a body
     Given HTTP receiver "posted" is running
@@ -1088,7 +1159,7 @@ Feature: HTTP emitter
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           WITHOUT BODY
         INVOKE write_header('X-Replaced', input.replacement),
-               write_header('x-replaced', 'final'),
+               write_header(lower('X-REPLACED'), 'final'),
                write_header('X-Empty', ''),
                write_header('X-Spaced', 'a  b'),
                write_header(input.header_name, input.header_value),

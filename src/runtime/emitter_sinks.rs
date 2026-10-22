@@ -176,7 +176,7 @@ impl EmitterSinkStarter {
                         mode: sink.mode,
                         retry_policy: plan.retry_policy,
                         default_client_id: format!(
-                            "{}-{}",
+                            "{}~{}",
                             context.domain.as_str(),
                             context.emitter.as_str()
                         ),

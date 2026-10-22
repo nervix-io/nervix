@@ -39,6 +39,7 @@ Feature: Prometheus TLS resource mounts
         MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{prometheus_tls_addr}}',
+          'timeout_ms' = 5000,
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE PROMETHEUS QUERY INGESTOR prom_samples

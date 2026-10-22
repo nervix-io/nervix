@@ -38,6 +38,10 @@ Five rules hold throughout:
 
 ## Ownership By Layer
 
+The predicate capability and its execution entry point keep paired supported and rejection
+Rustdoc examples beside their APIs. `just test-capability-docs` runs them in normal tests and CI,
+separately from [execution and concurrency evidence](./execution-primitives.md#verification-contracts).
+
 | Layer | Owner | What it owns |
 | --- | --- | --- |
 | Vocabulary | Expression Models in `nervix-models` | `Expression`, `RouteConstruction`, `Assignment`, `Invocation`, and `JsonPath`. A builtin name is a validated `BuiltinFunctionName` identifier, not a closed set, and a UDF name is a `UdfName`. |
@@ -973,7 +977,10 @@ The reference owns each family's contract. These notes describe its implementati
 
 - **Numeric.** Checked lanes cover arithmetic, comparison, `abs`, `sign`, and rounding.
   - `round(value, digits)` rounds exactly, with halves away from zero, using integer arithmetic on
-    the significand. Integer rounding to negative digits computes in 128 bits.
+    the significand. Its unchanged-value shortcut checks the distance to both neighbors: a normal
+    power of two has a neighbor toward zero only half a unit away. A decimal step near that gap
+    uses the exact decimal expansion, for positive and negative digit counts alike. Integer
+    rounding to negative digits computes in 128 bits.
   - Bit operations reuse Arrow's `binary` and `unary` for `and`, `or`, `xor`, and `not`, and
     branch-free lanes for shifts.
   - Classification never fails.

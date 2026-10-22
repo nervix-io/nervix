@@ -34,6 +34,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `client-replies` | `nervix-client-wire` complete reply equality | every reply family, dispositions, ordered diagnostics and structured command metadata, v1 | 128 | 4096 bytes |
 | `client-events` | `nervix-client-wire` complete event equality and retained graph ownership | every unsolicited event, discovery, clocks and opaque graph text, v1 | 128 | 2048 bytes |
 | `client-streams` | `nervix-client-wire` complete stream equality and shared chunk ownership | all upload, download and restore roots and outcomes, v1 | 128 | 2048 bytes |
+| `client-upload-archives` | `nervix-client-core` complete directory tree and deterministic archive bytes against an independent tar decoder | empty directories, nested and GNU long paths, arbitrary file bytes and block boundaries, v1 | 128 | 4096 bytes |
 | `client-reply-transfer` | `nervix-client-wire` exact segmentation bytes, reply equality and rejected append isolation | single frames and ordered transfers, incorrect identities and duplicates, v1 | 128 | 256 bytes |
 | `client-row-views` | `nervix-client-wire` complete retained Row views | all scalar cells, nested vectors, fixed arrays, nulls, redaction, branches and float bits, v1 | 128 | 512 bytes |
 | `client-arbitrary-frames` | `nervix-client-wire` typed verification and decoding within budgets | arbitrary bytes at all eight frame roots, v1 | 256 | 16385 bytes |
@@ -46,13 +47,13 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `client-ffi-field-descriptors-malformed` | `nervix-client-ffi` invalid-argument refusal that leaves the field list as the accepted calls built it | unknown types, lengths on scalar and `LIST` levels, empty and oversized `FIXED_LIST` levels, a 33rd list, refused names, elements without an open field, fields before the open one's element, an open last field, and reads past a field's last level or past the last field, v1 | 256 | 4096 bytes |
 | `client-processor-choice-request` | `nervix-client-wire` processor choice request round-trip equality | current targets with relay context, search, page and identity, v1 | 128 | 32 bytes |
 | `nspl-expression` | `nervix-nspl` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | NSPL expressions of every form, v5 | 256 | 512 bytes |
-| `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v7 | 256 | 2048 bytes |
-| `nspl-archive-model` | `nervix-nspl` complete ordered canonical Model equality through export, restore reads, reparse and re-export | cluster/domain archives with multiple ordered documents and every Model family, v8 | 128 | 4096 bytes |
-| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v5 | 256 | 2048 bytes |
-| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v5 | 256 | 2048 bytes |
+| `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v9 | 256 | 2048 bytes |
+| `nspl-archive-model` | `nervix-nspl` complete ordered canonical Model equality through export, restore reads, reparse and re-export | cluster/domain archives with multiple ordered documents and every Model family, v10 | 128 | 4096 bytes |
+| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v7 | 256 | 2048 bytes |
+| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v7 | 256 | 2048 bytes |
 | `nspl-expression-text` | `nervix-nspl` edited expression text reads as the same expression, or as none, through a statement and the standalone expression, expression-list and route-construction readers | edited canonical expressions, v3 | 256 | 512 bytes |
-| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v5 | 256 | 4096 bytes |
-| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v5 | 256 | 4096 bytes |
+| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v7 | 256 | 4096 bytes |
+| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v7 | 256 | 4096 bytes |
 | `models-names` | `nervix-models` name text, conversion, JSON, archive and Model-name widening equality | every name type, v1 | 256 | 256 bytes |
 | `models-name-validation` | `nervix-models` name parsing matches the name rule; decoders accept only canonical text | arbitrary text, v1 | 256 | 256 bytes |
 | `models-timestamps` | `nervix-models` integer, RFC 3339, JSON, archive and chrono equality | every signed Unix nanosecond, v1 | 256 | 64 bytes |
@@ -61,16 +62,18 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `models-domain-clock-validation` | `nervix-models` clock text and numbers read in range or fail typed; decoders refuse invalid values | arbitrary text and numbers, v1 | 256 | 64 bytes |
 | `models-durations` | `nervix-models` a duration reads back from the text `humantime` writes for it; only one within one of each unit of the longest duration may be refused as too long | every duration, v1 | 256 | 16 bytes |
 | `models-duration-text` | `nervix-models` duration text reads as `humantime` reads it or fails typed, and never panics | arbitrary duration text, v1 | 256 | 64 bytes |
+| `models-header-model-round-trip` | `nervix-models` writes carried through a header model read back per name as the model keeps them, and the model refuses exactly the literal writes that round trip would lose | repeated and case-varied header names under every layout and name rule, v1 | 256 | 64 bytes |
 | `models-json-paths` | `nervix-models` path text, JSON and archive equality | paths up to the step limit, v1 | 256 | 1024 bytes |
 | `models-json-path-validation` | `nervix-models` path text reaches a fixed point or fails typed; decoders admit the constructor's step counts | arbitrary path text, v1 | 256 | 512 bytes |
 | `models-batch-limits` | `nervix-models` message and size limit text, JSON and archive equality | every limit and unit, v1 | 256 | 64 bytes |
 | `models-batch-limit-validation` | `nervix-models` limit input reads in range or fails typed; decoders refuse out-of-range limits | arbitrary limits, v1 | 256 | 64 bytes |
 | `models-identities` | `nervix-models` execution reference, upload identity, endpoint and pool-bound equality | valid identities, v1 | 256 | 512 bytes |
 | `models-identity-validation` | `nervix-models` identity parsers and decoders accept exactly their rule | arbitrary identity text and bounds, v1 | 256 | 512 bytes |
-| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, full-width counts included, v5 | 256 | 4096 bytes |
+| `models-connector-declarations` | `nervix-models` a generated ingestor and emitter state only what their entity declares: a declared mode with its required option choices, an honored quiesce mode, the declared body form, admitted batching and a client of a declared connector | ingestors and emitters of every connector entity, v1 | 256 | 2048 bytes |
+| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, full-width counts included, v7 | 256 | 4096 bytes |
 | `models-archived-counts` | `nervix-models` count-bearing Model, statement, transaction identity and WASM inspection archive equality | zero where permitted, `u32::MAX + 1`, `u64::MAX` and generated native counts, v1 | 256 | 16 bytes |
 | `consensus-archived-counts` | `nervix-consensus` complete record equality through the production bounded storage codec | transaction commands, limits, positions, progress, failures, outcomes, plan and report headers with boundary and generated counts, v1 | 256 | 16 bytes |
-| `registry-archived-models` | `nervix-server` complete Model equality through the registry's sealed storage codec | every vocabulary Model family with pinned resource versions and full-width counts, v3 | 256 | 4096 bytes |
+| `registry-archived-models` | `nervix-server` complete Model equality through the registry's sealed storage codec | every vocabulary Model family with pinned resource versions and full-width counts, v5 | 256 | 4096 bytes |
 | `runtime-window-archived-counts` | `nervix-server` histogram delayed-removal archive equality | current removals with arbitrary expiry and boundary and generated bucket indices, v1 | 256 | 32 bytes |
 | `backup-record-manifest` | `nervix-backup` complete record and manifest encode/decode equality | all eleven current record kinds, lifecycle/catalog variants, every cut, full-width counters and ordered metadata, v4 | 256 | 4096 bytes |
 | `backup-runtime-state-records` | `nervix-backup` complete runtime state record equality | guest/materialized descriptors and identities, empty/multi-partition offsets and ordered branch lifecycle with bit-exact nested fields, v3 | 256 | 4096 bytes |
@@ -78,7 +81,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `backup-materialized-columns` | `nervix-server` exact-schema Arrow/native generation fidelity and stored checkpoint re-export | nullable, sensitive, nested and byte columns; complete headers, ordered identities and original stored Arrow bytes, v2 | 128 | 4096 bytes |
 | `backup-branch-state-descriptors` | `nervix-backup` complete deduplicator and window descriptor equality | empty, unbranched and branched keyspaces and windows, model digests, row sequences and watermarks, group counts and delayed histogram removals, v1 | 256 | 4096 bytes |
 | `backup-deduplicator-keys` | `nervix-server` typed Arrow key group and restored keyspace fidelity, and the streamed checkpoint byte-identical to the runtime's encoding of the same keys | every `DEDUPLICATE ON` key type with nulls, narrow integers, arbitrary float bit patterns, text, bytes, datetimes and list keys, repeated keys and bounded groups, v1 | 128 | 2048 bytes |
-| `backup-window-groups` | `nervix-server` window input and argument group and native checkpoint fidelity with equal aggregates | up to 192 admissions and interleaved steps over nullable integer, string and boolean arguments, concrete multi-type keys with bit-exact finite floats and fixed-offset datetimes, every exact aggregate family and a delayed histogram percentile, bounded groups sealed whole or split under generated identity limits, v3 | 64 | 1024 bytes |
+| `backup-window-groups` | `nervix-server` window input and argument group and native checkpoint fidelity with equal aggregates | up to 192 admissions and interleaved steps over nullable integer, string and boolean arguments, concrete multi-type keys with bit-exact finite floats and fixed-offset datetimes, every exact aggregate family and a delayed histogram percentile, bounded groups sealed whole or split under generated identity limits, one-row groups over windows of up to 48 rows, v4 | 64 | 1024 bytes |
 | `backup-complete-archives` | `nervix-backup` complete export/extraction, restore-read and deterministic re-export fidelity | cluster/domain scopes, resources included/omitted, every cut and supported state kind, empty/unbranched/multi-group materialized generations with valid Arrow columns, deduplicator key groups and window row and argument groups, synthetic raw payloads at tar block boundaries and long paths, v3 | 256 | 4096 bytes |
 | `backup-malformed-records` | `nervix-backup` safe typed validation of current record headers and values | all eleven kinds, truncated/altered headers, invalid current fields and bounded arbitrary bytes, v3 | 256 | 4096 bytes |
 | `backup-corrupt-archives` | `nervix-backup` rejection before verified restore contents are returned | changed lengths/digests/kinds, reordered/missing/extra sections, invalid records, materialized, deduplicator and window group metadata/membership, damaged Arrow sections, truncation and bounded arbitrary tar inputs, v3 | 256 | 4096 bytes |
@@ -91,8 +94,8 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `restore-installation-wire` | `nervix-interconnect` complete installation request and success/refusal wire equality through the bulk class limit | all actions, authority, all eight runtime state kinds branched and unbranched, zero/full-width lengths, arbitrary digests, payload and inventory, v2 | 256 | 128 bytes |
 | `restore-installation-storage` | `nervix-server` complete staged checkpoint and publication record equality | authority, placement, revision, payload and inventory, v1 | 256 | 128 bytes |
 | `restore-staging-kept-measurement` | `nervix-server` the measurement of unpublished restore staging a store kept equals one read afresh from every staged entry, after every step | histories of up to ten steps over two domains, two entities and three generations: staging of up to two whole chunks and a partial one that completes, fails its digest or is cut short, retried staging, sweeps that retain or reclaim, publication and reopening, v1 | 96 | 96 bytes |
-| `consensus-state-records` | `nervix-consensus` complete recovered state equality through the state writer, a real keyspace and recovery, for a first revision and a second stored as changes | every record family with replaced and removed records, every transaction, outcome and command execution state, names across the whole name rule and boundary counts and times, v2 | 128 | 65536 bytes |
-| `consensus-state-corruption` | `nervix-consensus` typed `InvalidState` recovery failure or a canonical state its readers can rely on | flipped, truncated, extended, rekeyed, copied, unknown and missing records of a stored revision, drawn from bytes of their own, v2 | 256 | 65600 bytes |
+| `consensus-state-records` | `nervix-consensus` complete recovered state equality through the state writer, a real keyspace and recovery, for a first revision and a second stored as changes | every record family with replaced and removed records, every transaction, outcome and command execution state, the accepted statements a finished transaction keeps, names across the whole name rule and boundary counts and times, v5 | 128 | 65536 bytes |
+| `consensus-state-corruption` | `nervix-consensus` typed `InvalidState` recovery failure or a canonical state its readers can rely on | flipped, truncated, extended, rekeyed, copied, unknown and missing records of a stored revision, drawn from bytes of their own, v5 | 256 | 65600 bytes |
 | `consensus-raft-records` | `nervix-consensus` complete Raft record equality through the storage codec, and keys that name their position or section | votes, log positions, entries of every command, state metadata, snapshot manifests and sections, v2 | 256 | 4096 bytes |
 | `consensus-raft-records-malformed` | `nervix-consensus` typed storage failure or a value that stores back to the same record | arbitrary bytes as every Raft record, log key and section key, v2 | 256 | 4096 bytes |
 | `registry-stored-models` | `nervix-server` complete Model equality through listing and keyed reads of a reopened registry, from its journal and from flushed tables | Models of every family in domains and with names across the whole name rule, v2 | 64 | 4096 bytes |
@@ -164,12 +167,15 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `bounded-write-limits` | `nervix-bounded-write` whole writes within the limit, capacity within it, and the outcome classification against a reference of the rule | writes, encoder failures and writing on after a refusal under limits of 1 to 1,021 bytes, v1 | 256 | 1024 bytes |
 | `connector-row-request-division` | `nervix-connector` row request division against the documented halving rule, both limits and the measurement bound | declared and native row and byte limits, up to 160 rows, measures that grow and shrink with a candidate, v1 | 256 | 1024 bytes |
 | `connector-confirmation-window` | `nervix-connector` confirmation window outcomes, end instant and in-flight bound against a reference model of the documented window rule, so no record confirmed before the publish ends is left unresolved | `MAX` one to six, `ACK TIMEOUT` one to 40 ms, up to 24 records refused at hand-over or answered confirmed, refused or failed within, at, past or never by their deadlines, pauses between hand-overs and a driver failure, on a paused clock, v1 | 256 | 512 bytes |
+| `pulsar-unconfirmed-receipts` | `nervix-connector-pulsar` task-owned NO ACK receipts against an independent completion/count model, retaining the first typed failure and counting every unanswered receipt at finish | Zero to 100 hand-overs with confirmed, failed or unanswered receipts, collection between hand-overs and a finish deadline already expired or reached while waiting on a paused clock, v1 | 256 | 512 bytes |
 | `emitter-batch-subdivision` | `nervix-server` batch candidates against the documented rule, message limit, compatibility and encoding bound | up to 96 members in three compatibility classes, failing containers, encodings that grow and shrink, v1 | 256 | 1024 bytes |
 | `emitter-batch-packing` | `nervix-server` packed payloads and rejected rows against the documented packing of exact member encodings and container framing | generated schemaful codecs and rows in carriers across two relays, three branches, three envelopes and seals, `MAX SIZE` from below one member's container to above the whole run's, v1 | 256 | 4096 bytes |
 | `codec-bounded-encodings` | `nervix-server` bounded row, member and container encodings against the unbounded bytes, and container framing | generated schemaful codecs and batches under limits short of, at, past and around each encoding, and containers of 24, 64 and 256 repeated members where a count's encoding grows, v1 | 256 | 4096 bytes |
 | `emitter-row-preparations` | `nervix-server` row request preparations kept unchanged or refused with the first violation | preparations of up to 12 selected rows spoiled by repeated, swapped, dropped, foreign and refused members and empty requests, v1 | 256 | 256 bytes |
 | `emitter-retained-payloads` | `nervix-server` retained payloads written unchanged in packing order and answered member by member | packing and write steps with delivered, rejected and unanswered records and failed writes over three buffered batches, v1 | 256 | 512 bytes |
 | `sqs-batch-requests` | `nervix-connector-sqs` measured record sizes, refusals above 256 KiB, and batch requests within every limit, ended only by a limit | small and near-limit bodies of one- to four-byte characters, attributes and FIFO groups, v1 | 256 | 1024 bytes |
+| `iceberg-nested-datetime-staging` | `nervix-connector-iceberg` staged nested-list schema and values against containing-microsecond division while preserving list boundaries | up to 16 generated UTC nanosecond timestamps in two list levels, including negative and boundary values, v1 | 256 | 160 bytes |
+| `http-request-heads` | `nervix-connector-http` written request heads read back by an HTTP/1.1 parser against every prepared field and the declared framing | methods that define request content, methods that define none, their ASCII case variants and extension methods, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without `Accept`, bodies up to 64 bytes, v1 | 256 | 512 bytes |
 | `mqtt-publish-packets` | `nervix-connector-mqtt` measured PUBLISH sizes against the packet the client writes, the protocol's largest packet and the broker maximum | topics up to 128 bytes, every quality of service, payloads beside every Remaining Length width and the protocol limit, v1 | 256 | 512 bytes |
 | `postgres-insert-measures` | `nervix-connector-postgres` measured inserts against the statement and the arrays the driver encodes, and the Bind message bound | up to four text columns of up to eight rows with NULLs, quotes and multi-byte characters, every run of rows, v1 | 256 | 1024 bytes |
 | `websocket-signaling-protobuf-values` | `nervix-connector-websockets` complete signaling JSON through the production protobuf conversions, with double and float bit equality | explicit scalar presence, absent defaults, full-width integers, booleans, UTF-8 strings and up to eight repeated doubles and floats, v1 | 256 | 256 bytes |
@@ -396,14 +402,31 @@ manual Bolero runs execute randomized checks and record a deliberate sanitizer s
 
 ### Documentation-only Selection
 
-Before starting ordinary suites, Check's `test-selection` job verifies that its checkout is the
-event's exact merge of the stated base and head, then reads every changed path between the base
-and tested merge. Rename detection is disabled so deleting or moving product code into a prose
-location still requires execution. Only `AGENTS.md`, `README.md`, Markdown under `docs/`, and
-Markdown under `.agents/skills/` qualify for the documentation-only exclusion. An empty diff,
-code, tests, build configuration, workflow definitions, scripts and unknown paths require suites;
-`no-docker` supplies no evidence about this choice. Missing or mismatched source identity fails
-selection and cannot authorize an exclusion.
+Before starting ordinary suites, Check's `test-selection` job proves which source it selects for.
+Its checkout must be the commit the event tests: a merge whose first parent is its base and whose
+second parent is the event's exact head. The event and the tested merge need not name the same base.
+GitHub records a pull request's base as its base branch's tip when the pull request opens, and moves
+it forward only to the newest base commit that a later head merges, while it builds the tested merge
+on the base branch's tip whenever the head changes. A push made after the base branch advanced,
+whose head does not merge the newest base, therefore tests a merge whose base is newer than the one
+its event names, and label events that follow name the same recorded base.
+
+Selection accepts the tested base when it is the event's base, or when the event's base is one of
+its ancestors. The checkout holds only the tested merge and its parents, so to decide the second
+case selection fetches the tested base's complete history as commits, without trees or file
+contents, and then answers from that local history alone. When the tested base is the event's own
+base, it fetches nothing. A checkout that is not the tested merge, a tested commit that does not
+merge the event's exact head into one base, an event base that the tested base does not descend
+from, such as a newer base or one from another branch, and a failed history fetch all fail
+selection, so none of them can authorize an exclusion.
+
+Selection then reads every changed path between the tested base and the tested merge: what the
+merge changes on the base it was tested against, never the base branch's own advance. Rename
+detection is disabled so deleting or moving product code into a prose location still requires
+execution. Only `AGENTS.md`, `README.md`, Markdown under `docs/`, and Markdown under
+`.agents/skills/` qualify for the documentation-only exclusion. An empty diff, code, tests, build
+configuration, workflow definitions, scripts and unknown paths require suites; `no-docker` supplies
+no evidence about this choice.
 
 A verified documentation-only selection excludes the ordinary tests, scenarios, extra tests,
 diagnostic evidence and their coverage aggregation. It excludes the entire reusable Bolero call
@@ -412,20 +435,31 @@ and mandatory. Label-selected mode checks remain selected by their labels; `fuzz
 both ordinary properties and the complete sanitizer inventory even for documentation. Label
 addition and removal compute a fresh selection from that event's label snapshot.
 
-The `ci-test-selection` artifact records run, attempt, job, event and action, tested/base/head
-identities, every changed path, labels and each ordinary/Bolero requirement. Its `selected` verdict
+The `ci-test-selection` artifact records run, attempt, job, event and action, the tested merge, the
+event's base, the tested base and the head, every changed path, labels and each ordinary/Bolero
+requirement. Two different bases record an advance that selection proved. Its `selected` verdict
 records a source decision, never successful property execution or coverage. Actual job conclusions
 remain in the workflow run. The reusable workflow's `bolero-selection` record is produced only
 after all of its required execution succeeds; failed, cancelled, skipped or missing required
 producers still fail its gate.
 
-A validation-only rerun uses the original event and tested commit. Its ordinary producer selection
-remains in the caller, outside the reusable workflow's `always()` gate, so deliberate non-code
-exclusion never becomes a cancelled property campaign to excuse. Historical attempts retain their
-actual cancellations; this policy does not turn an interrupted required campaign into success.
-`just test-ci-selection` exercises source identity, mixed changes, renames, label events, reruns and
-strict gates; `just coverage-ci-selection` measures that Python contract without launching product
-campaigns. Selection does not claim a model-checker or public Cucumber result.
+A rerun of `test-selection` reads the original event and tested merge and proves the same ancestry,
+so it reaches the same selection after the base branch advances again. A validation-only rerun uses
+the original event and tested commit. Its ordinary producer selection remains in the caller, outside
+the reusable workflow's `always()` gate, so deliberate non-code exclusion never becomes a cancelled
+property campaign to excuse. Historical attempts retain their actual cancellations; this policy does
+not turn an interrupted required campaign into success. `just test-ci-selection` exercises source
+identity, advanced, stale and tampered bases, stale heads, other merges, shallow checkouts, mixed
+changes, renames, label events, reruns and strict gates; `just coverage-ci-selection` measures that
+Python contract without launching product campaigns. Selection does not claim a model-checker or
+public Cucumber result.
+
+The selection tests keep Git maintenance in the foreground in every temporary repository,
+including the bare origin and shallow checkouts. Those repository-local settings also cover
+selection's history fetches and the origin's receive process, so waiting for each Git command
+finishes its writers before temporary-directory cleanup. A regression forces commit-graph
+maintenance and uses Git's process trace to check that it never detaches; cleanup errors remain
+test failures.
 
 ### Sanitizer Shards
 
@@ -448,7 +482,11 @@ that run in parallel, each in a job of its own:
   `just coverage-bolero 30 <number>/<count>`: the runner tests, its share of the campaigns and the
   complete failure qualification. Only the server preparation is held to one build job; discovery
   and library builds use every core. A shard samples CPU use, steal time and used memory every five
-  seconds and adds the summary to its job summary.
+  seconds and adds the summary to its job summary. Samples also retain guest-reported MHz,
+  UTC and CPU/memory/I/O pressure. Every build step first records the shared short CPU, memory
+  access and filesystem calibration, with JSON and Markdown artifacts. The
+  [runner diagnostics contract](integration-test-lifecycle.md) owns its bounds, units and limits;
+  these measurements never change campaign budgets or decide a property verdict.
 - `bolero-fuzz-combined` downloads every shard's completion evidence, without the raw profiles, and
   runs `just combine-bolero-fuzz`. It accepts only shards 1 to N of one plan, from one workflow run
   and attempt at the tested revision and inventory. Each must be complete, must have run exactly its
@@ -456,7 +494,10 @@ that run in parallel, each in a job of its own:
   select every registered target once. The job then writes the combined record and the merged Rust
   source report.
 
-Each shard job allows 180 minutes. `bolero-gate` requires the randomized job, every shard and the
+Each shard job allows 240 minutes. The 205-target inventory's three-shard plan estimates at most
+114 minutes per shard before discovery, failure qualification and uploads. Funding 1.5 times that
+estimate leaves 69 minutes for those surrounding operations and cold-build variation, including
+the separately bounded server preparation. `bolero-gate` requires the randomized job, every shard and the
 combined proof when the PR carries `fuzz`, and requires all of the sanitizer jobs to be skipped
 otherwise. `tests/release-evidence.toml` holds a qualifying revision to the same checks, every shard
 of the matrix included.
@@ -485,8 +526,10 @@ Ordinary execution prepares each selected package, harness and exact feature set
 the union of a package's features; its binary does not prepare a target with a different declared
 feature set. Each property still has a 240-second execution bound and must complete its exact
 randomized iteration count and replay every checked-in corpus input. A failed preparation ends
-the run before that harness executes any property. The ordinary CI job reserves 60 minutes for
-discovery, the declared feature builds and every registered target.
+the run before that harness executes any property. The ordinary CI job reserves 90 minutes for
+discovery, the declared feature builds and every registered target. Run 39649567371 took 47m10s;
+1.5 times that measurement is 70m45s, leaving more than 19 minutes for publication and further
+runner variation.
 
 Install the dated sanitizer nightly named in the inventory and the pinned CLI. Server properties
 also require the native server build dependencies, including `protoc` for the Pulsar driver;
@@ -656,8 +699,14 @@ runner report as `python.lcov`, and `runner-load-bolero-fuzz-<number>` with its 
 samples. `coverage-bolero-fuzz` holds the combined record and the merged report, which sums the
 shards' line, function and branch counters because they ran disjoint campaigns, and
 `bolero-selection` the gate's exact producer verdicts, including deliberate skips. Fuzz reports
-remain separate from ordinary workspace coverage and its CRAP gate. A sanitizer skip publishes no
+remain separate from ordinary workspace coverage and its CRAP report. A sanitizer skip publishes no
 fuzz coverage artifact.
+
+Check's `coverage-full` job reads both artifacts. For a pull request carrying `fuzz`, it requires
+the gate's successful randomized and sanitizer verdicts and the combined campaign of this run's
+shards over every target of the tested inventory, and adds the campaign's lines to the
+[full workspace union](./coverage-reports.md#the-full-workspace-union). Without `fuzz`, it requires
+the recorded deliberate skip and refuses any fuzz report.
 
 ## Adding A Target
 

@@ -1102,6 +1102,65 @@ Feature: Client ingestors
       | 1            |
       | 3            |
 
+  # The open reaches the node that executes the ingestor before that node has installed any domain
+  # again, which only a producer entering through another node can observe.
+  @client_ingestor @client_io_03_producer @client_io_03_restore
+  Scenario: A producer restored across a full restart waits for the node that executes its ingestor to install it again
+    Given HTTP receiver "sink" is running
+    And HTTP receiver "sink" answers unscripted requests with "respond 200"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_in (
+        region STRING, order_id STRING, amount I64, card STRING SENSITIVE
+      );
+      CREATE RELAY orders SCHEMA order_in UNBRANCHED;
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
+          MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TIMESTAMP NOW
+        TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+      };
+      CREATE EMITTER published FROM orders
+        TO HTTP sink_api
+          METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
+          MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+          WITHOUT BODY
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "entry"
+    And a node other than placeholder "entry" is saved as placeholder "owner"
+    When these NSPL commands are executed on the leader node
+      """
+      RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
+      """
+    Then within "30s" node "{{entry}}" eventually reports scheduled "ingestor" "orders_in" owner equals placeholder "owner"
+    Given client "app" is connected to node "{{entry}}"
+    When client "app" opens producer "orders" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE" with 1 batch and "1MiB" of credit
+    And producer "orders" submits batch "before restart" with rows
+      | region | order_id | amount | card   |
+      | eu     | o-1      | 1      | 4111-1 |
+    Then batch "before restart" completes
+    When the cluster is restarted while runtime installation on node "{{owner}}" waits
+    Then node "{{owner}}" reaches its runtime installation pause
+    And client "app" cannot open a producer on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE" with 1 batch and "1MiB" of credit because "endpoint unavailable"
+    When producer "orders" submits batch "after restart" with rows
+      | region | order_id | amount | card   |
+      | us     | o-2      | 2      | 4111-2 |
+    And runtime installation on node "{{owner}}" is released
+    Then batch "after restart" completes
+    And HTTP receiver "sink" has captured exactly 2 requests
+
   @client_ingestor @client_io_03_producer @client_io_03_socket_loss
   Scenario Outline: A producer restores its attachment after its session socket is lost
     Given a <cluster_size> node nervix cluster is started

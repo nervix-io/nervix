@@ -25,7 +25,7 @@ use crate::runtime::ingestors::endpoint::tests::{start_endpoint_ingestor, unfold
 
 /// How a test host takes in what its source hands it.
 #[derive(Debug, Clone, Copy)]
-struct HostIntake {
+pub(super) struct HostIntake {
     /// What an unacknowledged payload does when the extension workers have no room for it.
     admission: QueueAdmission,
     /// Whether what the source reads while quiesced passes through the quiesce control.
@@ -34,7 +34,7 @@ struct HostIntake {
 
 /// The intake of a source whose loop may be held while its payload waits for the extension
 /// workers.
-const WAITING_INTAKE: HostIntake = HostIntake {
+pub(super) const WAITING_INTAKE: HostIntake = HostIntake {
     admission: QueueAdmission::WaitForPlace,
     buffered: true,
 };
@@ -48,18 +48,18 @@ const REFUSING_INTAKE: HostIntake = HostIntake {
 
 /// A running domain whose endpoint ingestor `event_source` unfolds every payload on the extension
 /// workers of a single-worker executor, and a subscriber to the relay `events` it feeds.
-struct UnfoldingDomain {
-    runtime: Runtime,
+pub(super) struct UnfoldingDomain {
+    pub(super) runtime: Runtime,
     executor: Executor,
-    domain: DomainName,
-    ingestor: IngestorName,
+    pub(super) domain: DomainName,
+    pub(super) ingestor: IngestorName,
     delivered: RelaySubscriptionReceiver<RelayRecordBatch>,
     /// The branched entrypoints the hosts this fixture made feed.
     entrypoints: Vec<Arc<IngestorRouteRuntime>>,
 }
 
 impl UnfoldingDomain {
-    async fn start() -> Self {
+    pub(super) async fn start() -> Self {
         let domain = domain("default");
         let ingestor = named::<IngestorName>("event_source");
         let executor = single_worker_executor();
@@ -100,17 +100,19 @@ impl UnfoldingDomain {
     }
 
     /// Stops every entrypoint the fixture's hosts fed, then the runtime.
-    async fn finish(self) {
+    pub(super) async fn finish(self) {
         for entrypoint in &self.entrypoints {
             entrypoint.shutdown().await;
         }
-        self.runtime.shutdown().await;
+        self.runtime
+            .shutdown(self.runtime.domain_drain_timeout())
+            .await;
     }
 
     /// A second host for the fixture's ingestor, beside the endpoint source the fixture runs, which
     /// takes in what a source hands it through `quiesce` as `intake` says, and stops when
     /// `shutdown` turns true.
-    async fn host(
+    pub(super) async fn host(
         &mut self,
         quiesce: Arc<IngestorQuiesceControl>,
         shutdown: watch::Receiver<bool>,
@@ -176,11 +178,12 @@ impl UnfoldingDomain {
             buffered_intake: intake.buffered,
             flush_each_intake: true,
             unacknowledged_admission: intake.admission,
+            general_error_policy: plan.ingestor.general_error_policy.clone(),
         })
     }
 
     /// The quiesce control the fixture's running ingestor holds.
-    fn quiesce(&self) -> Arc<IngestorQuiesceControl> {
+    pub(super) fn quiesce(&self) -> Arc<IngestorQuiesceControl> {
         self.runtime
             .ingestor_quiesce_control(&self.domain, &self.ingestor)
             .assured("a running ingestor holds its quiesce control")
@@ -203,7 +206,7 @@ impl UnfoldingDomain {
     }
 
     /// The `user_id` of every row the relay delivers until `rows` have arrived.
-    async fn delivered_user_ids(&mut self, rows: usize) -> Vec<Option<RuntimeValue>> {
+    pub(super) async fn delivered_user_ids(&mut self, rows: usize) -> Vec<Option<RuntimeValue>> {
         let mut user_ids = Vec::with_capacity(rows);
         while user_ids.len() < rows {
             nervix_primitives::task::consume_budget().await;
@@ -299,17 +302,13 @@ async fn an_unacknowledged_batch_waits_for_the_extension_workers_when_its_source
     let taken_in = nervix_primitives::task::spawn(async move {
         let payload = br#"{"user_id":7}"#.to_vec();
         let intake = host
-            .intake(SourceIntakeBatch {
-                messages: vec![SourceIntakeMessage {
-                    payload: &payload,
-                    metadata: IngestMetadataRow::Headers {
-                        headers: &NoIngestHeaders,
-                    },
-                }],
-                mode: SourceIntakeMode::Unacknowledged,
-            })
-            .await
-            .map(|outcome| outcome.acknowledgements.len());
+            .intake_unacknowledged(vec![SourceIntakeMessage {
+                payload: &payload,
+                metadata: IngestMetadataRow::Headers {
+                    headers: &NoIngestHeaders,
+                },
+            }])
+            .await;
         (host, intake)
     });
     fixture.reach_unfolding().await;
@@ -329,8 +328,8 @@ async fn an_unacknowledged_batch_waits_for_the_extension_workers_when_its_source
         .expect("the batch is unfolded once the extension workers have room")
         .expect("the intake task does not panic");
     assert!(
-        matches!(intake, Ok(0)),
-        "an unacknowledged batch is taken in without acknowledgements: {intake:?}"
+        matches!(intake, Ok(())),
+        "the unacknowledged batch is taken in: {intake:?}"
     );
     assert_eq!(
         fixture.delivered_user_ids(1).await,
@@ -339,28 +338,23 @@ async fn an_unacknowledged_batch_waits_for_the_extension_workers_when_its_source
     fixture.finish().await;
 }
 
-/// Hands `host` one unacknowledged batch carrying `{"user_id":<user_id>}`, and answers how many
-/// acknowledgements the intake returned.
+/// Hands `host` one unacknowledged batch carrying `{"user_id":<user_id>}`.
 async fn take_in_unacknowledged(
     host: &mut RuntimeSourceHost,
     user_id: i64,
-) -> SourceIntakeResult<usize> {
+) -> SourceIntakeResult<()> {
     let payload = format!(r#"{{"user_id":{user_id}}}"#).into_bytes();
-    host.intake(SourceIntakeBatch {
-        messages: vec![SourceIntakeMessage {
-            payload: &payload,
-            metadata: IngestMetadataRow::Headers {
-                headers: &NoIngestHeaders,
-            },
-        }],
-        mode: SourceIntakeMode::Unacknowledged,
-    })
+    host.intake_unacknowledged(vec![SourceIntakeMessage {
+        payload: &payload,
+        metadata: IngestMetadataRow::Headers {
+            headers: &NoIngestHeaders,
+        },
+    }])
     .await
-    .map(|outcome| outcome.acknowledgements.len())
 }
 
 /// A quiesce control for the fixture's ingestor, outside the runtime, that `mode` governs.
-fn quiesce_control(
+pub(super) fn quiesce_control(
     fixture: &UnfoldingDomain,
     mode: IngestQuiesceMode,
 ) -> Arc<IngestorQuiesceControl> {
@@ -396,7 +390,7 @@ async fn an_unacknowledged_batch_is_refused_and_counted_when_its_source_cannot_h
 
     filled.release().await;
     let accepted = take_in_unacknowledged(&mut host, 8).await;
-    assert!(matches!(accepted, Ok(0)), "{accepted:?}");
+    assert!(matches!(accepted, Ok(())), "{accepted:?}");
     assert_eq!(host.unfolding_refused.get(), 1);
     assert_eq!(
         fixture.delivered_user_ids(1).await,
@@ -425,7 +419,7 @@ async fn the_ingestor_stopping_ends_a_batch_waiting_for_the_extension_workers() 
         .await
         .expect("the stop ends the wait while the extension class is still full")
         .expect("the intake task does not panic");
-    assert!(matches!(intake, Ok(0)), "{intake:?}");
+    assert!(matches!(intake, Ok(())), "{intake:?}");
     assert_eq!(
         host.collector.len(),
         0,
@@ -495,7 +489,7 @@ async fn a_new_buffering_quiesce_retains_a_batch_waiting_for_the_extension_worke
         .await
         .expect("the new quiesce ends the wait while the extension class is still full")
         .expect("the intake task does not panic");
-    assert!(matches!(intake, Ok(0)), "{intake:?}");
+    assert!(matches!(intake, Ok(())), "{intake:?}");
     assert_eq!(quiesce.counters().buffered_records, 1);
     assert_eq!(quiesce.counters().buffered_bytes, br#"{"user_id":7}"#.len());
 
@@ -533,7 +527,7 @@ async fn a_new_dropping_quiesce_drops_a_batch_waiting_for_the_extension_workers(
         .await
         .expect("the new quiesce ends the wait while the extension class is still full")
         .expect("the intake task does not panic");
-    assert!(matches!(intake, Ok(0)), "{intake:?}");
+    assert!(matches!(intake, Ok(())), "{intake:?}");
     assert_eq!(quiesce.counters().dropped_total, 1);
     assert_eq!(
         host.collector.len(),
@@ -687,7 +681,7 @@ async fn a_batch_whose_source_bypasses_the_quiesce_control_waits_on_through_a_ne
         .await
         .expect("the batch is unfolded once the extension workers have room")
         .expect("the intake task does not panic");
-    assert!(matches!(intake, Ok(0)), "{intake:?}");
+    assert!(matches!(intake, Ok(())), "{intake:?}");
     assert_eq!(
         fixture.delivered_user_ids(1).await,
         vec![Some(RuntimeValue::I64(7))]
@@ -697,23 +691,19 @@ async fn a_batch_whose_source_bypasses_the_quiesce_control_waits_on_through_a_ne
 }
 
 /// Hands `host` one acknowledged batch carrying `{"user_id":<user_id>}`, and returns the
-/// acknowledgements the intake answered with.
+/// acknowledgement the intake answered with.
 async fn take_in_acknowledged(
     host: &mut RuntimeSourceHost,
     user_id: i64,
-) -> SourceIntakeResult<Vec<SourceAcknowledgement>> {
+) -> SourceIntakeResult<SourceBatchAcknowledgement> {
     let payload = format!(r#"{{"user_id":{user_id}}}"#).into_bytes();
-    host.intake(SourceIntakeBatch {
-        messages: vec![SourceIntakeMessage {
-            payload: &payload,
-            metadata: IngestMetadataRow::Headers {
-                headers: &NoIngestHeaders,
-            },
-        }],
-        mode: SourceIntakeMode::Acknowledged,
-    })
+    host.intake_acknowledged(vec![SourceIntakeMessage {
+        payload: &payload,
+        metadata: IngestMetadataRow::Headers {
+            headers: &NoIngestHeaders,
+        },
+    }])
     .await
-    .map(|outcome| outcome.acknowledgements)
 }
 
 /// An acknowledged batch the extension workers cannot unfold now fails, so its source rejects it
@@ -742,20 +732,17 @@ async fn an_acknowledged_batch_is_refused_for_redelivery_when_the_extension_work
     );
 
     filled.release().await;
-    let acknowledgements = take_in_acknowledged(&mut host, 7)
+    let mut acknowledgement = take_in_acknowledged(&mut host, 7)
         .await
         .expect("the extension workers have room for the batch presented again");
-    assert_eq!(acknowledgements.len(), 1);
     assert_eq!(
         fixture.delivered_user_ids(1).await,
         vec![Some(RuntimeValue::I64(7))]
     );
-    for acknowledgement in acknowledgements {
-        assert_eq!(
-            acknowledgement.wait(Duration::from_secs(10)).await,
-            SourceAcknowledgementOutcome::Ack
-        );
-    }
+    assert_eq!(
+        acknowledgement.wait(Duration::from_secs(10)).await,
+        SourceAcknowledgementOutcome::Ack
+    );
     fixture.finish().await;
 }
 
@@ -771,21 +758,56 @@ async fn an_acknowledged_batch_read_while_suspended_dispatches_with_its_acknowle
         .await;
 
     quiesce.engage(IngestorQuiesceCause::EntityHold);
-    let acknowledgements = take_in_acknowledged(&mut host, 7)
+    let mut acknowledgement = take_in_acknowledged(&mut host, 7)
         .await
         .expect("a suspension lets the batch dispatch");
-    assert_eq!(acknowledgements.len(), 1);
     assert_eq!(
         fixture.delivered_user_ids(1).await,
         vec![Some(RuntimeValue::I64(7))]
     );
-    for acknowledgement in acknowledgements {
-        assert_eq!(
-            acknowledgement.wait(Duration::from_secs(10)).await,
-            SourceAcknowledgementOutcome::Ack
-        );
-    }
+    assert_eq!(
+        acknowledgement.wait(Duration::from_secs(10)).await,
+        SourceAcknowledgementOutcome::Ack
+    );
     assert_eq!(quiesce.counters(), IngestorQuiesceCounters::default());
     quiesce.release(IngestorQuiesceCause::EntityHold);
+    fixture.finish().await;
+}
+
+/// An acknowledged batch the graph acknowledged stays outstanding work of its ingestor until its
+/// source drops the batch acknowledgement, which the loop does once the transport has confirmed
+/// the batch's positions, so a drain or an ownership handoff that waits for the ingestor's roots
+/// also waits for that confirmation.
+#[nervix_primitives::test]
+async fn an_acknowledged_batch_stays_outstanding_until_its_source_settles_it() {
+    let mut fixture = UnfoldingDomain::start().await;
+    let quiesce = fixture.quiesce();
+    let (_shutdown_tx, shutdown) = watch::channel(false);
+    let mut host = fixture.host(quiesce, shutdown, WAITING_INTAKE).await;
+
+    let mut acknowledgement = take_in_acknowledged(&mut host, 7)
+        .await
+        .expect("the extension workers have room for the batch");
+    assert_eq!(
+        fixture.delivered_user_ids(1).await,
+        vec![Some(RuntimeValue::I64(7))]
+    );
+    assert_eq!(
+        acknowledgement.wait(Duration::from_secs(10)).await,
+        SourceAcknowledgementOutcome::Ack
+    );
+    assert_eq!(
+        host.ack_root_trackers
+            .ingestor_outstanding_for_ownership_handoff(),
+        1,
+        "the acknowledged batch is outstanding until its source has settled it"
+    );
+
+    drop(acknowledgement);
+    assert_eq!(
+        host.ack_root_trackers
+            .ingestor_outstanding_for_ownership_handoff(),
+        0
+    );
     fixture.finish().await;
 }

@@ -19,10 +19,11 @@ use arrow_array::{ArrayRef, Int64Array};
 use fjall::Database;
 use nervix_execution::{CpuClass, MemoryClass};
 use nervix_models::{
-    DomainName, GeneratorName, ModelKind, NodeRef, ParseAsType, ReingestorName, SchemaFingerprint,
+    DomainName, EmitterName, GeneratorName, ModelKind, NodeRef, ParseAsType, ReingestorName,
+    SchemaFingerprint,
 };
 use nervix_primitives::{
-    sync::{StdArc, blocking, mpsc, watch},
+    sync::{StdArc, blocking, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, timeout},
 };
@@ -73,8 +74,110 @@ async fn stop_duration(
     execution: DomainExecution,
 ) -> Duration {
     let started = Instant::now();
-    runtime.stop_domain_execution(domain, execution).await;
+    runtime
+        .stop_domain_execution(domain, execution, runtime.emitter_finish_deadline())
+        .await;
     started.elapsed()
+}
+
+/// An emitter task that reports the deadline its stop signal holds once its domain signals the stop,
+/// which is what an emitter task reads when teardown ends its loop.
+fn deadline_reporting_emitter(
+    execution: &DomainExecution,
+    report: oneshot::Sender<Option<Instant>>,
+) -> ScheduledEmitterTask {
+    let (commands, _) = mpsc::channel(1);
+    let (stop_signal, stop_rx) = watch::channel(None);
+    let mut stopped = execution.shutdown.subscribe();
+    let task = nervix_primitives::task::spawn(async move {
+        stopped
+            .wait_for(|stopped| *stopped)
+            .await
+            .expect("the domain signals its stop before it drops the sender");
+        let deadline = *stop_rx.borrow();
+        report
+            .send(deadline)
+            .expect("the check waits for the deadline the emitter read");
+    });
+    ScheduledEmitterTask {
+        commands,
+        stop_signal,
+        task,
+    }
+}
+
+/// A domain execution with one emitter task that reports the finish deadline it read when its
+/// domain stopped.
+fn execution_with_deadline_reporting_emitter(
+    domain: &DomainName,
+) -> (DomainExecution, oneshot::Receiver<Option<Instant>>) {
+    let mut execution = idle_execution(domain);
+    let (report, reported) = oneshot::channel();
+    let emitter = named::<EmitterName>("published");
+    let task = deadline_reporting_emitter(&execution, report);
+    execution
+        .emitter_tasks
+        .insert(NodeRef::new(ModelKind::Emitter, &emitter), task);
+    (execution, reported)
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_stopping_execution_gives_each_emitter_its_finish_deadline_before_its_stop() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let (execution, reported) = execution_with_deadline_reporting_emitter(&domain);
+    let finish_by = Instant::now() + Duration::from_secs(7);
+
+    runtime
+        .stop_domain_execution(&domain, execution, finish_by)
+        .await;
+
+    assert_eq!(
+        reported
+            .await
+            .expect("the emitter task reports what it read"),
+        Some(finish_by),
+        "an emitter that the stop ends must already hold the deadline it finishes its sink by"
+    );
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_stopping_runtime_gives_its_emitters_only_the_time_its_shutdown_leaves() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let (execution, reported) = execution_with_deadline_reporting_emitter(&domain);
+    runtime.inner.executions.insert(domain.clone(), execution);
+    let left = Duration::from_secs(3);
+    let started = Instant::now();
+
+    runtime.shutdown(left).await;
+
+    assert_eq!(
+        reported
+            .await
+            .expect("the emitter task reports what it read"),
+        Some(started + left),
+        "a shutdown with less time left than the domain drain timeout bounds the finish by it"
+    );
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_stopping_runtime_gives_its_emitters_no_more_than_the_domain_drain_timeout() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let (execution, reported) = execution_with_deadline_reporting_emitter(&domain);
+    runtime.inner.executions.insert(domain.clone(), execution);
+    let started = Instant::now();
+
+    runtime.shutdown(Duration::from_secs(3_600)).await;
+
+    assert_eq!(
+        reported
+            .await
+            .expect("the emitter task reports what it read"),
+        Some(started + runtime.domain_drain_timeout()),
+        "a long shutdown deadline still gives an emitter's finish only the domain drain timeout"
+    );
 }
 
 #[nervix_primitives::test(start_paused = true)]
@@ -309,7 +412,10 @@ async fn a_stopping_runtime_waits_for_the_snapshot_of_a_branch_whose_task_is_gon
 
     let stopping = nervix_primitives::task::spawn({
         let runtime = runtime.clone();
-        async move { runtime.shutdown().await }
+        async move {
+            let left = runtime.domain_drain_timeout();
+            runtime.shutdown(left).await
+        }
     });
     let told_to_stop = runtime.inner.branch_snapshot_tasks.stopping();
     timeout(REACHED_WITHIN, told_to_stop.cancelled())
@@ -350,9 +456,12 @@ async fn a_stopping_runtime_has_the_snapshot_task_of_a_silent_branch_write_and_e
         .expect("a persisting runtime starts a snapshot task");
     assert_eq!(window.persisted_revision(), None);
 
-    timeout(REACHED_WITHIN, runtime.shutdown())
-        .await
-        .expect("the runtime stops without its branch's stop");
+    timeout(
+        REACHED_WITHIN,
+        runtime.shutdown(runtime.domain_drain_timeout()),
+    )
+    .await
+    .expect("the runtime stops without its branch's stop");
 
     timeout(REACHED_WITHIN, snapshot_task)
         .await

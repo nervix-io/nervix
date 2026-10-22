@@ -4,10 +4,11 @@
 //!
 //! - **Owns.** The MQTT client a configuration declares, its event loop and reconnect backoff,
 //!   the connection it opens to the broker through the node resolver, the session, quality of
-//!   service and shared subscription a source reads through, manual acknowledgement and local
-//!   replay of publishes, the quality of service each record is published at, the Maximum Packet
-//!   Size the broker declares and the rejection of a record whose PUBLISH packet would exceed it,
-//!   and confirmation classification.
+//!   service and shared subscription a source reads through, the Maximum Packet Size a source
+//!   advertises, manual acknowledgement and local replay of publishes, the quality of service each
+//!   record is published at, the Maximum Packet Size the broker declares and the rejection of a
+//!   record whose PUBLISH packet would exceed it, the QoS 0 publishes a sink's client still holds
+//!   until it sends them, and confirmation classification.
 //! - **Depends on.** The connector contract, the node DNS resolver, vocabulary values,
 //!   `error-stack`, Tokio and `rumqttc`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -26,6 +27,12 @@
 )]
 
 mod connection;
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod scripted_broker;
 mod source;
 #[cfg(test)]
 #[cfg_attr(
@@ -47,32 +54,36 @@ use async_trait::async_trait;
 pub use connection::MqttConnectionError;
 use connection::MqttDialer;
 use error_stack::Report;
-use futures_util::FutureExt;
+use futures_util::FutureExt as _;
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    AckConfirmation, ParsedRetryPolicy, PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkHost,
-    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId, SinkStartError,
-    SinkStartResult, client_config_value, client_tls_paths, next_retry_delay,
+    AckConfirmation, BrokerAnswer, BrokerVerdict, ConfirmationWindow, ParsedRetryPolicy,
+    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish, SinkFinishError,
+    SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId,
+    SinkStartError, SinkStartResult, client_config_value, client_tls_paths, next_retry_delay,
     optional_client_config_value, read_tls_file,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
+use nervix_models::{ClientConfigEntry, TopicName};
 use nervix_primitives::{
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
         watch,
     },
-    time::{Instant, sleep},
+    task::unconstrained,
+    time::{Instant, sleep, timeout_at},
 };
+use nervix_recovery::Discarded as _;
 use rumqttc::{
     AsyncClient, ClientError as MqttClientError, ConnAck, Event, Incoming, MqttOptions,
-    PubAckReason as MqttPubAckReason, PubRecReason as MqttPubRecReason, PublishNoticeError,
-    PublishOptions, SessionMode, TlsConfiguration, Transport as MqttTransport, ValidatedTopic,
+    PubAckReason as MqttPubAckReason, PubRecReason as MqttPubRecReason, PublishNotice,
+    PublishNoticeError, PublishOptions, SessionMode, TlsConfiguration, Transport as MqttTransport,
+    ValidatedTopic,
 };
 pub use source::{
     MqttClientIdError, MqttSource, MqttSourceError, MqttSourceMessage, MqttSourcePlan,
-    MqttSourcePosition, MqttSourceSettings,
+    MqttSourcePosition, MqttSourceSessions, MqttSourceSettings,
 };
 use thiserror::Error;
 use tracing::warn;
@@ -100,13 +111,6 @@ impl MqttPublishingMode {
             Self::Qos2(_) => PublishOptions::exactly_once(),
         }
     }
-
-    fn confirmation_settings(self) -> Option<AckConfirmation> {
-        match self {
-            Self::Qos0 => None,
-            Self::Qos1(confirmation) | Self::Qos2(confirmation) => Some(confirmation),
-        }
-    }
 }
 
 /// What one MQTT sink publishes through: its client entries, topic, quality of service, the
@@ -127,6 +131,9 @@ pub struct MqttSink {
     mode: MqttPublishingMode,
     framing: MqttPublishFraming,
     broker_limit: Arc<MqttBrokerPacketLimit>,
+    /// The QoS 0 publishes the client took and has not yet sent, which stay empty under QoS 1
+    /// and 2.
+    unsent: MqttUnsentPublishes,
     eventloop_shutdown: watch::Sender<bool>,
 }
 
@@ -254,13 +261,117 @@ impl MqttBrokerPacketLimit {
     }
 }
 
-type MqttConfirmation = Pin<Box<dyn Future<Output = Result<(), PublishNoticeError>> + Send>>;
+/// The broker's answer for one QoS 1 or 2 record, which resolves when its `PUBACK` or the last
+/// packet of its QoS 2 handshake arrives, or when the client gives the record up.
+type MqttAnswer = Pin<Box<dyn Future<Output = BrokerAnswer> + Send>>;
 
-struct PendingMqttConfirmation {
-    record: SinkRecordId,
-    occurred_at: Timestamp,
-    deadline: Instant,
-    confirmation: MqttConfirmation,
+/// The flush of one QoS 0 publish the client took, which ends once the client's event loop has
+/// written the publish and flushed the connection, or failed to: the write or the flush failed, or
+/// a clean session's next connection dropped the publish a lost connection left behind.
+type MqttFlush = Pin<Box<dyn Future<Output = Result<(), PublishNoticeError>> + Send>>;
+
+/// The QoS 0 publishes a sink reported delivered that its client has not yet sent.
+///
+/// A QoS 0 record is delivered once the client takes it, and the client's event loop writes it to
+/// the broker connection afterwards: at once while it is connected, or once it connects again. The
+/// sink keeps the flush of every publish the client took until that flush ends, so finishing the
+/// sink can wait for what the client still holds. Dropping the ended flushes at the start of each
+/// publish keeps one flush for each publish the client still holds: the one request its queue
+/// takes, and those a lost connection left for the next.
+#[derive(Default)]
+struct MqttUnsentPublishes {
+    flushes: VecDeque<MqttFlush>,
+}
+
+impl MqttUnsentPublishes {
+    fn hold(&mut self, flush: MqttFlush) {
+        self.flushes.push_back(flush);
+    }
+
+    /// Drops every flush that has ended, without waiting, and answers the first failure among
+    /// them. Visiting each flush once leaves every pending one held even if a surrounding finish
+    /// is cancelled.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "polls the MQTT driver's flush notices without waiting; their \
+                      implementations belong to the driver"
+        )
+    )]
+    fn drop_ended(&mut self) -> Option<PublishNoticeError> {
+        let mut failure = None;
+        let flushes = std::mem::take(&mut self.flushes);
+        for mut flush in flushes {
+            match unconstrained(&mut flush).now_or_never() {
+                Some(Ok(())) => {}
+                Some(Err(error)) => {
+                    if failure.is_none() {
+                        failure = Some(error);
+                    }
+                }
+                None => self.flushes.push_back(flush),
+            }
+        }
+        failure
+    }
+
+    /// Drops the flushes that ended while the client was not being finished. One that failed lost
+    /// its publish with the connection whose failure the event loop reported.
+    fn drop_settled(&mut self) {
+        self.drop_ended().discarded(
+            "the event loop reported the lost connection that failed the flush as the sink's \
+             transient error and an error event",
+        );
+    }
+
+    /// Waits until the client has sent every publish it still holds, or `deadline` passes.
+    async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
+        self.drop_settled();
+        if self.flushes.is_empty() {
+            return Ok(SinkFinish::NothingHeld);
+        }
+        let mut failure = None;
+        while let Some(flush) = self.flushes.front_mut() {
+            nervix_primitives::task::consume_budget().await;
+            let waited = timeout_at(deadline, flush).await;
+            let Ok(ended) = waited else {
+                let failed = self.drop_ended();
+                if failure.is_none() {
+                    failure = failed;
+                }
+                break;
+            };
+            self.flushes.pop_front();
+            if let Err(error) = ended
+                && failure.is_none()
+            {
+                failure = Some(error);
+            }
+        }
+        self.finish_outcome(failure)
+    }
+
+    /// What a finish that saw `failure` among the flushes it waited for answers: the count still
+    /// held when its deadline passed, then a failed flush, then a flush of everything held.
+    fn finish_outcome(&self, failure: Option<PublishNoticeError>) -> SinkFinishResult {
+        if !self.flushes.is_empty() {
+            let unsent = SinkFinishError::Unsent {
+                sink: MQTT,
+                records: self.flushes.len().arch_into(),
+            };
+            let report = match failure {
+                Some(error) => Report::new(error).change_context(unsent),
+                None => Report::new(unsent),
+            };
+            return Err(report);
+        }
+        match failure {
+            Some(error) => {
+                Err(Report::new(error).change_context(SinkFinishError::Flush { sink: MQTT }))
+            }
+            None => Ok(SinkFinish::Flushed),
+        }
+    }
 }
 
 /// The delay before the event loop's next reconnect attempt, doubling up to the declared ceiling.
@@ -360,6 +471,7 @@ impl MqttSink {
             mode,
             framing,
             broker_limit,
+            unsent: MqttUnsentPublishes::default(),
             eventloop_shutdown,
         })
     }
@@ -456,95 +568,6 @@ impl MqttSink {
         Ok(MqttSinkAddr { host, port, tls })
     }
 
-    async fn confirm_oldest(
-        pending: &mut VecDeque<PendingMqttConfirmation>,
-        timeout: Duration,
-        outcome: &mut PerRecordOutcome<SinkRecordId>,
-    ) -> SinkPublishResult<()> {
-        let Some(oldest) = pending.front_mut() else {
-            return Err(Self::publish_error(
-                "mqtt acknowledgment window unexpectedly became empty",
-            ));
-        };
-        let remaining = oldest
-            .deadline
-            .checked_duration_since(Instant::now())
-            .unwrap_or(Duration::ZERO);
-        if remaining.is_zero() {
-            Self::harvest_ready_after_oldest_failure(pending, outcome);
-            return Err(Self::confirm_timeout_error(timeout));
-        }
-        let result = nervix_primitives::select! {
-            biased;
-            result = &mut oldest.confirmation => Some(result),
-            _ = sleep(remaining) => None,
-        };
-        let Some(result) = result else {
-            Self::harvest_ready_after_oldest_failure(pending, outcome);
-            return Err(Self::confirm_timeout_error(timeout));
-        };
-        let record_id = oldest.record;
-        let occurred_at = oldest.occurred_at;
-        match result {
-            Ok(()) => {
-                pending.pop_front();
-                outcome.deliver(record_id);
-                Ok(())
-            }
-            Err(error) if Self::is_record_notice_rejection(&error) => {
-                pending.pop_front();
-                outcome.reject(RejectedSinkRecord::external(
-                    record_id,
-                    occurred_at,
-                    format!("mqtt rejected record: {error}"),
-                ));
-                Ok(())
-            }
-            Err(error) => {
-                Self::harvest_ready_after_oldest_failure(pending, outcome);
-                Err(Self::publish_error(error))
-            }
-        }
-    }
-
-    /// Collects the records behind the oldest one whose confirmation already resolved.
-    ///
-    /// The caller reached here because the oldest record failed or timed out, and it is about to
-    /// return that failure for the whole publish. Records behind it that already succeeded or were
-    /// individually rejected are recorded so the retry does not send them again. Anything else is
-    /// deliberately left in neither list: its failure is the same infrastructure failure the
-    /// caller is returning, and classifying it per record would report one outage many times.
-    fn harvest_ready_after_oldest_failure(
-        pending: &mut VecDeque<PendingMqttConfirmation>,
-        outcome: &mut PerRecordOutcome<SinkRecordId>,
-    ) {
-        let mut index = 1;
-        while index < pending.len() {
-            let ready = pending
-                .get_mut(index)
-                .and_then(|confirmation| (&mut confirmation.confirmation).now_or_never());
-            let Some(result) = ready else {
-                index += 1;
-                continue;
-            };
-            let confirmation = pending.remove(index).verified(
-                "the index came from scanning this same pending window, which nothing else \
-                 removes from",
-            );
-            match result {
-                Ok(()) => outcome.deliver(confirmation.record),
-                Err(error) if Self::is_record_notice_rejection(&error) => {
-                    outcome.reject(RejectedSinkRecord::external(
-                        confirmation.record,
-                        confirmation.occurred_at,
-                        format!("mqtt rejected record: {error}"),
-                    ));
-                }
-                Err(_) => {}
-            }
-        }
-    }
-
     /// Accepts a payload of `payload_bytes` whose PUBLISH packet the protocol can express and the
     /// broker declared it will receive, or says why no packet of it can be sent.
     fn admit(&self, payload_bytes: usize) -> MqttRecordResult<()> {
@@ -552,10 +575,13 @@ impl MqttSink {
         self.broker_limit.admit(packet_bytes)
     }
 
+    /// Whether the client refused to take a record because of the record itself, so handing it over
+    /// again cannot succeed.
     fn is_record_client_rejection(error: &MqttClientError) -> bool {
         matches!(error, MqttClientError::InvalidRequest(_))
     }
 
+    /// Whether the broker refused a record for good: a v5 reason code about the record itself.
     fn is_record_notice_rejection(error: &PublishNoticeError) -> bool {
         matches!(
             error,
@@ -571,11 +597,138 @@ impl MqttSink {
         )
     }
 
-    fn confirm_timeout_error(timeout: Duration) -> Report<SinkPublishError> {
-        Self::publish_error(format!(
-            "mqtt publish confirmation exceeded ACK TIMEOUT {}",
-            humantime::format_duration(timeout)
-        ))
+    /// The broker's answer for a QoS 1 or 2 record whose handshake ended as `completion`.
+    ///
+    /// A completed handshake confirms the record, and a reason code about the record itself refuses
+    /// it for good. Any other ending leaves the record's outcome unknown: the client, its
+    /// connection or its session failed, or the broker's reason code is not about the record.
+    fn broker_answer(completion: Result<(), PublishNoticeError>) -> BrokerAnswer {
+        match completion {
+            Ok(()) => Ok(BrokerVerdict::Confirmed),
+            Err(error) if Self::is_record_notice_rejection(&error) => Ok(BrokerVerdict::Rejected {
+                message: format!("mqtt rejected record: {error}"),
+            }),
+            Err(error) => {
+                let description = format!("mqtt publish failed: {error}");
+                Err(Report::new(error)
+                    .change_context(SinkPublishError::Publish { sink: MQTT })
+                    .attach_printable(description))
+            }
+        }
+    }
+
+    /// Waits for the end of the handshake `notice` tracks and reads the broker's answer from it.
+    async fn await_answer(notice: PublishNotice) -> BrokerAnswer {
+        let completion = notice.wait_completion_async().await;
+        Self::broker_answer(completion)
+    }
+
+    /// The failure that ends a publish whose record the client refused to take for a reason that
+    /// is not the record's own, such as a full request queue.
+    fn refused_hand_over(error: MqttClientError) -> Report<SinkPublishError> {
+        let description = format!("mqtt client refused the record: {error}");
+        Report::new(error)
+            .change_context(SinkPublishError::Publish { sink: MQTT })
+            .attach_printable(description)
+    }
+
+    /// Publishes `records` at QoS 0, where the client taking a record delivers it, and keeps the
+    /// flush of every record the client took until the client sends it.
+    async fn publish_at_most_once(
+        &mut self,
+        records: Vec<SinkRecord>,
+    ) -> PerRecordOutcome<SinkRecordId> {
+        self.unsent.drop_settled();
+        let mut outcome = PerRecordOutcome::with_capacity(records.len());
+        for record in records {
+            nervix_primitives::task::consume_budget().await;
+            let record_id = record.id;
+            let occurred_at = record.occurred_at;
+            // The client would fail its connection on a packet the broker refuses to receive, so
+            // a record whose packet cannot be sent is rejected before it is handed over.
+            if let Err(error) = self.admit(record.payload.len()) {
+                outcome.reject(RejectedSinkRecord::external(
+                    record_id,
+                    occurred_at,
+                    format!("mqtt rejected record: {error}"),
+                ));
+                continue;
+            }
+            let handed_over = self.client.try_publish_tracked(
+                self.topic.as_str(),
+                record.payload,
+                PublishOptions::at_most_once(),
+            );
+            match handed_over {
+                Ok(notice) => {
+                    self.unsent.hold(Box::pin(notice.wait_completion_async()));
+                    outcome.deliver(record_id);
+                }
+                Err(error) if Self::is_record_client_rejection(&error) => {
+                    outcome.reject(RejectedSinkRecord::external(
+                        record_id,
+                        occurred_at,
+                        format!("mqtt rejected record: {error}"),
+                    ));
+                }
+                Err(error) => {
+                    outcome.fail(Self::refused_hand_over(error));
+                    return outcome;
+                }
+            }
+        }
+        outcome
+    }
+
+    /// Publishes `records` at QoS 1 or 2 and awaits the broker's answers through the confirmation
+    /// window `settings` declare.
+    ///
+    /// Every way the publish can fail ends it through the window, which first settles each answer
+    /// the broker already gave, so the host's retry never resends a record the broker confirmed.
+    async fn publish_confirmed(
+        &mut self,
+        records: Vec<SinkRecord>,
+        settings: AckConfirmation,
+    ) -> PerRecordOutcome<SinkRecordId> {
+        let mut window: ConfirmationWindow<MqttAnswer> =
+            ConfirmationWindow::new(MQTT, settings, records.len());
+        for record in records {
+            nervix_primitives::task::consume_budget().await;
+            let record_id = record.id;
+            let occurred_at = record.occurred_at;
+            // The client would fail its connection on a packet the broker refuses to receive, so
+            // a record whose packet cannot be sent is rejected before it is handed over.
+            if let Err(error) = self.admit(record.payload.len()) {
+                window.reject(RejectedSinkRecord::external(
+                    record_id,
+                    occurred_at,
+                    format!("mqtt rejected record: {error}"),
+                ));
+                continue;
+            }
+            let handed_over = self.client.try_publish_tracked(
+                self.topic.as_str(),
+                record.payload,
+                self.mode.publish_options(),
+            );
+            let notice = match handed_over {
+                Ok(notice) => notice,
+                Err(error) if Self::is_record_client_rejection(&error) => {
+                    window.reject(RejectedSinkRecord::external(
+                        record_id,
+                        occurred_at,
+                        format!("mqtt rejected record: {error}"),
+                    ));
+                    continue;
+                }
+                Err(error) => return window.fail(Self::refused_hand_over(error)),
+            };
+            let answer: MqttAnswer = Box::pin(Self::await_answer(notice));
+            if let Err(failure) = window.admit(record_id, occurred_at, answer).await {
+                return window.fail(failure);
+            }
+        }
+        window.finish().await
     }
 
     fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
@@ -612,17 +765,6 @@ impl MqttSink {
         Report::new(SinkStartError::InvalidConfiguration { sink: MQTT })
             .attach_printable(error.to_string())
     }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::dispatch(
-            reason = "formats the typed external MQTT driver failure; no internal runtime \
-                      ownership is inferred"
-        )
-    )]
-    fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
-        Report::new(SinkPublishError::Publish { sink: MQTT }).attach_printable(error.to_string())
-    }
 }
 
 impl Drop for MqttSink {
@@ -633,6 +775,18 @@ impl Drop for MqttSink {
 
 #[async_trait]
 impl SinkLifecycle for MqttSink {
+    /// A QoS 0 publish is delivered once the client takes it, and the event loop sends it later,
+    /// so the client can still hold delivered publishes, which the finish waits for the event loop
+    /// to send. A QoS 1 or 2 publish is delivered only once the broker answered for it.
+    async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
+        match self.mode {
+            MqttPublishingMode::Qos0 => self.unsent.finish(deadline).await,
+            MqttPublishingMode::Qos1(_) | MqttPublishingMode::Qos2(_) => {
+                Ok(SinkFinish::NothingHeld)
+            }
+        }
+    }
+
     /// A publish failure leaves the client connected: its event loop reconnects on its own
     /// schedule, and dropping it would discard the session the broker still holds.
     fn keeps_client_on_publish_failure(&self) -> bool {
@@ -643,99 +797,12 @@ impl SinkLifecycle for MqttSink {
 #[async_trait]
 impl RecordSink for MqttSink {
     async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
-        let mut outcome = PerRecordOutcome::with_capacity(records.len());
-        let mut pending: VecDeque<PendingMqttConfirmation> = VecDeque::new();
-        for record in records {
-            nervix_primitives::task::consume_budget().await;
-            let record_id = record.id;
-            let occurred_at = record.occurred_at;
-            // The client would fail its connection on a packet the broker refuses to receive, so
-            // a record whose packet cannot be sent is rejected before it is handed over.
-            if let Err(error) = self.admit(record.payload.len()) {
-                outcome.reject(RejectedSinkRecord::external(
-                    record_id,
-                    occurred_at,
-                    format!("mqtt rejected record: {error}"),
-                ));
-                continue;
-            }
-            if let MqttPublishingMode::Qos0 = self.mode {
-                match self.client.try_publish(
-                    self.topic.as_str(),
-                    record.payload,
-                    PublishOptions::at_most_once(),
-                ) {
-                    Ok(()) => outcome.deliver(record_id),
-                    Err(error) if Self::is_record_client_rejection(&error) => {
-                        outcome.reject(RejectedSinkRecord::external(
-                            record_id,
-                            occurred_at,
-                            format!("mqtt rejected record: {error}"),
-                        ));
-                    }
-                    Err(error) => {
-                        outcome.fail(Self::publish_error(error));
-                        return outcome;
-                    }
-                }
-                continue;
-            }
-
-            let notice = match self.client.try_publish_tracked(
-                self.topic.as_str(),
-                record.payload,
-                self.mode.publish_options(),
-            ) {
-                Ok(notice) => notice,
-                Err(error) if Self::is_record_client_rejection(&error) => {
-                    outcome.reject(RejectedSinkRecord::external(
-                        record_id,
-                        occurred_at,
-                        format!("mqtt rejected record: {error}"),
-                    ));
-                    continue;
-                }
-                Err(error) => {
-                    outcome.fail(Self::publish_error(error));
-                    return outcome;
-                }
-            };
-            let AckConfirmation {
-                max_in_flight,
-                timeout,
-            } = self.mode.confirmation_settings().verified(
-                "this path only runs for the confirmed publishing mode, which carries the settings",
-            );
-            let Some(deadline) = Instant::now().checked_add(timeout) else {
-                outcome.fail(Self::publish_error(
-                    "mqtt ACK TIMEOUT exceeds the monotonic clock range",
-                ));
-                return outcome;
-            };
-            pending.push_back(PendingMqttConfirmation {
-                record: record_id,
-                occurred_at,
-                deadline,
-                confirmation: Box::pin(notice.wait_completion_async()),
-            });
-            if pending.len() >= max_in_flight.get()
-                && let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
-            {
-                outcome.fail(error);
-                return outcome;
+        match self.mode {
+            MqttPublishingMode::Qos0 => self.publish_at_most_once(records).await,
+            MqttPublishingMode::Qos1(settings) | MqttPublishingMode::Qos2(settings) => {
+                self.publish_confirmed(records, settings).await
             }
         }
-        while !pending.is_empty() {
-            nervix_primitives::task::consume_budget().await;
-            let AckConfirmation { timeout, .. } = self.mode.confirmation_settings().verified(
-                "this path only runs for the confirmed publishing mode, which carries the settings",
-            );
-            if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {
-                outcome.fail(error);
-                return outcome;
-            }
-        }
-        outcome
     }
 }
 
@@ -745,76 +812,60 @@ impl RecordSink for MqttSink {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use error_stack::{AttachmentKind, FrameKind};
     use meticulous::ResultExt as _;
+    use nervix_connector::{ConfirmationWindowError, PerRecordOutcomeParts};
+    use nervix_models::Timestamp;
 
     use super::*;
-    use crate::test_fixtures::DnsFixture;
+    use crate::{scripted_broker::ScriptedBroker, test_fixtures::DnsFixture};
 
-    fn pending(
-        index: usize,
-        confirmation: MqttConfirmation,
-        deadline: Instant,
-    ) -> PendingMqttConfirmation {
-        PendingMqttConfirmation {
-            record: SinkRecordId::new(index),
-            occurred_at: Timestamp::from_unix_nanos(0),
-            deadline,
-            confirmation,
-        }
+    #[test]
+    fn a_completed_handshake_confirms_the_record() {
+        let verdict = MqttSink::broker_answer(Ok(()))
+            .expect("a completed handshake is the broker's verdict on the record");
+
+        assert_eq!(verdict, BrokerVerdict::Confirmed);
     }
 
     #[test]
-    fn ready_younger_confirmations_are_accounted_before_retrying_oldest() {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut window = VecDeque::from([
-            pending(0, Box::pin(std::future::pending()), deadline),
-            pending(1, Box::pin(async { Ok(()) }), deadline),
-            pending(
-                2,
-                Box::pin(async {
-                    Err(PublishNoticeError::V5PubAck(
-                        MqttPubAckReason::NotAuthorized,
-                    ))
-                }),
-                deadline,
+    fn a_reason_code_about_the_record_refuses_it_for_good() {
+        let refusals = [
+            (
+                PublishNoticeError::V5PubAck(MqttPubAckReason::NotAuthorized),
+                "mqtt rejected record: v5 puback returned non-success reason: NotAuthorized",
             ),
-            pending(
-                3,
-                Box::pin(async { Err(PublishNoticeError::SessionReset) }),
-                deadline,
+            (
+                PublishNoticeError::V5PubAck(MqttPubAckReason::TopicNameInvalid),
+                "mqtt rejected record: v5 puback returned non-success reason: TopicNameInvalid",
             ),
-        ]);
-        let mut outcome = PerRecordOutcome::empty();
+            (
+                PublishNoticeError::V5PubAck(MqttPubAckReason::PayloadFormatInvalid),
+                "mqtt rejected record: v5 puback returned non-success reason: PayloadFormatInvalid",
+            ),
+            (
+                PublishNoticeError::V5PubRec(MqttPubRecReason::NotAuthorized),
+                "mqtt rejected record: v5 pubrec returned non-success reason: NotAuthorized",
+            ),
+            (
+                PublishNoticeError::V5PubRec(MqttPubRecReason::TopicNameInvalid),
+                "mqtt rejected record: v5 pubrec returned non-success reason: TopicNameInvalid",
+            ),
+            (
+                PublishNoticeError::V5PubRec(MqttPubRecReason::PayloadFormatInvalid),
+                "mqtt rejected record: v5 pubrec returned non-success reason: PayloadFormatInvalid",
+            ),
+        ];
+        for (refusal, message) in refusals {
+            let verdict = MqttSink::broker_answer(Err(refusal))
+                .expect("a refusal of the record itself is the broker's verdict on it");
 
-        MqttSink::harvest_ready_after_oldest_failure(&mut window, &mut outcome);
-        let outcome = outcome.into_parts();
-
-        assert_eq!(window.len(), 1, "only the unresolved oldest must remain");
-        assert_eq!(outcome.delivered, vec![SinkRecordId::new(1)]);
-        assert_eq!(outcome.rejected.len(), 1);
-        assert_eq!(outcome.rejected[0].id, SinkRecordId::new(2));
-        assert!(outcome.infrastructure_error.is_none());
-    }
-
-    #[test]
-    fn authorization_topic_and_payload_rejections_are_record_specific() {
-        for reason in [
-            MqttPubAckReason::NotAuthorized,
-            MqttPubAckReason::TopicNameInvalid,
-            MqttPubAckReason::PayloadFormatInvalid,
-        ] {
-            assert!(MqttSink::is_record_notice_rejection(
-                &PublishNoticeError::V5PubAck(reason)
-            ));
-        }
-        for reason in [
-            MqttPubRecReason::NotAuthorized,
-            MqttPubRecReason::TopicNameInvalid,
-            MqttPubRecReason::PayloadFormatInvalid,
-        ] {
-            assert!(MqttSink::is_record_notice_rejection(
-                &PublishNoticeError::V5PubRec(reason)
-            ));
+            assert_eq!(
+                verdict,
+                BrokerVerdict::Rejected {
+                    message: message.to_string()
+                }
+            );
         }
     }
 
@@ -1278,7 +1329,14 @@ mod tests {
             .await
             .expect("the test broker answers the CONNECT");
 
-        let declared = nervix_primitives::time::timeout(Duration::from_secs(30), async {
+        let declared = declared_packet_limit(&sink).await;
+        assert_eq!(declared.get(), 1024);
+    }
+
+    /// The maximum packet size the broker declared to `sink`, once its event loop has recorded the
+    /// CONNACK that declared it.
+    async fn declared_packet_limit(sink: &MqttSink) -> NonZeroU32 {
+        nervix_primitives::time::timeout(Duration::from_secs(30), async {
             loop {
                 nervix_primitives::task::consume_budget().await;
                 if let Some(maximum) = sink.broker_limit.declared() {
@@ -1288,8 +1346,25 @@ mod tests {
             }
         })
         .await
-        .expect("the event loop records the CONNACK it received");
-        assert_eq!(declared.get(), 1024);
+        .expect("the event loop records the CONNACK it received")
+    }
+
+    /// The first transient error the sink's event loop records with its host.
+    async fn first_transient_error(recorded: &mut watch::Receiver<Option<String>>) -> String {
+        nervix_primitives::time::timeout(Duration::from_secs(30), async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                if let Some(reason) = recorded.borrow_and_update().clone() {
+                    return reason;
+                }
+                recorded
+                    .changed()
+                    .await
+                    .expect("the sink's host keeps the sender");
+            }
+        })
+        .await
+        .expect("the event loop reports its first failed connection")
     }
 
     #[nervix_primitives::test]
@@ -1305,20 +1380,7 @@ mod tests {
         let _sink = MqttSink::new(config, SinkHost::new(RecordingHost { transient_error }))
             .expect("the test sink config is valid");
 
-        let reason = nervix_primitives::time::timeout(Duration::from_secs(30), async {
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                if let Some(reason) = recorded.borrow_and_update().clone() {
-                    return reason;
-                }
-                recorded
-                    .changed()
-                    .await
-                    .expect("the sink's host keeps the sender");
-            }
-        })
-        .await
-        .expect("the event loop reports its first failed connection");
+        let reason = first_transient_error(&mut recorded).await;
 
         assert_eq!(
             reason,
@@ -1327,13 +1389,573 @@ mod tests {
         assert!(fixture.authority.questions_for("missing.nervix.test") > 0);
     }
 
+    /// The first printable attachment of `failure`: the description an emitter shows as its
+    /// transient error.
+    fn printable_description(failure: &Report<SinkPublishError>) -> Option<String> {
+        for frame in failure.frames() {
+            if let FrameKind::Attachment(AttachmentKind::Printable(attachment)) = frame.kind() {
+                return Some(attachment.to_string());
+            }
+        }
+        None
+    }
+
+    /// The configuration of a QoS 1 sink with `confirmation` on `topic` whose client connects to
+    /// `addr` through `dns`, retrying slowly enough that a test never sees a second attempt.
+    fn qos1_config(
+        addr: &str,
+        topic_name: &str,
+        dns: DnsResolver,
+        confirmation: AckConfirmation,
+    ) -> MqttSinkConfig {
+        MqttSinkConfig {
+            mode: MqttPublishingMode::Qos1(confirmation),
+            ..qos0_config(addr, topic_name, dns)
+        }
+    }
+
+    fn sorted_delivered(outcome: &PerRecordOutcomeParts<SinkRecordId>) -> Vec<SinkRecordId> {
+        let mut delivered = outcome.delivered.clone();
+        delivered.sort();
+        delivered
+    }
+
+    #[nervix_primitives::test]
+    async fn a_failed_answer_settles_the_answers_the_broker_gave_before_it() {
+        let broker = ScriptedBroker::start().await;
+        let fixture = DnsFixture::start().await;
+        let confirmation = AckConfirmation {
+            max_in_flight: NonZeroUsize::new(4).expect("four is non-zero"),
+            timeout: Duration::from_secs(30),
+        };
+        let mut sink = MqttSink::new(
+            qos1_config(&broker.addr(), "window", fixture.dns.clone(), confirmation),
+            SinkHost::new(SilentHost),
+        )
+        .expect("the test sink config is valid");
+        let script = async {
+            let mut connection = broker.accept().await;
+            let mut publishes = Vec::new();
+            for _ in 0..3 {
+                publishes.push(connection.read_publish().await);
+            }
+            // The broker confirms the younger records, then fails the oldest's answer for a reason
+            // that is not about the record.
+            connection.puback(publishes[1].packet_id, 0x00).await;
+            connection.puback(publishes[2].packet_id, 0x00).await;
+            connection.puback(publishes[0].packet_id, 0x97).await;
+            connection
+        };
+
+        let (outcome, _connection) = tokio::join!(
+            sink.publish(vec![record(0, 1), record(1, 1), record(2, 1)]),
+            script
+        );
+        let outcome = outcome.into_parts();
+
+        assert_eq!(
+            sorted_delivered(&outcome),
+            vec![SinkRecordId::new(1), SinkRecordId::new(2)],
+            "the records the broker confirmed before the failure are delivered"
+        );
+        assert!(outcome.rejected.is_empty());
+        let failure = outcome
+            .infrastructure_error
+            .expect("the oldest record's failed answer fails the publish");
+        assert_eq!(
+            failure.current_context(),
+            &SinkPublishError::Publish { sink: MQTT }
+        );
+        assert_eq!(
+            failure.downcast_ref::<PublishNoticeError>(),
+            Some(&PublishNoticeError::V5PubAck(
+                MqttPubAckReason::QuotaExceeded
+            ))
+        );
+        assert_eq!(
+            printable_description(&failure).as_deref(),
+            Some("mqtt publish failed: v5 puback returned non-success reason: QuotaExceeded")
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_confirmed_record_the_broker_would_refuse_is_rejected_before_the_client_sees_it() {
+        let broker = ScriptedBroker::start().await;
+        let fixture = DnsFixture::start().await;
+        let confirmation = AckConfirmation {
+            max_in_flight: NonZeroUsize::new(4).expect("four is non-zero"),
+            timeout: Duration::from_secs(30),
+        };
+        let mut sink = MqttSink::new(
+            qos1_config(&broker.addr(), "limited", fixture.dns.clone(), confirmation),
+            SinkHost::new(SilentHost),
+        )
+        .expect("the test sink config is valid");
+        let mut connection = broker.accept_declaring_packet_limit(64).await;
+        assert_eq!(declared_packet_limit(&sink).await.get(), 64);
+        let script = async {
+            let first = connection.read_publish().await;
+            let second = connection.read_publish().await;
+            connection.puback(first.packet_id, 0x00).await;
+            connection.puback(second.packet_id, 0x00).await;
+            [first.payload.len(), second.payload.len()]
+        };
+
+        // The topic `limited` takes 14 bytes around a QoS 1 payload: the fixed header byte, one
+        // remaining-length byte, the topic with its length prefix, the packet identifier, and the
+        // property length.
+        let (outcome, received) = tokio::join!(
+            sink.publish(vec![record(0, 50), record(1, 51), record(2, 50)]),
+            script
+        );
+        let outcome = outcome.into_parts();
+
+        assert_eq!(
+            received,
+            [50, 50],
+            "the broker receives only the records that fit"
+        );
+        assert_eq!(
+            sorted_delivered(&outcome),
+            vec![SinkRecordId::new(0), SinkRecordId::new(2)]
+        );
+        let [rejected] = outcome.rejected.as_slice() else {
+            panic!(
+                "exactly the oversize record is rejected: {:?}",
+                outcome.rejected
+            );
+        };
+        assert_eq!(rejected.id, SinkRecordId::new(1));
+        assert_eq!(
+            rejected.error.message,
+            "mqtt rejected record: MQTT PUBLISH packet of 65 bytes exceeds the broker's maximum \
+             packet size of 64 bytes"
+        );
+        assert!(outcome.infrastructure_error.is_none());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_reason_code_about_one_record_rejects_only_that_record() {
+        let broker = ScriptedBroker::start().await;
+        let fixture = DnsFixture::start().await;
+        let confirmation = AckConfirmation {
+            max_in_flight: NonZeroUsize::new(2).expect("two is non-zero"),
+            timeout: Duration::from_secs(30),
+        };
+        let mut sink = MqttSink::new(
+            qos1_config(&broker.addr(), "window", fixture.dns.clone(), confirmation),
+            SinkHost::new(SilentHost),
+        )
+        .expect("the test sink config is valid");
+        let script = async {
+            let mut connection = broker.accept().await;
+            let refused = connection.read_publish().await;
+            let confirmed = connection.read_publish().await;
+            assert_eq!(refused.payload, b"x");
+            connection.puback(refused.packet_id, 0x87).await;
+            connection.puback(confirmed.packet_id, 0x00).await;
+            connection
+        };
+
+        let (outcome, _connection) =
+            tokio::join!(sink.publish(vec![record(0, 1), record(1, 1)]), script);
+        let outcome = outcome.into_parts();
+
+        assert_eq!(outcome.delivered, vec![SinkRecordId::new(1)]);
+        let [rejected] = outcome.rejected.as_slice() else {
+            panic!(
+                "exactly the refused record is rejected: {:?}",
+                outcome.rejected
+            );
+        };
+        assert_eq!(rejected.id, SinkRecordId::new(0));
+        assert_eq!(
+            rejected.error.message,
+            "mqtt rejected record: v5 puback returned non-success reason: NotAuthorized"
+        );
+        assert!(outcome.infrastructure_error.is_none());
+    }
+
+    #[nervix_primitives::test]
+    async fn finishing_a_qos0_sink_that_published_nothing_has_nothing_to_send() {
+        let fixture = DnsFixture::start().await;
+        let mut sink = qos0_sink("mqtt://127.0.0.1:9", "idle", fixture.dns.clone());
+
+        let finished = sink
+            .finish(Instant::now())
+            .await
+            .expect("a QoS 0 sink that took no record has nothing to send");
+
+        assert_eq!(finished, SinkFinish::NothingHeld);
+    }
+
+    #[nervix_primitives::test]
+    async fn finishing_a_qos0_sink_sends_the_publish_its_client_still_holds() {
+        // The scripted broker reads the client's CONNECT and holds its answer, so the client takes
+        // the record but cannot send it until the broker answers.
+        let broker = ScriptedBroker::start().await;
+        let fixture = DnsFixture::start().await;
+        let mut sink = qos0_sink(&broker.addr(), "held", fixture.dns.clone());
+        let mut connection = broker.accept_without_reply().await;
+        let outcome = sink.publish(vec![record(0, 3)]).await.into_parts();
+        assert_eq!(
+            outcome.delivered,
+            vec![SinkRecordId::new(0)],
+            "a QoS 0 record is delivered once the client takes it"
+        );
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .assured("thirty seconds after now fits the monotonic clock");
+        let answer = async {
+            // CONNACK: no session present, success, and an empty property section.
+            connection.write(&[0x20, 0x03, 0x00, 0x00, 0x00]).await;
+            connection.read_publish_at_most_once().await
+        };
+
+        let (finished, payload) = tokio::join!(sink.finish(deadline), answer);
+
+        let finished = finished.expect("the client sends the publish once the broker answers");
+        assert_eq!(finished, SinkFinish::Flushed);
+        assert_eq!(
+            payload, b"xxx",
+            "the broker receives the publish the client held"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn finishing_counts_the_qos0_publish_its_client_still_holds_at_the_deadline() {
+        // The scripted broker never answers the client's CONNECT, so the client never sends the
+        // record it took.
+        let broker = ScriptedBroker::start().await;
+        let fixture = DnsFixture::start().await;
+        let mut sink = qos0_sink(&broker.addr(), "unsent", fixture.dns.clone());
+        let _connection = broker.accept_without_reply().await;
+        let outcome = sink.publish(vec![record(0, 3)]).await.into_parts();
+        assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(200))
+            .assured("two hundred milliseconds after now fits the monotonic clock");
+
+        let finished = sink.finish(deadline).await;
+
+        let error = finished.expect_err("the deadline passes while the client still holds it");
+        assert_eq!(
+            error.current_context(),
+            &SinkFinishError::Unsent {
+                sink: MQTT,
+                records: 1
+            }
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn finishing_a_confirmed_sink_has_nothing_to_send() {
+        let fixture = DnsFixture::start().await;
+        let confirmation = AckConfirmation {
+            max_in_flight: NonZeroUsize::MIN,
+            timeout: Duration::from_secs(30),
+        };
+        let mut sink = MqttSink::new(
+            qos1_config(
+                "mqtt://127.0.0.1:9",
+                "answered",
+                fixture.dns.clone(),
+                confirmation,
+            ),
+            SinkHost::new(SilentHost),
+        )
+        .expect("the test sink config is valid");
+
+        let finished = sink
+            .finish(Instant::now())
+            .await
+            .expect("a confirmed sink answers its finish");
+
+        assert_eq!(finished, SinkFinish::NothingHeld);
+    }
+
+    /// A flush the first poll finds pending and the next finds failed, as one whose connection
+    /// the event loop loses while a finish waits for it.
+    struct FailsOnceWaitedFor {
+        polled: bool,
+    }
+
+    impl Future for FailsOnceWaitedFor {
+        type Output = Result<(), PublishNoticeError>;
+
+        fn poll(
+            mut self: Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            if self.polled {
+                return std::task::Poll::Ready(Err(PublishNoticeError::Qos0NotFlushed));
+            }
+            self.polled = true;
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+
+    fn failing_flush() -> MqttFlush {
+        Box::pin(FailsOnceWaitedFor { polled: false })
+    }
+
+    fn open_flush() -> MqttFlush {
+        Box::pin(std::future::pending())
+    }
+
+    fn ended_flush(ended: Result<(), PublishNoticeError>) -> MqttFlush {
+        Box::pin(std::future::ready(ended))
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_flush_that_fails_while_the_finish_waits_fails_the_finish_with_its_cause() {
+        let mut unsent = MqttUnsentPublishes::default();
+        unsent.hold(failing_flush());
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .assured("thirty seconds after now fits the monotonic clock");
+
+        let finished = unsent.finish(deadline).await;
+
+        let error = finished.expect_err("a flush that failed fails the finish");
+        assert_eq!(
+            error.current_context(),
+            &SinkFinishError::Flush { sink: MQTT }
+        );
+        assert_eq!(
+            error.downcast_ref::<PublishNoticeError>(),
+            Some(&PublishNoticeError::Qos0NotFlushed),
+            "the driver's cause stays beneath the finish failure"
+        );
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_flush_that_ended_before_the_finish_leaves_nothing_held() {
+        let mut unsent = MqttUnsentPublishes::default();
+        unsent.hold(ended_flush(Ok(())));
+        unsent.hold(ended_flush(Err(PublishNoticeError::Qos0NotFlushed)));
+
+        let finished = unsent.finish(Instant::now()).await;
+
+        assert_eq!(
+            finished.expect("the client holds no publish once its flushes ended"),
+            SinkFinish::NothingHeld
+        );
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn the_deadline_counts_every_open_flush_beside_the_failure_the_finish_saw() {
+        let mut unsent = MqttUnsentPublishes::default();
+        unsent.hold(failing_flush());
+        unsent.hold(open_flush());
+        unsent.hold(open_flush());
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .assured("thirty seconds after now fits the monotonic clock");
+
+        let finished = unsent.finish(deadline).await;
+
+        let error = finished.expect_err("open flushes at the deadline fail the finish");
+        assert_eq!(
+            error.current_context(),
+            &SinkFinishError::Unsent {
+                sink: MQTT,
+                records: 2
+            }
+        );
+        assert_eq!(
+            error.downcast_ref::<PublishNoticeError>(),
+            Some(&PublishNoticeError::Qos0NotFlushed),
+            "the failure the finish saw stays beneath the count"
+        );
+        assert_eq!(
+            unsent.flushes.len(),
+            2,
+            "a later finish still answers for the open flushes"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_record_the_client_cannot_queue_fails_the_publish() {
+        // Nothing listens on the discard port. Once the client's first connection has failed, its
+        // event loop waits out the minute-long backoff without reading its request queue, which
+        // holds one request.
+        let fixture = DnsFixture::start().await;
+        let (transient_error, mut recorded) = watch::channel(None);
+        let timeout = Duration::from_millis(50);
+        let confirmation = AckConfirmation {
+            max_in_flight: NonZeroUsize::MIN,
+            timeout,
+        };
+        let mut sink = MqttSink::new(
+            qos1_config(
+                "mqtt://127.0.0.1:9",
+                "unreachable",
+                fixture.dns.clone(),
+                confirmation,
+            ),
+            SinkHost::new(RecordingHost { transient_error }),
+        )
+        .expect("the test sink config is valid");
+        first_transient_error(&mut recorded).await;
+
+        let unanswered = sink.publish(vec![record(0, 1)]).await.into_parts();
+        let failure = unanswered
+            .infrastructure_error
+            .expect("an answer that never comes fails the publish");
+        assert_eq!(
+            failure.downcast_ref::<ConfirmationWindowError>(),
+            Some(&ConfirmationWindowError::AnswerTimedOut { timeout })
+        );
+        assert_eq!(
+            printable_description(&failure).as_deref(),
+            Some("the broker did not answer within ACK TIMEOUT 50ms")
+        );
+        assert!(unanswered.delivered.is_empty());
+
+        // The record the failed publish handed over still fills the queue.
+        let refused = sink.publish(vec![record(0, 1)]).await.into_parts();
+        let failure = refused
+            .infrastructure_error
+            .expect("a record the client cannot queue fails the publish");
+        assert_eq!(
+            failure.current_context(),
+            &SinkPublishError::Publish { sink: MQTT }
+        );
+        assert!(
+            matches!(
+                failure.downcast_ref::<MqttClientError>(),
+                Some(MqttClientError::RequestChannelFull(_))
+            ),
+            "the client's typed refusal stays beneath the failure: {failure:?}"
+        );
+        assert_eq!(
+            printable_description(&failure).as_deref(),
+            Some("mqtt client refused the record: Request channel is full")
+        );
+        assert!(refused.delivered.is_empty());
+        assert!(refused.rejected.is_empty());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_qos0_record_the_client_cannot_queue_fails_the_publish() {
+        // As above: the event loop no longer reads its one-request queue after its first failed
+        // connection, so the client takes the first record and refuses the second.
+        let fixture = DnsFixture::start().await;
+        let (transient_error, mut recorded) = watch::channel(None);
+        let mut sink = MqttSink::new(
+            qos0_config("mqtt://127.0.0.1:9", "unreachable", fixture.dns.clone()),
+            SinkHost::new(RecordingHost { transient_error }),
+        )
+        .expect("the test sink config is valid");
+        first_transient_error(&mut recorded).await;
+
+        let outcome = sink
+            .publish(vec![record(0, 1), record(1, 1)])
+            .await
+            .into_parts();
+
+        assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+        assert!(outcome.rejected.is_empty());
+        let failure = outcome
+            .infrastructure_error
+            .expect("a record the client cannot queue fails the publish");
+        assert!(matches!(
+            failure.downcast_ref::<MqttClientError>(),
+            Some(MqttClientError::RequestChannelFull(_))
+        ));
+        assert_eq!(
+            printable_description(&failure).as_deref(),
+            Some("mqtt client refused the record: Request channel is full")
+        );
+    }
+
     #[test]
-    fn quota_and_session_failures_remain_infrastructure_failures() {
-        assert!(!MqttSink::is_record_notice_rejection(
-            &PublishNoticeError::V5PubAck(MqttPubAckReason::QuotaExceeded)
+    fn any_other_ending_leaves_the_record_unknown_and_keeps_its_cause() {
+        let endings = [
+            (
+                PublishNoticeError::V5PubAck(MqttPubAckReason::QuotaExceeded),
+                "mqtt publish failed: v5 puback returned non-success reason: QuotaExceeded",
+            ),
+            (
+                PublishNoticeError::V5PubAck(MqttPubAckReason::UnspecifiedError),
+                "mqtt publish failed: v5 puback returned non-success reason: UnspecifiedError",
+            ),
+            (
+                PublishNoticeError::V5PubRec(MqttPubRecReason::QuotaExceeded),
+                "mqtt publish failed: v5 pubrec returned non-success reason: QuotaExceeded",
+            ),
+            (
+                PublishNoticeError::V5PubComp(rumqttc::PubCompReason::PacketIdentifierNotFound),
+                "mqtt publish failed: v5 pubcomp returned non-success reason: \
+                 PacketIdentifierNotFound",
+            ),
+            (
+                PublishNoticeError::SessionReset,
+                "mqtt publish failed: message dropped due to session reset",
+            ),
+            (
+                PublishNoticeError::Recv,
+                "mqtt publish failed: event loop dropped notice sender",
+            ),
+        ];
+        for (ending, description) in endings {
+            let failure = MqttSink::broker_answer(Err(ending.clone()))
+                .expect_err("an ending that is not about the record leaves its outcome unknown");
+
+            assert_eq!(
+                failure.current_context(),
+                &SinkPublishError::Publish { sink: MQTT }
+            );
+            assert_eq!(failure.downcast_ref::<PublishNoticeError>(), Some(&ending));
+            assert_eq!(
+                printable_description(&failure).as_deref(),
+                Some(description)
+            );
+        }
+    }
+
+    #[test]
+    fn only_an_invalid_request_is_the_records_own_refusal() {
+        let publish = || {
+            rumqttc::Request::Publish(rumqttc::Publish::new(
+                "refused",
+                rumqttc::QoS::AtLeastOnce,
+                Vec::new(),
+                None,
+            ))
+        };
+        assert!(MqttSink::is_record_client_rejection(
+            &MqttClientError::InvalidRequest(Box::new(publish()))
         ));
-        assert!(!MqttSink::is_record_notice_rejection(
-            &PublishNoticeError::SessionReset
-        ));
+        let refusals = [
+            (
+                MqttClientError::RequestChannelFull(Box::new(publish())),
+                "mqtt client refused the record: Request channel is full",
+            ),
+            (
+                MqttClientError::RequestChannelDisconnected(Box::new(publish())),
+                "mqtt client refused the record: Request channel is disconnected",
+            ),
+            (
+                MqttClientError::TrackingUnavailable,
+                "mqtt client refused the record: Tracked request API is unavailable for this \
+                 client instance",
+            ),
+        ];
+        for (refusal, description) in refusals {
+            assert!(!MqttSink::is_record_client_rejection(&refusal));
+            let failure = MqttSink::refused_hand_over(refusal);
+            assert_eq!(
+                failure.current_context(),
+                &SinkPublishError::Publish { sink: MQTT }
+            );
+            assert!(failure.downcast_ref::<MqttClientError>().is_some());
+            assert_eq!(
+                printable_description(&failure).as_deref(),
+                Some(description)
+            );
+        }
     }
 }

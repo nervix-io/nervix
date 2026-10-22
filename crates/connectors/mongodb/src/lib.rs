@@ -47,13 +47,14 @@ use mongodb::{
 };
 use nervix_connector::{
     MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome, RejectedSinkRecord,
-    RowRequest, RowRequestLimits, RowSink, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
+    RowRequest, RowRequestLimits, RowSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
+    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
     optional_client_config_value,
 };
 use nervix_models::{
     ClientConfigEntry, ClientPoolBounds, CollectionName, EmitterBatchPolicy, FieldPath, Timestamp,
 };
+use nervix_primitives::time::Instant;
 use tracing::{debug, trace};
 
 const MONGODB: &str = "mongodb";
@@ -735,7 +736,13 @@ impl ConflictUpsert {
 }
 
 #[async_trait]
-impl SinkLifecycle for MongoDbSink {}
+impl SinkLifecycle for MongoDbSink {
+    /// Each unordered write answers for every document before the publish returns, so the
+    /// client holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RowSink for MongoDbSink {

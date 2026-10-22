@@ -854,7 +854,9 @@ another instant instead.
 | `write_header(name, value)` | nothing | Emitter-only side effect. Valid only as a top-level call in the final `INVOKE` block |
 
 Header names may be dynamic `STRING` expressions, and a name matches exactly, letter case included,
-the names the connector recorded. A null name reads as absent. Header reads are available on
+the names the connector recorded. A null name reads as absent. Each source and sink declares a
+[header model](connector-contract.md#header-models): what a repeated name keeps, the order names
+travel in, and whether names are recorded in lowercase, as HTTP field names are. Header reads are available on
 `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `HTTP REQUEST`, `KAFKA TOPIC`, `NATS SUBJECT`,
 `PULSAR TOPIC`, `RABBITMQ QUEUE`, and `SQS QUEUE` ingestors, in their `FILTER WHERE` and route
 construction, and in an error route's construction for a failure on such an ingestor. Header writes
@@ -866,7 +868,10 @@ read_headers`, or `MQTT emitters do not support write_header`.
 `write_header` arguments must be statically non-null `STRING` expressions, and a sensitive argument
 requires `leak_sensitive(...)`. They are evaluated after payload construction and route filtering.
 Calls are staged in source order in a route-local envelope; if any call fails, no payload or partial
-header envelope is published. See [Emitters](emitters.md) for each sink's header rules.
+header envelope is published. Where the sink keeps one value per name, a second call whose name is a
+string literal equal, as the sink compares names, to an earlier literal one is refused when the
+statement is validated. See [Header invocations](emitters.md#header-invocations) for each sink's
+header model.
 
 ## Lookups And UDF Calls
 
@@ -1367,6 +1372,9 @@ literal is the nearest binary float, which can lie on either side of a decimal t
 - `round(2.675, 2)` is `2.67`, because the `F64` nearest to `2.675` is slightly below it.
 - An `F32` rounds its own stored value: the `F32` nearest to `0.15` is slightly above `0.15`, so
   `round(x, 1)` of that `F32` is `0.2`.
+- At a power of two the adjacent float toward zero can be closer than the adjacent float away
+  from zero. For the `F64` value `5.0321474762477604e-234`, rounding to 249 places returns the
+  adjacent value toward zero, `5.03214747624776e-234`.
 
 A float result that is zero keeps the sign of `x`, as `round(-0.004, 2)` is `-0.0`. Rounding to a
 multiple of a power of ten can exceed the largest finite value, as `round(1.7976931348623157e308,

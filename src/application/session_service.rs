@@ -786,7 +786,7 @@ impl CompletionSnapshot<'_> {
                         names.push(FunctionName::ReadHeaders.as_str().to_string());
                     }
                     BuiltinFunctionScope::EmitterInvocation(kind)
-                        if kind.capabilities().writes_headers =>
+                        if kind.capabilities().writes_headers() =>
                     {
                         names.push(FunctionName::WriteHeader.as_str().to_string());
                     }
@@ -2663,7 +2663,8 @@ mod tests {
         writer.stop_all().await;
         observer.stop_all().await;
         nervix_primitives::time::timeout(Duration::from_secs(30), async {
-            service.inner.runtime.shutdown().await;
+            let runtime = &service.inner.runtime;
+            runtime.shutdown(runtime.domain_drain_timeout()).await;
             consensus.shutdown().await;
         })
         .await

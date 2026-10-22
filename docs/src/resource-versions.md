@@ -73,6 +73,10 @@ Uploads are leader operations. A client-protocol upload declares the exact size 
 streams, and a follower redirects it to the leader. A web-console upload streams the selected files
 to the leader, which builds the archive itself; a follower refuses it.
 
+The native client's directory archive is completed and flushed locally before its upload call
+opens. A failed or cancelled construction discards its partial temporary archive and assigns no
+version. Once built, that exact archive is retained for every retry within the upload call.
+
 A number is assigned when the leader admits an upload. Once the complete body has arrived, the
 leader holds the archive's digest and records the upload under its identity in one consensus
 command, which takes the next number of the sequence. A body that ends early or exceeds its
@@ -276,6 +280,15 @@ through the existing client's pinned mount before the replacement opens the newl
 client. Changing that client's definition or rebinding its mounted resource takes the ordinary
 configuration-entity domain pause. If the drain cannot complete, the candidate definition and
 its resource binding are not installed.
+
+MQTT input retirement resolves the preceding and replacement clients through their own pinned
+mounts and keeps both mount leases until network cleanup and replacement preparation finish.
+It can resolve the preceding client from a stopped domain's typed plan. A missing preceding
+mount is a reported best-effort cleanup failure; preparing the explicitly selected replacement
+still requires that replacement's complete binding. Retirement never changes a binding or
+selects a newer resource version. Pulsar input retirement resolves the dropped input's client the
+same way, from a stopped domain's typed plan too, and keeps its mount lease until the
+subscription's removal finishes; a missing mount is likewise a reported best-effort failure.
 
 ### The Pinning Invariant
 

@@ -21,10 +21,93 @@ use prost_reflect::{
 };
 use serde_json::{Map, Value, json};
 
-use super::{SignalingProtobufError, decode_protobuf_payload, encode_protobuf_payload};
+use super::{
+    CompiledSignalingProtocol, CompiledSignalingWire, JaqNativeFormat, SignalingProtobufError,
+    decode_protobuf_payload, encode_protobuf_payload,
+};
 
 const LIST_LIMIT: usize = 8;
 const TEXT_LIMIT: usize = 64;
+
+fn acknowledgement_descriptor() -> MessageDescriptor {
+    let fields = [("outcome", 1), ("cause", 2)].map(|(name, number)| FieldDescriptorProto {
+        name: Some(name.to_owned()),
+        json_name: Some(name.to_owned()),
+        number: Some(number),
+        label: Some(Label::Optional.into()),
+        r#type: Some(Type::String.into()),
+        ..Default::default()
+    });
+    let file = FileDescriptorProto {
+        name: Some("endpoint_acknowledgement.proto".to_owned()),
+        syntax: Some("proto2".to_owned()),
+        message_type: vec![DescriptorProto {
+            name: Some("Acknowledgement".to_owned()),
+            field: fields.to_vec(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    DescriptorPool::from_file_descriptor_set(FileDescriptorSet { file: vec![file] })
+        .assured("two distinct string fields form a valid acknowledgement descriptor")
+        .get_message_by_name("Acknowledgement")
+        .assured("the fixture declares its acknowledgement message")
+}
+
+#[test]
+fn bolero_acknowledgement_frames_preserve_the_complete_outcome_value() {
+    let descriptor = acknowledgement_descriptor();
+    let wires = [
+        CompiledSignalingWire::Native(JaqNativeFormat::Raw),
+        CompiledSignalingWire::Native(JaqNativeFormat::Json),
+        CompiledSignalingWire::Native(JaqNativeFormat::Yaml),
+        CompiledSignalingWire::Native(JaqNativeFormat::Cbor),
+        CompiledSignalingWire::Protobuf {
+            send: descriptor.clone(),
+            wait: descriptor,
+        },
+    ];
+    let protocols = wires.map(|wire| CompiledSignalingProtocol {
+        wire,
+        accept_data: true,
+        steps: Vec::new(),
+        fails: Vec::new(),
+        timeout: std::time::Duration::from_secs(5),
+    });
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(64)
+        .for_each(|bytes: &[u8]| {
+            let text = String::from_utf8_lossy(bytes).into_owned();
+            let input = json!({ "outcome": text, "cause": text.chars().rev().collect::<String>() });
+            for protocol in &protocols {
+                let frame = protocol
+                    .encode_acknowledgement(input.clone())
+                    .assured("every declared format can encode this complete string object");
+                let decoded = match frame {
+                    super::Message::Text(text) => {
+                        let value = protocol
+                            .decode_frame(text.as_bytes(), true)
+                            .assured("the outbound text is valid in its declared wire format");
+                        match &protocol.wire {
+                            CompiledSignalingWire::Native(JaqNativeFormat::Raw) => {
+                                serde_json::from_str(
+                                    value.as_str().assured("RAW carries the object's JSON text"),
+                                )
+                                .assured("the complete JSON object is encoded in RAW text")
+                            }
+                            _ => value,
+                        }
+                    }
+                    super::Message::Binary(bytes) => protocol
+                        .decode_frame(&bytes, false)
+                        .assured("the outbound binary value is valid in its declared wire format"),
+                    _ => panic!("an acknowledgement is a data frame"),
+                };
+                assert_eq!(decoded, input, "{} acknowledgement", protocol.format_name());
+            }
+        });
+}
 
 struct SignalingFixture {
     descriptor: MessageDescriptor,

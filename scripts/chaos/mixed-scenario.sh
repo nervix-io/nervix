@@ -726,11 +726,37 @@ mixed_heal() {
         --argjson held_ms "$((heal_requested_ms - ${mixed_action_verified_ms[${id}]}))"
 }
 
+# True when a quorum that can communicate agrees on a caught-up leader, writing the leader to
+# CHECKS_DIR/survivor-leader.txt. Every voter outside EXCLUDED must agree. When EXCLUDED is empty and a
+# lossy link joins two voters, either end of it may lag instead: TCP on that link can stall the append
+# stream to it until the loss heals, and the other two voters are still a quorum. The end left out is
+# written to CHECKS_DIR/settled-without.txt, which is empty when every voter agreed.
+mixed_quorum_settled() {
+    local excluded="$1"
+    local checks_dir="$2"
+    shift 2
+    local lossy_ends=("$@")
+    if survivors_settled "${excluded}" "${checks_dir}"; then
+        : >"${checks_dir}/settled-without.txt"
+        return 0
+    fi
+    [[ -z "${excluded}" ]] || return 1
+    local end
+    for end in ${lossy_ends[@]+"${lossy_ends[@]}"}; do
+        if survivors_settled "${end}" "${checks_dir}"; then
+            printf '%s\n' "${end}" >"${checks_dir}/settled-without.txt"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Judges the availability the plan's policy promises while the step's faults hold. A quorum that can
 # still communicate must agree on a caught-up leader and acknowledge a control canary; with no quorum
 # able to communicate, no running node may acknowledge one. Random or burst loss on the one link left
 # between the remaining quorum can stall commits until it heals, so availability is then recorded but
-# not required. A pause bounds the checks by its end.
+# not required. With every voter in a quorum, an end of a lossy link may lag the other two voters.
+# A pause bounds the checks by its end.
 mixed_hold_checks() {
     local ordinal="$1"
     local label="$2"
@@ -756,9 +782,15 @@ mixed_hold_checks() {
     mapfile -t impaired < <(mixed_impaired_hosts)
     local degraded=false
     local lossy_quorum_link=false
+    local lossy_ends=()
     for id in "${mixed_active[@]}"; do
         if [[ "${mixed_action_dir[${id}]}" == *-degrade ]]; then
             degraded=true
+        fi
+        if [[ -n "${mixed_action_lossy_link[${id}]:-}" ]]; then
+            # The link is a space-separated pair of hosts.
+            # shellcheck disable=SC2206
+            lossy_ends+=(${mixed_action_lossy_link[${id}]})
         fi
         if [[ -n "${mixed_action_lossy_link[${id}]:-}" ]] && ((${#impaired[@]} == 1)); then
             local endpoint
@@ -773,6 +805,7 @@ mixed_hold_checks() {
     done
     local verdict='observed'
     local canaries=()
+    rm -f "${checks_dir}/settled-without.txt"
     if ((window_ms < 5000)); then
         # A short pause ends before any public observation could judge it.
         verdict='too-short-to-observe'
@@ -783,7 +816,7 @@ mixed_hold_checks() {
             seconds="${mixed_majority_bound}"
         fi
         if ! wait_for "a connected quorum agreeing on a caught-up leader during step ${ordinal}" "${seconds}" \
-            survivors_settled "${excluded}" "${checks_dir}"; then
+            mixed_quorum_settled "${excluded}" "${checks_dir}" ${lossy_ends[@]+"${lossy_ends[@]}"}; then
             if ((deadline_ms > 0)); then
                 verdict='pause-ended-first'
             elif [[ "${lossy_quorum_link}" == true ]]; then
@@ -862,9 +895,11 @@ mixed_hold_checks() {
         --argjson active "$(printf '%s\n' "${mixed_active[@]}" | jq -R . | jq -sc .)" \
         --argjson canaries "$(printf '%s\n' ${canaries[@]+"${canaries[@]}"} | jq -R . | jq -sc 'map(select(length > 0))')" \
         --argjson lossy "${lossy_quorum_link}" \
+        --arg settled_without "$(cat "${checks_dir}/settled-without.txt" 2>/dev/null || true)" \
         '{label: $label, active_faults: $active, voters_out_of_quorum: $impaired,
           quorum_could_communicate: (($impaired | length) <= 1), quorum_link_lossy: $lossy,
           availability_required: ((($impaired | length) <= 1) and ($lossy | not)), verdict: $verdict,
+          settled_without: (if $settled_without == "" then null else $settled_without end),
           canaries: $canaries}' \
         >"${checks_dir}.json"
     mixed_trace_record faults-held "${ordinal}" --arg label "${label}" --arg verdict "${verdict}"

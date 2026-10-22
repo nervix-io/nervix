@@ -13,6 +13,11 @@ binding inherits every rule below from it except those in [Using The Shared
 Binding](#using-the-shared-binding). An implementation that speaks the protocol itself, as the Go
 and TypeScript conformance clients do, follows all of it.
 
+The Rust reference implementation's execution modes and native/browser capability boundaries are
+specified in [Execution Primitives](./execution-primitives.md). Those repository build and
+verification contracts apply to the Rust implementation; independent clients continue to implement
+the protocol rules in this manual using their own runtime.
+
 ## Conformance Language
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are used as RFC 2119 defines them.
@@ -138,7 +143,8 @@ archive; see [Restore Streams](#restore-streams).
   calls. A download connection carries one request. A restore connection MUST stay open after its
   last chunk, whose bytes complete the size its start declares, until the reply arrives: closing
   it would end the attempt in transport. A client MUST treat a close with code `1001` on either
-  connection as a transport failure, after which A-6 and P-5 apply.
+  connection as a transport failure, after which A-6 and W-5 apply, and a close with code `1011`,
+  which the server sends when it cannot put an answer into one frame, as a failure of the server.
 - **T-4.** A native client MUST send `authorization: Basic <base64(user:password)>` metadata on
   every call, including every upload. A WebSocket client MUST present the same credentials in an
   `Authorization: Basic` header or in the `auth` query parameter, percent-encoded, because the
@@ -340,8 +346,11 @@ retained reference, query and transaction expectations.
   state or counts, including `COMMITTED`.
 - **X-4.** A client SHOULD send `COMMIT` with `expected_preview` set to the preview identity the
   user reviewed: the one from the last append's admission, or from an inspection of the attached
-  transaction at its current position. It MUST NOT refresh that preview from a `PreviewStale` reply,
-  from an inspection of another transaction, or from an inspection at an older position.
+  transaction at its current position. An inspection runs on the concurrent lane, so its report can
+  already include an append whose outcome has not arrived; the client MUST keep that preview under
+  the position the report names and use it once the append's outcome reports that position, rather
+  than discard it. It MUST NOT refresh that preview from a `PreviewStale` reply, from an inspection
+  of another transaction, or from an inspection at an older position.
 - **X-5.** While a commit is `COMMITTING`, a client MUST keep waiting for the commit's own outcome,
   repeating the commit under its reference after any interruption.
 - **X-6.** On `TransactionDetached`, a client MUST send `AttachTransactionRequest` for the
@@ -555,8 +564,9 @@ payload, infinity, and nullable and sensitive branch key fields.
   request identity. A changed contract or generation, a removed or stopped endpoint, or a schema
   mismatch requires an explicit new producer. A temporary capacity or owner refusal MAY be retried
   with bounded physical backoff. `EndpointUnavailable` while the serving node establishes its
-  process-start catch-up proof is such a temporary refusal. Close and drop MUST win over an
-  in-flight restoration.
+  process-start catch-up proof, or while the node executing the ingestor has not installed it again
+  after a restart, is such a temporary refusal. Close and drop MUST win over an in-flight
+  restoration.
 
 ## Emitter Consumers
 
@@ -607,6 +617,9 @@ payload, infinity, and nullable and sensitive branch key fields.
   non-empty and within one frame, adding up to exactly `total_bytes`, and then the client
   half-closes the stream. The Rust client sends 64 KiB chunks.
   [Resources](./resources.md#upload-format) defines the archive format.
+  A client that prepares a local archive MUST finish and flush it before using it as an upload
+  body. A preparation failure or cancellation MUST abandon the partial archive while preserving
+  the original failure or cancellation outcome. Local preparation has not admitted an upload.
 - **U-2.** A client MUST create one upload identity per logical upload, 1 to 128 bytes of ASCII
   letters, digits, `-`, `_`, and `.`, and SHOULD make it a UUIDv7. It MUST keep the identity and the
   exact archive bytes until the upload's outcome is known, and every attempt MUST send both
@@ -637,8 +650,9 @@ payload, infinity, and nullable and sensitive branch key fields.
 - **A-2.** A client MUST download one archive per `DownloadBackup` call, sending exactly one
   `BackupDownloadRequest` that names the backup's execution reference. The answer is one
   `BackupDownloadFailed` or `LeaderRedirect` frame, or a `BackupArchiveStart`, the archive as
-  `BackupArchiveChunk` frames in order, and a `BackupArchiveComplete`. Any other order is a protocol
-  violation.
+  `BackupArchiveChunk` frames in order, and a `BackupArchiveComplete`. After the start, a
+  `BackupDownloadFailed` may also take the place of the remaining chunks and the completion, when
+  the node cannot read the archive it retains. Any other order is a protocol violation.
 - **A-3.** A client MUST check that the start's size and digest equal the summary's, MUST refuse an
   archive that grows past that size, and MUST accept the archive only after `BackupArchiveComplete`
   arrived and the bytes it received have exactly the summary's size and BLAKE3 digest.
@@ -672,20 +686,20 @@ payload, infinity, and nullable and sensitive branch key fields.
 
 ## Restore Streams
 
-- **P-1.** A client MUST send `RESTORE` on its own, never in a `CommandRequest` and never while it
+- **W-1.** A client MUST send `RESTORE` on its own, never in a `CommandRequest` and never while it
   holds a transaction. Each attempt is one `RestoreBackup` call: a `RestoreStart` with a non-zero
   `request_id`, the restore's execution reference, the statement as canonical NSPL, and the exact
   size and BLAKE3 digest of the archive; then the archive as `RestoreChunk` frames in order, each
   non-empty and within one frame, adding up to exactly the declared size; then the client
   half-closes the stream, or on a console WebSocket keeps the connection open for the reply (T-3a).
   The Rust client and the web console send 256 KiB chunks.
-- **P-2.** A client MUST create one execution reference per logical restore, following E-1 to E-4,
+- **W-2.** A client MUST create one execution reference per logical restore, following E-1 to E-4,
   and MUST keep the reference, the statement, and the archive's bytes until the restore's outcome is
   known. Every attempt MUST send all three unchanged, and the digest MUST be computed over exactly
   the bytes the client streams.
-- **P-3.** A client MUST check that the reply's `request_id`, when present, equals the start's, and
+- **W-3.** A client MUST check that the reply's `request_id`, when present, equals the start's, and
   that a `CommandOutcome` names the execution reference it sent.
-- **P-4.** A client MUST act on the reply:
+- **W-4.** A client MUST act on the reply:
   - `RestoreUploadFailed` with `InvalidStream`, `InvalidStatement`, `SizeMismatch`, or
     `DigestMismatch` changed nothing, and the client MUST NOT send the same stream again
     unchanged.
@@ -701,7 +715,7 @@ payload, infinity, and nullable and sensitive branch key fields.
     the default reports `Stopped`. Clients MUST also decode the required `start_version` in each
     `DomainInfo` from domain lists and domain-change events, and MUST reject missing required
     generation or status fields rather than supply a default.
-- **P-5.** When a call fails in transport, or a frame or the reply does not arrive in time, the
+- **W-5.** When a call fails in transport, or a frame or the reply does not arrive in time, the
   restore's outcome is uncertain. A client MUST stream the whole archive again, from its first
   byte, under the same reference to learn it, and MUST NOT create a new reference for it. It MUST
   NOT bound a call by the command's request deadline, and SHOULD bound each frame, and the wait
@@ -893,7 +907,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | E-1 to E-5 | In `client_wire_failures.feature`: `A command lost after durable admission is recovered by its request identity`, `A reclaimed command identity stays expired after a durable restart`, `A race across leaders recovers a typed execution reference conflict`, `A command identity outside its retry window starts no effect`, `A full command history refuses new identities and keeps every retained result`, `Concurrent exact BEGIN retries join one durable execution`, and `Reusing a durable transaction identity with different content fails semantically`; `a_command_reply_for_another_execution_cannot_claim_success` |
 | E-6 to E-8 | `Leadership lost after durable admission leaves an unknown outcome that a retry recovers` in `session_protocol.feature`; `an_unknown_outcome_is_recovered_with_the_same_execution_reference` and `replies_ask_for_the_routing_their_disposition_needs` |
 | D-1 to D-5 | `A redirect names no endpoint for a leader that discovery cannot reach` in `session_protocol.feature`; `The Rust client reconnects through its original seed after the leader stops` in `client_wire_failures.feature`; `a_command_redirect_keeps_its_execution_reference`, `a_command_waits_for_an_election_and_is_sent_again_with_its_reference`, `a_closed_session_recovers_through_a_configured_seed`, and `a_reconnected_session_restores_subscriptions_before_it_attaches_its_transaction` |
-| X-1 to X-3 | In `client_wire_failures.feature`: `A command missing from a committed transaction cannot report aggregate success`, `Replaying a BEGIN whose response was lost returns the original transaction`, `Replaying an accepted <append_kind> append does not preflight or append it again`, and the two exact transaction batch retries; `lost_begin_append_and_commit_replies_retry_the_exact_request` and `concurrent_commands_capture_transaction_position_in_send_order` |
+| X-1 to X-3 | In `client_wire_failures.feature`: `A command missing from a committed transaction cannot report aggregate success`, `Replaying a BEGIN whose response was lost returns the original transaction`, `Replaying an accepted <append_kind> append does not preflight or append it again`, and the three exact transaction batch retries, including `A committed transaction batch keeps its one outcome when leadership moves while each attempt records it`; `lost_begin_append_and_commit_replies_retry_the_exact_request` and `concurrent_commands_capture_transaction_position_in_send_order` |
 | X-4, X-5 | `A commit fenced to a preview the transaction outgrew is refused and stays open` in `nspl_transactions.feature`; `a_commit_fences_against_the_basis_its_own_transaction_reported`, `a_refused_commit_does_not_adopt_an_unreviewed_basis`, and `an_older_inspection_cannot_replace_a_newer_queue_preview` |
 | X-6 | `A session whose leader lost its binding re-attaches instead of failing` and `Attaching from a second session takes over an open transaction` in `nspl_transactions.feature`; `Web console recovers a reverted command's own outcome after its reply is lost` and `Web console resolves a Create command held when its transaction finishes during reconnect` in `nspl_repl.feature`; `a_detached_transaction_is_attached_again_before_the_command_is_retried` |
 | X-7, X-8 | `A clean session close reverts its open transaction` and `An orphaned transaction expires and retains its outcome` in `nspl_transactions.feature`; `A stalled commit cannot block expiry, another domain, or tombstone cleanup` in `client_wire_failures.feature`; `Physical inactivity while every node is stopped expires an open transaction` in `client_wire_process_restart.feature` |
@@ -905,12 +919,13 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | E-1 to E-6 (emitter consumers) | The saturated producer and concurrent consumer and clock restart, generation change, and emitter relocation cases in `client_emitters.feature`; `a_consumer_reports_a_gap_then_reads_through_a_fresh_attachment`, `an_ended_consumer_attachment_reopens_when_its_contract_is_unchanged`, `a_changed_consumer_contract_or_generation_requires_a_new_open`, `temporary_consumer_capacity_refusal_retries_the_same_desired_contract`, `a_delivery_from_a_lost_exchange_cannot_ack_a_replacement`, `a_settlement_sent_before_the_session_lost_its_answer_is_unknown`, `a_read_whose_caller_stopped_waiting_is_taken_over_by_the_next_read`, `a_close_whose_caller_stopped_waiting_still_releases_the_attachment`, and `closing_during_restoration_releases_the_late_attachment` in `nervix-client-core`; `consumer_replies_round_trip_with_retained_arrow_body` and the `server_emitter_opened.nxsm` conformance frame in `nervix-client-wire` |
 | U-1 to U-5 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `Upload retry after leader change reports the assigned version`, and `An uncertain upload completes once across installation and leader change`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive` and `malformed_upload_replies_are_rejected_by_their_correlations` |
 | A-1 to A-6 | Every scenario of `backup.feature`, including `A client that loses its download fetches the archive again until a download collects it`, `An archive is refused once its execution reference's retry validity ends`, and `Downloads of another user's backup, or under a reference without an archive, are refused`; the console's `A console backup downloads a verified archive whose manifest lists the backed-up domains` and `A console backup download interrupted by a page reload resumes after the reload` in `backup_restore.feature`; `every_download_frame_round_trips` and `a_download_request_with_an_invalid_reference_is_refused` in `nervix-client-wire`; the `backup_download_*` conformance frames |
+| A-7, A-8 | Every scenario of `backup_wait.feature`, including `A bounded native wait recovers the original multi-domain backup`, `A bounded CLI wait recovers the same multi-domain backup to another file`, `A backup execution can be recovered to another local destination`, `An expired reference refuses CLI recovery without starting another backup`, and `A leader change between domain cuts preserves multi-domain backup recovery` |
 | B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, `every_event_kind_reports_its_subscription_and_count`, and `a_token_bounds_a_call_by_cancellation_and_by_deadline`; the C, C++, Python, Java, and Ruby cases of `client_conformance.feature` |
 | B-8 | `a_backup_outcome_reports_its_archive` and `client_errors_are_classified_and_keep_their_causes` in `nervix-client-ffi` |
 | B-9 | `a_retained_clock_event_outlives_a_reference_released_on_another_thread`, `a_session_reads_every_clock_event_kind_and_bounds_its_wait`, and `a_restoration_failure_names_its_domain_and_carries_no_clock` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for C, C++, Python, Java, and Ruby |
 | B-11 | `a_clock_attached_after_start_is_read_before_its_first_tick`, `every_state_reports_only_the_fields_and_projections_it_carries`, `a_refused_attach_leaves_the_session_following_what_it_followed`, `an_attach_cancelled_after_it_was_sent_is_resolved_by_executing_it_again`, `several_domains_are_read_apart_until_a_detach_or_an_end_withdraws_one`, `an_interrupted_attachment_reads_its_last_clock_without_a_tick_until_it_is_restored`, and `a_domain_clock_outlives_references_released_on_another_thread_and_its_session` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for the C ABI in process, C, C++, Python, Java, and Ruby |
 | B-12 to B-16 | `A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter` in `client_conformance.feature` for the C ABI in process, C, C++, Python, Java, and Ruby; `a_producer_reports_its_description_and_takes_every_outcome_class`, `a_refused_open_names_its_refusal_and_a_host_argument_is_checked_first`, `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain`, `a_reconnect_interrupts_a_consumer_expires_its_deliveries_and_restores_only_open_handles`, `every_kind_of_column_reads_back_from_the_batch_and_from_its_stream`, `a_builder_refuses_what_a_column_cannot_hold`, and `bolero_host_columns_round_trip_through_builder_and_stream` in `nervix-client-ffi` |
-| P-1 to P-5, B-10 | Every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; the console's restore scenarios in `backup_restore.feature`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
+| W-1 to W-5, B-10 | Every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; the console's restore scenarios in `backup_restore.feature`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
 
 The [client representation properties](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
 add complete generated-value evidence for F-1 to F-7, R-1 to R-5 and B-1 to B-7. They preserve

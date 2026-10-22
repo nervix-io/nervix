@@ -36,6 +36,15 @@ Install:
 - `just` (latest release)
 - `zellij`
 
+`just build-web-console` builds the console the server embeds. trunk uses a `wasm-bindgen` CLI
+from `PATH` when its version equals the one `Cargo.lock` locks, and otherwise downloads it from
+GitHub without retrying. So the build installs that exact version with `cargo install --locked`
+into `target/tools/wasm-bindgen-<version>`, through the configured compiler wrapper, puts it first
+on `PATH` and runs `trunk build --offline`. Cargo checks the crate against the registry index and
+retries its own transient network failures. Offline, trunk stops at once when the CLI is missing or
+reports another version. The image's `builder` stage runs the same installer,
+`python3 scripts/wasm_bindgen.py install`, before its own offline trunk build.
+
 ## Build Container Images
 
 ```bash
@@ -47,6 +56,18 @@ Both recipes require the repository's remote compiler-cache configuration: `KACH
 `KACHE_S3_REGION`, `KACHE_S3_ENDPOINT`, `KACHE_S3_ACCESS_KEY`, and `KACHE_S3_SECRET_KEY`. They build
 and load a local image by default; the existing tag, platform, push, and BuildKit cache arguments
 are available for publishing builds.
+
+The `builder` stage installs its build tools at the exact versions that `ARG`s in
+`Dockerfile.debian` pin, and every image build runs that step. kache and trunk come from their
+projects' release archives for the build architecture, fetched from the release download URL with
+no GitHub API call, and each archive is checked against its pinned SHA-256 before anything is taken
+out of it. Both projects build their releases with fat LTO in one codegen unit, which would take
+minutes to compile. cargo-auditable and cargo-sonic compile with `cargo install --locked` against
+the lockfile each crate published, so a later compatible release of one of their dependencies can
+neither change them nor stop them compiling. Moving a tool to another version changes its version
+pin and, for an archive, the checksum of each build architecture; an archive that does not match
+its checksum fails the build. The kache pin is the `KACHE_VERSION` that CI's kache-backed jobs
+install, which the recipes pass to the build.
 
 `Dockerfile.debian` has two complete image targets: `cpu` (the default) and `cuda`. The recipes
 select them with `--target cpu` and `--target cuda`, respectively. Both targets copy the same
@@ -263,15 +284,18 @@ The `[parallel]` groups map package lists onto that recipe, including the packag
 `--all-features` and the compiler tooling packages. Feature, target, profile and compiler selections
 stay separate, so mutually exclusive execution modes never share a Cargo invocation.
 
-Clippy uses `clippy/<package>/<configuration_hash>` beneath `CARGO_TARGET_DIR`, or the repository's
-`target` directory when that variable is unset. The hash includes the Cargo arguments and compiler,
-so each configuration has its own build directory lock. `just cargo-clippy-package <package>
-[arguments ...]` runs a focused check of all targets through the same recipe. The compiler driver
-builds keep their separate `typed-ratchet/driver` directory. All builds retain the configured kache
-wrapper. Cargo's compiler job limit applies separately within each invocation. On CI, where nothing
-reads a build directory after its lint and the runner's disk cannot hold every configuration's at
-once, a target that passed deletes its own; a failed target keeps its directory, and a local run
-keeps them all for the next one.
+Clippy builds in four directories, `clippy/0` to `clippy/3` beneath `CARGO_TARGET_DIR`, or the
+repository's `target` directory when that variable is unset. The SHA-256 of a configuration's
+package, Cargo arguments and toolchain, modulo four, selects its directory, so each run of a
+configuration returns to the directory that holds its artifacts. The configurations in a directory
+share the dependencies they build, build scripts included, and Cargo keeps the artifacts of
+different features, profiles, targets and flags, and of the stable and nightly compilers, apart
+there. Configurations in the same directory take turns on its build directory lock, so two of them
+selected at once run one after the other. Nothing deletes these directories, locally or on CI: the
+four of them bound what a lint leaves on disk. `just cargo-clippy-package <package> [arguments ...]`
+runs a focused check of all targets through the same recipe. The compiler driver builds keep their
+separate `typed-ratchet/driver` directory. All builds retain the configured kache wrapper. Cargo's
+compiler job limit applies separately within each invocation.
 
 `just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
 the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that
@@ -417,9 +441,14 @@ where the report ends, how it is rendered and which evidence holds it.
 
 ### Capability doctests
 
+[Execution Primitives](./execution-primitives.md#verification-contracts) distinguishes API
+doctests, Cargo graph and target probes, compiler fixtures, adapter conformance and actual
+production-owner model execution. Keep each verdict with the configuration and claim it checks.
+
 `just test-capability-docs` checks runtime state handles, logical and physical deadlines,
-subscription predicates, and the UDF execution context with `compile_fail` doctests beside their
-APIs. Paired compiling examples check that the imports and current signatures remain valid. These
+subscription and VM predicates, the UDF execution context, consensus capabilities, DNS error
+carriers, recovery outcomes and SIMD byte classes with `compile_fail` doctests beside their APIs.
+Paired compiling examples check that the imports and current signatures remain valid. These
 checks cover the specific rejected operations in each snippet. They run in `just test` and CI;
 the runtime examples require the `testing` feature, which the recipe enables.
 
@@ -711,8 +740,9 @@ just build-chaos-diagnostic-image nervix:diagnostic-local ghcr.io/nervix-io/nerv
 just chaos suite smoke --image nervix:diagnostic-local --image-kind deloxide-order
 ```
 
-`scripts/chaos/README.md` describes every scenario, the suites, diagnostic images, their budgets
-and artifacts, and how to reproduce or replay a failed run.
+[External Cluster Chaos](./cluster-chaos.md) describes the runner, every scenario and its verdicts,
+the suites, diagnostic images, their budgets and artifacts, and how to reproduce or replay a failed
+run.
 
 ### Release evidence
 
@@ -755,251 +785,14 @@ skip supplies no execution or coverage evidence. API-rejection checks use paired
 `compile_fail` and compiling doctests. Publish new benchmark and validation artifacts on the
 corresponding ClickUp task; keep durable architectural conclusions in the chapter.
 
-### Source coverage of the native extra checks
+### Coverage reports and complexity
 
-The extra checks that execute Nervix code natively in ordinary mode, the compiler synchronization
-fixtures, benchmark bodies, primitive boundary conformance and NSPL completion walk, also measure which source
-lines they execute. Run them the way CI does:
-
-```bash
-just coverage-native-extras
-```
-
-Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`,
-`test-shuttle`, `test-loom`, `test-turmoil`, `test-deadlock-evidence-order`, `test-deadlock-report`,
-`test-deloxide`, `test-deloxide-order`, `test-deloxide-stress`, `test-deloxide-stress-restore`, or
-an individual `test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the
-`deloxide-order` build; the local report command uses the ordinary build; each diagnostic lane
-builds in the instrumented build of the feature its selection compiles, the two stress lanes in one,
-and exports only after its
-`lane.json` records a complete run. `test-primitives`
-selects native conformance in ordinary, Shuttle, Loom, Turmoil and Deloxide execution:
-
-```bash
-just coverage-native-extras nspl-completion-walk
-just coverage-native-extras test-primitives
-just coverage-native-extras test-shuttle test-loom
-just coverage-native-extras test-turmoil
-just coverage-native-extras test-shuttle --filter cancellation
-just coverage-loom target/loom.lcov execution.cancellation
-```
-
-A producer runs its check exactly as `just <producer>` does and fails when the check fails.
-`rust-toolchain.toml` includes the `llvm-tools` component because only the compiler's own LLVM
-tools read its profiles. What the check needs first, such as the web console the server benches
-link, is built normally. The recipe
-that executes Nervix code then runs in the environment `cargo llvm-cov show-env --sh
---no-rustc-wrapper` describes: every crate is compiled with source coverage instrumentation into
-`target/native-coverage-build` for ordinary mode and `target/native-coverage-build-<mode>` for
-each other mode, and the configured kache wrapper stays in place. The `test-deloxide`,
-`test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore` lanes instrument
-only workspace crates: the collector moves the
-instrumentation flags into `scripts/coverage_workspace_wrapper.py`, which Cargo runs beneath kache
-as the workspace compiler wrapper, the scope `cargo llvm-cov` gives the ordinary coverage build.
-Their nodes must meet product deadlines while they compile WASM processors and process Arrow state,
-and instrumented dependencies made that several times slower; the report is the same, because
-export keeps only repository sources. Kache runs a workspace wrapper chain directly, so their
-workspace crates are compiled each run while dependencies come from the cache. Each mode has a
-separate build lock through export. The parts that only compile or target the browser stay uninstrumented;
-`just test-primitives-compile` retains their independent verdict. Miri, mutation testing and
-`just test-loom-qualification` never run under this command. The compile and qualification
-commands run without the collector's profile environment, so altered source cannot contribute to
-the current-source report.
-
-Every run collects into a directory of its own,
-`target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. The attempt is the GitHub
-Actions run and attempt in CI, and the time and process locally. No run reuses, reads or cleans
-another run's directory, so no run can count another's counters. The directory holds:
-
-| Entry | Content |
-| --- | --- |
-| `lcov.info` | The LCOV report of the repository's sources, with the absolute paths `llvm-cov` writes |
-| `completion.json` | The completion record: the verdict and everything it covers |
-| `executions.jsonl` | Every executable Cargo ran, with its arguments and build ID |
-| `models.json` | For Shuttle and Loom, canonical discovery, selection, execution and completion evidence |
-| `export.log` | The diagnostics of `llvm-profdata` and `llvm-cov`, each bounded |
-| `profiles/` and `merged.profdata` | The raw counters and their merge; they stay on the machine |
-
-Cargo runs each instrumented executable through the collector as its runner, which records the
-execution and points the counters of the executable, and of every process it starts, at `profiles/`,
-one file per process and module. Build scripts and procedural macros execute only when a crate is
-compiled rather than served from the cache, so their ordinary build-time counters are discarded.
-The compiler fixture is itself an executed check: its loaded procedural macro objects are retained
-by build ID, including those in nested Cargo output directories. The producer uses its pinned
-compiler's LLVM tools. The report is exported with the toolchain's own
-`llvm-profdata` and `llvm-cov` from exactly the executables that ran and the children they started.
-It keeps the files inside the repository and leaves out dependencies, harness code below a `tests`,
-`examples` or `benches` directory, and code generated below a Cargo target directory.
-
-`completion.json` names the producer and mode, the tested commit and whether the working tree was
-modified, the CI run and attempt, the compiler and its LLVM version, the instrumentation flags, the
-recipes that make up the check, the executions and child executables selected, the profile files
-with the binary IDs they name, the warnings `llvm-cov` printed, and the executable and covered lines
-of each package. Model producers also embed `models.json`: exact package/test identities,
-InvariantIds and bounds for Loom, and paired exploration/nondeterminism records for Shuttle.
-The canonical runners validate their own inventories and filters. Missing or ignored checks,
-zero overall selection, incomplete exploration and nondeterminism failures retain their failure
-verdicts. A package with no filter match is allowed within a nonempty cross-package selection.
-Its `verdict` reads `running` from the moment the directory exists. It becomes
-`complete` only once the whole check passed and the report was written, and `failed` or
-`interrupted` otherwise, with a `failure` naming the stage, `prepare`, `instrument`, `run`, `export`
-or `finish`, and what went wrong. A collection fails when the recipe ran no executable, when an
-executable it ran is gone or was rebuilt before the export, when one wrote no profile, or when a
-profile is unreadable or names an executable that is no longer there. Every attempt keeps its
-profiles, so a failed one keeps its evidence; remove `target/native-coverage` when the collections
-are no longer needed.
-
-Every profile is matched to the executable that wrote it before the export, so a warning from
-`llvm-cov` never means a stale profile. When several executables share a function that only some of
-them run, such as an inlined dependency function, the copies that never ran can carry a different
-hash, and `llvm-cov` warns that they have mismatched data and reads the function from the
-executables that ran it.
-
-CI's extra-tests job collects native extras and per-mode primitive conformance, and runs primitive
-compile checks independently. The `shuttle` job, which runs only for a pull request labeled
-`shuttle`, collects its complete inventory, including random/PCT exploration and paired
-nondeterminism checking, and runs schedule replay qualification independently. For a pull
-request labeled `turmoil`, the `turmoil` job collects the canonical simulation suite once,
-including each fresh-process attempt, and runs failure replay qualification independently.
-For a request labeled `loom`, the `loom` job collects the complete Loom inventory, and two
-loom-qualification jobs split weakening qualification into shards, because it rebuilds the server
-once for each weakening of a server owner. The jobs upload `lcov.info`, `completion.json`,
-`executions.jsonl`, `export.log` and model evidence as `coverage-native-extras`,
-`coverage-shuttle`, `coverage-loom` and `coverage-turmoil`, whatever the verdict. The
-[ordinary workspace report](#the-ordinary-workspace-report) merges ordinary collections only; mode
-reports describe modeled or diagnostic execution and retain separate attribution.
-`just coverage-shuttle <output> [filter]`,
-`just coverage-loom <output> [filter]` and `just coverage-turmoil <output>` copy a successfully
-completed canonical report to the
-requested path while retaining its attempt evidence. Replay uses the unchanged exact-check
-commands and the failure directory under the matching mode build directory.
-The benchmark bodies run instrumented, so
-their Criterion test mode shows that each body executes and measures nothing. The collector itself,
-including real instrumented runs of a fixture crate and its refusal of every incomplete collection,
-is tested with:
-
-```bash
-just test-native-coverage
-```
-
-### The ordinary workspace report
-
-Every ordinary coverage consumer reads one report, `lcov-workspace.info`: patch line coverage, the
-CRAP report and the `coverage-merged` artifact. `just coverage-merge` builds it from the
-ordinary producers' reports, and fails, writing no report, rather than publish an incomplete one.
-
-`just test-coverage` and `just test-scenarios-coverage` export `lcov-workspace.info` from every
-profile they collected with `--no-default-ignore-filename-regex`, which keeps every workspace crate
-and the test sources the run executed. Each writes the absolute checkout path it ran in to
-`coverage-source-root.txt` beside the report. `just coverage-report-workspace` writes the same pair
-from the profiles a focused recipe collected. CI uploads the pair as the `coverage-tests` and
-`coverage-scenarios` artifacts, the second with the Python paced drivers' report, and the
-extra-tests job uploads its native collections and Python tooling reports as
-`coverage-native-extras`. The coverage job then runs:
-
-```bash
-just coverage-merge coverage-inputs/tests coverage-inputs/scenarios coverage-inputs/native-extras
-```
-
-An input is a producer's artifact directory or one report, with the producer's
-`coverage-source-root.txt` in the directory or beside the report. The merge reads the workspace
-export, every Python tooling report named `python.lcov`, and every complete ordinary native
-collection below `native-coverage`. A collection of another mode describes modeled or diagnostic
-execution, so it is never read: the Shuttle, Loom, Turmoil and Deloxide primitive conformance
-collections in the native extras artifact are recorded as left out. The reports of the `shuttle`,
-`loom`, `turmoil`, `deloxide` and Bolero fuzz jobs are not inputs at all.
-
-Every record is mapped onto the repository. The merge strips the producer's checkout root and
-resolves `..` segments lexically, so the record of a `#[path]` module names the file it includes,
-and it keeps a record only when its file is tracked at the tested revision, test sources included.
-It drops the rest and counts the dropped files by class: dependencies below `~/.cargo/registry`,
-`~/.cargo/git` and `/kache/.cargo/registry`, the standard library below `/rustc/<commit>` or a
-local rustup toolchain, files generated below the checkout's Cargo target directory, such as the
-FlatBuffers `OUT_DIR` sources, untracked files, and any other path outside the checkout. The counters of every report that
-measured a file are summed. The report holds line and function counters. Branch records are left
-out: the Rust producers export none, and coverage.py names Python branches in words that LCOV readers
-such as `cargo crap` refuse.
-
-The merge fails with a message naming what to fix when:
-
-- an input is missing, or holds neither a workspace export nor a complete ordinary collection;
-- an input has no root metadata;
-- none of a report's records lies below its producer's checkout root;
-- a report contributes no record of a tracked file;
-- a native report has no complete ordinary completion record beside it, or one producer has two
-  collections;
-- a workspace member that `cargo metadata` lists has no Rust record in the merged report.
-
-Either way it writes its merge record, `target/coverage-merge/record.json`: the verdict and the
-tested revision, every input with its checkout root, each report it read with its record counts and
-its dropped records by class, the collections it left out, the dropped files by class, and the
-workspace members the report measures. CI retains the report and its record as the
-`coverage-merged` artifact.
-
-Without inputs, the merge rewrites in place the `lcov-workspace.info` that `just test-coverage`
-wrote, into the shape CI publishes, and the CRAP report and patch line coverage read it:
-
-```bash
-just test-coverage
-just coverage-merge
-just check-coverage
-just coverage-patch origin/main
-```
-
-`just test-coverage-merge` exercises the mapping, every integrity failure and the CI contract, and
-`just coverage-merge-runner` exports the merge's measured Python coverage for CI.
-
-### Patch line coverage
-
-CI runs `just coverage-patch` against the merged ordinary workspace report and updates one PR
-comment with patch line coverage, project line coverage, per-file totals and uncovered added line
-numbers. The comment names the merge base and tested commit and links to the workflow artifacts.
-Patch coverage is advisory: no percentage is a build gate, and a missing report or a failed comment
-publication does not fail CI. The complexity verdict is the `just ratchet` count of functions
-above cyclomatic complexity 30, which reads no coverage.
-
-The label-enabled Turmoil job publishes a separate **Turmoil patch coverage** comment using
-`--scope turmoil` after its canonical instrumented suite and independent replay qualification
-pass. The scope selects a distinct marker, so the two jobs update their own comments regardless
-of completion order. This report describes only the current Turmoil build's product sources;
-it does not merge modeled counters into the ordinary report or its CRAP report. Failed
-collection keeps its verdict and diagnostics without publishing a successful coverage report.
-
-Run the same calculation manually after collecting coverage for the committed source revision:
-
-```bash
-just coverage-patch origin/main lcov-workspace.info
-just coverage-patch origin/main lcov-workspace.info --pr 123 --repo nervix-io/nervix
-just coverage-turmoil target/turmoil.lcov
-just coverage-patch origin/main target/turmoil.lcov --scope turmoil --output target/turmoil-patch-coverage.md
-```
-
-The first command prints the Markdown report and writes `target/patch-coverage.md`; the second also
-creates or updates the authenticated publisher's marked PR comment through `gh`. Additional
-`--report <path>` arguments union line hits from multiple LCOV reports. Coverage must describe the
-tested commit's line coordinates. The reporter maps sources onto tracked files as
-`just coverage-merge` does, so a `..` segment names the file it reaches, and the merged report,
-already relative to the repository, needs no checkout root. CI's reporter reads that report, so the
-different checkout paths of Blacksmith and GitHub-hosted runners are resolved once, by the merge. A
-focused local report, such as the Backup and Visual Create coverage recipes write, describes the
-local checkout and needs none either. For reports collected in another checkout, use
-`--source-root <original-checkout-path>`, or `--source-root-file` with the producer's
-`coverage-source-root.txt`, to remap absolute source paths explicitly. Repeat either when reports
-come from multiple source roots.
-
-The command compares the base's merge base to `HEAD`, or to `--head <commit>`. Only added lines with
-LCOV `DA` counters enter its denominator; repeated records count each file/line once, and a hit in
-any report covers the line. Deleted lines, unchanged lines and non-executable additions do not
-enter it. A changed file absent from LCOV is shown as unavailable. An empty measured patch has no
-percentage. Project coverage describes the tracked files present in the supplied reports; no
-baseline project report is assumed.
-
-CI compares the PR base to the tested synthetic merge commit, so the diff uses the same line
-coordinates as the collected coverage. It passes the PR head separately with `--pr-head` and checks
-that the PR is still open at that head before publication. Fork PR tokens may lack comment access;
-the local report, workflow summary and artifact remain available. `just test-patch-coverage`
-exercises accounting and publication, and `just coverage-patch-runner` exports the reporter's
-measured Python coverage for CI.
+[Coverage Reports And The Complexity Gate](./coverage-reports.md) owns the ordinary producer
+catalog, native collection, source mapping, report integrity, advisory patch coverage and CRAP,
+the full workspace union, and their relationship to the deterministic complexity ratchet. Start
+with its
+[local reproduction commands](./coverage-reports.md#the-ordinary-workspace-report) or
+[native collection commands](./coverage-reports.md#native-collection).
 
 ### The scenario suite's execution budget
 
@@ -1035,12 +828,12 @@ phases a scenario reports, and how each failure reaches CI output.
 `just book <version>` renders this book, and `just book-pdf <version>` additionally produces
 `nervix.pdf` through pandoc and XeLaTeX.
 
-Both recipes require the exact mdBook release pinned by `MDBOOK_VERSION` in
-`scripts/build_book.py`, and they fail with that version in the message when a different one is
-installed. CI resolves the same constant, so a local build always matches what is published. The
-pin is exact because the rendered theme targets mdBook's internal element IDs and because the PDF
-relies on mdBook rewriting print-page links into in-document anchors — on an older release every
-cross-chapter link in the PDF would point back at the website instead.
+Both recipes accept stable mdBook patch releases in the major/minor series selected by
+`MDBOOK_VERSION` in `scripts/build_book.py`: the current `0.5.3` pin accepts `0.5.x`, including
+`0.5.4`. A different major or minor version, or a malformed version, fails with the supported series
+in the message. CI installs the exact pinned release for reproducible publication. The series
+requirement protects the theme's element IDs and mdBook's rewriting of print-page links into
+in-document anchors, which the PDF uses for cross-chapter links.
 
 Install the pinned release with:
 

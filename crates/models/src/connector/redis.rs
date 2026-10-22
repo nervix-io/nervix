@@ -18,18 +18,24 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
+        DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    ChannelName, ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    AcknowledgementConfirmation, ChannelName, ClientName, ConnectorKind, DeclaredDelivery,
+    DeclaredQuiesce, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    EmitterPublishingModeKind, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    LocatorDeclaration, LocatorName, PositionClass, SinkBody, SinkClientReference, SinkEntity,
+    SinkReference, SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope,
+    SourceReference, SourceReferenceKind,
 };
 
-configured_client!(Redis: pooled CreateClientRedis => RedisConfigEntry);
+configured_client!(Redis: pooled, config NervixWithAddressQuery, CreateClientRedis => RedisConfigEntry);
 
 /// The longest channel Nervix subscribes to, in bytes.
 const REDIS_CHANNEL_MAX: usize = 1024;
@@ -37,7 +43,7 @@ const REDIS_CHANNEL_MAX: usize = 1024;
 external_names! {
     /// A Redis Pub/Sub channel: 1 to 1,024 bytes. A Redis channel is binary-safe, so any text is a
     /// channel, and a `*` is the character itself: a pattern subscription is another entity.
-    pub struct RedisChannelName => redis_channel_rule;
+    pub struct RedisChannelName => redis_channel_rule, label "redis_channel", example "orders";
 }
 
 fn redis_channel_rule(text: &str) -> Result<(), ExternalNameError> {
@@ -55,13 +61,70 @@ pub struct RedisPubSubSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a REDIS PUBSUB ingestor holds and how long it waits.
+const REDIS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "messages the driver reads ahead of the host",
+        bound: BufferBound::Unbounded,
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "reading the next message",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &[],
+};
+
+/// What the connector of a REDIS PUBSUB emitter holds and how long it waits.
+const REDIS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "connections the command pool holds",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("POOL SIZE MAX"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "checking out a connection, a new one's name resolution, connection, TLS and \
+                   Redis setup included",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "the answer to a PUBLISH",
+            bound: WaitBound::Driver("500 ms"),
+        },
+    ],
+    driver_limits: &[],
+};
+
 impl SourceEntity for RedisPubSubSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
+        headers: None,
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Redis),
         position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::NO_ACK],
+        quiesce: &[DeclaredQuiesce::BUFFER, DeclaredQuiesce::DROP],
+        locator: Some(LocatorDeclaration {
+            keywords: "CHANNEL",
+            name: LocatorName::External(RedisChannelName::DECLARATION),
+        }),
+        options: &[],
+        bounds: REDIS_SOURCE_BOUNDS,
     };
 }
 
@@ -76,13 +139,6 @@ impl SourceBody for RedisPubSubSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(
-            quiesce,
-            IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop
-        )
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -128,16 +184,23 @@ pub struct RedisPubSubSink {
 
 impl SinkEntity for RedisPubSubSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        headers: None,
+        reference: SinkReferenceKind::Client(ConnectorKind::Redis),
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::NoAck],
+        locator: Some(LocatorDeclaration {
+            keywords: "CHANNEL",
+            name: LocatorName::Unquoted {
+                label: "channel_name",
+            },
+        }),
+        options: &[],
+        envelope: &[],
+        properties: &[],
+        bounds: REDIS_SINK_BOUNDS,
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::NoAck { .. })
-    }
 }
 
 impl SinkBody for RedisPubSubSink {

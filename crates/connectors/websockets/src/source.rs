@@ -2,8 +2,9 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Outbound transport requirements and configuration, DNS-backed resume, signaling
-//!   before readiness, accepted-frame storage, payload delivery, and suspend and close operations.
+//! - **Owns.** Outbound transport requirements and configuration, DNS-backed resume within the
+//!   client's `connect_timeout_ms`, signaling before readiness, accepted-frame storage, payload
+//!   delivery, and suspend and close operations.
 //! - **Depends on.** The source contract, typed plans and host services, compiled signaling engine,
 //!   vocabulary values, execution primitives, TLS configuration, and WebSocket transport.
 //! - **Must not know.** Configuration Models, NSPL, runtime collectors, relays, branches,
@@ -28,13 +29,15 @@ use std::{collections::VecDeque, future::Future, time::Duration};
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
-use meticulous::ResultExt as _;
+use futures_util::{SinkExt as _, StreamExt as _};
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    BrokerSourceConnector, ClientConfigResult, IngestMessageHeaders, IngestMetadataRow,
-    NoIngestHeaders, RustlsClientConfigSource, SourceBatch, SourceBatchRequest, SourceConnector,
-    SourceError, SourceMessage, SourceResult, SourceResume, client_config_value,
+    BrokerSourceConnector, ClientConfigResult, ConfiguredDeadline, IngestMessageHeaders,
+    IngestMetadataRow, NoIngestHeaders, RustlsClientConfigSource, SourceBatch, SourceBatchRequest,
+    SourceConnector, SourceError, SourceMessage, SourceReadCancellation, SourceResult,
+    SourceResume, client_config_value,
 };
-use nervix_dns::{ConnectionBudget, DnsResolver};
+use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::{
     net::TcpStream,
@@ -50,7 +53,21 @@ use url::Url;
 use crate::{CompiledSignalingProtocol, SignalingDataSink, WebsocketSignalingSession};
 
 const WEBSOCKETS: &str = "websockets";
-const CONNECT_BUDGET: Duration = Duration::from_secs(30);
+const CLOSE_BUDGET: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Error)]
+enum WebsocketSourceFailure {
+    #[error("WebSocket peer closed with code {code}: {reason}")]
+    PeerClosed { code: u16, reason: String },
+    #[error("WebSocket peer closed without a status")]
+    PeerClosedWithoutStatus,
+    #[error("WebSocket peer ended its connection")]
+    Ended,
+    #[error("WebSocket close handshake failed")]
+    CloseTransport,
+    #[error("WebSocket close handshake did not finish within {budget:?}")]
+    CloseTimeout { budget: Duration },
+}
 
 #[derive(Debug, Error)]
 pub enum WebsocketSourcePlanError {
@@ -68,6 +85,9 @@ pub struct WebsocketSourcePlan {
     dns: DnsResolver,
     entries: Vec<ClientConfigEntry>,
     signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
+    /// How long opening one connection may take: name resolution, the address attempts, TLS and
+    /// the upgrade handshake.
+    connect_timeout: ConfiguredDeadline,
 }
 
 /// The configured request authority and the socket target it names. The request itself always
@@ -87,6 +107,8 @@ impl WebsocketSourcePlan {
         dns: DnsResolver,
     ) -> Result<Self, Report<WebsocketSourcePlanError>> {
         let endpoint = Self::endpoint_from_config(&entries)
+            .change_context(WebsocketSourcePlanError::Configuration)?;
+        let connect_timeout = ConfiguredDeadline::connect(&entries)
             .change_context(WebsocketSourcePlanError::Configuration)?;
         let parsed = Url::parse(&endpoint).map_err(|error| {
             Report::new(WebsocketSourcePlanError::Endpoint).attach_printable(error)
@@ -116,6 +138,7 @@ impl WebsocketSourcePlan {
             dns,
             entries,
             signaling_protocol,
+            connect_timeout,
         })
     }
 
@@ -169,10 +192,67 @@ impl SourceMessage for WebsocketSourceMessage {
 pub struct WebsocketSource {
     endpoint: WebsocketEndpoint,
     dns: DnsResolver,
+    connect_timeout: ConfiguredDeadline,
     tls_connector: Option<Connector>,
     signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
     relay: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     pending: VecDeque<Vec<u8>>,
+}
+
+impl WebsocketSource {
+    /// Why a resume opened no connection: when the attempts ran out of the client's
+    /// `connect_timeout_ms`, the failure names it beneath the resume's.
+    fn unconnected(&self, budget: &OperationBudget, failures: Vec<String>) -> Report<SourceError> {
+        let resume = SourceError::Resume {
+            connector: WEBSOCKETS,
+        };
+        let mut report = if budget.remaining().is_zero() {
+            Report::new(
+                self.connect_timeout
+                    .elapsed("opening the WebSocket connection"),
+            )
+            .change_context(resume)
+        } else {
+            Report::new(resume)
+        };
+        for failure in failures {
+            report = report.attach_printable(failure);
+        }
+        report
+    }
+
+    async fn close_transport(&mut self) -> error_stack::Result<(), WebsocketSourceFailure> {
+        // Detach before the first await: cancelling the handshake drops this exact socket and
+        // leaves the source needing a resume, without attaching to another transport.
+        let Some(mut relay) = self.relay.take() else {
+            return Ok(());
+        };
+        let closing = async {
+            relay
+                .close(None)
+                .await
+                .change_context(WebsocketSourceFailure::CloseTransport)?;
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                match relay.next().await {
+                    Some(Ok(Message::Close(_))) | None => return Ok(()),
+                    Some(Ok(_)) => {}
+                    Some(Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed)) => {
+                        return Ok(());
+                    }
+                    Some(Err(error)) => {
+                        return Err(Report::new(error)
+                            .change_context(WebsocketSourceFailure::CloseTransport));
+                    }
+                }
+            }
+        };
+        timeout(CLOSE_BUDGET, closing).await.map_err(|error| {
+            Report::new(error).change_context(WebsocketSourceFailure::CloseTimeout {
+                budget: CLOSE_BUDGET,
+            })
+        })?
+    }
 }
 
 #[async_trait]
@@ -193,6 +273,7 @@ impl SourceConnector for WebsocketSource {
         Ok(Self {
             endpoint: plan.endpoint.clone(),
             dns: plan.dns.clone(),
+            connect_timeout: plan.connect_timeout,
             tls_connector,
             signaling_protocol: plan.signaling_protocol.clone(),
             relay: None,
@@ -205,25 +286,26 @@ impl SourceConnector for WebsocketSource {
     }
 
     async fn suspend(&mut self) -> SourceResult<()> {
-        self.relay = None;
-        Ok(())
+        self.close_transport()
+            .await
+            .change_context(SourceError::Suspend {
+                connector: WEBSOCKETS,
+            })
     }
 
     async fn resume(&mut self) -> SourceResult<SourceResume> {
         if self.relay.is_some() {
             return Ok(SourceResume::Ready);
         }
-        let budget = ConnectionBudget::start(CONNECT_BUDGET);
+        let budget = OperationBudget::start(self.connect_timeout.bound(), LookupShare::Whole);
         let addresses = self
             .dns
-            .resolve(&self.endpoint.host, self.endpoint.port, budget.remaining())
+            .resolve(&self.endpoint.host, self.endpoint.port, budget.lookup())
             .await
             .change_context(SourceError::Resume {
                 connector: WEBSOCKETS,
             })?;
-        let mut report = Report::new(SourceError::Resume {
-            connector: WEBSOCKETS,
-        });
+        let mut failures = Vec::new();
         let mut connected = None;
         for attempt in budget.attempts(&addresses) {
             nervix_primitives::task::consume_budget().await;
@@ -245,19 +327,15 @@ impl SourceConnector for WebsocketSource {
                     connected = Some(connection);
                     break;
                 }
-                Ok(Err(error)) => {
-                    report = report.attach_printable(format!("{}: {error}", attempt.address));
-                }
-                Err(_) => {
-                    report = report.attach_printable(format!(
-                        "{}: no WebSocket connection within {:?}",
-                        attempt.address, attempt.budget
-                    ));
-                }
+                Ok(Err(error)) => failures.push(format!("{}: {error}", attempt.address)),
+                Err(_) => failures.push(format!(
+                    "{}: no WebSocket connection within {:?}",
+                    attempt.address, attempt.budget
+                )),
             }
         }
         let Some((mut relay, _)) = connected else {
-            return Err(report);
+            return Err(self.unconnected(&budget, failures));
         };
         if let Some(protocol) = self.signaling_protocol.as_ref() {
             let (payloads_tx, mut payloads_rx) = mpsc::unbounded_channel();
@@ -290,9 +368,12 @@ impl SourceConnector for WebsocketSource {
     }
 
     async fn close(&mut self) -> SourceResult<()> {
-        self.relay = None;
         self.pending.clear();
-        Ok(())
+        self.close_transport()
+            .await
+            .change_context(SourceError::Close {
+                connector: WEBSOCKETS,
+            })
     }
 }
 
@@ -304,6 +385,7 @@ impl BrokerSourceConnector for WebsocketSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         if let Some(payload) = self.pending.pop_front() {
             return Ok(SourceBatch::Messages(vec![WebsocketSourceMessage::new(
@@ -315,7 +397,12 @@ impl BrokerSourceConnector for WebsocketSource {
             let Some(relay) = self.relay.as_mut() else {
                 return Ok(SourceBatch::ResumeRequired);
             };
-            let message = futures_util::StreamExt::next(relay).await;
+            let next = futures_util::StreamExt::next(relay);
+            let Some(message) = cancellation.unless_cancelled(next).await else {
+                return Ok(SourceBatch::Interrupted {
+                    gathered: Vec::new(),
+                });
+            };
             match message {
                 Some(Ok(Message::Text(text))) => {
                     return Ok(SourceBatch::Messages(vec![WebsocketSourceMessage::new(
@@ -327,17 +414,45 @@ impl BrokerSourceConnector for WebsocketSource {
                         bytes.to_vec(),
                     )]));
                 }
-                Some(Ok(Message::Close(_))) | None => {
+                Some(Ok(Message::Close(frame))) => {
+                    let failure = match frame {
+                        Some(frame) => WebsocketSourceFailure::PeerClosed {
+                            code: u16::from(frame.code),
+                            reason: frame.reason.into_owned(),
+                        },
+                        None => WebsocketSourceFailure::PeerClosedWithoutStatus,
+                    };
+                    // Reading a Close queues its response. Flush it before releasing the socket;
+                    // any failure to answer remains attached to the peer's original close reason.
+                    let mut relay = self
+                        .relay
+                        .take()
+                        .verified("the installed transport yielded the Close above");
+                    let answered = timeout(CLOSE_BUDGET, relay.flush()).await;
+                    let report = Report::new(failure);
+                    let report = match answered {
+                        Ok(Ok(())) => report,
+                        Ok(Err(error)) => report.attach_printable(error),
+                        Err(error) => report.attach_printable(error),
+                    };
+                    return Err(report.change_context(SourceError::Read {
+                        connector: WEBSOCKETS,
+                    }));
+                }
+                None => {
                     self.relay = None;
-                    return Ok(SourceBatch::ResumeRequired);
+                    return Err(Report::new(WebsocketSourceFailure::Ended).change_context(
+                        SourceError::Read {
+                            connector: WEBSOCKETS,
+                        },
+                    ));
                 }
                 Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
                 Some(Err(error)) => {
                     self.relay = None;
-                    return Err(Report::new(SourceError::Read {
+                    return Err(Report::new(error).change_context(SourceError::Read {
                         connector: WEBSOCKETS,
-                    })
-                    .attach_printable(error.to_string()));
+                    }));
                 }
             }
         }
@@ -373,7 +488,6 @@ impl SignalingDataSink for QueuedSignalingDataSink {
 mod tests {
     use std::{net::IpAddr, time::Duration};
 
-    use meticulous::OptionExt as _;
     use nervix_dns::{DnsConfiguration, NameServers};
     use nervix_primitives::net::TcpListener;
     use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
@@ -382,6 +496,274 @@ mod tests {
     use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 
     use super::*;
+
+    #[nervix_primitives::test]
+    async fn a_server_that_never_answers_the_upgrade_is_reported_within_connect_timeout() {
+        let fixture = DnsFixture::start().await;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .assured("a loopback TCP port is available");
+        let address = listener.local_addr().assured("the listener is bound");
+        // Accepts the connection and never answers the upgrade request.
+        let silent = nervix_primitives::task::spawn(async move {
+            let (held, _) = listener.accept().await.assured("the source connects");
+            std::future::pending::<()>().await;
+            drop(held);
+        });
+        let mut entries = endpoint(format!("ws://{address}/socket"));
+        entries.push(ClientConfigEntry {
+            key: "connect_timeout_ms".to_string(),
+            value: "200".to_string(),
+        });
+        let plan = WebsocketSourcePlan::new(entries, None, fixture.resolver)
+            .assured("the endpoint and deadline are valid");
+        let mut source = WebsocketSource::open(&plan, 0)
+            .await
+            .assured("the source opens");
+        let failure = timeout(Duration::from_secs(10), source.resume())
+            .await
+            .assured("connect_timeout_ms bounds the resume")
+            .err()
+            .assured("a server that never answers cannot be connected");
+        let elapsed = failure
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<nervix_connector::DeadlineElapsed>())
+            .assured("the elapsed deadline is the innermost cause");
+        assert_eq!(elapsed.key, nervix_models::DeadlineKey::ConnectTimeout);
+        assert_eq!(elapsed.bound, Duration::from_millis(200));
+        assert!(format!("{failure:#}").contains("within connect_timeout_ms 200ms"));
+        silent.abort();
+    }
+
+    #[nervix_primitives::test]
+    async fn an_invalid_connect_timeout_refuses_the_plan() {
+        let fixture = DnsFixture::start().await;
+        let mut entries = endpoint("ws://127.0.0.1:9/socket".to_string());
+        entries.push(ClientConfigEntry {
+            key: "connect_timeout_ms".to_string(),
+            value: "0".to_string(),
+        });
+        let error = WebsocketSourcePlan::new(entries, None, fixture.resolver)
+            .err()
+            .assured("a zero deadline cannot plan a connection");
+        assert!(matches!(
+            error.current_context(),
+            WebsocketSourcePlanError::Configuration
+        ));
+    }
+
+    async fn connected_pair() -> (WebsocketSource, WebSocketStream<TcpStream>) {
+        let fixture = DnsFixture::start().await;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .assured("a loopback TCP port is available");
+        let address = listener.local_addr().assured("the listener is bound");
+        let plan = WebsocketSourcePlan::new(
+            endpoint(format!("ws://{address}/socket")),
+            None,
+            fixture.resolver,
+        )
+        .assured("the endpoint is valid");
+        let mut source = WebsocketSource::open(&plan, 0)
+            .await
+            .assured("the source opens");
+        let server = async {
+            let (stream, _) = listener.accept().await.assured("the source connects");
+            tokio_tungstenite::accept_async(stream)
+                .await
+                .assured("the upgrade succeeds")
+        };
+        let (resumed, peer) = tokio::join!(source.resume(), server);
+        assert_eq!(resumed.assured("the source resumes"), SourceResume::Ready);
+        (source, peer)
+    }
+
+    #[nervix_primitives::test]
+    async fn suspension_and_close_exchange_close_frames() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+
+        for suspend in [true, false] {
+            let (mut source, mut peer) = connected_pair().await;
+            source.pending.push_back(b"retained".to_vec());
+            let ending = async {
+                if suspend {
+                    source.suspend().await
+                } else {
+                    source.close().await
+                }
+            };
+            let observe = async {
+                let frame = peer
+                    .next()
+                    .await
+                    .assured("the peer receives a frame")
+                    .assured("the frame is valid");
+                assert!(
+                    matches!(frame, Message::Close(_)),
+                    "expected Close, got {frame:?}"
+                );
+                match peer.flush().await {
+                    Ok(()) | Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed) => {}
+                    Err(error) => panic!("the peer could not answer the Close: {error}"),
+                }
+            };
+            let (closed, ()) = tokio::join!(ending, observe);
+            closed.assured("the close handshake succeeds");
+            assert!(source.needs_resume());
+            assert_eq!(source.pending.len(), usize::from(suspend));
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_cancelled_read_takes_no_frame_and_leaves_the_next_one_to_the_next_read() {
+        use futures_util::SinkExt as _;
+
+        let (mut source, mut peer) = connected_pair().await;
+        let request = SourceBatchRequest {
+            max_messages: std::num::NonZeroUsize::MIN,
+            batch_timeout: None,
+        };
+        let cancellation = SourceReadCancellation::new();
+        cancellation.cancel();
+        let interrupted = source
+            .next_batch(request, &cancellation)
+            .await
+            .assured("a cancelled read is not a failure");
+        let SourceBatch::Interrupted { gathered } = interrupted else {
+            panic!("a read the host cancelled ends as interrupted");
+        };
+        assert!(gathered.is_empty(), "the peer sent nothing to take");
+
+        peer.send(Message::Text("sent after the cancelled read".into()))
+            .await
+            .assured("the peer sends a frame");
+        let batch = source
+            .next_batch(request, &SourceReadCancellation::new())
+            .await
+            .assured("the frame is read");
+        let SourceBatch::Messages(messages) = batch else {
+            panic!("the source reads the frame as a batch");
+        };
+        let message = messages.first().assured("the read returned the frame");
+        assert_eq!(message.payload(), b"sent after the cancelled read");
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_peer_close_is_a_transient_read_failure_with_its_status() {
+        use futures_util::StreamExt as _;
+        use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+
+        let (mut source, mut peer) = connected_pair().await;
+        peer.close(Some(CloseFrame {
+            code: CloseCode::Again,
+            reason: "fixture restart".into(),
+        }))
+        .await
+        .assured("the peer sends its close");
+        let error = source
+            .next_batch(
+                SourceBatchRequest {
+                    max_messages: std::num::NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &SourceReadCancellation::new(),
+            )
+            .await
+            .err()
+            .assured("a peer close must reach the host's transient failure path");
+        assert!(matches!(error.current_context(), SourceError::Read { .. }));
+        assert!(format!("{error:#}").contains("1013"));
+        assert!(format!("{error:#}").contains("fixture restart"));
+        assert!(source.needs_resume());
+        let answer = peer
+            .next()
+            .await
+            .assured("the client answers the peer's Close")
+            .assured("the closing frame is valid");
+        let Message::Close(Some(frame)) = answer else {
+            panic!("expected the client's closing answer, got {answer:?}");
+        };
+        assert_eq!(u16::from(frame.code), 1013);
+        assert_eq!(frame.reason, "fixture restart");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_close_without_a_status_is_a_transient_read_failure() {
+        let (mut source, mut peer) = connected_pair().await;
+        peer.close(None)
+            .await
+            .assured("the peer sends an empty Close");
+        let error = source
+            .next_batch(
+                SourceBatchRequest {
+                    max_messages: std::num::NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &SourceReadCancellation::new(),
+            )
+            .await
+            .err()
+            .assured("an empty Close still requires a paced reconnect");
+        assert!(format!("{error:#}").contains("without a status"));
+        assert!(source.needs_resume());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_peer_that_never_answers_close_releases_the_transport_with_a_timeout() {
+        for suspend in [true, false] {
+            let (mut source, _peer) = connected_pair().await;
+            source.pending.push_back(b"retained".to_vec());
+            let result = if suspend {
+                timeout(Duration::from_secs(60), source.suspend()).await
+            } else {
+                timeout(Duration::from_secs(60), source.close()).await
+            };
+            let error = result
+                .assured("source teardown has its own bounded close wait")
+                .err()
+                .assured("a peer that never reads cannot answer the Close");
+            assert!(format!("{error:#}").contains("close handshake"));
+            assert!(source.needs_resume());
+            assert_eq!(source.pending.len(), usize::from(suspend));
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_cancelled_close_releases_the_transport_and_clears_pending_payloads() {
+        let (mut source, _peer) = connected_pair().await;
+        source.pending.push_back(b"retained".to_vec());
+        assert!(
+            timeout(Duration::from_millis(1), source.close())
+                .await
+                .is_err()
+        );
+        assert!(source.needs_resume());
+        assert!(source.pending.is_empty());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_failed_read_preserves_its_typed_transport_cause() {
+        let (mut source, peer) = connected_pair().await;
+        drop(peer);
+        let error = source
+            .next_batch(
+                SourceBatchRequest {
+                    max_messages: std::num::NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &SourceReadCancellation::new(),
+            )
+            .await
+            .err()
+            .assured("TCP ended without the closing handshake");
+        assert!(
+            error
+                .downcast_ref::<tokio_tungstenite::tungstenite::Error>()
+                .is_some()
+        );
+        assert!(source.needs_resume());
+    }
 
     struct DnsFixture {
         authority: DnsAuthority,

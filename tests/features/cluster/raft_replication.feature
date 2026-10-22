@@ -1,5 +1,6 @@
 Feature: Pipelined raft replication and bounded log retention
 
+  @long_running
   Scenario: A rate-limited follower catches up without restarting a moving append stream
     Given a 3 node nervix cluster is started
     When node "node-3" is stopped
@@ -59,6 +60,7 @@ Feature: Pipelined raft replication and bounded log retention
     Then within "60s" node "node-3" recovers by installing a raft snapshot
     And within "60s" node "node-3" has applied 40 domains named "interrupted"
 
+  @long_running
   Scenario: Durable follower catch-up stays bounded and preserves its append stream
     Given raft election timeout is configured from "15s" to "20s"
     And a 3 node nervix cluster is started

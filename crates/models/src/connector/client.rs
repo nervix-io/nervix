@@ -27,15 +27,21 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
     entity_union::{ALTERED_PAIR_CHECKED, connector_sinks, connector_source_kinds},
     source::AlteredIngestorSource,
 };
 use crate::{
-    AckWindow, AlterIngestorError, AlterIngestorOperation, CanonicalNsplError, ClientName,
-    CreateIngestor, EmitSinkCapabilities, EmitterBatchRequirement, EmitterPublishingMode,
-    IngestQuiesceMode, IngestSourceCapabilities, IngestorAlteration, IngestorEntityModel,
-    IngestorInput, PositionClass, RetryPolicy, SchemaName, SinkBody, SinkEntity, SinkReference,
-    SourceEntity, SourceMetadataScope, SourceReferenceKind,
+    AckWindow, AcknowledgementConfirmation, AlterIngestorError, AlterIngestorOperation,
+    CanonicalNsplError, ClientName, CreateIngestor, DeclaredDelivery, DeclaredQuiesce,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
+    IngestDeliveryKind, IngestQuiesceMode, IngestSourceCapabilities, IngestorAlteration,
+    IngestorEntityModel, IngestorInput, PositionClass, RetryPolicy, SchemaName, SinkBody,
+    SinkEntity, SinkReference, SinkReferenceKind, SourceEntity, SourceMetadataScope,
+    SourceReferenceKind,
 };
 
 /// Application producers submitting native Arrow batches of one internal schema.
@@ -61,6 +67,14 @@ pub struct ClientIngestMode {
 }
 
 impl ClientIngestMode {
+    /// Which delivery mode this is: `ACK SEQUENTIAL` or `ACK PARALLEL`.
+    pub const fn kind(&self) -> IngestDeliveryKind {
+        match self.window {
+            AckWindow::Sequential => IngestDeliveryKind::AckSequential,
+            AckWindow::Parallel { .. } => IngestDeliveryKind::AckParallel,
+        }
+    }
+
     /// The acknowledgement window as a count: one batch for `ACK SEQUENTIAL`, `max` for
     /// `ACK PARALLEL MAX <max>`.
     pub fn window_size(&self) -> NonZeroU64 {
@@ -71,15 +85,64 @@ impl ClientIngestMode {
     }
 }
 
+/// A producer's parallel window holds every admitted batch until its acknowledgement, so it
+/// collects acknowledgements without a batch timeout.
+const CLIENT_ACK_PARALLEL: DeclaredDelivery = DeclaredDelivery {
+    kind: IngestDeliveryKind::AckParallel,
+    example: "ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
+    requires: &[],
+};
+
+/// What the connector of a CLIENT PRODUCER holds and how long it waits.
+const PRODUCER_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "batches one producer submits ahead of their outcomes",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Items {
+                count: 1024,
+                unit: "batches, within 32 MiB, per producer grant",
+            },
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[DeclaredWait {
+        wait: "the acknowledgement of an admitted batch",
+        bound: WaitBound::Clause("ACK TIMEOUT"),
+    }],
+    driver_limits: &[],
+};
+
+/// What the connector of a CLIENT CONSUMER holds and how long it waits.
+const CONSUMER_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "batches retained for consumers on a node",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Bytes(134217728),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[DeclaredWait {
+        wait: "a delivery attempt",
+        bound: WaitBound::Clause("ACK TIMEOUT"),
+    }],
+    driver_limits: &[],
+};
+
 impl SourceEntity for ClientProducerSource {
     /// A submitted batch carries no transport headers, so its rows expose an empty header list
     /// that no program may read.
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
+        headers: None,
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Schema,
         position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::ACK_SEQUENTIAL, CLIENT_ACK_PARALLEL],
+        quiesce: &[DeclaredQuiesce::SUSPEND],
+        locator: None,
+        options: &[],
+        bounds: PRODUCER_BOUNDS,
     };
 }
 
@@ -174,16 +237,18 @@ pub struct ClientConsumerSink {
 
 impl SinkEntity for ClientConsumerSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
-        requires_codec: false,
-        batch_requirement: EmitterBatchRequirement::Required,
+        headers: None,
+        reference: SinkReferenceKind::Schema,
+        body: EmitterBodyForm::Native,
+        batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::ClientAck],
+        locator: None,
+        options: &[],
+        envelope: &[],
+        properties: &[],
+        bounds: CONSUMER_BOUNDS,
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::ClientAck { .. })
-    }
 }
 
 impl SinkBody for ClientConsumerSink {

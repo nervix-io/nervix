@@ -3,10 +3,11 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The typed source plan, broker and paced-polling connector traits, source messages,
-//!   acknowledgement policies, lifecycle operations, typed source failures, and the opaque host
-//!   handle through which a source delivers messages and reports lifecycle state.
+//!   acknowledgement policies, lifecycle operations, typed source failures, the cancellation
+//!   through which the host ends a broker read in flight, and the opaque host handle through which
+//!   a source delivers messages and reports lifecycle state.
 //! - **Depends on.** Typed ingest metadata, the vocabulary's metadata scopes and timestamps,
-//!   `error-stack`, and Tokio's monotonic clock.
+//!   `error-stack`, and the primitive boundary's monotonic clock and cancellation token.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, ACK-tree
 //!   implementations, metrics implementations, or any connector driver.
 
@@ -20,6 +21,7 @@
 
 use std::{
     fmt::Debug,
+    future::Future,
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
@@ -27,7 +29,7 @@ use std::{
 use async_trait::async_trait;
 use error_stack::Report;
 use nervix_models::{PositionClass, SourceMetadataScope, Timestamp};
-use nervix_primitives::time::Instant;
+use nervix_primitives::{sync::CancellationToken, time::Instant};
 use thiserror::Error;
 
 use crate::{IngestMessageHeaders, IngestMetadataRow, ParsedRetryPolicy, RetainedIngestHeaders};
@@ -164,8 +166,62 @@ pub struct SourceBatchRequest {
 /// One source poll result.
 pub enum SourceBatch<M> {
     Messages(Vec<M>),
+    /// The read ended early because the host cancelled it. `gathered` holds every message the
+    /// source had already taken from its transport for this batch, possibly none, and the host
+    /// takes them in before it acts on what made it cancel.
+    Interrupted {
+        gathered: Vec<M>,
+    },
     ResumeRequired,
     Closed,
+}
+
+/// The host's request that a read in flight end and return what it already took.
+///
+/// The host hands one to each [`BrokerSourceConnector::next_batch`] and cancels it when a quiesce
+/// change or a stop needs its loop back while the read waits. It never drops a read in flight:
+/// after cancelling it keeps awaiting the read, takes in what the read returns, and only then acts
+/// on the change or the stop.
+#[derive(Debug, Default)]
+pub struct SourceReadCancellation {
+    token: CancellationToken,
+}
+
+impl SourceReadCancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Asks the read to end. Only the host that started the read cancels it.
+    pub fn cancel(&self) {
+        self.token.cancel();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    /// Resolves once the host has cancelled the read.
+    pub async fn cancelled(&self) {
+        self.token.cancelled().await;
+    }
+
+    /// Waits for `read` unless the host cancels first, which returns `None`.
+    ///
+    /// A read that is ready completes even after the host cancelled, so a message its transport
+    /// already delivered is taken rather than left behind. A read still waiting when the host
+    /// cancels is dropped, and anything it holds is dropped with it, so a source passes only a read
+    /// that holds nothing it took from its transport while it waits.
+    pub async fn unless_cancelled<F>(&self, read: F) -> Option<F::Output>
+    where
+        F: Future,
+    {
+        nervix_primitives::select! {
+            biased;
+            output = read => Some(output),
+            () = self.token.cancelled() => None,
+        }
+    }
 }
 
 /// A source message whose transport values remain owned by its connector.
@@ -274,11 +330,32 @@ pub trait BrokerSourceConnector: SourceConnector {
     type Message: SourceMessage<Position = Self::Position>;
     type Position: Clone + Debug + Send + Sync + 'static;
 
+    /// Reads the next batch, up to `request.max_messages`.
+    ///
+    /// The host awaits every read to completion, so a read never loses what it took from its
+    /// transport to a dropped future. Once the host cancels `cancellation`, the read ends as soon
+    /// as it can and returns [`SourceBatch::Interrupted`] with every message it had already taken.
+    /// A source that gathers several messages observes the cancellation between its transport
+    /// reads, and a read it cannot interrupt without losing what that read returns completes
+    /// within its own bounded wait first.
     async fn next_batch(
         &mut self,
         request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>>;
 
+    /// Settles `positions` as processed on the transport.
+    ///
+    /// Returns once the transport has confirmed them as far as the source's entity declares in its
+    /// [`AcknowledgementConfirmation`](nervix_models::AcknowledgementConfirmation): the broker
+    /// answered the acknowledgement or the commit, or, where the protocol has no answer, the
+    /// acknowledgement was written to the connection. A source that returns before that declares
+    /// so rather than reporting a confirmation it did not get. A confirmation that fails returns
+    /// [`SourceError::Acknowledge`]: the host shows it as the ingestor's transient status and
+    /// rejects the positions, which the source's [`PositionClass`] then handles.
+    ///
+    /// Until this returns the host reports no progress for the positions: drains and ownership
+    /// handoffs keep waiting for them, and the ingestor's transient status stays as it was.
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> SourceResult<()>;
 
     async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()>;
@@ -314,23 +391,10 @@ pub trait PacedSourceConnector: SourceConnector {
     async fn poll(&mut self, scheduled_at: Timestamp) -> SourceResult<SourcePoll>;
 }
 
-/// Whether the host should attach one ACK root to every accepted source message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceIntakeMode {
-    Unacknowledged,
-    Acknowledged,
-}
-
 /// One borrowed source message crossing into host-owned decoding and dispatch.
 pub struct SourceIntakeMessage<'a> {
     pub payload: &'a [u8],
     pub metadata: IngestMetadataRow<'a>,
-}
-
-/// One source batch crossing the connector boundary once.
-pub struct SourceIntakeBatch<'a> {
-    pub messages: Vec<SourceIntakeMessage<'a>>,
-    pub mode: SourceIntakeMode,
 }
 
 /// Why host-owned source intake could not accept a batch.
@@ -338,8 +402,6 @@ pub struct SourceIntakeBatch<'a> {
 pub enum SourceIntakeError {
     #[error("failed to retain a source batch during quiesce")]
     Retain,
-    #[error("failed to decode a source payload")]
-    Decode,
     #[error("failed to dispatch a source batch")]
     Dispatch,
     #[error("failed to flush a source batch")]
@@ -356,7 +418,7 @@ pub enum SourceAcknowledgementOutcome {
     Shutdown,
 }
 
-/// The host implementation behind an opaque source acknowledgement.
+/// The host implementation behind an opaque batch acknowledgement.
 #[async_trait]
 #[cfg_attr(
     nervix_lint,
@@ -366,30 +428,32 @@ pub enum SourceAcknowledgementOutcome {
                   acknowledgements"
     )
 )]
-pub trait SourceAcknowledgementServices: Send + 'static {
-    async fn wait(self: Box<Self>, timeout: Duration) -> SourceAcknowledgementOutcome;
+pub trait SourceBatchAcknowledgementServices: Send + 'static {
+    /// Waits until every message of the batch has been acknowledged through the graph, until one
+    /// of them failed, or until the host stops. `timeout` bounds how long the acknowledgement of
+    /// one message may stay silent.
+    async fn wait(&mut self, timeout: Duration) -> SourceAcknowledgementOutcome;
 }
 
-/// One acknowledgement the host returns for one accepted source message.
-pub struct SourceAcknowledgement {
-    services: Box<dyn SourceAcknowledgementServices>,
+/// The acknowledgement the host returns for one acknowledged intake batch.
+///
+/// The host counts the batch's work as outstanding, which drains and ownership handoffs wait for,
+/// until this handle drops, also once its wait has returned. The loop therefore keeps it until the
+/// source has confirmed or rejected the batch's positions on its transport.
+pub struct SourceBatchAcknowledgement {
+    services: Box<dyn SourceBatchAcknowledgementServices>,
 }
 
-impl SourceAcknowledgement {
-    pub fn new(services: impl SourceAcknowledgementServices) -> Self {
+impl SourceBatchAcknowledgement {
+    pub fn new(services: impl SourceBatchAcknowledgementServices) -> Self {
         Self {
             services: Box::new(services),
         }
     }
 
-    pub async fn wait(self, timeout: Duration) -> SourceAcknowledgementOutcome {
+    pub async fn wait(&mut self, timeout: Duration) -> SourceAcknowledgementOutcome {
         self.services.wait(timeout).await
     }
-}
-
-/// Acknowledgements returned in the same order as an acknowledged intake batch.
-pub struct SourceIntakeOutcome {
-    pub acknowledgements: Vec<SourceAcknowledgement>,
 }
 
 /// Every runtime service exposed through one source host handle.
@@ -403,10 +467,18 @@ pub struct SourceIntakeOutcome {
     )
 )]
 pub trait SourceHostServices: Send + 'static {
-    async fn intake(
+    /// Takes in a batch whose positions nothing downstream acknowledges.
+    async fn intake_unacknowledged(
         &mut self,
-        batch: SourceIntakeBatch<'_>,
-    ) -> SourceIntakeResult<SourceIntakeOutcome>;
+        messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<()>;
+
+    /// Takes in a batch whose positions the source settles once every message has been
+    /// acknowledged through the graph, and returns the acknowledgement the loop waits on.
+    async fn intake_acknowledged(
+        &mut self,
+        messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<SourceBatchAcknowledgement>;
 
     async fn flush(&mut self) -> SourceIntakeResult<()>;
     async fn replay_buffered(&mut self) -> SourceIntakeResult<bool>;
@@ -423,6 +495,9 @@ pub trait SourceHostServices: Send + 'static {
     fn handle_ack_failure(&self, reason: String);
     /// Counts positions the host discarded after a reconnect because the broker redelivers them.
     fn record_transport_redeliveries(&self, positions: usize);
+    /// Reports that the source stopped before its transport confirmed `positions` it had read,
+    /// which the transport presents again by its own redelivery contract.
+    fn record_unconfirmed_stop(&self, positions: usize);
 }
 
 /// Task-local host services a source loop drives without exposing a runtime type.
@@ -437,11 +512,18 @@ impl SourceHost {
         }
     }
 
-    pub async fn intake(
+    pub async fn intake_unacknowledged(
         &mut self,
-        batch: SourceIntakeBatch<'_>,
-    ) -> SourceIntakeResult<SourceIntakeOutcome> {
-        self.services.intake(batch).await
+        messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<()> {
+        self.services.intake_unacknowledged(messages).await
+    }
+
+    pub async fn intake_acknowledged(
+        &mut self,
+        messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<SourceBatchAcknowledgement> {
+        self.services.intake_acknowledged(messages).await
     }
 
     pub async fn flush(&mut self) -> SourceIntakeResult<()> {
@@ -498,5 +580,51 @@ impl SourceHost {
 
     pub fn record_transport_redeliveries(&self, positions: usize) {
         self.services.record_transport_redeliveries(positions);
+    }
+
+    pub fn record_unconfirmed_stop(&self, positions: usize) {
+        self.services.record_unconfirmed_stop(positions);
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tests {
+    use std::{
+        future::{self, poll_fn},
+        pin::pin,
+        task::Poll,
+    };
+
+    use super::*;
+
+    #[nervix_primitives::test]
+    async fn a_read_that_is_ready_completes_after_the_host_cancelled() {
+        let cancellation = SourceReadCancellation::new();
+        cancellation.cancel();
+
+        let output = cancellation.unless_cancelled(future::ready(7)).await;
+
+        assert_eq!(output, Some(7));
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_read_still_waiting_when_the_host_cancels_ends_without_output() {
+        let cancellation = SourceReadCancellation::new();
+        let mut waiting = pin!(cancellation.unless_cancelled(future::pending::<u8>()));
+
+        let first = poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
+        assert!(
+            first.is_pending(),
+            "a read nobody cancelled keeps waiting for its transport"
+        );
+        assert!(!cancellation.is_cancelled());
+        cancellation.cancel();
+
+        assert_eq!(waiting.await, None);
     }
 }

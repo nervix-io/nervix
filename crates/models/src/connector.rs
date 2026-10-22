@@ -6,9 +6,9 @@
 //!   nested connector by entity, the kinds that name each connector and entity pair, the
 //!   alterations of the ingestors that read each pair, the shape of the names an external system
 //!   gives the entities a source reads, and what a pair declares whatever its statement says:
-//!   header access, the metadata namespace, where a source executes, what a sink requires of its
-//!   emitter, and what a body references. Each connector's own module owns its client Model, its
-//!   entity Models, their modes and the rules its external names follow.
+//!   the header model of each side, the metadata namespace, where a source executes, what a sink
+//!   requires of its emitter, and what a body references. Each connector's own module owns its
+//!   client Model, its entity Models, their modes and the rules its external names follow.
 //! - **Depends on.** Validated names, expressions, schema types, and the acknowledgement, retry and
 //!   batching vocabulary the entity Models share.
 //! - **Must not know.** How a connector is planned, validated, hosted or driven, or any connector
@@ -24,11 +24,15 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+mod bounds;
 mod clickhouse;
 mod client;
 mod configured_client;
+mod deadline;
+mod declaration;
 mod entity_union;
 mod external_name;
+mod header_model;
 mod http;
 mod iceberg;
 mod kafka;
@@ -54,10 +58,11 @@ mod zeromq;
 use strum::{AsRefStr, Display, EnumIter, IntoStaticStr};
 
 pub use self::{
-    clickhouse::*, client::*, configured_client::*, external_name::ExternalNameError, http::*,
-    iceberg::*, kafka::*, mongodb::*, mqtt::*, mysql::*, nats::*, otel::*, postgres::*,
-    prometheus::*, pulsar::*, rabbitmq::*, redis::*, sentry::*, sink::*, source::*,
-    source_metadata::*, sqs::*, syslog::*, websockets::*, zeromq::*,
+    bounds::*, clickhouse::*, client::*, configured_client::*, deadline::*, declaration::*,
+    external_name::ExternalNameError, header_model::*, http::*, iceberg::*, kafka::*, mongodb::*,
+    mqtt::*, mysql::*, nats::*, otel::*, postgres::*, prometheus::*, pulsar::*, rabbitmq::*,
+    redis::*, sentry::*, sink::*, source::*, source_metadata::*, sqs::*, syslog::*, websockets::*,
+    zeromq::*,
 };
 pub(crate) use self::{entity_union::ALTERED_PAIR_CHECKED, source::AlteredIngestorSource};
 
@@ -126,5 +131,36 @@ impl ConnectorKind {
     /// How NSPL spells this kind.
     pub fn keyword(self) -> &'static str {
         self.into()
+    }
+
+    /// What every client of this connector declares. Application sessions reach the `CLIENT`
+    /// connector without a client Model, and an Iceberg sink writes through an object-store
+    /// client and commits through a catalog client, so neither has a client of its own.
+    pub const fn client(self) -> Option<ClientDeclaration> {
+        match self {
+            Self::Client | Self::Iceberg => None,
+            Self::Http => Some(<CreateClientHttp>::DECLARATION),
+            Self::Websockets => Some(<CreateClientWebsockets>::DECLARATION),
+            Self::Kafka => Some(<CreateClientKafka>::DECLARATION),
+            Self::Pulsar => Some(<CreateClientPulsar>::DECLARATION),
+            Self::RabbitMq => Some(<CreateClientRabbitMq>::DECLARATION),
+            Self::Redis => Some(<CreateClientRedis>::DECLARATION),
+            Self::Mqtt => Some(<CreateClientMqtt>::DECLARATION),
+            Self::Nats => Some(<CreateClientNats>::DECLARATION),
+            Self::ZeroMq => Some(<CreateClientZeroMq>::DECLARATION),
+            Self::Sqs => Some(<CreateClientSqs>::DECLARATION),
+            Self::Syslog => Some(<CreateClientSyslog>::DECLARATION),
+            Self::Prometheus => Some(<CreateClientPrometheus>::DECLARATION),
+            Self::Sentry => Some(<CreateClientSentry>::DECLARATION),
+            Self::Otel => Some(<CreateClientOtel>::DECLARATION),
+            Self::ClickHouse => Some(<CreateClientClickHouse>::DECLARATION),
+            Self::Postgres => Some(<CreateClientPostgres>::DECLARATION),
+            Self::MySql => Some(<CreateClientMySql>::DECLARATION),
+            Self::MongoDb => Some(<CreateClientMongoDb>::DECLARATION),
+            Self::S3 => Some(<CreateClientS3>::DECLARATION),
+            Self::Gcs => Some(<CreateClientGcs>::DECLARATION),
+            Self::AzureBlob => Some(<CreateClientAzureBlob>::DECLARATION),
+            Self::IcebergRest => Some(<CreateClientIcebergRest>::DECLARATION),
+        }
     }
 }

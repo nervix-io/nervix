@@ -31,18 +31,21 @@ use std::{
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
-    BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
+    BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceAckPolicy, SourceBatch,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
+    SourceResult, SourceResume,
 };
 use nervix_models::{ClientConfigEntry, KafkaPartitionSchedule, KafkaTopicName, Timestamp};
 use nervix_primitives::{
     sync::{Arc, watch},
-    time::{Instant, sleep_until},
+    task::JoinHandle,
+    time::{Instant, sleep_until, timeout},
 };
+use nervix_recovery::Discarded as _;
 use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
-    error::{KafkaError, RDKafkaErrorCode},
+    error::{KafkaError, KafkaResult, RDKafkaErrorCode},
     message::{Headers, Message as KafkaMessage},
     topic_partition_list::{Offset, TopicPartitionList},
 };
@@ -51,6 +54,13 @@ use tracing::{debug, warn};
 
 const KAFKA: &str = "kafka";
 const DOMAIN_ASSIGNMENT_RETRY: Duration = Duration::from_millis(100);
+
+/// How long a consumer-group commit waits for its coordinator's answer.
+///
+/// librdkafka keeps retrying a commit it could not send for as long as the group has no reachable
+/// coordinator, so the source stops waiting at this deadline and the commit fails. The commit stays
+/// the instance's one commit in flight, which the next commit waits for first.
+const COMMIT_ANSWER_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The next unread offset for one Kafka topic partition.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -169,6 +179,7 @@ impl KafkaDomainOffsetHost {
 pub enum KafkaSourceOffsetMode {
     ConsumerGroup {
         group_id: String,
+        commit: KafkaGroupCommit,
     },
     Domain {
         group_id: String,
@@ -177,13 +188,49 @@ pub enum KafkaSourceOffsetMode {
     },
 }
 
+impl KafkaSourceOffsetMode {
+    /// Whether the driver commits the positions it delivers on its own cadence.
+    fn driver_commits(&self) -> bool {
+        matches!(
+            self,
+            Self::ConsumerGroup {
+                commit: KafkaGroupCommit::DriverCadence,
+                ..
+            }
+        )
+    }
+}
+
+/// Who commits a consumer group's offsets, which the ingestor's acknowledgement mode decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KafkaGroupCommit {
+    /// `MODE NO ACK`: the driver commits the positions it delivered on its own cadence,
+    /// `auto.commit.interval.ms`, so acknowledging them confirms nothing on the transport.
+    /// Leaving the group commits what that cadence has not committed yet.
+    DriverCadence,
+    /// An `ACK` mode: the source commits each acknowledged batch's positions and acknowledging
+    /// returns once the group's coordinator answered the commit.
+    EachAcknowledgedBatch,
+}
+
+impl KafkaGroupCommit {
+    /// Who commits under `acknowledgement`.
+    pub fn for_acknowledgement(acknowledgement: SourceAckPolicy) -> Self {
+        match acknowledgement {
+            SourceAckPolicy::None => Self::DriverCadence,
+            SourceAckPolicy::Sequential { .. } | SourceAckPolicy::Parallel { .. } => {
+                Self::EachAcknowledgedBatch
+            }
+        }
+    }
+}
+
 /// The complete connector-owned plan for opening Kafka source instances.
 #[derive(Clone)]
 pub struct KafkaSourcePlan {
     pub config: Vec<ClientConfigEntry>,
     pub topic: KafkaTopicName,
     pub offset_mode: KafkaSourceOffsetMode,
-    pub enable_auto_commit: bool,
 }
 
 #[derive(Debug, Error)]
@@ -194,8 +241,15 @@ pub enum KafkaSourceError {
     Subscribe { topic: String },
     #[error("failed to build Kafka offset commit for topic '{topic}' partition {partition}")]
     BuildOffsetCommit { topic: String, partition: i32 },
-    #[error("failed to commit Kafka offsets")]
-    CommitOffset,
+    #[error("Kafka did not commit the offsets of consumer group '{group}'")]
+    CommitOffset { group: String },
+    #[error("Kafka offset commit task for consumer group '{group}' failed")]
+    CommitTask { group: String },
+    #[error(
+        "Kafka consumer group '{group}' did not answer an offset commit within {}",
+        humantime::format_duration(*deadline)
+    )]
+    CommitUnanswered { group: String, deadline: Duration },
     #[error("failed to build Kafka assignment for topic '{topic}' partition {partition}")]
     BuildAssignment { topic: String, partition: i32 },
     #[error("failed to assign Kafka partitions for topic '{topic}'")]
@@ -360,10 +414,12 @@ impl SourceMessage for KafkaSourceMessage {
 }
 
 pub struct KafkaSource {
-    consumer: StreamConsumer,
+    /// Shared with the blocking-pool job of a commit in flight, which keeps the consumer open
+    /// until librdkafka answers it.
+    consumer: Arc<StreamConsumer>,
     topic: nervix_models::KafkaTopicName,
     offset_mode: KafkaSourceOffsetMode,
-    enable_auto_commit: bool,
+    commits: GroupCommits,
     instance_index: u64,
     assignment: KafkaConsumerAssignment,
     observed_generation: Option<u64>,
@@ -375,10 +431,10 @@ impl SourceConnector for KafkaSource {
 
     async fn open(plan: &Self::Plan, instance_index: u64) -> SourceResult<Self> {
         let group_id = match &plan.offset_mode {
-            KafkaSourceOffsetMode::ConsumerGroup { group_id }
+            KafkaSourceOffsetMode::ConsumerGroup { group_id, .. }
             | KafkaSourceOffsetMode::Domain { group_id, .. } => group_id,
         };
-        let config = consumer_config(&plan.config, group_id, plan.enable_auto_commit);
+        let config = consumer_config(&plan.config, group_id, plan.offset_mode.driver_commits());
         let consumer = config
             .create()
             .map_err(|source| {
@@ -386,10 +442,10 @@ impl SourceConnector for KafkaSource {
             })
             .change_context(SourceError::Open { connector: KAFKA })?;
         Ok(Self {
-            consumer,
+            consumer: Arc::new(consumer),
             topic: plan.topic.clone(),
             offset_mode: plan.offset_mode.clone(),
-            enable_auto_commit: plan.enable_auto_commit,
+            commits: GroupCommits::new(COMMIT_ANSWER_DEADLINE),
             instance_index,
             assignment: KafkaConsumerAssignment::default(),
             observed_generation: None,
@@ -410,10 +466,11 @@ impl SourceConnector for KafkaSource {
 
     async fn suspend(&mut self) -> SourceResult<()> {
         match &self.offset_mode {
-            KafkaSourceOffsetMode::ConsumerGroup { .. } => {
-                self.consumer.unsubscribe();
-                Ok(())
-            }
+            KafkaSourceOffsetMode::ConsumerGroup { group_id, commit } => self
+                .commits
+                .leave_group(&self.consumer, group_id, *commit)
+                .await
+                .change_context(SourceError::Suspend { connector: KAFKA }),
             KafkaSourceOffsetMode::Domain { .. } => self
                 .assignment
                 .clear(&self.consumer, self.topic.as_str())
@@ -461,10 +518,11 @@ impl SourceConnector for KafkaSource {
 
     async fn close(&mut self) -> SourceResult<()> {
         match &self.offset_mode {
-            KafkaSourceOffsetMode::ConsumerGroup { .. } => {
-                self.consumer.unsubscribe();
-                Ok(())
-            }
+            KafkaSourceOffsetMode::ConsumerGroup { group_id, commit } => self
+                .commits
+                .leave_group(&self.consumer, group_id, *commit)
+                .await
+                .change_context(SourceError::Close { connector: KAFKA }),
             KafkaSourceOffsetMode::Domain { .. } => self
                 .assignment
                 .clear(&self.consumer, self.topic.as_str())
@@ -481,6 +539,7 @@ impl BrokerSourceConnector for KafkaSource {
     async fn next_batch(
         &mut self,
         request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let first = match &mut self.offset_mode {
             KafkaSourceOffsetMode::Domain { rebalance, .. } => {
@@ -493,9 +552,22 @@ impl BrokerSourceConnector for KafkaSource {
                         };
                     }
                     message = self.consumer.recv() => message,
+                    () = cancellation.cancelled() => {
+                        return Ok(SourceBatch::Interrupted {
+                            gathered: Vec::new(),
+                        });
+                    }
                 }
             }
-            KafkaSourceOffsetMode::ConsumerGroup { .. } => self.consumer.recv().await,
+            KafkaSourceOffsetMode::ConsumerGroup { .. } => {
+                let Some(message) = cancellation.unless_cancelled(self.consumer.recv()).await
+                else {
+                    return Ok(SourceBatch::Interrupted {
+                        gathered: Vec::new(),
+                    });
+                };
+                message
+            }
         };
         let first = first
             .map_err(|source| self.receive_failure(source))
@@ -531,6 +603,9 @@ impl BrokerSourceConnector for KafkaSource {
                         }
                     }
                 }
+                () = cancellation.cancelled() => {
+                    return Ok(SourceBatch::Interrupted { gathered: messages });
+                }
             }
         }
         Ok(SourceBatch::Messages(messages))
@@ -539,10 +614,23 @@ impl BrokerSourceConnector for KafkaSource {
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         let positions = latest_positions(positions);
         match &self.offset_mode {
-            KafkaSourceOffsetMode::ConsumerGroup { .. } if self.enable_auto_commit => Ok(()),
-            KafkaSourceOffsetMode::ConsumerGroup { .. } => self
-                .commit_consumer_offsets(&positions)
-                .change_context(SourceError::Acknowledge { connector: KAFKA }),
+            // The driver commits the positions it delivered on its own cadence, so acknowledging
+            // them confirms nothing on the transport.
+            KafkaSourceOffsetMode::ConsumerGroup {
+                commit: KafkaGroupCommit::DriverCadence,
+                ..
+            } => Ok(()),
+            KafkaSourceOffsetMode::ConsumerGroup {
+                group_id,
+                commit: KafkaGroupCommit::EachAcknowledgedBatch,
+            } => {
+                let request = GroupCommitRequest::acknowledged(&positions)
+                    .change_context(SourceError::Acknowledge { connector: KAFKA })?;
+                self.commits
+                    .commit(&self.consumer, group_id, request)
+                    .await
+                    .change_context(SourceError::Acknowledge { connector: KAFKA })
+            }
             KafkaSourceOffsetMode::Domain { offsets, .. } => {
                 for position in positions {
                     nervix_primitives::task::consume_budget().await;
@@ -655,33 +743,6 @@ impl KafkaSource {
         Ok(ready)
     }
 
-    fn commit_consumer_offsets(
-        &self,
-        positions: &[KafkaOffsetPosition],
-    ) -> Result<(), Report<KafkaSourceError>> {
-        let mut offsets = TopicPartitionList::new();
-        for position in positions {
-            offsets
-                .add_partition_offset(
-                    &position.topic,
-                    position.partition,
-                    Offset::Offset(position.offset),
-                )
-                .map_err(|source| {
-                    Report::new(KafkaSourceError::BuildOffsetCommit {
-                        topic: position.topic.clone(),
-                        partition: position.partition,
-                    })
-                    .attach_printable(source.to_string())
-                })?;
-        }
-        self.consumer
-            .commit(&offsets, CommitMode::Async)
-            .map_err(|source| {
-                Report::new(KafkaSourceError::CommitOffset).attach_printable(source.to_string())
-            })
-    }
-
     fn assigned_partitions(&self) -> Result<AssignedPartitions, Report<KafkaSourceError>> {
         let assignment = self.consumer.assignment().map_err(|source| {
             Report::new(KafkaSourceError::ReadAssignment {
@@ -710,6 +771,144 @@ impl KafkaSource {
                 })
                 .attach_printable(source.to_string())
             })
+    }
+}
+
+/// What one consumer-group commit commits.
+enum GroupCommitRequest {
+    /// The latest acknowledged offset of each partition of an acknowledged batch.
+    Acknowledged(TopicPartitionList),
+    /// The positions the driver delivered since its last commit.
+    Delivered,
+}
+
+impl GroupCommitRequest {
+    /// The commit of an acknowledged batch's `positions`, each the next offset of its partition.
+    fn acknowledged(positions: &[KafkaOffsetPosition]) -> Result<Self, Report<KafkaSourceError>> {
+        let mut offsets = TopicPartitionList::new();
+        for position in positions {
+            offsets
+                .add_partition_offset(
+                    &position.topic,
+                    position.partition,
+                    Offset::Offset(position.offset),
+                )
+                .map_err(|source| {
+                    Report::new(source).change_context(KafkaSourceError::BuildOffsetCommit {
+                        topic: position.topic.clone(),
+                        partition: position.partition,
+                    })
+                })?;
+        }
+        Ok(Self::Acknowledged(offsets))
+    }
+
+    /// Commits through `consumer` and returns the coordinator's answer.
+    ///
+    /// librdkafka's synchronous commit parks the calling thread until the coordinator answers.
+    fn commit(self, consumer: &StreamConsumer) -> KafkaResult<()> {
+        match self {
+            Self::Acknowledged(offsets) => consumer.commit(&offsets, CommitMode::Sync),
+            Self::Delivered => {
+                let committed = consumer.commit_consumer_state(CommitMode::Sync);
+                match committed {
+                    // The driver delivered nothing since its last commit.
+                    Err(KafkaError::ConsumerCommit(RDKafkaErrorCode::NoOffset)) => Ok(()),
+                    other => other,
+                }
+            }
+        }
+    }
+}
+
+/// One source instance's consumer-group commits, which run one at a time.
+///
+/// A commit parks a blocking-pool thread until its coordinator answers, and the source waits for
+/// that answer at most `deadline`. A commit whose answer outlasts the deadline stays in flight
+/// until librdkafka answers it, and the next commit waits for it first, so an instance never parks
+/// more than one thread.
+struct GroupCommits {
+    deadline: Duration,
+    /// The commit whose answer outlasted its deadline, still owned by librdkafka.
+    unanswered: Option<JoinHandle<KafkaResult<()>>>,
+}
+
+impl GroupCommits {
+    fn new(deadline: Duration) -> Self {
+        Self {
+            deadline,
+            unanswered: None,
+        }
+    }
+
+    /// Commits `request` for consumer group `group_id` through `consumer`, and returns once the
+    /// group's coordinator answered it, or fails when the deadline passes first.
+    async fn commit(
+        &mut self,
+        consumer: &Arc<StreamConsumer>,
+        group_id: &str,
+        request: GroupCommitRequest,
+    ) -> Result<(), Report<KafkaSourceError>> {
+        if let Some(mut unanswered) = self.unanswered.take() {
+            let earlier = timeout(self.deadline, &mut unanswered).await;
+            let Ok(earlier) = earlier else {
+                self.unanswered = Some(unanswered);
+                return Err(self.unanswered_failure(group_id));
+            };
+            earlier.discarded(
+                "the acknowledgement or leave that started the commit already failed when its \
+                 deadline passed, so a late answer owes nothing",
+            );
+        }
+        let consumer = consumer.clone();
+        let mut pending =
+            nervix_primitives::task::spawn_blocking(move || request.commit(&consumer));
+        let answered = timeout(self.deadline, &mut pending).await;
+        let Ok(joined) = answered else {
+            self.unanswered = Some(pending);
+            return Err(self.unanswered_failure(group_id));
+        };
+        let committed = joined.map_err(|source| {
+            Report::new(source).change_context(KafkaSourceError::CommitTask {
+                group: group_id.to_string(),
+            })
+        })?;
+        committed.map_err(|source| {
+            Report::new(source).change_context(KafkaSourceError::CommitOffset {
+                group: group_id.to_string(),
+            })
+        })
+    }
+
+    /// Leaves consumer group `group_id` through `consumer`, first committing what `commit` leaves
+    /// outstanding.
+    ///
+    /// An acknowledged group has nothing outstanding: acknowledging a batch returned only once its
+    /// commit was answered. The driver's cadence leaves the positions it delivered since its last
+    /// commit, which are committed and answered before the group can hand the partitions to
+    /// another member. A failed commit is returned once the consumer left the group all the same.
+    async fn leave_group(
+        &mut self,
+        consumer: &Arc<StreamConsumer>,
+        group_id: &str,
+        commit: KafkaGroupCommit,
+    ) -> Result<(), Report<KafkaSourceError>> {
+        let committed = match commit {
+            KafkaGroupCommit::DriverCadence => {
+                self.commit(consumer, group_id, GroupCommitRequest::Delivered)
+                    .await
+            }
+            KafkaGroupCommit::EachAcknowledgedBatch => Ok(()),
+        };
+        consumer.unsubscribe();
+        committed
+    }
+
+    fn unanswered_failure(&self, group_id: &str) -> Report<KafkaSourceError> {
+        Report::new(KafkaSourceError::CommitUnanswered {
+            group: group_id.to_string(),
+            deadline: self.deadline,
+        })
     }
 }
 
@@ -1109,6 +1308,36 @@ mod tests {
         assignment
     }
 
+    /// Both KAFKA TOPIC sides declare ordered repeats with exact names: the record headers a
+    /// sink writes keep every write in the order written, and a reader of the produced record
+    /// visits them in that order, a repeated name once for each of its values.
+    #[test]
+    fn written_headers_read_back_in_write_order_with_every_repeat() {
+        let mut written = Vec::new();
+        for (name, value) in [
+            ("trace", "a"),
+            ("Tenant", "x"),
+            ("trace", "b"),
+            ("tenant", "y"),
+        ] {
+            written.push((name.to_string(), value.to_string()));
+        }
+        let message = rdkafka::message::OwnedMessage::new(
+            Some(b"{}".to_vec()),
+            None,
+            "events".to_string(),
+            rdkafka::Timestamp::NotAvailable,
+            0,
+            0,
+            Some(crate::KafkaSink::owned_headers(&written)),
+        );
+        let message =
+            KafkaSourceMessage::from_message(message).assured("offset zero has a next offset");
+        let mut visited = Vec::new();
+        message.visit(&mut |name, value| visited.push(format!("{name}={value}")));
+        assert_eq!(visited, ["trace=a", "Tenant=x", "trace=b", "tenant=y"]);
+    }
+
     #[test]
     fn a_consumer_never_lets_the_broker_create_a_topic_whatever_the_client_sets() {
         let entries = [
@@ -1316,3 +1545,19 @@ mod tests {
         assert!(!assigned.contains(&other_topic_start));
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "source_commit_tests.rs"]
+mod commit_tests;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "source_read_tests.rs"]
+mod read_tests;

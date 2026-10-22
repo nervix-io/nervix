@@ -41,7 +41,9 @@ impl SqsIngestorStartPlan {
         let Some(dns) = runtime.dns() else {
             return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
         };
-        let connector = SqsSourcePlan::connect(&resolved.entries, &queue, dns.clone())
+        // The plan builds its client without a request; each instance looks the queue up when it
+        // resumes, so an unreachable service is a transient source failure, not a failed start.
+        let connector = SqsSourcePlan::new(&resolved.entries, queue, dns.clone())
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerSourceStart {

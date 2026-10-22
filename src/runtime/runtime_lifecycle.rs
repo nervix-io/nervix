@@ -164,6 +164,7 @@ impl Runtime {
                 node_quiesce_counters: DashMap::default(),
                 entity_gate_holds: Arc::new(DashMap::default()),
                 frozen_ownership_handoff_entities: Arc::new(DashMap::default()),
+                entity_gate_tasks: EntityGateTasks::default(),
                 active_domain_alters: Arc::new(DashMap::default()),
                 state_identities: DashMap::default(),
                 state_replication_routing: Default::default(),
@@ -297,6 +298,22 @@ impl Runtime {
         super::branch_task_stop_timeout(self.inner.domain_drain_timeout)
     }
 
+    /// When the emitters of a domain execution that stops now finish their sinks: the domain drain
+    /// timeout from now, the same bound a stop command gives an emitter.
+    pub(in crate::runtime) fn emitter_finish_deadline(&self) -> Instant {
+        self.emitter_finish_deadline_within(self.inner.domain_drain_timeout)
+    }
+
+    /// When the emitters of a domain execution that stops now finish their sinks, no later than
+    /// `limit` from now.
+    fn emitter_finish_deadline_within(&self, limit: Duration) -> Instant {
+        let budget = limit.min(self.inner.domain_drain_timeout);
+        Instant::now().checked_add(budget).assured(
+            "the domain drain timeout bounds the budget, and it is the sixty-second default or a \
+             scenario's own short drain, which end within the monotonic clock's range",
+        )
+    }
+
     pub(crate) fn entity_gate_deadline(&self) -> Duration {
         self.inner.entity_gate_deadline
     }
@@ -323,6 +340,13 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn take_handoff_engagement_transport_failure(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .take_handoff_engagement_transport_failure(domain)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) fn take_armed_schedule_publication_fault(&self, domain: &DomainName) -> bool {
         self.inner
             .fault_injection
@@ -344,6 +368,32 @@ impl Runtime {
         self.inner
             .fault_injection
             .take_shutdown_cordon_release_delay(stopping_node)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_standalone_transaction_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        boundary: crate::fault_injection::StandaloneTransactionBoundary,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_standalone_transaction_if_armed(node, domain, boundary)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_domain_resume_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        boundary: crate::fault_injection::DomainResumeBoundary,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_domain_resume_if_armed(node, domain, boundary)
+            .await;
     }
 
     #[cfg(feature = "testing")]
@@ -411,10 +461,14 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
-    pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
+    pub(crate) async fn pause_backup_cut_if_armed(
+        &self,
+        domain: &DomainName,
+        boundary: crate::fault_injection::BackupCutBoundary,
+    ) {
         self.inner
             .fault_injection
-            .pause_backup_cut_if_armed(domain)
+            .pause_backup_cut_if_armed(domain, boundary)
             .await;
     }
 
@@ -503,11 +557,46 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_command_finalization_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_command_finalization_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_relocation_publication_if_armed(&self, domain: &DomainName) {
         self.inner
             .fault_injection
             .pause_relocation_publication_if_armed(domain)
             .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_relocation_commit_refusal(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .take_relocation_commit_refusal(domain)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_model_publication_refusal(
+        &self,
+        domain: &DomainName,
+    ) -> Option<crate::fault_injection::ModelPublicationRefusalKind> {
+        self.inner
+            .fault_injection
+            .take_model_publication_refusal(domain)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_model_pause_release_refusal(
+        &self,
+        domain: &DomainName,
+    ) -> Option<crate::fault_injection::ModelPublicationRefusalKind> {
+        self.inner
+            .fault_injection
+            .take_model_pause_release_refusal(domain)
     }
 
     #[cfg(feature = "testing")]
@@ -541,6 +630,22 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_ownership_handoff_activation_if_armed(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .pause_ownership_handoff_activation_if_armed(domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_graceful_drain_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_graceful_drain_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) fn scheduler_mode(&self) -> crate::registry::SchedulerMode {
         self.inner.fault_injection.scheduler_mode()
     }
@@ -560,12 +665,18 @@ impl Runtime {
         self.inner.events.report_error(message);
     }
 
+    /// Stops `execution` and waits for its tasks. Every emitter task the stop ends finishes its
+    /// sink by `emitter_finish_deadline`, which it learns before the shutdown is signalled.
     pub(in crate::runtime) async fn stop_domain_execution(
         &self,
         domain: &DomainName,
         execution: DomainExecution,
+        emitter_finish_deadline: Instant,
     ) {
         self.inner.endpoint_intake_routes.withdraw_domain(domain);
+        for emitter_task in execution.emitter_tasks.values() {
+            emitter_task.finish_by(emitter_finish_deadline);
+        }
         execution.shutdown.send_replace(true);
         for (relay, task) in execution.relay_owner_tasks {
             nervix_primitives::task::consume_budget().await;
@@ -680,7 +791,8 @@ impl Runtime {
         self.stop_domain_ingestors(domain).await;
         if let Some((_, mut execution)) = self.inner.executions.remove(domain) {
             execution.routing.deactivate();
-            self.stop_domain_execution(domain, execution).await;
+            self.stop_domain_execution(domain, execution, self.emitter_finish_deadline())
+                .await;
         }
     }
 
@@ -708,7 +820,11 @@ impl Runtime {
         }
     }
 
-    pub(crate) async fn shutdown(&self) {
+    /// Stops every domain's execution and the runtime services behind them. `left` is the time the
+    /// node's shutdown leaves the runtime: an emitter finishes its sink within it, and within the
+    /// domain drain timeout.
+    pub(crate) async fn shutdown(&self, left: Duration) {
+        let emitter_finish_deadline = self.emitter_finish_deadline_within(left);
         self.end_client_ingestor_endpoints(ClientProducerEndReason::ShuttingDown)
             .await;
         let domains = self
@@ -723,7 +839,8 @@ impl Runtime {
         for domain in &domains {
             if let Some((_, mut execution)) = self.inner.executions.remove(domain) {
                 execution.routing.deactivate();
-                self.stop_domain_execution(domain, execution).await;
+                self.stop_domain_execution(domain, execution, emitter_finish_deadline)
+                    .await;
             }
             self.clear_domain_ingestor_quiescence(domain);
         }
@@ -733,6 +850,13 @@ impl Runtime {
         // the replication routes their checkpoints are offered through are still installed.
         self.inner.branch_snapshot_tasks.close();
         self.inner.branch_snapshot_tasks.wait().await;
+        // Nothing dispatches through a gate, admits through a quiesced ingestor or publishes past
+        // a freeze any more, so every entity gate this node holds ends here with its runtime. A
+        // lease that a handoff left held until a deadline past this node's stop would otherwise
+        // keep its hold, and the ingestor controls and metrics that hold retains, after the node
+        // stopped.
+        self.inner.entity_gate_tasks.close();
+        self.inner.entity_gate_tasks.wait().await;
         self.inner.domain_routings.clear();
         self.inner.endpoint_intake_routes.clear();
         self.inner.compiled_domain_udfs.clear();
@@ -755,42 +879,6 @@ impl Runtime {
         self.inner.restored_materialized_stream_states.clear();
         self.inner.replicated_window_processor_states.clear();
         self.inner.replicated_branch_aggregated_states.clear();
-    }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "running tasks borrow retained node services or await their selected \
-                      acknowledgement root"
-        )
-    )]
-    pub(in crate::runtime) async fn await_ack_completion(
-        shutdown_rx: &mut watch::Receiver<bool>,
-        mut completion: AckCompletion,
-        timeout_duration: Duration,
-    ) -> Option<AckOutcome> {
-        loop {
-            nervix_primitives::select! {
-                // A signalled stop and a dropped sender both end this wait, so the outcome
-                // carries nothing the caller could act on differently.
-                _ = shutdown_rx.changed() => {
-                    return None;
-                }
-                progress = nervix_primitives::time::timeout(timeout_duration, completion.wait_for_progress()) => {
-                    match progress {
-                        Ok(AckProgress::Alive) => {}
-                        Ok(AckProgress::Complete(outcome)) => return Some(outcome),
-                        Err(_) => {
-                            return Some(AckOutcome::NoAck(format!(
-                                "ack timeout elapsed after {}",
-                                humantime::format_duration(timeout_duration)
-                            )));
-                        }
-                    }
-                }
-            }
-        }
     }
 
     pub(in crate::runtime) async fn await_shutdown_task(

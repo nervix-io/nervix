@@ -20,26 +20,31 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
+        DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    PositionClass, QueueName, RetryPolicy, SinkBody, SinkClientReference, SinkEntity,
-    SinkReference, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
+    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    LocatorDeclaration, LocatorName, OptionDeclaration, PositionClass, QueueName, RetryPolicy,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
-configured_client!(RabbitMq: unpooled CreateClientRabbitMq => RabbitMqConfigEntry);
+configured_client!(RabbitMq: unpooled, config NervixWithAddressQuery, CreateClientRabbitMq => RabbitMqConfigEntry);
 
 /// The longest queue name AMQP 0-9-1 carries, in bytes.
 const RABBITMQ_QUEUE_MAX: usize = 255;
 
 external_names! {
     /// A RabbitMQ queue: 1 to 255 bytes, the length AMQP 0-9-1 carries a queue name in.
-    pub struct RabbitMqQueueName => rabbitmq_queue_rule;
+    pub struct RabbitMqQueueName => rabbitmq_queue_rule, label "rabbitmq_queue", example "orders";
 }
 
 fn rabbitmq_queue_rule(text: &str) -> Result<(), ExternalNameError> {
@@ -58,13 +63,95 @@ pub struct RabbitMqQueueSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a RABBITMQ QUEUE ingestor holds and how long it waits.
+const RABBITMQ_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "deliveries the broker sends ahead of their acknowledgement",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Items {
+                count: 1,
+                unit: "delivery",
+            },
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, address attempts, TLS, the AMQP handshake, \
+                   channel open and consume",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "a silent connection",
+            bound: WaitBound::Driver("twice the negotiated heartbeat"),
+        },
+    ],
+    driver_limits: &["A frame above the negotiated frame_max ends the connection."],
+};
+
+/// What the connector of a RABBITMQ QUEUE emitter holds and how long it waits.
+const RABBITMQ_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[
+        DeclaredBuffer {
+            holds: "publishes awaiting confirmation",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("ACK PARALLEL MAX, 1 under ACK SEQUENTIAL"),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "unroutable messages the broker returns under NO ACK",
+            bound: BufferBound::Unbounded,
+        },
+    ],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, address attempts, TLS, the AMQP handshake, \
+                   channel open, confirm select and the queue check",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "a publish",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "a confirmation under ACK",
+            bound: WaitBound::Clause("ACK TIMEOUT"),
+        },
+        DeclaredWait {
+            wait: "the round trip that ends a publish under NO ACK",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
+        },
+    ],
+    driver_limits: &["A frame above the negotiated frame_max ends the connection."],
+};
+
 impl SourceEntity for RabbitMqQueueSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
+        // An AMQP field table holds one value per name, in ascending order of name.
+        headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::RabbitMq),
         position_class: PositionClass::BrokerRedelivered,
+        acknowledgement_confirmation: AcknowledgementConfirmation::Written,
+        delivery: &[DeclaredDelivery::ACK_SEQUENTIAL],
+        quiesce: &[DeclaredQuiesce::SUSPEND],
+        locator: Some(LocatorDeclaration {
+            keywords: "QUEUE",
+            name: LocatorName::External(RabbitMqQueueName::DECLARATION),
+        }),
+        options: &[OptionDeclaration::INSTANCES],
+        bounds: RABBITMQ_SOURCE_BOUNDS,
     };
 }
 
@@ -79,10 +166,6 @@ impl SourceBody for RabbitMqQueueSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(quiesce, IngestQuiesceMode::Suspend)
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -137,19 +220,27 @@ pub struct RabbitMqQueueSink {
 
 impl SinkEntity for RabbitMqQueueSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: true,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        // An AMQP field table holds one value per name, in ascending order of name.
+        headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
+        reference: SinkReferenceKind::Client(ConnectorKind::RabbitMq),
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[
+            EmitterPublishingModeKind::NoAck,
+            EmitterPublishingModeKind::BrokerAck,
+        ],
+        locator: Some(LocatorDeclaration {
+            keywords: "QUEUE",
+            name: LocatorName::Unquoted {
+                label: "queue_name",
+            },
+        }),
+        options: &[],
+        envelope: &[],
+        properties: &[],
+        bounds: RABBITMQ_SINK_BOUNDS,
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(
-            mode,
-            EmitterPublishingMode::NoAck { .. } | EmitterPublishingMode::BrokerAck { .. }
-        )
-    }
 }
 
 impl SinkBody for RabbitMqQueueSink {

@@ -10,7 +10,7 @@
 //!   client's request, redirect and reconnect policy.
 
 use std::{
-    collections::BTreeMap, future::Future, io, net::SocketAddr, path::PathBuf, time::Duration,
+    collections::BTreeMap, fmt, future::Future, io, net::SocketAddr, path::PathBuf, time::Duration,
 };
 
 use error_stack::Report;
@@ -152,6 +152,51 @@ pub(crate) enum StatusRequestError {
         message: String,
         diagnostics: Vec<Diagnostic>,
     },
+}
+
+/// Where a status request ended without the node's status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StatusRequestEnding {
+    /// The request's deadline passed while this operation was still pending.
+    Pending(StatusOperation),
+    /// This operation failed.
+    Failed(StatusOperation),
+    /// The request could not be built, so it never reached the node.
+    NotSent,
+}
+
+impl fmt::Display for StatusRequestEnding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pending(operation) => write!(formatter, "{operation} pending at its deadline"),
+            Self::Failed(operation) => write!(formatter, "{operation} failed"),
+            Self::NotSent => formatter.write_str("request not built"),
+        }
+    }
+}
+
+impl StatusRequestError {
+    /// Where the request this failure ended was: the operation it was in, and whether that
+    /// operation failed or was still pending when the deadline passed.
+    pub(crate) fn ending(&self) -> StatusRequestEnding {
+        match self {
+            Self::DeadlinePassed { operation, .. } => StatusRequestEnding::Pending(*operation),
+            Self::Connect(_) => StatusRequestEnding::Failed(StatusOperation::Connect),
+            Self::OpenSession(_) => StatusRequestEnding::Failed(StatusOperation::OpenSession),
+            Self::SendCommand => StatusRequestEnding::Failed(StatusOperation::SendCommand),
+            Self::ReceiveResponse(_)
+            | Self::SessionEnded
+            | Self::UndecodableFrame
+            | Self::UnexpectedReply { .. }
+            | Self::Unsuccessful { .. } => {
+                StatusRequestEnding::Failed(StatusOperation::ReceiveResponse)
+            }
+            Self::ConfigureEndpoint(_)
+            | Self::ReadTlsAuthority { .. }
+            | Self::Authorization(_)
+            | Self::EncodeRequest => StatusRequestEnding::NotSent,
+        }
+    }
 }
 
 /// How a status request secures its connection to the node.

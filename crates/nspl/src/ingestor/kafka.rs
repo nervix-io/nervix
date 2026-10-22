@@ -34,16 +34,13 @@ pub(super) fn topic_body<'src>()
         .ignore_then(kw(Identifier::By))
         .ignore_then(choice((
             kw_phrase2(Identifier::Consumer, Identifier::Group)
-                .ignore_then(external_name(
-                    "kafka_consumer_group",
-                    KafkaConsumerGroupName::parse,
-                ))
+                .ignore_then(external_name::<KafkaConsumerGroupName>())
                 .map(KafkaOffsetMode::ConsumerGroup),
             kw(Identifier::Domain).to(KafkaOffsetMode::Domain),
         )));
     client_ref()
         .then_ignore(kw(Identifier::Topic))
-        .then(external_name("kafka_topic", KafkaTopicName::parse))
+        .then(external_name::<KafkaTopicName>())
         .then(offset_mode)
         .then(optional_instances())
         .then_ignore(kw(Identifier::Mode))

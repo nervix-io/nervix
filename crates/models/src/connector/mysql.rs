@@ -15,14 +15,22 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use super::{configured_client::configured_client, entity_union::connector_sinks};
+use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
+    configured_client::configured_client,
+    entity_union::connector_sinks,
+};
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkValueMapping, SinkValueMappings, TableName,
+    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkReferenceKind, SinkValueMapping, SinkValueMappings, TableName,
 };
 
-configured_client!(MySql: pooled CreateClientMySql => MySqlConfigEntry);
+configured_client!(MySql: pooled, config NervixWithAddressQuery, CreateClientMySql => MySqlConfigEntry);
 
 pub type MySqlValueMapping = SinkValueMapping;
 
@@ -46,18 +54,56 @@ pub enum MySqlConflictAction {
     DoUpdate,
 }
 
+/// What the connector of a MYSQL TABLE holds and how long it waits.
+const MYSQL_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "connections the pool holds",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("POOL SIZE MAX"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[DeclaredWait {
+        wait: "connection, its handshake and an insert",
+        bound: WaitBound::Unbounded,
+    }],
+    driver_limits: &["The driver has no connect, read or write timeout."],
+};
+
 impl SinkEntity for MySqlTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
-        requires_codec: false,
-        batch_requirement: EmitterBatchRequirement::Required,
+        headers: None,
+        reference: SinkReferenceKind::Client(ConnectorKind::MySql),
+        body: EmitterBodyForm::Values,
+        batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        locator: Some(LocatorDeclaration {
+            keywords: "INSERT TO TABLE",
+            name: LocatorName::Unquoted {
+                label: "table_name",
+            },
+        }),
+        options: &[OptionDeclaration {
+            keywords: "ON CONFLICT",
+            presence: OptionPresence::Optional { default: None },
+            form: OptionForm::Choice(&[
+                OptionChoice {
+                    name: "DO NOTHING",
+                    value: None,
+                    example: "ON CONFLICT DO NOTHING",
+                },
+                OptionChoice {
+                    name: "DO UPDATE",
+                    value: None,
+                    example: "ON CONFLICT DO UPDATE",
+                },
+            ]),
+        }],
+        envelope: &[],
+        properties: &[],
+        bounds: MYSQL_BOUNDS,
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::RequestAck { .. })
-    }
 }
 
 impl SinkBody for MySqlTableSink {

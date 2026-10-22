@@ -31,6 +31,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
   NO_COLOR: "1"
@@ -46,7 +47,8 @@ jobs:
   bolero-random:
     name: bolero-random
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 60
+    # Run 39649567371 took 47m10s; 90 minutes covers 1.5 times that duration plus publication.
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -54,14 +56,15 @@ jobs:
           ref: ${{ inputs.tested-sha || github.sha }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -106,6 +109,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Runner diagnostics before Run runner tests and every ordinary Bolero property
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: run-runner-tests-and-every-ordinary-bolero-property
+
       - name: Run runner tests and every ordinary Bolero property
         run: |
           just toolchains-install
@@ -133,10 +141,9 @@ jobs:
         # Each shard runs whole harnesses of the inventory; `just fuzz-plan 3` shows the division.
         shard: [1, 2, 3]
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # The single job that ran all 159 targets took 209 to 258 minutes: discovery, both server
-    # sanitizer builds with one Cargo job, 132 minutes of campaigns, qualification and uploads.
-    # A shard builds at most one server harness and runs about a third of the campaigns.
-    timeout-minutes: 180
+    # The 205-target plan estimates up to 114 minutes per shard before discovery, qualification
+    # and uploads. Fund 1.5 times that estimate plus their overhead on a slow runner.
+    timeout-minutes: 240
     permissions:
       contents: read
     steps:
@@ -146,8 +153,9 @@ jobs:
           ref: ${{ inputs.tested-sha || github.sha }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Setup pinned sanitizer nightly
@@ -159,7 +167,7 @@ jobs:
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -214,19 +222,39 @@ jobs:
           python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
 
+      - name: Runner diagnostics before Install pinned cargo-bolero
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: install-pinned-cargo-bolero
+
       - name: Install pinned cargo-bolero
         run: just install-cargo-bolero
+
+      - name: Runner diagnostics before Discover every registered target
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: discover-every-registered-target
 
       - name: Discover every registered target
         run: |
           just toolchains-install
           just validate-bolero
 
+      - name: Runner diagnostics before Prepare this shard's declared server harnesses
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: prepare-this-shard-s-declared-server-harnesses
+
       - name: Prepare this shard's declared server harnesses
         env:
           # One Cargo build job bounds the instrumented server build's compiler memory.
           CARGO_BUILD_JOBS: "1"
         run: just prepare-bolero-shard ${{ matrix.shard }}/${{ strategy.job-total }}
+
+      - name: Runner diagnostics before Run this shard's sanitizer libFuzzer targets and qualify failures
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: run-this-shard-s-sanitizer-libfuzzer-targets-and-qualify-failures
 
       - name: Run this shard's sanitizer libFuzzer targets and qualify failures
         run: just coverage-bolero 30 ${{ matrix.shard }}/${{ strategy.job-total }}
@@ -314,11 +342,11 @@ jobs:
         with:
           ref: ${{ inputs.tested-sha || github.sha }}
 
-      # The justfile reads the repository toolchain with toml-cli whenever it loads.
+      # The justfile reads the repository toolchain with Python's TOML parser when it loads.
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli
+          tool: just@latest
 
       - name: Download every shard's completion evidence
         uses: actions/download-artifact@v4

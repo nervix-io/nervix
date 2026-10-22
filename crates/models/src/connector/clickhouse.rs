@@ -14,14 +14,18 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use super::{configured_client::configured_client, entity_union::connector_sinks};
+use super::{
+    bounds::{DeadlineKey, DeclaredBounds, DeclaredWait, OmittedDeadline, WaitBound},
+    configured_client::configured_client,
+    entity_union::connector_sinks,
+};
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkValueMapping, SinkValueMappings, TableName,
+    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    EmitterPublishingModeKind, LocatorDeclaration, LocatorName, SinkBody, SinkClientReference,
+    SinkEntity, SinkReference, SinkReferenceKind, SinkValueMapping, SinkValueMappings, TableName,
 };
 
-configured_client!(ClickHouse: unpooled CreateClientClickHouse => ClickHouseConfigEntry);
+configured_client!(ClickHouse: unpooled, config Nervix, CreateClientClickHouse => ClickHouseConfigEntry);
 
 pub type ClickHouseValueMapping = SinkValueMapping;
 
@@ -35,18 +39,38 @@ pub struct ClickHouseTableSink {
     pub values: Vec<ClickHouseValueMapping>,
 }
 
+/// What the connector of a CLICKHOUSE TABLE holds and how long it waits.
+const CLICKHOUSE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[],
+    waits: &[DeclaredWait {
+        wait: "an insert: connection, TLS, upload and the response",
+        bound: WaitBound::Key {
+            key: DeadlineKey::Timeout,
+            omitted: OmittedDeadline::Unbounded,
+        },
+    }],
+    driver_limits: &[],
+};
+
 impl SinkEntity for ClickHouseTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
-        requires_codec: false,
-        batch_requirement: EmitterBatchRequirement::Required,
+        headers: None,
+        reference: SinkReferenceKind::Client(ConnectorKind::ClickHouse),
+        body: EmitterBodyForm::Values,
+        batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        locator: Some(LocatorDeclaration {
+            keywords: "INSERT TO TABLE",
+            name: LocatorName::Unquoted {
+                label: "table_name",
+            },
+        }),
+        options: &[],
+        envelope: &[],
+        properties: &[],
+        bounds: CLICKHOUSE_BOUNDS,
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::RequestAck { .. })
-    }
 }
 
 impl SinkBody for ClickHouseTableSink {

@@ -662,6 +662,15 @@ mod tests {
     /// on how rows were grouped into runs, which archive groups change.
     const MERGED_OUTPUT: &str = "mean_latency";
 
+    /// The archive group limit that seals every row as a group of its own.
+    const ROW_GROUP_LIMIT: u64 = 64;
+
+    /// The most rows a property case splits into one-row groups. Every such group is a whole
+    /// archive round of executor jobs and sealed pieces, so splitting a full 192-row window that
+    /// way costs a case seconds on a busy runner. The larger group limits still archive windows of
+    /// every size.
+    const ROW_GROUP_SPLIT_ROWS: usize = 48;
+
     fn float_output(batch: &RuntimeRecordBatch, field: &str) -> Option<f64> {
         let value = batch_value(batch, field)?;
         let RuntimeValue::F64(OrderedFloat(value)) = value else {
@@ -1126,10 +1135,19 @@ mod tests {
                     .assured("property runtime opens");
                 let mut entropy = Entropy::new(input);
                 let case = WindowCheckpointCase::generated(&mut entropy);
+                // The case's own choices come before its rows, which can read every remaining
+                // byte. Drawn after them, the group limit would fall to its first option, and the
+                // revision to zero, in nearly every random case.
+                let revision = entropy.any_u64();
+                let limit = entropy.pick([ROW_GROUP_LIMIT, 512, 65_536]);
+                let mut rows = case.rows;
+                if limit == ROW_GROUP_LIMIT {
+                    rows = rows.min(ROW_GROUP_SPLIT_ROWS);
+                }
                 let executor = case.archive_executor();
                 runtime.block_on(async {
                     let mut window = window();
-                    fill(&mut window, &mut entropy, case.rows).await;
+                    fill(&mut window, &mut entropy, rows).await;
                     let before = window.emitted().await;
                     let mut published = window
                         .state
@@ -1138,8 +1156,6 @@ mod tests {
                     for entry in &mut published.entries {
                         entry.key = case.branch.clone();
                     }
-                    let revision = entropy.any_u64();
-                    let limit = entropy.pick([64, 512, 65_536]);
                     let restored = archived_and_restored(
                         &executor,
                         &window,

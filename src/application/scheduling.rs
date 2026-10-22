@@ -1109,6 +1109,11 @@ impl SessionServiceImpl {
         // move until the entire drain budget expires.
         self.inner.runtime.close_local_intake();
         let local_node_id = self.inner.consensus.local_node_id().clone();
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_graceful_drain_if_armed(&local_node_id)
+            .await;
         let operator_cordon_exists = self
             .inner
             .consensus

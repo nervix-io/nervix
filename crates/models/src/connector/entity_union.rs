@@ -164,19 +164,15 @@ macro_rules! connector_sources {
                 }
             }
 
-            fn supports_quiesce(&self, quiesce: &$crate::IngestQuiesceMode) -> bool {
-                match self {
-                    $(
-                        Self::$Variant(source) => {
-                            $crate::SourceBody::supports_quiesce(source, quiesce)
-                        }
-                    )+
-                }
-            }
-
             fn acknowledgement(&self) -> $crate::IngestAcknowledgement<'_> {
                 match self {
                     $(Self::$Variant(source) => $crate::SourceBody::acknowledgement(source),)+
+                }
+            }
+
+            fn chosen(&self, option: &str) -> Option<&'static str> {
+                match self {
+                    $(Self::$Variant(source) => $crate::SourceBody::chosen(source, option),)+
                 }
             }
         }
@@ -428,16 +424,6 @@ macro_rules! connector_sinks {
             fn capabilities(&self) -> $crate::EmitSinkCapabilities {
                 match self {
                     $(Self::$Variant => <$Model as $crate::SinkEntity>::CAPABILITIES,)+
-                }
-            }
-
-            fn accepts_publishing_mode(&self, mode: &$crate::EmitterPublishingMode) -> bool {
-                match self {
-                    $(
-                        Self::$Variant => {
-                            <$Model as $crate::SinkEntity>::accepts_publishing_mode(mode)
-                        }
-                    )+
                 }
             }
         }

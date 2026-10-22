@@ -91,25 +91,45 @@ class ConsoleAssetTests(unittest.TestCase):
             root = pathlib.Path(directory)
             console = root / "crates/web-console"
             console.mkdir(parents=True)
+            tools = root / "target/tools/wasm-bindgen-0.2.129/bin"
 
             def build(args: list[str], **kwargs: object) -> None:
-                self.assertEqual(args[:4], ["trunk", "build", "--release", "--dist"])
+                # Offline, trunk takes the wasm-bindgen first on PATH and never downloads one.
+                self.assertEqual(args[:5], ["trunk", "build", "--release", "--offline", "--dist"])
                 self.assertEqual(kwargs["cwd"], console)
                 self.assertNotIn("NO_COLOR", kwargs["env"])
+                self.assertEqual(kwargs["env"]["PATH"].split(os.pathsep)[0], str(tools))
                 self.assertTrue(kwargs["check"])
-                staging = pathlib.Path(args[4])
+                staging = pathlib.Path(args[5])
                 staging.mkdir()
                 (staging / "index.html").write_bytes(b"current console")
 
             with mock.patch.object(build_web_console, "ROOT", root), \
+                    mock.patch.object(build_web_console.wasm_bindgen, "install", return_value=tools) as install, \
                     mock.patch.object(build_web_console.subprocess, "run", side_effect=build):
                 build_web_console.main()
+            install.assert_called_once_with(root, build_web_console.wasm_bindgen.default_target())
             with mock.patch.object(build_web_console, "ROOT", root), \
+                    mock.patch.object(build_web_console.wasm_bindgen, "install", return_value=tools), \
                     mock.patch.object(build_web_console.subprocess, "run",
                                       side_effect=subprocess.CalledProcessError(1, "trunk")):
                 with self.assertRaises(subprocess.CalledProcessError):
                     build_web_console.main()
             self.assertEqual((console / "dist/index.html").read_bytes(), b"current console")
+
+    def test_a_failed_tool_install_stops_the_build_before_trunk_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "crates/web-console/dist").mkdir(parents=True)
+            (root / "crates/web-console/dist/index.html").write_bytes(b"current console")
+            refusal = build_web_console.wasm_bindgen.ToolError("installing wasm-bindgen-cli 0.2.129 failed with exit 101")
+            with mock.patch.object(build_web_console, "ROOT", root), \
+                    mock.patch.object(build_web_console.wasm_bindgen, "install", side_effect=refusal), \
+                    mock.patch.object(build_web_console.subprocess, "run") as run:
+                with self.assertRaisesRegex(build_web_console.wasm_bindgen.ToolError, "failed with exit 101"):
+                    build_web_console.main()
+            run.assert_not_called()
+            self.assertEqual((root / "crates/web-console/dist/index.html").read_bytes(), b"current console")
 
 
 class InventoryTests(unittest.TestCase):
@@ -127,6 +147,7 @@ class InventoryTests(unittest.TestCase):
             "task-status-transitions",
             "entity-freeze-transitions",
             "endpoint-route-table",
+            "endpoint-acknowledgement-body",
             "relay-channel-lifetimes",
             "interconnect-slot-lifetimes",
             "runtime-checkpoint-description-wire",
@@ -136,11 +157,13 @@ class InventoryTests(unittest.TestCase):
             "runtime-checkpoint-listing-malformed",
             "remote-correlation-lifetimes",
             "relay-admission-owners",
+            "relay-channel-watermark-turnover",
             "client-emitter-wire",
             "client-requests",
             "client-replies",
             "client-events",
             "client-streams",
+            "client-upload-archives",
             "client-reply-transfer",
             "client-row-views",
             "client-arbitrary-frames",
@@ -185,12 +208,14 @@ class InventoryTests(unittest.TestCase):
             "models-name-validation",
             "models-external-names",
             "models-external-name-validation",
+            "models-connector-declarations",
             "models-timestamps",
             "models-timestamp-text",
             "models-domain-clock",
             "models-domain-clock-validation",
             "models-durations",
             "models-duration-text",
+            "models-header-model-round-trip",
             "models-json-paths",
             "models-json-path-validation",
             "models-batch-limits",
@@ -271,6 +296,7 @@ class InventoryTests(unittest.TestCase):
             "codec-json-non-finite-floats",
             "codec-transforming-numbers",
             "jaq-native-numbers",
+            "jaq-yaml-string-values",
             "remote-relay-rows",
             "remote-relay-rows-malformed",
             "relay-wire-messages",
@@ -297,15 +323,20 @@ class InventoryTests(unittest.TestCase):
             "bounded-write-limits",
             "connector-row-request-division",
             "connector-confirmation-window",
+            "pulsar-unconfirmed-receipts",
             "emitter-batch-subdivision",
             "emitter-batch-packing",
             "codec-bounded-encodings",
             "emitter-row-preparations",
             "emitter-retained-payloads",
             "sqs-batch-requests",
+            "iceberg-nested-datetime-staging",
+            "sentry-prepared-envelopes",
+            "http-request-heads",
             "mqtt-publish-packets",
             "postgres-insert-measures",
             "websocket-signaling-protobuf-values",
+            "websocket-acknowledgement-values",
             "websocket-signaling-protobuf-malformed",
             "otel-hex-ids",
             "console-pending-backups",
@@ -314,8 +345,10 @@ class InventoryTests(unittest.TestCase):
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "ingestor-describe-envelope",
+            "dns-operation-budget",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
+            "nervix-client-core",
             "nervix-client-wire",
             "nervix-client-ffi",
             "nervix-server",
@@ -332,6 +365,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-simd-kernels",
             "nervix-checkpoint-replication",
             "nervix-connector-syslog",
+            "nervix-connector-pulsar",
             "nervix-connector-kafka",
             "nervix-paced-simulation",
             "nervix-wasm-protocol",
@@ -345,16 +379,23 @@ class InventoryTests(unittest.TestCase):
             "nervix-bounded-write",
             "nervix-connector",
             "nervix-connector-sqs",
+            "nervix-connector-iceberg",
             "nervix-connector-mqtt",
             "nervix-connector-postgres",
             "nervix-connector-websockets",
             "nervix-connector-otel",
+            "nervix-connector-sentry",
+            "nervix-connector-http",
             "nervix-web-console",
+            "nervix-dns",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
             self.assertTrue(target.corpus.is_dir())
-            self.assertIn(target.test_target, {"lib", "test:representations", "bin:nervix-web-console"})
+            self.assertIn(
+                target.test_target,
+                {"lib", "test:representations", "test:connectors", "bin:nervix-web-console"},
+            )
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
 

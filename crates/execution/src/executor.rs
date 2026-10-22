@@ -232,6 +232,9 @@ impl Executor {
 
     /// Run one storage job on `class`'s workers. The consensus class has a single worker, so its
     /// jobs execute in the order they were admitted.
+    ///
+    /// A class whose wait queue is full refuses the job, which is what work answering a request
+    /// needs; [`Self::run_storage_with`] states another [`QueueAdmission`].
     pub async fn run_storage<T>(
         &self,
         class: StorageClass,
@@ -241,8 +244,24 @@ impl Executor {
     where
         T: Send + 'static,
     {
+        self.run_storage_with(class, QueueAdmission::RefuseWhenFull, reservation, job)
+            .await
+    }
+
+    /// Run one storage job like [`Self::run_storage`], with `admission` saying what a full wait
+    /// queue does with it.
+    pub async fn run_storage_with<T>(
+        &self,
+        class: StorageClass,
+        admission: QueueAdmission,
+        reservation: Reservation,
+        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
+    ) -> Result<T, Report<ExecutionError>>
+    where
+        T: Send + 'static,
+    {
         self.storage_pool(class)
-            .run(QueueAdmission::RefuseWhenFull, reservation, job)
+            .run(admission, reservation, job)
             .await
     }
 

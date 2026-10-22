@@ -37,7 +37,7 @@ use std::{ops::Range, time::Duration};
 
 use ::clickhouse::{Client as ClickHouseClient, error::Error as ClickHouseError};
 use bytes::Bytes;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor as HyperTokioExecutor,
@@ -48,13 +48,14 @@ use nervix_columnar_json::{
     NestedNulls,
 };
 use nervix_connector::{
-    MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome, RejectedSinkRecord,
-    RowRequest, RowRequestLimits, RowSink, RustlsClientConfigSource, SinkHost, SinkLifecycle,
-    SinkPublishError, SinkRecordPosition, SinkStartError, SinkStartResult, client_config_value,
-    optional_client_config_value,
+    ConfiguredDeadline, MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome,
+    RejectedSinkRecord, RowRequest, RowRequestLimits, RowSink, RustlsClientConfigSource,
+    SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkRecordPosition,
+    SinkStartError, SinkStartResult, client_config_value, optional_client_config_value,
 };
 use nervix_dns::{DnsLookupError, DnsResolver};
 use nervix_models::{ClientConfigEntry, EmitterBatchPolicy, TableName};
+use nervix_primitives::time::Instant;
 use tracing::{debug, trace};
 
 const CLICKHOUSE: &str = "clickhouse";
@@ -293,18 +294,9 @@ impl ClickHouseSink {
         let invalid = || Report::new(SinkStartError::InvalidConfiguration { sink: CLICKHOUSE });
         let addr = client_config_value(config, "addr", "ClickHouse")
             .map_err(|error| invalid().attach_printable(error.to_string()))?;
-        let request_timeout = match optional_client_config_value(config, "timeout_ms") {
-            Some(timeout_ms) => {
-                let mapping_input = timeout_ms.parse::<u64>().map(Duration::from_millis);
-                let timeout = match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(_) => Err(invalid()
-                        .attach_printable(format!("invalid ClickHouse timeout_ms '{timeout_ms}'"))),
-                }?;
-                Some(timeout)
-            }
-            None => None,
-        };
+        let request_timeout = ConfiguredDeadline::timeout(config)
+            .change_context(SinkStartError::InvalidConfiguration { sink: CLICKHOUSE })?
+            .map(ConfiguredDeadline::bound);
         let tls_config = RustlsClientConfigSource::new(config)
             .build()
             .map_err(|error| invalid().attach_printable(error.to_string()))?;
@@ -371,7 +363,12 @@ impl ClickHouseSink {
 }
 
 #[async_trait::async_trait]
-impl SinkLifecycle for ClickHouseSink {}
+impl SinkLifecycle for ClickHouseSink {
+    /// Each insert is answered before the publish returns, so the client holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait::async_trait]
 impl RowSink for ClickHouseSink {
@@ -705,18 +702,25 @@ mod tests {
     #[nervix_primitives::test]
     async fn client_rejects_an_invalid_request_timeout() {
         let fixture = Fixture::start().await;
-        let error = match ClickHouseSink::client_from_config(
-            &client_config("http://127.0.0.1:8123", "later"),
-            fixture.dns(),
-        ) {
-            Ok(_) => panic!("invalid ClickHouse timeout should fail client initialization"),
-            Err(error) => error,
-        };
+        for value in ["later", "0"] {
+            let error = match ClickHouseSink::client_from_config(
+                &client_config("http://127.0.0.1:8123", value),
+                fixture.dns(),
+            ) {
+                Ok(_) => panic!("invalid ClickHouse timeout should fail client initialization"),
+                Err(error) => error,
+            };
 
-        assert!(
-            format!("{error:?}").contains("invalid ClickHouse timeout_ms 'later'"),
-            "unexpected error: {error:?}"
-        );
+            assert!(
+                error.frames().any(|frame| matches!(
+                    frame.downcast_ref::<nervix_connector::ClientConfigError>(),
+                    Some(nervix_connector::ClientConfigError::InvalidDeadline {
+                        key: "timeout_ms"
+                    })
+                )),
+                "{value}: unexpected error: {error:?}"
+            );
+        }
     }
 
     #[nervix_primitives::test]

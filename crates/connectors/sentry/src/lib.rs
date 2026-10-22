@@ -3,7 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The Sentry DSN and envelope endpoint, envelope encoding with its event defaults,
-//!   per-record response classification, and the retry delay a rate-limited project asks for.
+//!   one event identity per prepared payload, per-record response classification, and the retry
+//!   delay a rate-limited project asks for.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio, `reqwest`
 //!   and `sentry-types`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -26,12 +27,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use error_stack::Report;
 use nervix_connector::{
-    HttpClientConfig, PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkRecord, SinkRecordId, SinkRetryDelay, SinkStartError, SinkStartResult, client_config_value,
-    physical_time::actual_utc_now,
+    HttpClientConfig, PerRecordOutcome, RecordSink, SinkFinish, SinkFinishResult, SinkHost,
+    SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId, SinkRetryDelay, SinkStartError,
+    SinkStartResult, client_config_value, physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, Timestamp};
+use nervix_models::{
+    ClientConfigEntry, MessageErrorCode, MessageErrorOperation, StructuredMessageError, Timestamp,
+};
+use nervix_primitives::time::Instant;
 use reqwest::{
     Client as HttpClient, StatusCode,
     header::{CONTENT_TYPE, HeaderValue, RETRY_AFTER},
@@ -221,11 +225,10 @@ impl SentrySink {
         let parsed =
             serde_json::from_value::<Event<'static>>(serde_json::Value::Object(event.clone()))
                 .map_err(|source| Report::new(SentryEventError::Event { source }))?;
-        let event_id = parsed.event_id.simple().to_string();
-        event.insert(
-            "event_id".to_string(),
-            serde_json::Value::String(event_id.clone()),
-        );
+        let event_id = event
+            .entry("event_id".to_string())
+            .or_insert_with(|| serde_json::Value::String(parsed.event_id.simple().to_string()))
+            .clone();
         event
             .entry("platform".to_string())
             .or_insert_with(|| serde_json::Value::String("other".to_string()));
@@ -260,32 +263,55 @@ impl SentrySink {
         envelope.push(b'\n');
         Ok(envelope)
     }
+
+    fn envelope_request(&self, payload: Vec<u8>) -> reqwest::RequestBuilder {
+        self.client
+            .post(self.envelope_url.clone())
+            .header(SENTRY_AUTH_HEADER, self.auth.clone())
+            .header(CONTENT_TYPE, SENTRY_ENVELOPE_CONTENT_TYPE)
+            .body(payload)
+    }
 }
 
 #[async_trait]
-impl SinkLifecycle for SentrySink {}
+impl SinkLifecycle for SentrySink {
+    /// Each envelope is answered before the publish returns, so the client holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RecordSink for SentrySink {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::error_boundary(
+            outcome,
+            reason = "projects the complete Sentry preparation report into its message rejection"
+        )
+    )]
+    fn prepare_payload(
+        &mut self,
+        payload: Vec<u8>,
+        occurred_at: Timestamp,
+    ) -> Result<Vec<u8>, StructuredMessageError> {
+        Self::encode_envelope(&payload, occurred_at).map_err(|error| StructuredMessageError {
+            reference: uuid::Uuid::now_v7(),
+            code: MessageErrorCode::External,
+            message: format!("{error:#}"),
+            operation: MessageErrorOperation::Publish,
+            operation_index: None,
+            fields: Default::default(),
+            occurred_at,
+        })
+    }
+
     async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
-        for record in records {
+        for mut record in records {
             nervix_primitives::task::consume_budget().await;
-            let body = match Self::encode_envelope(&record.payload, record.occurred_at) {
-                Ok(body) => body,
-                Err(error) => {
-                    // A payload that does not parse keeps its parser's error as the frame beneath
-                    // the context, so the reason is the whole chain.
-                    outcome.reject(record.rejected(format!("{error:#}")));
-                    continue;
-                }
-            };
             let request = self
-                .client
-                .post(self.envelope_url.clone())
-                .header(SENTRY_AUTH_HEADER, self.auth.clone())
-                .header(CONTENT_TYPE, SENTRY_ENVELOPE_CONTENT_TYPE)
-                .body(body)
+                .envelope_request(std::mem::take(&mut record.payload))
                 .send();
             let response = match request.await {
                 Ok(response) => response,
@@ -330,6 +356,9 @@ impl RecordSink for SentrySink {
         outcome
     }
 }
+
+#[cfg(test)]
+mod envelope_properties;
 
 #[cfg(test)]
 #[cfg_attr(
