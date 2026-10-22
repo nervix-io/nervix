@@ -19,7 +19,10 @@
 
 use nervix_models::SourceMetadataScope;
 
-/// Transport headers of one source message, visited in arrival order.
+/// Transport headers of one source message, visited in the order its entity's declared header model
+/// keeps them: as the message carries them for `ordered_repeats`, each name's values together for
+/// `repeats_by_name`, one value per name for `last_wins`, and names in ascending byte order for
+/// `sorted_by_name`.
 ///
 /// Connectors implement this over their own borrowed message so a group's header builders
 /// are appended from the source directly, without an owned header vector per message.
@@ -80,7 +83,9 @@ impl IngestMessageHeaders for RetainedIngestHeaders {
 /// One message's ingest metadata, read from its source message.
 ///
 /// The variant must match the metadata scope the ingestor started with; the fields borrow the
-/// source message so appending a row copies bytes into Arrow buffers and nothing else.
+/// source message so appending a row copies bytes into Arrow buffers and nothing else, and copying a
+/// row copies only those borrows.
+#[derive(Clone, Copy)]
 pub enum IngestMetadataRow<'a> {
     Kafka {
         topic: &'a str,

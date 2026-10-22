@@ -28,7 +28,7 @@
 mod connection;
 mod source;
 
-use std::{fmt::Debug, time::Duration};
+use std::fmt::Debug;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use async_trait::async_trait;
@@ -41,15 +41,17 @@ use aws_sdk_sqs::{
     types::{MessageAttributeValue, SendMessageBatchRequestEntry},
 };
 use connection::{FailedRequest, SqsTrust};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult, client_config_value,
-    client_tls_paths, optional_client_config_value, read_tls_file,
+    ConfiguredDeadline, PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish,
+    SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId,
+    SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
+    optional_client_config_value, read_tls_file,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp};
+use nervix_primitives::time::Instant;
 use nervix_simd_kernels::{XmlChars, XmlCharsError};
 pub use source::{
     SqsMessageAttributes, SqsSource, SqsSourceError, SqsSourceMessage, SqsSourcePlan,
@@ -150,12 +152,8 @@ impl PreparedSqsRecord {
                 return Err(report.change_context(issue));
             }
         };
-        if headers.len() > 10 {
-            return Err(Report::new(SqsRecordError::AttributeCount {
-                count: headers.len(),
-                maximum: 10,
-            }));
-        }
+        // A later write of a name replaces the earlier value, so the message carries one attribute
+        // per name and SQS counts those, after the writes have collapsed.
         let mut attributes = HashMap::with_capacity(headers.len());
         for (name, value) in headers {
             SqsSink::validate_attribute(&name, &value)?;
@@ -168,6 +166,12 @@ impl PreparedSqsRecord {
                         .attach_printable(error)
                 })?;
             attributes.insert(name, attribute);
+        }
+        if attributes.len() > 10 {
+            return Err(Report::new(SqsRecordError::AttributeCount {
+                count: attributes.len(),
+                maximum: 10,
+            }));
         }
         if let Some(group_id) = group_id.as_deref() {
             SqsSink::validate_group_id(group_id)?;
@@ -255,19 +259,9 @@ impl SqsSink {
             .unwrap_or("x")
             .to_string();
 
-        let request_timeout = match optional_client_config_value(config, "timeout_ms") {
-            Some(timeout_ms) => {
-                let mapping_input = timeout_ms.parse::<u64>().map(Duration::from_millis);
-                let timeout = match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(_) => Err(Self::config_error(format!(
-                        "invalid SQS timeout_ms '{timeout_ms}'"
-                    ))),
-                }?;
-                Some(timeout)
-            }
-            None => None,
-        };
+        let request_timeout = ConfiguredDeadline::timeout(config)
+            .change_context(SinkStartError::InvalidConfiguration { sink: SQS })?
+            .map(ConfiguredDeadline::bound);
 
         let mut loader = aws_config::defaults(BehaviorVersion::latest())
             .region(aws_sdk_sqs::config::Region::new(region))
@@ -657,11 +651,6 @@ impl SqsSink {
         }
     }
 
-    fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
-        Report::new(SinkStartError::InvalidConfiguration { sink: SQS })
-            .attach_printable(error.to_string())
-    }
-
     fn start_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
         Report::new(SinkStartError::Initialize { sink: SQS }).attach_printable(error.to_string())
     }
@@ -677,7 +666,12 @@ impl SqsSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for SqsSink {}
+impl SinkLifecycle for SqsSink {
+    /// Each send is answered before the publish returns, so the client holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RecordSink for SqsSink {
@@ -718,7 +712,7 @@ mod connection_tests;
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, time::Duration};
 
     use aws_sdk_sqs::{error::ConnectorError, types::error::QueueDoesNotExist};
     use meticulous::ResultExt as _;
@@ -846,6 +840,41 @@ mod tests {
             empty_value.current_context(),
             &SqsRecordError::EmptyAttributeValue {
                 name: "tenant".to_string()
+            }
+        );
+    }
+
+    /// SQS keeps one attribute per name, the last one written, so ten names written in eleven
+    /// writes make a message of ten attributes, which SQS accepts, and the count refuses only
+    /// eleven distinct names.
+    #[test]
+    fn attributes_are_counted_after_a_repeated_name_keeps_its_last_value() {
+        let mut headers = Vec::new();
+        for index in 0..10 {
+            headers.push((format!("attribute_{index}"), format!("value_{index}")));
+        }
+        headers.push(("attribute_3".to_string(), "replaced".to_string()));
+        let mut repeated = record(0, vec![b'x']);
+        repeated.headers = headers.clone();
+        let prepared = PreparedSqsRecord::new(repeated)
+            .expect("ten distinct names are within the attribute limit");
+        assert_eq!(prepared.attributes.len(), 10);
+        let replaced = prepared
+            .attributes
+            .get("attribute_3")
+            .and_then(MessageAttributeValue::string_value);
+        assert_eq!(replaced, Some("replaced"));
+
+        headers.push(("attribute_10".to_string(), "value_10".to_string()));
+        let mut eleven = record(0, vec![b'x']);
+        eleven.headers = headers;
+        let refused =
+            PreparedSqsRecord::new(eleven).expect_err("eleven distinct names exceed the limit");
+        assert_eq!(
+            refused.current_context(),
+            &SqsRecordError::AttributeCount {
+                count: 11,
+                maximum: 10,
             }
         );
     }
@@ -1324,13 +1353,20 @@ mod tests {
     #[nervix_primitives::test]
     async fn client_rejects_an_invalid_request_timeout() {
         let fixture = Fixture::start().await;
-        let error = SqsSink::client_from_config(&client_config("later"), fixture.dns())
-            .await
-            .expect_err("invalid SQS timeout should fail client initialization");
+        for value in ["later", "0"] {
+            let error = SqsSink::client_from_config(&client_config(value), fixture.dns())
+                .await
+                .expect_err("invalid SQS timeout should fail client initialization");
 
-        assert!(
-            format!("{error:?}").contains("invalid SQS timeout_ms 'later'"),
-            "unexpected error: {error:?}"
-        );
+            assert!(
+                error.frames().any(|frame| matches!(
+                    frame.downcast_ref::<nervix_connector::ClientConfigError>(),
+                    Some(nervix_connector::ClientConfigError::InvalidDeadline {
+                        key: "timeout_ms"
+                    })
+                )),
+                "{value}: unexpected error: {error:?}"
+            );
+        }
     }
 }

@@ -25,8 +25,8 @@ use bytes::Bytes;
 use error_stack::Report;
 use futures_util::future::join_all;
 use nervix_connector::{
-    PerRecordOutcome, RejectedSinkRecord, SinkLifecycle, SinkPublishError, SinkRecordId,
-    SinkRecordPosition,
+    PerRecordOutcome, RejectedSinkRecord, SinkFinish, SinkFinishResult, SinkLifecycle,
+    SinkPublishError, SinkRecordId, SinkRecordPosition,
 };
 use nervix_models::{EmitterBatchPolicy, MessageErrorOperation, Timestamp};
 use uuid::Uuid;
@@ -80,7 +80,9 @@ impl ClientEmitterSink {
         let fields = output_schema.declared_fields();
         let max_bytes = plan.batch.max_size.bytes().get();
         let max_rows = plan.batch.max_messages.get().get();
-        let endpoint = Arc::new(ClientEmitterEndpoint::new(
+        let endpoint = Arc::new(ClientEmitterEndpoint::of_emitter(
+            &context.domain,
+            &context.emitter,
             ClientEmitterDescription {
                 fields,
                 maximum_payload_bytes: max_bytes,
@@ -97,12 +99,18 @@ impl ClientEmitterSink {
                 .metrics
                 .client_emitter_series(&context.domain, &context.emitter),
         ));
-        if let Some(previous) = context
+        let replaced = context
             .runtime
             .inner
             .client_emitters
-            .insert(key.clone(), endpoint.clone())
-        {
+            .insert(key.clone(), endpoint.clone());
+        info!(
+            domain = context.domain.as_str(),
+            emitter = context.emitter.as_str(),
+            replaced = replaced.is_some(),
+            "started client emitter endpoint"
+        );
+        if let Some(previous) = replaced {
             previous.replace();
         }
         Self {
@@ -251,6 +259,11 @@ impl Drop for ClientEmitterSink {
             .remove_if(&self.key, |_, current| Arc::ptr_eq(current, &self.endpoint))
             .is_some()
         {
+            info!(
+                domain = self.key.domain.as_str(),
+                emitter = self.key.identifier().as_str(),
+                "ended client emitter endpoint"
+            );
             self.endpoint.end();
         }
     }
@@ -258,6 +271,12 @@ impl Drop for ClientEmitterSink {
 
 #[async_trait]
 impl SinkLifecycle for ClientEmitterSink {
+    /// A batch is delivered only on its consumer's application ACK, and the batches still waiting
+    /// for one are the host's retained payloads, not a client's, so nothing is left to send.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+
     fn keeps_client_on_publish_failure(&self) -> bool {
         false
     }

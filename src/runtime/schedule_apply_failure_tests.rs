@@ -92,6 +92,7 @@ fn swap_of(entity: NodeRef) -> EntitySwapExecution {
         dynamic_updates: Vec::new(),
         state_purges: BTreeMap::new(),
         gate_relays: Vec::new(),
+        forced_recovery_relays: Vec::new(),
     }
 }
 
@@ -646,6 +647,27 @@ async fn an_emitter_swap_keeps_the_task_that_did_not_stop() {
         )
         .await
         .expect_err("an emitter whose task does not stop cannot be swapped");
+    assert_eq!(
+        format!("{error:#}"),
+        failed_build(
+            &domain,
+            "failed to stop emitter 'audit' for its swap: scheduled emitter task is unavailable \
+             for stopping"
+        )
+    );
+    let node = ClusterNodeName::parse("node-1").assured("the test node is a valid name");
+    let revision = test_execution_revision(&domain, emitting_nodes());
+    let result = runtime
+        .apply_schedule_delta(
+            &node,
+            &revision,
+            &ExecutionDelta::EntitySwap(swap_of(emitter.clone())),
+            true,
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("schedule application must keep a failed emitter stop visible");
+    };
     assert_eq!(
         format!("{error:#}"),
         failed_build(

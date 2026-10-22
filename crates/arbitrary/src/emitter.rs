@@ -9,7 +9,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BatchMessageLimit, ByteSizeUnit, ClickHouseSink, ClickHouseSinkEntity, ClickHouseTableSink,
     ClickHouseValueMapping, ClientConsumerSink, ClientSink, ClientSinkEntity, CreateEmitter,
-    EmitSink, EmitSinkKind, EmitterBatchPolicy, EmitterBatchRequirement, EmitterBody,
+    EmitSink, EmitSinkKind, EmitterBatchLegality, EmitterBatchPolicy, EmitterBody,
     EmitterPublishingMode, Expression, HttpRequestSink, HttpSink, HttpSinkEntity, IcebergCatalog,
     IcebergSink, IcebergSinkEntity, IcebergStorageBackend, IcebergTableSink, KafkaSink,
     KafkaSinkEntity, KafkaTopicSink, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink,
@@ -49,16 +49,13 @@ impl Arbitrary<'_> {
             EmitterBody::Values => RouteShape::FilterOnly,
         };
         let publishing_mode = self.accepted_publishing_mode(&sink);
-        // NSPL writes no batching clause for an HTTP emitter, whose requests carry one record
-        // each, even though the vocabulary lets its sink batch.
-        let batch = match (sink.batch_requirement(), &sink) {
-            (EmitterBatchRequirement::Required, _) => Some(self.batch_policy()),
-            (EmitterBatchRequirement::Optional, EmitSink::Http(_))
-                if self.domain == Domain::Nspl =>
-            {
-                None
-            }
-            (EmitterBatchRequirement::Optional, _) => {
+        // Plexus writes no batching clause where batching is unavailable, as for an HTTP emitter,
+        // whose requests carry one record each. The vocabulary can still hold one, which a stored
+        // form must carry back, so its domain may draw one.
+        let batch = match sink.batch_legality() {
+            EmitterBatchLegality::Required { .. } => Some(self.batch_policy()),
+            EmitterBatchLegality::Unavailable { .. } if self.domain == Domain::Nspl => None,
+            EmitterBatchLegality::Optional { .. } | EmitterBatchLegality::Unavailable { .. } => {
                 if self.entropy.flag() {
                     Some(self.batch_policy())
                 } else {
@@ -161,6 +158,15 @@ impl Arbitrary<'_> {
             .boundary_biased(1..=u64::from(BatchMessageLimit::MAX));
         let max_messages =
             BatchMessageLimit::try_from(messages).verified("the range above is the limit's range");
+        let max_size = self.payload_size_limit();
+        EmitterBatchPolicy {
+            max_messages,
+            max_size,
+        }
+    }
+
+    /// A size limit in any unit, from one of the unit to the most a 64-bit byte count holds.
+    pub fn payload_size_limit(&mut self) -> PayloadSizeLimit {
         let unit = self.entropy.pick([
             ByteSizeUnit::B,
             ByteSizeUnit::KB,
@@ -174,15 +180,11 @@ impl Arbitrary<'_> {
         ]);
         let most = u64::MAX / unit.bytes();
         let count = self.entropy.boundary_biased(1..=most);
-        let max_size = PayloadSizeLimit::new(
+        PayloadSizeLimit::new(
             NonZeroU64::new(count).verified("the range above starts at one"),
             unit,
         )
-        .verified("the count is at most the largest the unit's byte count allows");
-        EmitterBatchPolicy {
-            max_messages,
-            max_size,
-        }
+        .verified("the count is at most the largest the unit's byte count allows")
     }
 
     /// A sink of the requested connector and entity, with every clause it declares.

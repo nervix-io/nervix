@@ -16,8 +16,9 @@ use std::fmt;
 
 use error_stack::{Context, Report};
 use nervix_models::{
-    BranchSelection, ClientName, ConnectorKind, DomainName, EndpointName, EndpointType, FieldName,
-    IngestSourceKind, ModelKind, ModelName, RelayName,
+    BranchSelection, ClientName, ConnectorKind, DomainName, EmitSinkKind, EndpointName,
+    EndpointType, FieldName, IngestSourceKind, ModelKind, ModelName, PrometheusClientConfigError,
+    RelayName,
 };
 use thiserror::Error;
 
@@ -142,6 +143,18 @@ pub(crate) enum RegistryError {
         endpoint: EndpointName,
         required: EndpointType,
         found: EndpointType,
+    },
+    /// A Prometheus client whose `CONFIG` breaks a rule its client declares. The issue names the
+    /// key, so the one message a failed command shows states the whole reason, and the
+    /// vocabulary's report stays beneath it.
+    #[error(
+        "{} client '{client}' in domain '{domain}' cannot use its CONFIG: {issue}",
+        ConnectorKind::Prometheus
+    )]
+    InvalidPrometheusClientConfig {
+        domain: DomainName,
+        client: ClientName,
+        issue: PrometheusClientConfigError,
     },
     #[error("branch '{branch}' in domain '{domain}' uses BYTES in field '{field}'")]
     BranchFieldContainsBytes {
@@ -329,6 +342,22 @@ pub(crate) enum RegistryError {
         emitter: ModelName,
         sink: &'static str,
         target: String,
+    },
+    /// An emitter whose sink keeps one value per header name writes one literal name twice, so
+    /// on every record the later write replaces the earlier one and the earlier one is never
+    /// published. The header is named as the sink's header model records it.
+    #[error(
+        "emitter '{emitter}' in domain '{domain}' writes header '{header}' at INVOKE #{earlier} \
+         and again at #{later}, but {sink} emitters keep one value per header name, so the later \
+         write would replace the earlier one on every record"
+    )]
+    ReplacedHeaderWrite {
+        domain: DomainName,
+        emitter: ModelName,
+        sink: EmitSinkKind,
+        header: String,
+        earlier: usize,
+        later: usize,
     },
     #[error(
         "model '{identifier}' in domain '{domain}' is invalid: LOOKUP_HASH_MAP argument \

@@ -30,6 +30,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Syslog wire schema, codec fields, UDP/TCP/TLS framing, clients, sources, and sinks | `Common` → `Syslog` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
+| Plexus entity modes, ordered options, typed metadata, CONFIG ownership and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
 | Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
 | Constructed Arrow output applications receive and explicitly ACK, retry or reject | `Emitters` → `Client emitters`, `Sessions` → `Emitter Consumers`, and `Client Implementation Manual` → `Emitter Consumers` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
@@ -168,6 +169,9 @@ relay. Do not use them to scan across branches.
   membership because their listeners execute on every cluster node. Every other ingestor, a
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
   schedule recomputation.
+- For `WEBSOCKETS CONNECTION` recovery and graceful close, read `Ingestors` →
+  `WEBSOCKETS CONNECTION` in the selected documentation index.
+  A successful upgrade does not establish data delivery or reset repeated-failure backoff.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
   optionality match exactly. Declared wire formats are separate entity kinds even when their names
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
@@ -178,7 +182,7 @@ relay. Do not use them to scan across branches.
   order; `ON EMITTING BATCH` may follow `ON EMITTING` and yields exactly one value per batch. Every `ON INGESTION` output is an object that fits the internal schema, and a payload that
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
 - Every codec using the SYSLOG wire schema uses `FROM SYSLOG` and only the exact fixed fields
-  documented in `Common` → `Syslog`; keep the format separate from the `TYPE SYSLOG` transport,
+  documented in `Common` → `Syslog`; keep the format separate from the `SYSLOG CLIENT`,
   use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO_ACK` on a syslog emitter, and
   configure TLS identity and framing for the client direction that consumes it.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
@@ -193,6 +197,9 @@ relay. Do not use them to scan across branches.
 - Every emitter sink declares its transport-supported `MODE` in the documented position and
   supplies the complete retry policy plus the confirmation window and timeout when that mode
   confirms asynchronously. No operational mode variable is inferred.
+- For Pulsar receipt deadlines and the final wait after `NO_ACK` acceptance, read
+  [Emitters → Pulsar](../../../docs/src/emitters.md#pulsar) and
+  [Finishing a sink](../../../docs/src/connector-contract.md#finishing-a-sink).
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
   whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
@@ -260,21 +267,43 @@ relay. Do not use them to scan across branches.
   shortening or lengthening a real retry wait.
 - Size an Iceberg emitter's worst-case latency as `FLUSH EACH` plus `COMMIT EACH`: the commit
   duration starts when a flush stages rows while none are staged, not when the rows arrived.
+- Keep `MAX BATCH SIZE` well below 32 MiB on routes that feed an Iceberg emitter. A commit charges
+  its staged files to the node's 32 MiB bulk memory class and reads a larger staged batch only once
+  the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
+  transient error while the emitter retries.
+- Provision Iceberg table columns with names and types matching the emitter's `VALUES`. A
+  `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
+  microsecond and needs a `timestamptz` column, not `timestamptz_ns`. Opening the emitter refuses
+  a mapped column the table lacks or types differently, before staging records, but a commit
+  writes the mapped columns by position in the table's column order: map every table column, in
+  that order, and map only values that are never null into required columns. A table changed
+  after open can still fail a later commit.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
   an ingestor's `NO ACK` or an emitter's `NO_ACK`.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
+- For Kafka source control-call deadlines and bounded execution, follow `Ingestors` → `Client
+  Deadlines`. Keep `socket.timeout.ms` distinct from the consumer-group commit caller deadline;
+  an unanswered commit is retained before another can start.
 - Kafka `OFFSET BY DOMAIN` commits and start-point resets wait up to the native checkpoint bulk
   operation's thirty-second budget for all assigned state replicas. A missing acknowledgement
   follows the source's existing rejection and retry policy; this mode remains at least once.
+- A Kafka `OFFSET BY CONSUMER GROUP` ingestor in an `ACK` mode waits for the broker to answer each
+  batch's commit before it reports progress, one round trip per batch, so prefer `ACK PARALLEL`
+  where throughput matters. A refused or unanswered commit is the ingestor's transient status and
+  its batch is read again, so downstream output can repeat.
 - Every ingestor head names its connector and entity, such as `CREATE KAFKA TOPIC INGESTOR`, and
   its body after `FROM` names no connector. Its client belongs to the head's connector, and an
   `HTTP ENDPOINT` or `WEBSOCKETS ENDPOINT` reads an endpoint of `TYPE HTTP` or `TYPE WEBSOCKETS`.
   Every source body declares `MODE`, with `MODE NO ACK` where nothing waits on an acknowledgement,
   and only a mode its entity accepts. Every ingestor `ALTER` repeats the stored ingestor's head;
   reading another connector or entity takes `DROP INGESTOR` and a new `CREATE`.
+- For acknowledged HTTP or WebSocket endpoint intake in Plexus, read `Ingestors` → `HTTP ENDPOINT
+  And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
+  shared client outcome labels, and sender retry semantics. Check that a WebSocket endpoint's
+  declared signaling format can encode its acknowledgements, including during `ACCEPT DATA`.
 - Every external name an ingestor reads, such as a topic, consumer group, subscription, queue,
   channel, subject, queue group, or MQTT topic filter, is a string literal spelled exactly as the
   external system names it and within the rules of `Ingestors` → `External Names`.
@@ -282,9 +311,21 @@ relay. Do not use them to scan across branches.
   `DECODE USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint
   `RETRY AFTER` wherever that mode requires it. `MQTT TOPIC` `SUSPEND` also declares `SESSION
   PERSISTENT QOS 1`. Do not mix mode bodies between entities or infer a default.
+- MQTT source client identities default to the domain and ingestor, with an instance suffix for
+  multiple instances. Account for the broker state that input replacement and `DROP INGESTOR`
+  retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
+  session lifetime and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
+- Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
+  `OWNED BY INGESTOR` when Nervix may create it and should remove it when the ingestor or its
+  domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
+  the operator must create before the ingestor reads. Consumers register as
+  `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for missing subscriptions, removal
+  failures and which subscription `ALTER` retains or removes. Changing only consumer policy or
+  handing the same subscription to `PROVISIONED` preserves its backlog; a changed broker, qualified
+  topic or subscription name retires the preceding owned subscription best-effort.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
-  SUSPEND` and nothing else: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO ACK`. The
+  SUSPEND` and nothing else: no external connector client, codec, `DECODE USING`, headers, or `NO ACK`. The
   schema is the exact contract producers declare, including optionality and sensitivity, and a
   paced domain requires its timestamp source. Changing its schema, mode, timestamp, filter, routes
   other than `FLUSH`, or branch declarations ends attached producers. The Rust client may restore a
@@ -307,9 +348,21 @@ relay. Do not use them to scan across branches.
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the
   due instant, and use a fresh execution snapshot for returned data and generated routes.
-- Treat Kafka emitter success as local librdkafka producer-queue admission. Even in `ATTACHED`
-  mode, Nervix does not wait for a broker delivery receipt before completing its ACK share.
-- Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON
+- Every `PROMETHEUS CLIENT` sets `addr` to the API root, an `http` or `https` URL without a
+  query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
+  the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. Read
+  `Ingestors` → `Prometheus` for the keys.
+- A `PROMETHEUS QUERY` ingestor reads at most `MAX BODY SIZE` bytes of each response, written
+  between `QUERY` and `EVERY` and `16MiB` when left out. A larger response fails the poll as the
+  ingestor's transient error rather than delivering part of it; raise the bound for a query that
+  legitimately returns more. Samples enter the graph in batches of at most 1024.
+- Treat Kafka `NO_ACK` emitter success as local librdkafka producer-queue admission. Even in
+  `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
+  share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces any
+  `message.timeout.ms` or `delivery.timeout.ms` in the client's `CONFIG` as the producer's delivery
+  bound. The producer always reports every record, so `delivery.report.only.error` in a client's
+  `CONFIG` has no effect.
+- Every Sentry emitter references a `SENTRY CLIENT` with a project DSN, encodes one event JSON
   object per record, and has no `write_header` invocation.
 - Every custom WASM guest is built for the current ABI, accepts
   `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
@@ -397,9 +450,12 @@ Choose checks relevant to the configured graph:
   sent alone from `nervix-cli`, a native client, or the web console, which saves it as a verified
   browser download. A normal backup quiesces each running domain
   before capturing WASM guest state, Kafka domain source offsets, branch lifecycle, fresh
-  materialized relay generations, deduplicator keys and the rows windows retain. `WITHOUT
-  PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures only
-  configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
+  materialized relay generations, deduplicator keys and the rows windows retain. A backup is
+  refused while a node that owns the domain's state is down or no node can host part of it, and a
+  normal backup also while a node that runs its work is; send it again once the node is back,
+  failover has moved its work, or a node is uncordoned.
+  `WITHOUT PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures
+  only configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
   its state, domains, users, and resource versions. Treat an archive as a secret. Kafka offset and
   branch lifecycle sections stream within the 32 MiB bulk budget up to the 64 MiB record limit;
   their conversion is charged to the node's `restore_metadata` grant, sized below.
@@ -432,8 +488,10 @@ Choose checks relevant to the configured graph:
   separate from archive-file staging and does not bound snapshot retention or filesystem
   overhead. Observe `nervix_restore_staging_bytes`, `nervix_restore_staging_limit_bytes` and
   `nervix_restore_staging_reclaimed_bytes_total` at `/metrics`; the backup chapter distinguishes
-  logical usage from SST allocation. Recover an uncertain applying restore with its exact
-  execution reference; after a terminal failed restore, restore into a fresh target name.
+  logical usage from SST allocation. Recover an uncertain applying restore by sending it again
+  under its exact execution reference, as the Rust client's `restore_with_reference` does;
+  `nervix-cli restore` starts every run under a fresh reference. After a terminal failed restore,
+  restore into a fresh target name.
   Restore metadata preparation has a separate per-node `restore_metadata` memory grant, defaulting
   to 2 GiB and admitted before decoding or planning. Native lifecycle, Kafka, deduplicator and
   window checkpoints stream through quota-owned files and 64 KiB windows with a fixed 2 MiB bulk

@@ -1,3 +1,15 @@
+//! Connector-specific client definitions in Plexus.
+//!
+//! Layer: language.
+//! - **Owns.** Composed connector/client heads and their typed configuration, mount and pool clauses.
+//! - **Depends on.** Shared language tokens, parser primitives and client vocabulary Models.
+//! - **Must not know.** Registry validation, connector drivers or runtime execution.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the client definition grammar declared above")
+)]
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
@@ -82,17 +94,15 @@ fn client_pool_bounds<'src>()
         .boxed()
 }
 
-/// The shape every `CREATE CLIENT` statement shares.
+/// The shape every connector-headed client definition shares.
 ///
-/// `between_type_and_mount` is the one part that varies: the two declared bounds of a pool-capable
+/// `before_mount` is the one part that varies: the two declared bounds of a pool-capable
 /// client, the optional signaling protocol of a WebSockets client, and nothing at all for the rest.
 /// Keeping one chain is what makes `IF NOT EXISTS`, the name, the mount, the configuration block
 /// and the optional terminator identical for every client type.
 fn create_client_parser<'src, B: 'src, T>(
-    client_type: Identifier,
-    between_type_and_mount: impl Parser<'src, &'src [Token], B, extra::Err<ParseError<'src>>>
-    + Clone
-    + 'src,
+    connector: Identifier,
+    before_mount: impl Parser<'src, &'src [Token], B, extra::Err<ParseError<'src>>> + Clone + 'src,
     build: impl Fn(
         ClientName,
         B,
@@ -104,11 +114,9 @@ fn create_client_parser<'src, B: 'src, T>(
 ) -> impl Parser<'src, &'src [Token], CreateStatement<T>, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Create)
         .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Client))
+        .then_ignore(kw_phrase2(connector, Identifier::Client))
         .then(client_name())
-        .then_ignore(kw(Identifier::Type))
-        .then_ignore(kw(client_type))
-        .then(between_type_and_mount)
+        .then(before_mount)
         .then(client_mount())
         .then_ignore(kw(Identifier::Config))
         .then(transport_config())
@@ -310,6 +318,9 @@ pub fn suggest_create_client_kafka(input: &str, cursor: usize) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod conformance_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::lexer::lex;
@@ -325,8 +336,7 @@ mod tests {
     #[test]
     fn parses_client_kafka_config() {
         let input = r#"
-            CREATE CLIENT kafka_main
-              TYPE KAFKA
+            CREATE KAFKA CLIENT kafka_main
               CONFIG {
                 'bootstrap.servers' = 'host1:9092,host2:9092',
                 'group.id' = 'my-consumer-group',
@@ -349,8 +359,7 @@ mod tests {
     #[test]
     fn parses_client_kafka_mount_clause() {
         let input = r#"
-            CREATE CLIENT kafka_tls
-              TYPE KAFKA
+            CREATE KAFKA CLIENT kafka_tls
               MOUNT dev_tls VERSION 4
               CONFIG {
                 'ssl.ca.location' = '{{dev_tls}}/ca.pem'
@@ -375,9 +384,8 @@ mod tests {
     #[test]
     fn parses_syslog_client_with_resource_mount() {
         let tokens = to_tokens(
-            "CREATE CLIENT syslog_tls TYPE SYSLOG MOUNT tls_bundle VERSION LATEST CONFIG { \
-             'protocol' = 'tls', 'addr' = 'logs.example.com:6514', 'tls_ca_file' = \
-             '{{tls_bundle}}/ca.pem' };",
+            "CREATE SYSLOG CLIENT syslog_tls MOUNT tls_bundle VERSION LATEST CONFIG { 'protocol' \
+             = 'tls', 'addr' = 'logs.example.com:6514', 'tls_ca_file' = '{{tls_bundle}}/ca.pem' };",
         );
         let parsed = create_client_syslog_parser()
             .then_ignore(end())
@@ -400,8 +408,7 @@ mod tests {
     #[test]
     fn parses_client_gcs_config() {
         let input = r#"
-            CREATE CLIENT gcs_main
-              TYPE GCS
+            CREATE GCS CLIENT gcs_main
               CONFIG {
                 'service_path' = 'http://127.0.0.1:4443',
                 'no_auth' = true
@@ -426,8 +433,7 @@ mod tests {
     #[test]
     fn parses_client_azure_blob_config() {
         let input = r#"
-            CREATE CLIENT azure_main
-              TYPE AZURE_BLOB
+            CREATE AZURE_BLOB CLIENT azure_main
               CONFIG {
                 'account_name' = 'devstoreaccount1',
                 'account_key' = 'local-key'
@@ -452,8 +458,7 @@ mod tests {
     #[test]
     fn parses_client_iceberg_rest_config() {
         let input = r#"
-            CREATE CLIENT iceberg_catalog
-              TYPE ICEBERG_REST
+            CREATE ICEBERG_REST CLIENT iceberg_catalog
               CONFIG {
                 'uri' = 'http://127.0.0.1:8181',
                 'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -478,8 +483,7 @@ mod tests {
     #[test]
     fn parses_client_pulsar_config() {
         let input = r#"
-            CREATE CLIENT pulsar_main
-              TYPE PULSAR
+            CREATE PULSAR CLIENT pulsar_main
               CONFIG {
                 'addr' = 'pulsar://127.0.0.1:6650',
                 'namespace' = 'public/default'
@@ -502,21 +506,21 @@ mod tests {
 
     #[test]
     fn fails_without_config_block() {
-        let tokens = to_tokens("CREATE CLIENT kafka_main TYPE KAFKA CONFIG;");
+        let tokens = to_tokens("CREATE KAFKA CLIENT kafka_main CONFIG;");
         let errs = parse_create_client_kafka_tokens(&tokens).expect_err("must fail");
         assert!(!errs.is_empty());
     }
 
     #[test]
     fn fails_when_mount_has_no_resource_name() {
-        let tokens = to_tokens("CREATE CLIENT kafka_main TYPE KAFKA MOUNT CONFIG { 'a' = 'b' };");
+        let tokens = to_tokens("CREATE KAFKA CLIENT kafka_main MOUNT CONFIG { 'a' = 'b' };");
         let errs = parse_create_client_kafka_tokens(&tokens).expect_err("must fail");
         assert!(!errs.is_empty());
     }
 
     #[test]
     fn mount_context_suggests_config_without_type_leakage() {
-        let input = "CREATE CLIENT kafka_main TYPE KAFKA MOUNT dev_tls VERSION 1 ";
+        let input = "CREATE KAFKA CLIENT kafka_main MOUNT dev_tls VERSION 1 ";
         let suggestions = suggest_create_client_kafka(input, input.len());
         assert!(suggestions.contains(&"CONFIG".to_string()));
         assert!(!suggestions.contains(&"HTTP".to_string()));
@@ -525,17 +529,17 @@ mod tests {
 
     #[test]
     fn mount_requires_a_resource_version() {
-        let input = "CREATE CLIENT kafka_main TYPE KAFKA MOUNT dev_tls CONFIG { 'a' = 'b' };";
+        let input = "CREATE KAFKA CLIENT kafka_main MOUNT dev_tls CONFIG { 'a' = 'b' };";
         assert!(parse_create_client_kafka(input).is_err());
     }
 
     #[test]
     fn mount_context_requires_version_then_suggests_available_versions() {
-        let after_resource = "CREATE CLIENT kafka_main TYPE KAFKA MOUNT dev_tls ";
+        let after_resource = "CREATE KAFKA CLIENT kafka_main MOUNT dev_tls ";
         let suggestions = suggest_create_client_kafka(after_resource, after_resource.len());
         assert_eq!(suggestions, vec!["VERSION".to_string()]);
 
-        let after_version = "CREATE CLIENT kafka_main TYPE KAFKA MOUNT dev_tls VERSION ";
+        let after_version = "CREATE KAFKA CLIENT kafka_main MOUNT dev_tls VERSION ";
         let suggestions = suggest_create_client_kafka(after_version, after_version.len());
         assert!(suggestions.contains(&"LATEST".to_string()));
         assert!(suggestions.contains(&"completed_resource_version".to_string()));
@@ -545,8 +549,7 @@ mod tests {
     #[test]
     fn parses_client_rabbitmq_config() {
         let input = r#"
-            CREATE CLIENT rabbit_main
-              TYPE RABBITMQ
+            CREATE RABBITMQ CLIENT rabbit_main
               CONFIG {
                 'addr' = 'amqp://guest:guest@localhost:5672/%2f',
                 'connection_name' = 'nervix-rabbit'
@@ -573,8 +576,7 @@ mod tests {
     #[test]
     fn parses_client_http_config() {
         let input = r#"
-            CREATE CLIENT http_main
-              TYPE HTTP
+            CREATE HTTP CLIENT http_main
               CONFIG {
                 'endpoint' = 'https://api.example.com/events',
                 'method' = 'POST'
@@ -598,8 +600,7 @@ mod tests {
     #[test]
     fn parses_client_sentry_config() {
         let input = r#"
-            CREATE CLIENT sentry_main
-              TYPE SENTRY
+            CREATE SENTRY CLIENT sentry_main
               CONFIG {
                 'dsn' = 'https://public@sentry.example.com/42',
                 'timeout_ms' = 5000
@@ -626,8 +627,7 @@ mod tests {
     #[test]
     fn parses_client_s3_config() {
         let input = r#"
-            CREATE CLIENT s3_main
-              TYPE S3
+            CREATE S3 CLIENT s3_main
               CONFIG {
                 'endpoint' = 'http://127.0.0.1:9900',
                 'region' = 'us-east-1',
@@ -655,8 +655,7 @@ mod tests {
     #[test]
     fn parses_client_clickhouse_config() {
         let input = r#"
-            CREATE CLIENT clickhouse_main
-              TYPE CLICKHOUSE
+            CREATE CLICKHOUSE CLIENT clickhouse_main
               CONFIG {
                 'addr' = 'http://127.0.0.1:8123',
                 'database' = 'default'
@@ -679,8 +678,7 @@ mod tests {
     #[test]
     fn parses_client_postgres_config() {
         let input = r#"
-            CREATE CLIENT postgres_main
-              TYPE POSTGRES
+            CREATE POSTGRES CLIENT postgres_main
               POOL SIZE MIN 2 MAX 8
               CONFIG {
                 'addr' = 'postgresql://postgres:nervix@127.0.0.1:5432/postgres?sslmode=disable',
@@ -710,8 +708,7 @@ mod tests {
     #[test]
     fn parses_client_mysql_config() {
         let input = r#"
-            CREATE CLIENT mysql_main
-              TYPE MYSQL
+            CREATE MYSQL CLIENT mysql_main
               POOL SIZE MIN 0 MAX 8
               CONFIG {
                 'addr' = 'mysql://nervix:nervix@127.0.0.1:3306/nervix',
@@ -741,8 +738,7 @@ mod tests {
     #[test]
     fn parses_client_mongodb_config() {
         let input = r#"
-            CREATE CLIENT mongodb_main
-              TYPE MONGODB
+            CREATE MONGODB CLIENT mongodb_main
               POOL SIZE MIN 3 MAX 3
               CONFIG {
                 'addr' = 'mongodb://root:nervix@127.0.0.1:27017/nervix?authSource=admin',
@@ -772,8 +768,7 @@ mod tests {
     #[test]
     fn parses_client_redis_config() {
         let input = r#"
-            CREATE CLIENT redis_main
-              TYPE REDIS
+            CREATE REDIS CLIENT redis_main
               POOL SIZE MIN 1 MAX 4
               CONFIG {
                 'addr' = 'redis://127.0.0.1:6379/',
@@ -813,36 +808,32 @@ mod tests {
     #[test]
     fn pooled_client_requires_the_whole_pool_clause_in_the_declared_order() {
         assert!(
-            statement_errors(
-                "CREATE CLIENT pg TYPE POSTGRES CONFIG { 'addr' = 'postgresql://h/d' };"
-            )
-            .contains("expected POOL SIZE")
+            statement_errors("CREATE POSTGRES CLIENT pg CONFIG { 'addr' = 'postgresql://h/d' };")
+                .contains("expected POOL SIZE")
         );
         assert!(
             statement_errors(
-                "CREATE CLIENT pg TYPE POSTGRES POOL SIZE MIN 2 CONFIG { 'addr' = \
-                 'postgresql://h/d' };"
+                "CREATE POSTGRES CLIENT pg POOL SIZE MIN 2 CONFIG { 'addr' = 'postgresql://h/d' };"
             )
             .contains("expected MAX")
         );
         assert!(
             statement_errors(
-                "CREATE CLIENT pg TYPE POSTGRES POOL SIZE MAX 8 MIN 2 CONFIG { 'addr' = \
+                "CREATE POSTGRES CLIENT pg POOL SIZE MAX 8 MIN 2 CONFIG { 'addr' = \
                  'postgresql://h/d' };"
             )
             .contains("expected MIN")
         );
         assert!(
             statement_errors(
-                "CREATE CLIENT pg TYPE POSTGRES MIN 2 MAX 8 CONFIG { 'addr' = 'postgresql://h/d' \
-                 };"
+                "CREATE POSTGRES CLIENT pg MIN 2 MAX 8 CONFIG { 'addr' = 'postgresql://h/d' };"
             )
             .contains("expected POOL SIZE")
         );
         assert!(
             statement_errors(
-                "CREATE CLIENT pg TYPE POSTGRES MOUNT dev_tls VERSION 1 POOL SIZE MIN 2 MAX 8 \
-                 CONFIG { 'addr' = 'postgresql://h/d' };"
+                "CREATE POSTGRES CLIENT pg MOUNT dev_tls VERSION 1 POOL SIZE MIN 2 MAX 8 CONFIG { \
+                 'addr' = 'postgresql://h/d' };"
             )
             .contains("expected POOL SIZE, found MOUNT")
         );
@@ -852,15 +843,15 @@ mod tests {
     fn pooled_client_rejects_a_repeated_pool_clause() {
         assert!(
             statement_errors(
-                "CREATE CLIENT pg TYPE POSTGRES POOL SIZE MIN 2 MIN 3 MAX 8 CONFIG { 'addr' = \
+                "CREATE POSTGRES CLIENT pg POOL SIZE MIN 2 MIN 3 MAX 8 CONFIG { 'addr' = \
                  'postgresql://h/d' };"
             )
             .contains("expected MAX, found MIN")
         );
         assert!(
             statement_errors(
-                "CREATE CLIENT pg TYPE POSTGRES POOL SIZE MIN 2 MAX 8 POOL SIZE MIN 3 MAX 9 \
-                 CONFIG { 'addr' = 'postgresql://h/d' };"
+                "CREATE POSTGRES CLIENT pg POOL SIZE MIN 2 MAX 8 POOL SIZE MIN 3 MAX 9 CONFIG { \
+                 'addr' = 'postgresql://h/d' };"
             )
             .contains("expected MOUNT | CONFIG, found POOL")
         );
@@ -870,7 +861,7 @@ mod tests {
     fn pooled_client_rejects_a_maximum_of_zero() {
         assert!(
             statement_errors(
-                "CREATE CLIENT rd TYPE REDIS POOL SIZE MIN 0 MAX 0 CONFIG { 'addr' = \
+                "CREATE REDIS CLIENT rd POOL SIZE MIN 0 MAX 0 CONFIG { 'addr' = \
                  'redis://h:6379/0' };"
             )
             .contains("maximum pool size must be greater than zero")
@@ -881,7 +872,7 @@ mod tests {
     fn pooled_client_rejects_a_minimum_above_its_maximum() {
         assert!(
             statement_errors(
-                "CREATE CLIENT my TYPE MYSQL POOL SIZE MIN 9 MAX 8 CONFIG { 'addr' = \
+                "CREATE MYSQL CLIENT my POOL SIZE MIN 9 MAX 8 CONFIG { 'addr' = \
                  'mysql://h:3306/d' };"
             )
             .contains("minimum pool size 9 must not exceed maximum pool size 8")
@@ -892,14 +883,14 @@ mod tests {
     fn pooled_client_rejects_counts_outside_the_declared_range() {
         assert!(
             statement_errors(
-                "CREATE CLIENT mg TYPE MONGODB POOL SIZE MIN 4294967296 MAX 8 CONFIG { 'addr' = \
+                "CREATE MONGODB CLIENT mg POOL SIZE MIN 4294967296 MAX 8 CONFIG { 'addr' = \
                  'mongodb://h:27017/d' };"
             )
             .contains("invalid integer '4294967296'; expected 0 through 4294967295")
         );
         assert!(
             statement_errors(
-                "CREATE CLIENT mg TYPE MONGODB POOL SIZE MIN 2 MAX 4294967296 CONFIG { 'addr' = \
+                "CREATE MONGODB CLIENT mg POOL SIZE MIN 2 MAX 4294967296 CONFIG { 'addr' = \
                  'mongodb://h:27017/d' };"
             )
             .contains("invalid integer '4294967296'; expected 0 through 4294967295")
@@ -910,14 +901,14 @@ mod tests {
     fn pooled_client_rejects_fractional_and_negative_counts() {
         assert!(
             statement_errors(
-                "CREATE CLIENT rd TYPE REDIS POOL SIZE MIN 1.5 MAX 4 CONFIG { 'addr' = \
+                "CREATE REDIS CLIENT rd POOL SIZE MIN 1.5 MAX 4 CONFIG { 'addr' = \
                  'redis://h:6379/0' };"
             )
             .contains("invalid integer '1.5'")
         );
         assert!(
             statement_errors(
-                "CREATE CLIENT rd TYPE REDIS POOL SIZE MIN 1 MAX -4 CONFIG { 'addr' = \
+                "CREATE REDIS CLIENT rd POOL SIZE MIN 1 MAX -4 CONFIG { 'addr' = \
                  'redis://h:6379/0' };"
             )
             .contains("expected max_pool_size, found -")
@@ -928,7 +919,7 @@ mod tests {
     fn pool_bounds_do_not_leak_into_client_types_without_a_pool() {
         assert!(
             statement_errors(
-                "CREATE CLIENT kafka_main TYPE KAFKA POOL SIZE MIN 2 MAX 8 CONFIG { \
+                "CREATE KAFKA CLIENT kafka_main POOL SIZE MIN 2 MAX 8 CONFIG { \
                  'bootstrap.servers' = '127.0.0.1:9092' };"
             )
             .contains("expected MOUNT | CONFIG, found POOL")
@@ -937,20 +928,20 @@ mod tests {
 
     #[test]
     fn completion_walks_the_pool_clause_only_for_pooled_client_types() {
-        let after_type = "CREATE CLIENT pg TYPE POSTGRES ";
+        let after_type = "CREATE POSTGRES CLIENT pg ";
         let suggestions = crate::statement::suggest_statement(after_type, after_type.len());
         assert_eq!(suggestions, vec!["POOL SIZE".to_string()]);
 
-        let after_clause_head = "CREATE CLIENT pg TYPE POSTGRES POOL SIZE ";
+        let after_clause_head = "CREATE POSTGRES CLIENT pg POOL SIZE ";
         let suggestions =
             crate::statement::suggest_statement(after_clause_head, after_clause_head.len());
         assert_eq!(suggestions, vec!["MIN".to_string()]);
 
-        let after_minimum = "CREATE CLIENT pg TYPE POSTGRES POOL SIZE MIN 2 ";
+        let after_minimum = "CREATE POSTGRES CLIENT pg POOL SIZE MIN 2 ";
         let suggestions = crate::statement::suggest_statement(after_minimum, after_minimum.len());
         assert_eq!(suggestions, vec!["MAX".to_string()]);
 
-        let after_maximum = "CREATE CLIENT pg TYPE POSTGRES POOL SIZE MIN 2 MAX 8 ";
+        let after_maximum = "CREATE POSTGRES CLIENT pg POOL SIZE MIN 2 MAX 8 ";
         let suggestions = crate::statement::suggest_statement(after_maximum, after_maximum.len());
         assert!(suggestions.contains(&"MOUNT".to_string()));
         assert!(suggestions.contains(&"CONFIG".to_string()));
@@ -961,18 +952,18 @@ mod tests {
 
     #[test]
     fn completion_expects_a_count_after_each_pool_bound_keyword() {
-        let after_min = "CREATE CLIENT rd TYPE REDIS POOL SIZE MIN ";
+        let after_min = "CREATE REDIS CLIENT rd POOL SIZE MIN ";
         let suggestions = crate::statement::suggest_statement(after_min, after_min.len());
         assert_eq!(suggestions, vec!["min_pool_size".to_string()]);
 
-        let after_max = "CREATE CLIENT rd TYPE REDIS POOL SIZE MIN 1 MAX ";
+        let after_max = "CREATE REDIS CLIENT rd POOL SIZE MIN 1 MAX ";
         let suggestions = crate::statement::suggest_statement(after_max, after_max.len());
         assert_eq!(suggestions, vec!["max_pool_size".to_string()]);
     }
 
     #[test]
     fn completion_does_not_offer_pool_bounds_after_an_unpooled_client_type() {
-        let after_type = "CREATE CLIENT kafka_main TYPE KAFKA ";
+        let after_type = "CREATE KAFKA CLIENT kafka_main ";
         let suggestions = crate::statement::suggest_statement(after_type, after_type.len());
         assert!(suggestions.contains(&"CONFIG".to_string()));
         assert!(!suggestions.contains(&"POOL SIZE".to_string()));
@@ -981,8 +972,7 @@ mod tests {
     #[test]
     fn parses_client_mqtt_config() {
         let input = r#"
-            CREATE CLIENT mqtt_main
-              TYPE MQTT
+            CREATE MQTT CLIENT mqtt_main
               CONFIG {
                 'addr' = 'mqtt://127.0.0.1:1883',
                 'client_id' = 'nervix-mqtt'
@@ -1006,8 +996,7 @@ mod tests {
     #[test]
     fn parses_client_prometheus_config() {
         let input = r#"
-            CREATE CLIENT prom_main
-              TYPE PROMETHEUS
+            CREATE PROMETHEUS CLIENT prom_main
               CONFIG {
                 'addr' = 'http://127.0.0.1:9090',
                 'timeout_ms' = 5000
@@ -1031,8 +1020,7 @@ mod tests {
     #[test]
     fn parses_client_zeromq_config() {
         let input = r#"
-            CREATE CLIENT zmq_main
-              TYPE ZEROMQ
+            CREATE ZEROMQ CLIENT zmq_main
               CONFIG {
                 'addr' = 'tcp://127.0.0.1:5555',
                 'bind' = true
@@ -1055,8 +1043,7 @@ mod tests {
     #[test]
     fn parses_client_sqs_config() {
         let input = r#"
-            CREATE CLIENT sqs_main
-              TYPE SQS
+            CREATE SQS CLIENT sqs_main
               CONFIG {
                 'endpoint' = 'http://127.0.0.1:9324',
                 'region' = 'us-east-1'
@@ -1079,8 +1066,7 @@ mod tests {
     #[test]
     fn parses_client_websockets_config() {
         let input = r#"
-            CREATE CLIENT ws_main
-              TYPE WEBSOCKETS
+            CREATE WEBSOCKETS CLIENT ws_main
               CONFIG {
                 'endpoint' = 'wss://api.example.com/ws',
                 'subprotocol' = 'notifications'
@@ -1105,8 +1091,8 @@ mod tests {
     #[test]
     fn parses_client_websockets_signaling_protocol() {
         let input = r#"
-            CREATE CLIENT ws_main
-              TYPE WEBSOCKETS WITH SIGNALING PROTOCOL binance_style
+            CREATE WEBSOCKETS CLIENT ws_main
+              WITH SIGNALING PROTOCOL binance_style
               CONFIG {
                 'endpoint' = 'wss://api.example.com/ws'
               };
@@ -1130,8 +1116,8 @@ mod tests {
 
     #[test]
     fn parses_websocket_signaling_protocol_before_versioned_mount() {
-        let input = "CREATE CLIENT ws_main TYPE WEBSOCKETS WITH SIGNALING PROTOCOL binance_style \
-                     MOUNT ws_tls VERSION 2 CONFIG { 'endpoint' = 'wss://api.example.com/ws' };";
+        let input = "CREATE WEBSOCKETS CLIENT ws_main WITH SIGNALING PROTOCOL binance_style MOUNT \
+                     ws_tls VERSION 2 CONFIG { 'endpoint' = 'wss://api.example.com/ws' };";
         let tokens = to_tokens(input);
         let parsed = create_client_websockets_parser()
             .then_ignore(end())
@@ -1147,8 +1133,7 @@ mod tests {
     #[test]
     fn parses_client_nats_config() {
         let input = r#"
-            CREATE CLIENT nats_main
-              TYPE NATS
+            CREATE NATS CLIENT nats_main
               CONFIG {
                 'addr' = 'nats://127.0.0.1:4222',
                 'name' = 'nervix-nats'

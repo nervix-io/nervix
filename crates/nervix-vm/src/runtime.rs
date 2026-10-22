@@ -764,6 +764,22 @@ impl ExecutionContext {
 
 /// Executes a predicate without exposing constructed columns or invocations.
 ///
+/// The execution entry point accepts the compiled predicate capability:
+///
+/// ```
+/// use nervix_execution::Executor;
+/// use nervix_vm::{CompiledPredicate, ExecutionContext, TypedBatch, execute_predicate_in_context};
+///
+/// async fn execute(
+///     executor: &Executor,
+///     predicate: &CompiledPredicate,
+///     batch: &TypedBatch,
+///     context: &ExecutionContext,
+/// ) {
+///     let _ = execute_predicate_in_context(executor, predicate, batch, context).await;
+/// }
+/// ```
+///
 /// A construction-capable program cannot be passed through this entry point:
 ///
 /// ```compile_fail

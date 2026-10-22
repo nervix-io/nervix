@@ -1968,7 +1968,7 @@ pub(super) async fn expire_processor_branch_instances(
                 Some(BranchEvictionReason::Ttl),
             )
         );
-        runtime.invalidate_branch_relay_generation(domain, &key);
+        template.retire_branch_channels(&key);
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
             "the eviction, reset or ownership transfer transition ends its exact retained branch \
@@ -2019,7 +2019,7 @@ pub(super) async fn evict_processor_branch_instances_to_capacity(
                 Some(BranchEvictionReason::Lru),
             )
         );
-        runtime.invalidate_branch_relay_generation(domain, &key);
+        template.retire_branch_channels(&key);
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
             "the eviction, reset or ownership transfer transition ends its exact retained branch \

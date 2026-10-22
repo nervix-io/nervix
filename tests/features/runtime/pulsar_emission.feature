@@ -22,13 +22,12 @@ Feature: Pulsar emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_pulsar_ingress SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_pulsar_ingress;
-        CREATE CLIENT pulsar_main
-        TYPE PULSAR
+        CREATE PULSAR CLIENT pulsar_main
         CONFIG {
           'addr' = '{{pulsar_addr}}'
         };
         CREATE PULSAR TOPIC INGESTOR pulsar_ingress
-        FROM pulsar_main TOPIC 'notifications_in_{{test_id}}' SUBSCRIPTION 'nervix_pulsar_emission_{{test_id}}' INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM pulsar_main TOPIC 'notifications_in_{{test_id}}' SUBSCRIPTION 'nervix_pulsar_emission_{{test_id}}' OWNED BY INGESTOR INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -92,7 +91,7 @@ Feature: Pulsar emission
       CREATE SCHEMA user_id_branch ( user_id I64 );
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -109,7 +108,7 @@ Feature: Pulsar emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT pulsar_sink TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT pulsar_sink CONFIG {
         'addr' = '{{pulsar_stallable_addr}}'
       };
       CREATE ATTACHED EMITTER pulsar_boundary FROM notifications

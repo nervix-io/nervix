@@ -47,8 +47,8 @@ mod stress;
 #[cfg(feature = "native")]
 pub use handoff::ReportHandoff;
 pub use order::{
-    LockLifetime, MAX_ORDER_EDGES, MAX_ORDER_WITNESSES, OrderEdge, OrderLock, OrderOutOfBounds,
-    OrderWitness, PotentialCycle,
+    LockLifetime, MAX_ORDER_EDGES, MAX_ORDER_HISTORY_EDGES, MAX_ORDER_WITNESSES, OrderEdge,
+    OrderLock, OrderOutOfBounds, OrderWitness, PotentialCycle,
 };
 pub use stress::{MAX_STRESS_DELAY, PREEMPTION_SCALE, StressConfiguration, StressOutOfBounds};
 

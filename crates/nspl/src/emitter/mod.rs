@@ -559,7 +559,7 @@ fn batch_clause<'src>()
         .then(byte_size_lit().try_map(|literal, span| {
             literal
                 .parse::<PayloadSizeLimit>()
-                .map_err(|error| Rich::custom(span, error.to_string()))
+                .map_err(|issue| Rich::custom(span, format!("BATCH MAX SIZE {issue}")))
         }))
         .map(|(max_messages, max_size)| EmitterBatchPolicy {
             max_messages,
@@ -1437,6 +1437,9 @@ pub fn suggest_create_emitter(input: &str, cursor: usize) -> Vec<String> {
 pub fn suggest_alter_emitter(input: &str, cursor: usize) -> Vec<String> {
     suggest_from!(input, cursor, alter_emitter_parser())
 }
+
+#[cfg(test)]
+mod conformance_tests;
 
 #[cfg(test)]
 mod tests {

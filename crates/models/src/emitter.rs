@@ -16,12 +16,13 @@
 use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
-use strum::{AsRefStr, EnumString, IntoStaticStr};
+use strum::{AsRefStr, EnumDiscriminants, EnumIter, EnumString, IntoStaticStr};
 use thiserror::Error;
 
 use crate::{
-    AckWindow, ClientName, CodecName, EmitSink, EmitterName, ErrorPolicies, FlushPolicy,
-    IcebergSink, InputCollectPolicy, ProcessorInputWhere, ProcessorInputs, RelayName, RetryPolicy,
+    AckWindow, BatchUnavailability, ClientName, CodecName, EmitSink, EmitterBatchLegality,
+    EmitterName, ErrorPolicies, FlushPolicy, IcebergSink, InputCollectPolicy, ProcessorInputWhere,
+    ProcessorInputs, RelayName, RetryPolicy,
 };
 
 #[derive(
@@ -33,7 +34,7 @@ pub struct CreateEmitter {
     pub body: EmitterBody,
     pub sink: Box<EmitSink>,
     /// `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, absent when the emitter publishes one record per
-    /// message. A sink whose [`EmitSink::batch_requirement`] is required never omits it.
+    /// message. A sink whose [`EmitSink::batch_legality`] requires it never omits it.
     pub batch: Option<crate::EmitterBatchPolicy>,
     pub flush_policy: FlushPolicy,
     pub error_policies: ErrorPolicies,
@@ -107,22 +108,25 @@ impl CreateEmitter {
     /// error, so neither has to rebuild the other's report.
     fn batch_contract_violation(&self) -> Option<EmitterBatchContractError> {
         let sink = self.sink.transport_label();
-        if let EmitSink::Http(_) = self.sink.as_ref()
-            && self.batch.is_some()
-        {
-            return Some(EmitterBatchContractError::HttpUnsupported);
-        }
+        let legality = self.sink.batch_legality();
         let Some(batch) = &self.batch else {
-            return match self.sink.batch_requirement() {
-                crate::EmitterBatchRequirement::Optional => None,
-                crate::EmitterBatchRequirement::Required => {
+            return match legality {
+                EmitterBatchLegality::Required { .. } => {
                     Some(EmitterBatchContractError::Required { sink })
                 }
+                EmitterBatchLegality::Optional { .. }
+                | EmitterBatchLegality::Unavailable { .. } => None,
             };
         };
-        if let Some(maximum) = self.sink.batch_size_maximum()
-            && batch.max_size.bytes() > maximum.bytes()
-        {
+        let maximum = match legality {
+            EmitterBatchLegality::Unavailable { reason } => {
+                return Some(EmitterBatchContractError::Unavailable { sink, reason });
+            }
+            EmitterBatchLegality::Required { maximum }
+            | EmitterBatchLegality::Optional { maximum } => maximum,
+        };
+        let maximum = maximum?;
+        if batch.max_size.bytes() > maximum.bytes() {
             return Some(EmitterBatchContractError::SizeAboveSinkMaximum {
                 sink,
                 declared: batch.max_size,
@@ -406,8 +410,11 @@ pub enum AlterEmitterError {
 /// Why an emitter's batching clause does not fit the sink it publishes to.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum EmitterBatchContractError {
-    #[error("HTTP emitters send one request per record and do not support BATCH")]
-    HttpUnsupported,
+    #[error("{sink} emitters {reason} and do not support BATCH")]
+    Unavailable {
+        sink: &'static str,
+        reason: BatchUnavailability,
+    },
     #[error(
         "{sink} emitters require BATCH MAX MESSAGES <n> MAX SIZE <bytes>, because every write \
          carries several rows"
@@ -425,8 +432,18 @@ pub enum EmitterBatchContractError {
 }
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    EnumDiscriminants,
 )]
+#[strum_discriminants(name(EmitterPublishingModeKind), derive(Hash, EnumIter))]
 pub enum EmitterPublishingMode {
     ClientAck {
         window: AckWindow,
@@ -502,17 +519,46 @@ impl EmitterPublishingMode {
     }
 
     pub fn kind_label(&self) -> &'static str {
+        self.kind().label()
+    }
+
+    /// Which publishing mode this is, whatever window and durations it writes.
+    pub fn kind(&self) -> EmitterPublishingModeKind {
+        EmitterPublishingModeKind::from(self)
+    }
+}
+
+impl EmitterPublishingModeKind {
+    /// How a `MODE` clause names the mode, as `DESCRIBE` and diagnostics name it.
+    pub const fn label(self) -> &'static str {
         match self {
-            Self::ClientAck { .. } => "ACK",
-            Self::NoAck { .. } => "NO_ACK",
-            Self::BrokerAck { .. } => "ACK",
-            Self::MqttQos0 { .. } => "QOS 0",
-            Self::MqttQos1 { .. } => "QOS 1 ACK",
-            Self::MqttQos2 { .. } => "QOS 2 ACK",
-            Self::NatsJetStream { .. } => "JETSTREAM ACK",
-            Self::SqsSingle { .. } => "SINGLE",
-            Self::SqsBatch { .. } => "BATCH",
-            Self::RequestAck { .. } => "ACK",
+            Self::ClientAck | Self::BrokerAck | Self::RequestAck => "ACK",
+            Self::NoAck => "NO_ACK",
+            Self::MqttQos0 => "QOS 0",
+            Self::MqttQos1 => "QOS 1 ACK",
+            Self::MqttQos2 => "QOS 2 ACK",
+            Self::NatsJetStream => "JETSTREAM ACK",
+            Self::SqsSingle => "SINGLE",
+            Self::SqsBatch => "BATCH",
+        }
+    }
+
+    /// The mode written in full after `MODE`, as documentation and generated statements write it.
+    pub const fn example(self) -> &'static str {
+        match self {
+            Self::ClientAck | Self::BrokerAck => {
+                "ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s"
+            }
+            Self::NoAck => "NO_ACK RETRY POLICY BACKOFF 1s MAX 30s",
+            Self::MqttQos0 => "QOS 0 RETRY POLICY BACKOFF 1s MAX 30s",
+            Self::MqttQos1 => "QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
+            Self::MqttQos2 => "QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
+            Self::NatsJetStream => {
+                "JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s"
+            }
+            Self::SqsSingle => "SINGLE RETRY POLICY BACKOFF 1s MAX 30s",
+            Self::SqsBatch => "BATCH RETRY POLICY BACKOFF 1s MAX 30s",
+            Self::RequestAck => "ACK RETRY POLICY BACKOFF 1s MAX 30s",
         }
     }
 }

@@ -13,11 +13,22 @@ run_id="rate-probe-check-$$-${RANDOM}"
 tmp_dir="${CHAOS_RATE_PROBE_ARTIFACTS:-$(mktemp -d)}"
 mkdir -p "${tmp_dir}"
 
+# A failed self-test keeps its probes' raw streams and records: in the evidence directory that the
+# verifier self-check names, or where they are.
 cleanup() {
+    local status=$?
     "${chaos_dir}/cleanup.sh" --run-id "${run_id}" --quiet >/dev/null 2>&1 || true
-    if [[ -z "${CHAOS_RATE_PROBE_ARTIFACTS:-}" ]]; then
+    [[ -z "${CHAOS_RATE_PROBE_ARTIFACTS:-}" ]] || return 0
+    if [[ "${status}" -eq 0 ]]; then
         rm -rf "${tmp_dir}"
+        return 0
     fi
+    local retained="${tmp_dir}"
+    if [[ -n "${CHAOS_SELF_TEST_EVIDENCE:-}" ]] && mkdir -p "${CHAOS_SELF_TEST_EVIDENCE}" \
+        && mv "${tmp_dir}" "${CHAOS_SELF_TEST_EVIDENCE}/rate-probe"; then
+        retained="${CHAOS_SELF_TEST_EVIDENCE}/rate-probe"
+    fi
+    printf 'rate probe self-test evidence retained in %s\n' "${retained}" >&2
 }
 trap cleanup EXIT
 fail() { printf 'rate probe self-test failed: %s\n' "$*" >&2; exit 1; }
@@ -33,11 +44,15 @@ test_sender_id="$(docker run --detach --label "io.nervix.chaos.run=${run_id}" \
     --network "${run_id}" "${CHAOS_PROBE_IMAGE}" sleep 300)"
 test_receiver_id="$(docker run --detach --label "io.nervix.chaos.run=${run_id}" \
     --network "${run_id}" "${CHAOS_PROBE_IMAGE}" sleep 300)"
+# A namespace owner Docker created but never started, whose namespace no helper can join.
+test_stopped_id="$(docker create --label "io.nervix.chaos.run=${run_id}" \
+    --network "${run_id}" "${CHAOS_PROBE_IMAGE}" sleep 300)"
 
 owned_service_container() {
     case "$1" in
         sender) printf '%s\n' "${test_sender_id}" ;;
         receiver) printf '%s\n' "${test_receiver_id}" ;;
+        stopped) printf '%s\n' "${test_stopped_id}" ;;
         *) fail "unknown test endpoint $1" ;;
     esac
 }
@@ -51,10 +66,10 @@ epoch_ms() {
     printf '%s\n' "$((nanoseconds / 1000000))"
 }
 
-# Invoke the production Docker commands. Only the deliberate unreachable control shortens its
-# total deadline; the partial-payload control changes the producer's input, not the probe owner.
+# Invoke the production Docker commands. Only the deliberate unreachable control and the ping
+# controls of a slow start and a stalled sample shorten a bound; the partial-payload control changes
+# the producer's input, not the probe owner.
 test_case=delayed-connect
-sender_failed=false
 # These controls rewrite code that the helper's shell executes; parameter expressions stay literal.
 # shellcheck disable=SC2016
 run_bounded() {
@@ -65,11 +80,63 @@ run_bounded() {
         && " ${arguments[*]} " != *' --detach '* ]]; then
         sleep 6
     fi
+    # The ping helper's launch names its cidfile *.helper-id.txt; its sample is the only wait of
+    # these cases.
+    if [[ "$1 $2" == 'docker run' && " ${arguments[*]} " == *'.helper-id.txt '* ]]; then
+        case "${test_case}" in
+            ping-slow-start)
+                # Docker takes six seconds to start the helper.
+                sleep 6
+                ;;
+            ping-launch-stall)
+                # Docker creates the helper, but its start outlasts the launch bound.
+                local create=(docker create)
+                for i in "${!arguments[@]}"; do
+                    if ((i > 1)) && [[ "${arguments[i]}" != --detach ]]; then
+                        create+=("${arguments[i]}")
+                    fi
+                done
+                "${create[@]}" >/dev/null || return $?
+                sleep 4
+                return 124
+                ;;
+            ping-sample-stall)
+                # The sample outlasts its bound: four hundred packets at the same interval.
+                local after_separator=false
+                for i in "${!arguments[@]}"; do
+                    if [[ "${after_separator}" == true && "${arguments[i]}" == -c ]]; then
+                        arguments[i + 1]=400
+                    fi
+                    [[ "${arguments[i]}" != -- ]] || after_separator=true
+                done
+                ;;
+            ping-exit | ping-logs-failure | ping-removal-failure)
+                # The helper reports without sampling, and ping-exit with a status ping never uses.
+                local helper_status=0
+                [[ "${test_case}" != ping-exit ]] || helper_status=3
+                for i in "${!arguments[@]}"; do
+                    arguments[i]="${arguments[i]//'ping "$@" || status=$?'/"status=${helper_status}"}"
+                done
+                ;;
+        esac
+    fi
+    if [[ "${test_case}" == ping-logs-failure && "$1 $2" == 'docker logs' ]]; then
+        printf 'deliberate ping helper log failure\n' >&2
+        return 125
+    fi
+    if [[ "${test_case}" == ping-removal-failure && "$1 $2 $3" == 'docker container rm' ]]; then
+        printf 'deliberate ping helper removal failure\n' >&2
+        return 125
+    fi
+    if [[ "$1 $2" == 'docker wait' ]]; then
+        case "${test_case}" in
+            ping-slow-start) limit=8 ;;
+            ping-sample-stall) limit=4 ;;
+        esac
+    fi
     if [[ "${test_case}" == unreachable && "$1 $2" == 'docker run' \
         && " ${arguments[*]} " != *' --detach '* ]] \
         || [[ "${test_case}" == unreachable && "$1 $2" == 'docker wait' ]]; then
-        limit=4
-    elif [[ "${sender_failed}" == true && "$1 $2" == 'docker wait' ]]; then
         limit=4
     fi
     if [[ "${test_case}" == partial ]]; then
@@ -123,10 +190,6 @@ run_bounded() {
         return 125
     fi
     timeout --foreground --kill-after=5s "${limit}s" "${arguments[@]}" || status=$?
-    if [[ "$1 $2" == 'docker run' && " ${arguments[*]} " != *' --detach '* \
-        && "${status}" -ne 0 ]]; then
-        sender_failed=true
-    fi
     return "${status}"
 }
 netem() {
@@ -225,7 +288,95 @@ retained_helper="$(jq -r .receiver_helper_id "${tmp_dir}/cleanup-failure.probe.j
 docker inspect "${retained_helper}" >/dev/null || fail 'cleanup failure lost the retained helper'
 timeout --foreground --kill-after=5s 20s docker container rm --force "${retained_helper}" >/dev/null
 
-# Qualify the existing twofold effect against real healthy and 256kbit directed transfers.
+# Docker's start of a ping helper is control time with its own bound: a helper Docker takes six
+# seconds to start still completes a sample whose wait allows only eight. A start that outlasts
+# the launch bound and a sample that outlasts its own bound each fail with the stage that took the
+# time, and keep Docker's own record of the helper before removing it.
+test_case=ping-slow-start
+link_ping "${tmp_dir}/ping-slow-start.txt" sender receiver baseline
+jq -e '.launch_status == 0 and .wait_status == 0 and .helper_exit_code == 0 and .ping_status == 0
+    and .shared_clock and .launch_ms >= 6000 and .sample_ms >= 3800 and .sample_ms < 8000
+    and .logs_status == 0 and .removal_status == 0 and .docker_state == null' \
+    "${tmp_dir}/ping-slow-start.probe.json" >/dev/null \
+    || fail 'a slow helper start was counted against its sample'
+jq -e '.sent == 40' "${tmp_dir}/ping-slow-start.json" >/dev/null \
+    || fail 'a slow helper start lost its sample'
+for test_case in ping-launch-stall ping-sample-stall; do
+    if (set -e; link_ping "${tmp_dir}/${test_case}.txt" sender receiver baseline) \
+        >"${tmp_dir}/${test_case}.failure.txt" 2>&1; then
+        fail "${test_case} passed"
+    fi
+done
+grep -q 'Docker did not start it within its 60 s launch bound (launch exited 124); Docker recorded no start of it' \
+    "${tmp_dir}/ping-launch-stall.failure.txt" || fail 'a stalled helper start lost its stage'
+jq -e '.launch_status == 124 and .wait_status == null and .sample_started_uptime_ms == null
+    and .docker_state.status == "created" and .removal_status == 0
+    and any(.docker_events[]; .action == "create") and any(.docker_events[]; .action == "destroy")
+    and .sender == "sender" and .receiver == "receiver" and .launch_seconds == 60
+    and .sample_seconds == 30' "${tmp_dir}/ping-launch-stall.probe.json" >/dev/null \
+    || fail 'a stalled helper start lost Docker state, events or removal'
+grep -q 'its sample did not end within its 30 s bound (wait exited 124); the sample began [0-9.]* s after the launch' \
+    "${tmp_dir}/ping-sample-stall.failure.txt" || fail 'a stalled sample lost its stage'
+jq -e '.launch_status == 0 and .wait_status == 124 and .shared_clock and .launch_ms >= 0
+    and .sample_finished_uptime_ms == null and .docker_state.status == "running"
+    and .removal_status == 0 and any(.docker_events[]; .action == "start")' \
+    "${tmp_dir}/ping-sample-stall.probe.json" >/dev/null \
+    || fail 'a stalled sample lost its start, Docker state or removal'
+for test_case in ping-launch-stall ping-sample-stall; do
+    helper="$(cat "${tmp_dir}/${test_case}.helper-id.txt")"
+    if timeout --foreground --kill-after=5s 20s docker inspect "${helper}" >/dev/null 2>&1; then
+        fail "${test_case} retained its helper"
+    fi
+done
+
+# Docker's refusal of a launch, ping's own exit, a failed read of the helper's output and a failed
+# removal each name their stage.
+test_case=ping-launch-refusal
+if (set -e; link_ping "${tmp_dir}/${test_case}.txt" stopped receiver baseline) \
+    >"${tmp_dir}/${test_case}.failure.txt" 2>&1; then
+    fail "${test_case} passed"
+fi
+grep -q ': Docker refused its launch (launch exited 125: .*non running container.*); see ' \
+    "${tmp_dir}/ping-launch-refusal.failure.txt" || fail 'a refused helper launch lost its stage'
+jq -e '.launch_status == 125 and .wait_status == null and .docker_state.status == "created"
+    and .removal_status == 0 and any(.docker_events[]; .action == "destroy")' \
+    "${tmp_dir}/ping-launch-refusal.probe.json" >/dev/null \
+    || fail 'a refused helper launch lost Docker state, events or removal'
+for test_case in ping-exit ping-logs-failure ping-removal-failure; do
+    if (set -e; link_ping "${tmp_dir}/${test_case}.txt" sender receiver baseline) \
+        >"${tmp_dir}/${test_case}.failure.txt" 2>&1; then
+        fail "${test_case} passed"
+    fi
+done
+grep -q ': ping exited 3; see ' "${tmp_dir}/ping-exit.failure.txt" \
+    || fail 'a failed ping lost its exit status'
+jq -e '.wait_status == 0 and .helper_exit_code == 3 and .ping_status == 3 and .logs_status == 0
+    and .removal_status == 0' "${tmp_dir}/ping-exit.probe.json" >/dev/null \
+    || fail 'a failed ping lost its outcome'
+grep -q ': its output could not be read (logs exited 125); see ' \
+    "${tmp_dir}/ping-logs-failure.failure.txt" || fail 'a failed helper log read lost its stage'
+grep -q 'deliberate ping helper log failure' "${tmp_dir}/ping-logs-failure.helper.log" \
+    || fail 'a failed helper log read lost its diagnostic'
+jq -e '.helper_exit_code == 0 and .logs_status == 125 and .removal_status == 0' \
+    "${tmp_dir}/ping-logs-failure.probe.json" >/dev/null || fail 'a failed helper log read lost its outcome'
+grep -q ': it could not be removed (removal exited 125); see ' \
+    "${tmp_dir}/ping-removal-failure.failure.txt" || fail 'a failed helper removal lost its stage'
+grep -q 'deliberate ping helper removal failure' "${tmp_dir}/ping-removal-failure.helper-removal.log" \
+    || fail 'a failed helper removal lost its diagnostic'
+jq -e '.helper_exit_code == 0 and .logs_status == 0 and .removal_status == 125' \
+    "${tmp_dir}/ping-removal-failure.probe.json" >/dev/null || fail 'a failed helper removal lost its outcome'
+# A failed removal keeps the exact helper identity for the run's cleanup owner.
+retained_helper="$(jq -r .helper_id "${tmp_dir}/ping-removal-failure.probe.json")"
+docker inspect "${retained_helper}" >/dev/null || fail 'a failed removal lost the retained helper'
+timeout --foreground --kill-after=5s 20s docker container rm --force "${retained_helper}" >/dev/null
+
+# No earlier control leaves a helper in either namespace while the effect is measured.
+[[ -z "$(docker ps -aq --filter "label=io.nervix.chaos.run=${run_id}" \
+    --filter 'label=io.nervix.chaos.role=link-probe')" ]] \
+    || fail 'an earlier control retained a helper'
+
+# Qualify the existing twofold effect against real healthy and 256kbit directed transfers. Each
+# successful sample keeps its launch and sample times on the controller's clock.
 test_case=rate-effect
 link_ping "${tmp_dir}/healthy-ping.txt" sender receiver baseline
 link_rate_probe "${tmp_dir}/healthy-rate.json" sender receiver
@@ -233,6 +384,12 @@ netem qdisc add dev eth0 root netem rate 256kbit
 link_ping "${tmp_dir}/capped-ping.txt" sender receiver rate-limit
 link_rate_probe "${tmp_dir}/capped-rate.json" sender receiver
 netem qdisc del dev eth0 root
+for sample in healthy-ping capped-ping; do
+    jq -e '.launch_status == 0 and .wait_status == 0 and .helper_exit_code == 0 and .ping_status == 0
+        and .shared_clock and .launch_ms >= 0 and .sample_ms >= 3800 and .logs_status == 0
+        and .removal_status == 0 and .docker_state == null' \
+        "${tmp_dir}/${sample}.probe.json" >/dev/null || fail "${sample} lost its helper timings"
+done
 "${chaos_dir}/verify-degraded-evidence.sh" effect rate-limit \
     "${tmp_dir}/healthy-ping.json" "${tmp_dir}/capped-ping.json" \
     "${tmp_dir}/healthy-rate.json" "${tmp_dir}/capped-rate.json" >/dev/null \

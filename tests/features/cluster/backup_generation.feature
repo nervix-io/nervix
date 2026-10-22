@@ -1,7 +1,7 @@
 Feature: Bounded complete restore generations
   Restoring a complete state set publishes one durable generation before START.
 
-  @restore_installation @deloxide_stress_restore
+  @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: A complete restore generation with <branches> saves of <save_mib> MiB on <cluster_size> nodes preserves branches and source offsets
     Given Kafka is running
     And runtime replication is configured with replica count <replicas> and snapshot interval "10m"
@@ -26,7 +26,7 @@ Feature: Bounded complete restore generations
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY filtered_metrics SCHEMA result BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

@@ -29,7 +29,7 @@ Feature: Real process crash recovery
         TO window_outputs
           SET tenant = FIRST(input.tenant), samples = COUNT(input.value)
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT crash_postgres TYPE POSTGRES
+      CREATE POSTGRES CLIENT crash_postgres
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{postgres_addr}}'
@@ -123,7 +123,7 @@ Feature: Real process crash recovery
         MAX TIME 10m
         BRANCHED BY by_reading_tenant
         TO unique_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT reading_postgres TYPE POSTGRES
+      CREATE POSTGRES CLIENT reading_postgres
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{postgres_addr}}'
@@ -251,7 +251,7 @@ Feature: Real process crash recovery
           INHERIT ALL
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT crash_postgres TYPE POSTGRES
+      CREATE POSTGRES CLIENT crash_postgres
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{postgres_addr}}'

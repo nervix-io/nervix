@@ -17,15 +17,16 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, ModelVariant};
 use nervix_models::{
     AckWindow, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterIngestorError,
-    BatchMessageLimit, ClickHouseSink, ClickHouseSinkEntity, ClickHouseTableSink,
-    ClickHouseValueMapping, ClientConsumerSink, ClientIngestMode, ClientName, ClientSinkEntity,
-    ClientSourceEntity, CollectionName, ConnectorKind, EmitSink, EmitSinkKind, EmitterBatchPolicy,
-    EmitterBatchRequirement, EmitterPublishingMode, EndpointIngestMode, EndpointType, Expression,
-    HttpEndpointSource, HttpSinkEntity, HttpSource, HttpSourceEntity, IcebergCatalog, IcebergSink,
-    IcebergSinkEntity, IcebergStorageBackend, IcebergTableSink, IngestAcknowledgement,
-    IngestQuiesceMode, IngestQuiesceOverflow, IngestSource, IngestSourceKind, KafkaIngestMode,
-    KafkaOffsetMode, KafkaSinkEntity, KafkaSourceEntity, KafkaTopicSink, KafkaTopicSource, Literal,
-    Model, ModelKind, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MongoDbSinkEntity,
+    BatchMessageLimit, BatchUnavailability, ClickHouseSink, ClickHouseSinkEntity,
+    ClickHouseTableSink, ClickHouseValueMapping, ClientConsumerSink, ClientIngestMode, ClientName,
+    ClientSinkEntity, ClientSourceEntity, CollectionName, ConnectorKind, EmitSink, EmitSinkKind,
+    EmitterBatchLegality, EmitterBatchPolicy, EmitterBodyForm, EmitterPublishingMode,
+    EndpointIngestMode, EndpointType, Expression, HeaderLayout, HeaderModel, HttpEndpointSource,
+    HttpSinkEntity, HttpSource, HttpSourceEntity, IcebergCatalog, IcebergSink, IcebergSinkEntity,
+    IcebergStorageBackend, IcebergTableSink, IngestAcknowledgement, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestSource, IngestSourceKind, KafkaIngestMode, KafkaOffsetMode,
+    KafkaSinkEntity, KafkaSourceEntity, KafkaTopicSink, KafkaTopicSource, Literal, Model,
+    ModelKind, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MongoDbSinkEntity,
     MqttIngestMode, MqttQos, MqttSession, MqttSinkEntity, MqttSourceEntity, MqttTopicSource,
     MySqlConflictAction, MySqlSink, MySqlSinkEntity, MySqlTableSink, NatsSinkEntity,
     NatsSourceEntity, OtelLogsSink, OtelMappings, OtelMetric, OtelMetricKind, OtelMetricsSink,
@@ -41,6 +42,8 @@ use nervix_models::{
 };
 use rstest::rstest;
 use strum::IntoEnumIterator as _;
+
+mod surface;
 
 fn named<N>(raw: &str) -> N
 where
@@ -309,72 +312,79 @@ fn a_source_form_names_its_pair_by_key_and_label() {
 
 /// What one source pair declares, as the table below states it.
 struct SourceDeclaration {
-    reads_headers: bool,
+    headers: Option<HeaderModel>,
     metadata: SourceMetadataScope,
     every_node: bool,
     reference: SourceReferenceKind,
 }
 
 fn source_declaration(kind: IngestSourceKind) -> SourceDeclaration {
-    let headers_only = |reads_headers, connector| SourceDeclaration {
-        reads_headers,
+    let headers_only = |headers, connector| SourceDeclaration {
+        headers,
         metadata: SourceMetadataScope::Headers,
         every_node: false,
         reference: SourceReferenceKind::Client(connector),
     };
     match kind {
         IngestSourceKind::Client(ClientSourceEntity::Producer) => SourceDeclaration {
-            reads_headers: false,
+            headers: None,
             metadata: SourceMetadataScope::Headers,
             every_node: false,
             reference: SourceReferenceKind::Schema,
         },
-        IngestSourceKind::Http(HttpSourceEntity::Request) => {
-            headers_only(true, ConnectorKind::Http)
-        }
+        IngestSourceKind::Http(HttpSourceEntity::Request) => headers_only(
+            Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
+            ConnectorKind::Http,
+        ),
         IngestSourceKind::Kafka(KafkaSourceEntity::Topic) => SourceDeclaration {
-            reads_headers: true,
+            headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
             metadata: SourceMetadataScope::Kafka,
             every_node: false,
             reference: SourceReferenceKind::Client(ConnectorKind::Kafka),
         },
-        IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) => {
-            headers_only(true, ConnectorKind::Pulsar)
-        }
-        IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => headers_only(false, ConnectorKind::Mqtt),
-        IngestSourceKind::Nats(NatsSourceEntity::Subject) => {
-            headers_only(true, ConnectorKind::Nats)
-        }
-        IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) => {
-            headers_only(true, ConnectorKind::RabbitMq)
-        }
+        IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) => headers_only(
+            Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            ConnectorKind::Pulsar,
+        ),
+        IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => headers_only(None, ConnectorKind::Mqtt),
+        IngestSourceKind::Nats(NatsSourceEntity::Subject) => headers_only(
+            Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
+            ConnectorKind::Nats,
+        ),
+        IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) => headers_only(
+            Some(HeaderModel::exact(HeaderLayout::SortedByName)),
+            ConnectorKind::RabbitMq,
+        ),
         IngestSourceKind::Redis(RedisSourceEntity::PubSub) => {
-            headers_only(false, ConnectorKind::Redis)
+            headers_only(None, ConnectorKind::Redis)
         }
         IngestSourceKind::Prometheus(PrometheusSourceEntity::Query) => {
-            headers_only(false, ConnectorKind::Prometheus)
+            headers_only(None, ConnectorKind::Prometheus)
         }
         IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull) => {
-            headers_only(false, ConnectorKind::ZeroMq)
+            headers_only(None, ConnectorKind::ZeroMq)
         }
-        IngestSourceKind::Sqs(SqsSourceEntity::Queue) => headers_only(true, ConnectorKind::Sqs),
+        IngestSourceKind::Sqs(SqsSourceEntity::Queue) => headers_only(
+            Some(HeaderModel::exact(HeaderLayout::LastWins)),
+            ConnectorKind::Sqs,
+        ),
         IngestSourceKind::Http(HttpSourceEntity::Endpoint) => SourceDeclaration {
-            reads_headers: true,
+            headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
             metadata: SourceMetadataScope::Headers,
             every_node: true,
             reference: SourceReferenceKind::Endpoint(EndpointType::Http),
         },
         IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
-            headers_only(false, ConnectorKind::Websockets)
+            headers_only(None, ConnectorKind::Websockets)
         }
         IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => SourceDeclaration {
-            reads_headers: true,
+            headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
             metadata: SourceMetadataScope::Headers,
             every_node: true,
             reference: SourceReferenceKind::Endpoint(EndpointType::Websockets),
         },
         IngestSourceKind::Syslog(SyslogSourceEntity::Listener) => SourceDeclaration {
-            reads_headers: false,
+            headers: None,
             metadata: SourceMetadataScope::Syslog,
             every_node: true,
             reference: SourceReferenceKind::Client(ConnectorKind::Syslog),
@@ -387,8 +397,8 @@ fn every_source_pair_declares_its_headers_metadata_execution_and_reference() {
     for kind in IngestSourceKind::all() {
         let expected = source_declaration(kind);
         let declared = kind.capabilities();
-        assert_eq!(declared.reads_headers, expected.reads_headers, "{kind:?}");
-        assert_eq!(kind.reads_headers(), expected.reads_headers, "{kind:?}");
+        assert_eq!(declared.headers, expected.headers, "{kind:?}");
+        assert_eq!(kind.reads_headers(), expected.headers.is_some(), "{kind:?}");
         assert_eq!(declared.metadata, expected.metadata, "{kind:?}");
         assert_eq!(
             declared.executes_on_every_cluster_node, expected.every_node,
@@ -435,7 +445,7 @@ fn a_transport_source_states_what_its_pair_declares() {
                 format!("{} {}", kind.connector().keyword(), kind.entity_keyword())
             );
             assert_eq!(kind.to_string(), kind.phrase());
-            assert_eq!(source.reads_headers(), declared.reads_headers);
+            assert_eq!(source.reads_headers(), declared.reads_headers());
             assert_eq!(
                 source.executes_on_every_cluster_node(),
                 declared.executes_on_every_cluster_node
@@ -604,70 +614,92 @@ fn the_metadata_scopes_declare_their_fields_in_order() {
 
 /// What one sink pair declares, as the table below states it.
 struct SinkDeclaration {
-    writes_headers: bool,
-    requires_codec: bool,
-    batch_required: bool,
+    headers: Option<HeaderModel>,
+    body: EmitterBodyForm,
+    batch: EmitterBatchLegality,
     requires_batch_transformation: bool,
-    bounded_batch: bool,
     modes: &'static [&'static str],
 }
 
 fn sink_declaration(kind: EmitSinkKind) -> SinkDeclaration {
-    let codec = |writes_headers, modes| SinkDeclaration {
-        writes_headers,
-        requires_codec: true,
-        batch_required: false,
+    let codec = |headers, modes| SinkDeclaration {
+        headers,
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        bounded_batch: false,
         modes,
     };
-    let request = |batch_required| SinkDeclaration {
-        writes_headers: false,
-        requires_codec: false,
-        batch_required,
+    let request = |batch| SinkDeclaration {
+        headers: None,
+        body: EmitterBodyForm::Values,
+        batch,
         requires_batch_transformation: false,
-        bounded_batch: false,
         modes: &["RequestAck"],
     };
+    let required = EmitterBatchLegality::Required { maximum: None };
+    let optional = EmitterBatchLegality::Optional { maximum: None };
     match kind {
         EmitSinkKind::Client(ClientSinkEntity::Consumer) => SinkDeclaration {
-            writes_headers: false,
-            requires_codec: false,
-            batch_required: true,
+            headers: None,
+            body: EmitterBodyForm::Native,
+            batch: required,
             requires_batch_transformation: false,
-            bounded_batch: false,
             modes: &["ClientAck"],
         },
         EmitSinkKind::Http(HttpSinkEntity::Request) => SinkDeclaration {
-            writes_headers: true,
-            ..request(false)
+            headers: Some(HeaderModel::lowercase(HeaderLayout::SortedByName)),
+            body: EmitterBodyForm::CodecOrWithoutBody,
+            ..request(EmitterBatchLegality::Unavailable {
+                reason: BatchUnavailability::OneRequestPerRecord,
+            })
         },
-        EmitSinkKind::Kafka(KafkaSinkEntity::Topic)
-        | EmitSinkKind::Pulsar(PulsarSinkEntity::Topic)
-        | EmitSinkKind::RabbitMq(RabbitMqSinkEntity::Queue) => codec(true, &["NoAck", "BrokerAck"]),
+        EmitSinkKind::Kafka(KafkaSinkEntity::Topic) => codec(
+            Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            &["NoAck", "BrokerAck"],
+        ),
+        EmitSinkKind::Pulsar(PulsarSinkEntity::Topic) => codec(
+            Some(HeaderModel::exact(HeaderLayout::LastWins)),
+            &["NoAck", "BrokerAck"],
+        ),
+        EmitSinkKind::RabbitMq(RabbitMqSinkEntity::Queue) => codec(
+            Some(HeaderModel::exact(HeaderLayout::SortedByName)),
+            &["NoAck", "BrokerAck"],
+        ),
         EmitSinkKind::Redis(RedisSinkEntity::PubSub)
         | EmitSinkKind::ZeroMq(ZeroMqSinkEntity::Push)
-        | EmitSinkKind::Syslog(SyslogSinkEntity::Collector) => codec(false, &["NoAck"]),
+        | EmitSinkKind::Syslog(SyslogSinkEntity::Collector) => codec(None, &["NoAck"]),
         EmitSinkKind::Mqtt(MqttSinkEntity::Topic) => {
-            codec(false, &["MqttQos0", "MqttQos1", "MqttQos2"])
+            codec(None, &["MqttQos0", "MqttQos1", "MqttQos2"])
         }
-        EmitSinkKind::Nats(NatsSinkEntity::Subject) => codec(true, &["NoAck", "NatsJetStream"]),
+        EmitSinkKind::Nats(NatsSinkEntity::Subject) => codec(
+            Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
+            &["NoAck", "NatsJetStream"],
+        ),
         EmitSinkKind::Sqs(SqsSinkEntity::Queue) => SinkDeclaration {
-            bounded_batch: true,
-            ..codec(true, &["SqsSingle", "SqsBatch"])
+            batch: EmitterBatchLegality::Optional {
+                maximum: Some(
+                    "256KiB"
+                        .parse()
+                        .assured("256 KiB is a whole number of bytes"),
+                ),
+            },
+            ..codec(
+                Some(HeaderModel::exact(HeaderLayout::LastWins)),
+                &["SqsSingle", "SqsBatch"],
+            )
         },
         EmitSinkKind::Sentry(SentrySinkEntity::Event) => SinkDeclaration {
             requires_batch_transformation: true,
-            ..codec(false, &["RequestAck"])
+            ..codec(None, &["RequestAck"])
         },
         EmitSinkKind::Otel(
             OtelSinkEntity::Logs | OtelSinkEntity::Traces | OtelSinkEntity::Metrics,
         )
-        | EmitSinkKind::Iceberg(IcebergSinkEntity::Table) => request(false),
+        | EmitSinkKind::Iceberg(IcebergSinkEntity::Table) => request(optional),
         EmitSinkKind::ClickHouse(ClickHouseSinkEntity::Table)
         | EmitSinkKind::Postgres(PostgresSinkEntity::Table)
         | EmitSinkKind::MySql(MySqlSinkEntity::Table)
-        | EmitSinkKind::MongoDb(MongoDbSinkEntity::Collection) => request(true),
+        | EmitSinkKind::MongoDb(MongoDbSinkEntity::Collection) => request(required),
     }
 }
 
@@ -676,25 +708,26 @@ fn every_sink_pair_declares_its_headers_codec_batching_and_publishing_modes() {
     for kind in EmitSinkKind::all() {
         let expected = sink_declaration(kind);
         let declared = kind.capabilities();
-        assert_eq!(declared.writes_headers, expected.writes_headers, "{kind:?}");
-        assert_eq!(declared.requires_codec, expected.requires_codec, "{kind:?}");
+        assert_eq!(declared.headers, expected.headers, "{kind:?}");
         assert_eq!(
-            declared.batch_requirement == EmitterBatchRequirement::Required,
-            expected.batch_required,
+            declared.writes_headers(),
+            expected.headers.is_some(),
             "{kind:?}"
         );
+        assert_eq!(declared.body, expected.body, "{kind:?}");
+        assert_eq!(declared.batch, expected.batch, "{kind:?}");
         assert_eq!(
             declared.requires_batch_transformation, expected.requires_batch_transformation,
-            "{kind:?}"
-        );
-        assert_eq!(
-            declared.batch_size_maximum.is_some(),
-            expected.bounded_batch,
             "{kind:?}"
         );
         for (name, mode) in publishing_modes() {
             assert_eq!(
                 kind.accepts_publishing_mode(&mode),
+                expected.modes.contains(&name),
+                "{kind:?} {name}"
+            );
+            assert_eq!(
+                declared.publishing_modes.contains(&mode.kind()),
                 expected.modes.contains(&name),
                 "{kind:?} {name}"
             );
@@ -704,10 +737,12 @@ fn every_sink_pair_declares_its_headers_codec_batching_and_publishing_modes() {
 
 #[test]
 fn the_sqs_sink_admits_at_most_the_message_size_sqs_does() {
-    let maximum = EmitSinkKind::Sqs(SqsSinkEntity::Queue)
-        .capabilities()
-        .batch_size_maximum
-        .assured("SQS fixes a message size");
+    let EmitterBatchLegality::Optional {
+        maximum: Some(maximum),
+    } = EmitSinkKind::Sqs(SqsSinkEntity::Queue).capabilities().batch
+    else {
+        panic!("SQS batches optionally, up to the message size it fixes");
+    };
     assert_eq!(maximum.bytes().get(), 256 * 1024);
 }
 
@@ -723,13 +758,12 @@ fn a_sink_states_what_its_pair_declares() {
             assert_eq!(sink.connector(), kind.connector());
             assert_eq!(sink.transport_label(), kind.connector().keyword());
             assert_eq!(sink.capabilities(), declared);
-            assert_eq!(sink.requires_codec(), declared.requires_codec);
-            assert_eq!(sink.batch_requirement(), declared.batch_requirement);
+            assert_eq!(sink.requires_codec(), declared.body.requires_codec());
+            assert_eq!(sink.batch_legality(), declared.batch);
             assert_eq!(
                 sink.requires_batch_transformation(),
                 declared.requires_batch_transformation
             );
-            assert_eq!(sink.batch_size_maximum(), declared.batch_size_maximum);
             for (name, mode) in publishing_modes() {
                 assert_eq!(
                     sink.accepts_publishing_mode(&mode),
@@ -1039,9 +1073,10 @@ fn naming_another_client_keeps_a_sink_of_every_pair_the_same_definition() {
             let mut original = arbitrary.create_emitter_to(kind);
             // An alteration checks the batching contract again, which is not what this check is
             // about, so the emitter batches exactly as its sink requires.
-            original.batch = match original.sink.batch_requirement() {
-                EmitterBatchRequirement::Required => Some(admissible_batch()),
-                EmitterBatchRequirement::Optional => None,
+            original.batch = match original.sink.batch_legality() {
+                EmitterBatchLegality::Required { .. } => Some(admissible_batch()),
+                EmitterBatchLegality::Optional { .. }
+                | EmitterBatchLegality::Unavailable { .. } => None,
             };
             let alter = AlterEmitter {
                 emitter: original.name.clone(),

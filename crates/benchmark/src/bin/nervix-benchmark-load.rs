@@ -54,6 +54,33 @@ const UNIFORM_ID_DIGITS: usize = 16;
 const RETAIN_MARKER: u8 = b'x';
 const PADDING: u8 = b'y';
 
+/// How long the producer keeps trying to deliver a message before it reports the message failed.
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a throughput-batched record batch waits for more messages before it is sent.
+const THROUGHPUT_LINGER: Duration = Duration::from_millis(5);
+/// The most messages a throughput-batched record batch holds.
+const THROUGHPUT_BATCH_MESSAGES: u64 = 10_000;
+/// How long a record batch holding part of a keyed cycle waits for the rest of the cycle. A cycle
+/// whose messages take longer than this to queue fails the run, so no record batch is ever sent
+/// with part of a cycle.
+const CYCLE_LINGER: Duration = Duration::from_secs(50);
+// librdkafka refuses a linger that is not shorter than the delivery timeout.
+const _: () = assert!(CYCLE_LINGER.as_millis() < DELIVERY_TIMEOUT.as_millis());
+/// The byte budget librdkafka gives the record batches the producer's `batch.size` asks for.
+const PRODUCER_BATCH_BYTES: usize = 1_048_576;
+/// The most bytes one record batch, and one produce request, may hold: the producer's
+/// `message.max.bytes`. librdkafka closes a batch at the smaller of this and
+/// `PRODUCER_BATCH_BYTES`.
+const RECORD_BATCH_BYTES: usize = 1_000_000;
+// A keyed cycle is checked against this limit, so it must be the one that closes a batch.
+const _: () = assert!(RECORD_BATCH_BYTES <= PRODUCER_BATCH_BYTES);
+/// What librdkafka reserves for the framing of the next record when it decides whether that record
+/// still fits its batch: the most the varint fields of a version 2 record can occupy.
+const RECORD_FRAMING_BYTES: usize = 36;
+/// The part of a record batch's byte budget the produce request and record batch headers take: the
+/// fixed fields, a topic name of at most 249 bytes, and the 61-byte record batch header.
+const BATCH_HEADER_BYTES: usize = 1024;
+
 #[derive(Debug, Parser)]
 #[command(about = "Drive a Kafka-to-Kafka end-to-end streaming benchmark")]
 struct Args {
@@ -298,8 +325,9 @@ impl PayloadWriter {
     /// The payload for message `index` of cycle `cycle`.
     ///
     /// Keyed cycles emit one pass over the whole key list per copy, so a key's duplicates are
-    /// `keys_per_cycle` messages apart on one partition: far enough to exercise a live keyspace,
-    /// close enough that deduplication expiry can never split them.
+    /// `keys_per_cycle` messages apart on one partition, far enough to exercise a live keyspace.
+    /// `RecordBatching::WholeCycles` sends each cycle as one Kafka record batch, so the duplicates
+    /// reach the deduplicator together and its expiry can never split them.
     fn payload(&mut self, cycle: u64, index: u64) -> &[u8] {
         match self {
             Self::Uniform {
@@ -647,9 +675,103 @@ impl Drop for SummaryDrain {
     }
 }
 
+/// How the producer cuts each partition's queue of input messages into Kafka record batches.
+///
+/// The broker appends a record batch whole and serves it whole, but nothing bounds the time
+/// between two batches of one partition: a broker that stalls holds the later batch back for as
+/// long as it stalls, and the measured path reads that batch that much later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordBatching {
+    /// A batch is sent after `THROUGHPUT_LINGER` or once it holds `THROUGHPUT_BATCH_MESSAGES`
+    /// messages or its byte budget, so one cycle can span batches. Every uniform input is owed its
+    /// own output, so it does not matter which messages travel together.
+    Throughput,
+    /// Every batch holds exactly one cycle. A batch is sent when the last message of its cycle is
+    /// queued, and the driver flushes the producer only between cycles. The copies of each key
+    /// therefore reach the deduplicator together however long the broker stalls between batches,
+    /// and its `MAX TIME` never expires a key between them.
+    WholeCycles { messages_per_cycle: u64 },
+}
+
+impl RecordBatching {
+    /// The batching `shape` needs when each of its messages takes `wire_bytes` bytes.
+    ///
+    /// A keyed cycle that cannot fit in one record batch is refused, because its copies of a key
+    /// could then travel in different batches.
+    fn for_shape(shape: &LoadShape, wire_bytes: usize) -> Result<Self> {
+        let messages_per_cycle = match shape {
+            LoadShape::UniformPassthrough
+            | LoadShape::UniformUppercase
+            | LoadShape::UniformFilterMap
+            | LoadShape::UniformFanout { .. } => return Ok(Self::Throughput),
+            LoadShape::KeyedWindowed { .. } => shape.messages_per_cycle(),
+        };
+        let record_bytes = wire_bytes
+            .checked_add(RECORD_FRAMING_BYTES)
+            .context("keyed record size overflowed")?;
+        let cycle_records = usize::try_from(messages_per_cycle)
+            .context("keyed cycle message count does not fit in memory")?;
+        let records_bytes = cycle_records
+            .checked_mul(record_bytes)
+            .context("keyed cycle size overflowed")?;
+        let cycle_bytes = records_bytes
+            .checked_add(BATCH_HEADER_BYTES)
+            .context("keyed cycle size overflowed")?;
+        ensure!(
+            cycle_bytes <= RECORD_BATCH_BYTES,
+            "a keyed cycle of {messages_per_cycle} messages of {wire_bytes} bytes needs up to \
+             {cycle_bytes} bytes, more than the {RECORD_BATCH_BYTES} bytes of the one record \
+             batch that keeps every key's copies together"
+        );
+        Ok(Self::WholeCycles { messages_per_cycle })
+    }
+
+    /// The configuration of the producer that writes the benchmark's input records.
+    fn producer_config(self, bootstrap_servers: &str) -> ClientConfig {
+        let (linger, batch_messages) = match self {
+            Self::Throughput => (THROUGHPUT_LINGER, THROUGHPUT_BATCH_MESSAGES),
+            Self::WholeCycles { messages_per_cycle } => (CYCLE_LINGER, messages_per_cycle),
+        };
+        let mut config = ClientConfig::new();
+        config
+            .set("bootstrap.servers", bootstrap_servers)
+            .set("acks", "all")
+            .set("enable.idempotence", "true")
+            .set(
+                "delivery.timeout.ms",
+                DELIVERY_TIMEOUT.as_millis().to_string(),
+            )
+            .set("linger.ms", linger.as_millis().to_string())
+            .set("batch.size", PRODUCER_BATCH_BYTES.to_string())
+            .set("message.max.bytes", RECORD_BATCH_BYTES.to_string())
+            .set("batch.num.messages", batch_messages.to_string())
+            .set("queue.buffering.max.messages", "1048576")
+            .set("queue.buffering.max.kbytes", "1048576")
+            .set("compression.type", "none");
+        config
+    }
+
+    /// Fails a keyed cycle whose messages took `elapsed` to queue when that is long enough for
+    /// its record batch to have been sent before the cycle's last message joined it.
+    fn check_cycle_queued(self, cycle: u64, elapsed: Duration) -> Result<()> {
+        match self {
+            Self::Throughput => Ok(()),
+            Self::WholeCycles { .. } => {
+                ensure!(
+                    elapsed < CYCLE_LINGER,
+                    "queueing keyed cycle {cycle} took {elapsed:?}, so its record batch may have \
+                     been sent after {CYCLE_LINGER:?} without the rest of the cycle"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
 struct BenchmarkRunner {
     args: CommonArgs,
     shape: LoadShape,
+    batching: RecordBatching,
     producer: ThreadedProducer<DeliveryContext>,
     deliveries: DeliveryContext,
     wait_timeout: Duration,
@@ -804,18 +926,11 @@ impl BenchmarkRunner {
             args.go_file.display()
         );
 
+        let wire_bytes = PayloadWriter::new(&shape, args.value_bytes)?.wire_bytes();
+        let batching = RecordBatching::for_shape(&shape, wire_bytes)?;
         let deliveries = DeliveryContext::default();
-        let producer = ClientConfig::new()
-            .set("bootstrap.servers", &args.bootstrap_servers)
-            .set("acks", "all")
-            .set("enable.idempotence", "true")
-            .set("delivery.timeout.ms", "60000")
-            .set("linger.ms", "5")
-            .set("batch.size", "1048576")
-            .set("batch.num.messages", "10000")
-            .set("queue.buffering.max.messages", "1048576")
-            .set("queue.buffering.max.kbytes", "1048576")
-            .set("compression.type", "none")
+        let producer = batching
+            .producer_config(&args.bootstrap_servers)
             .create_with_context(deliveries.clone())
             .context("failed to create the benchmark Kafka producer")?;
         let wait_timeout = Duration::from_secs(args.wait_timeout_seconds);
@@ -823,6 +938,7 @@ impl BenchmarkRunner {
         Ok(Self {
             args,
             shape,
+            batching,
             producer,
             deliveries,
             wait_timeout,
@@ -1345,10 +1461,11 @@ impl BenchmarkRunner {
         messages_per_cycle: u64,
         deadline: Instant,
     ) -> Result<()> {
+        let started = Instant::now();
         for index in 0..messages_per_cycle {
             self.send_before(deadline, partition, payload.payload(cycle, index))?;
         }
-        Ok(())
+        self.batching.check_cycle_queued(cycle, started.elapsed())
     }
 
     fn send_before(&self, deadline: Instant, partition: i32, payload: &[u8]) -> Result<()> {
@@ -1704,6 +1821,9 @@ fn wait_for_empty_topic(
 
 #[cfg(test)]
 mod tests {
+    use nervix_primitives::sync::blocking::mpsc;
+    use nervix_recovery::NoReceiver as _;
+
     use super::*;
 
     #[test]
@@ -1873,5 +1993,276 @@ mod tests {
                 .and_then(|item| item.distinct_estimate),
             Some(37)
         );
+    }
+
+    /// The keyed shape of the `kafka-dedup-window` catalog workload.
+    fn dedup_window_shape() -> LoadShape {
+        LoadShape::KeyedWindowed {
+            keys_per_cycle: 768,
+            retained_keys: 576,
+            copies_per_key: 2,
+            count_field: "record_count".to_string(),
+        }
+    }
+
+    const BATCH_TOPIC: &str = "keyed-cycles";
+    /// The topic of the cycle that brings the producer to the broker before a test's cycles.
+    const WARM_UP_TOPIC: &str = "warm-up";
+
+    /// Hands the test the message counts of the record batches a producer formed for
+    /// `BATCH_TOPIC`, from the statistics librdkafka emits once per interval for the batches of
+    /// that interval.
+    struct FormedBatches {
+        windows: mpsc::Sender<rdkafka::statistics::Window>,
+    }
+
+    impl ClientContext for FormedBatches {
+        fn stats(&self, statistics: rdkafka::Statistics) {
+            let Some(topic) = statistics.topics.get(BATCH_TOPIC) else {
+                return;
+            };
+            if topic.batchcnt.cnt > 0 {
+                self.windows
+                    .send(topic.batchcnt.clone())
+                    .means_peer_left("the test reading the formed record batches");
+            }
+        }
+    }
+
+    impl ProducerContext for FormedBatches {
+        type DeliveryOpaque = ();
+
+        fn delivery(&self, _: &DeliveryResult<'_>, _: Self::DeliveryOpaque) {}
+    }
+
+    /// One partition of a mock broker, and a producer configured as the driver configures it for
+    /// `shape`, reporting the record batches it forms.
+    struct BatchedPartition {
+        cluster: rdkafka::mocking::MockCluster<'static, rdkafka::producer::DefaultProducerContext>,
+        producer: ThreadedProducer<FormedBatches>,
+        windows: mpsc::Receiver<rdkafka::statistics::Window>,
+        payload: PayloadWriter,
+        messages_per_cycle: u64,
+    }
+
+    impl BatchedPartition {
+        fn open(shape: &LoadShape) -> Self {
+            let cluster = rdkafka::mocking::MockCluster::new(1)
+                .assured("librdkafka builds an in-process mock cluster");
+            cluster
+                .create_topic(BATCH_TOPIC, 1, 1)
+                .assured("the mock cluster creates a topic");
+            cluster
+                .create_topic(WARM_UP_TOPIC, 1, 1)
+                .assured("the mock cluster creates a topic");
+            let payload = PayloadWriter::new(shape, 128).assured("a 128-byte value fits a payload");
+            let batching = RecordBatching::for_shape(shape, payload.wire_bytes())
+                .assured("a catalog workload's keyed cycle fits one record batch");
+            let mut config = batching.producer_config(&cluster.bootstrap_servers());
+            config.set("statistics.interval.ms", "10");
+            let (sender, windows) = mpsc::channel();
+            let producer = config
+                .create_with_context(FormedBatches { windows: sender })
+                .assured("the driver's producer configuration is accepted by librdkafka");
+            let mut partition = Self {
+                payload,
+                messages_per_cycle: shape.messages_per_cycle(),
+                cluster,
+                producer,
+                windows,
+            };
+            // Until the idempotent producer holds its producer id it sends nothing, and the
+            // backed-up queue would cut the first batches by size whatever a test does to its
+            // cycles. A cycle delivered on another topic shows that it holds one. The cycle is
+            // whole because a partial one would wait out the cycle linger: rust-rdkafka calls
+            // librdkafka's flush with a zero timeout, which lifts the linger only while it lasts.
+            partition.send_cycle(WARM_UP_TOPIC, 0, 0, Duration::ZERO);
+            partition
+                .producer
+                .flush(Duration::from_secs(30))
+                .assured("the mock broker acknowledges the warm-up cycle");
+            partition
+        }
+
+        /// Queues every message of `cycle` for `topic`, stopping for `pause` before message
+        /// `pause_at`.
+        fn send_cycle(&mut self, topic: &str, cycle: u64, pause_at: u64, pause: Duration) {
+            for index in 0..self.messages_per_cycle {
+                if index == pause_at {
+                    thread::sleep(pause);
+                }
+                let record = BaseRecord::<'_, (), [u8], ()>::to(topic)
+                    .partition(0)
+                    .payload(self.payload.payload(cycle, index));
+                self.producer
+                    .send(record)
+                    .map_err(|(error, _)| error)
+                    .assured("the producer queue holds every message of a few cycles");
+            }
+        }
+
+        /// The message counts of the record batches formed for `cycles` whole cycles: one window
+        /// for each statistics interval in which the producer formed a batch.
+        fn batch_windows(&self, cycles: u64) -> Vec<rdkafka::statistics::Window> {
+            self.producer
+                .flush(Duration::from_secs(30))
+                .assured("the mock broker acknowledges every queued message");
+            let messages = cycles
+                .checked_mul(self.messages_per_cycle)
+                .assured("the tests send a few cycles of fewer than two thousand messages");
+            let expected = i64::try_from(messages).assured("a few cycles of messages fit an i64");
+            let mut windows = Vec::new();
+            let mut counted = 0_i64;
+            while counted < expected {
+                let Ok(window) = self.windows.recv_timeout(Duration::from_secs(30)) else {
+                    panic!(
+                        "the producer statistics counted {counted} of {expected} batched messages"
+                    );
+                };
+                counted = counted
+                    .checked_add(window.sum)
+                    .assured("the windows count the batches of the few cycles the test sent");
+                windows.push(window);
+            }
+            assert_eq!(
+                counted, expected,
+                "the producer statistics counted more batched messages than the test sent"
+            );
+            windows
+        }
+
+        /// Asserts that every record batch formed for `cycles` cycles held exactly one cycle.
+        fn assert_one_cycle_per_batch(&self, cycles: u64) {
+            let cycle = i64::try_from(self.messages_per_cycle)
+                .assured("a cycle's message count fits an i64");
+            for window in self.batch_windows(cycles) {
+                assert_eq!(
+                    (window.min, window.max),
+                    (cycle, cycle),
+                    "record batches of {} to {} messages split {cycle}-message cycles",
+                    window.min,
+                    window.max
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn keyed_cycles_travel_whole_and_uniform_messages_in_throughput_batches() {
+        let keyed = dedup_window_shape();
+        let wire_bytes = PayloadWriter::new(&keyed, 128)
+            .assured("a 128-byte value fits a payload")
+            .wire_bytes();
+        assert_eq!(
+            RecordBatching::for_shape(&keyed, wire_bytes)
+                .assured("the catalog's keyed cycle fits one record batch"),
+            RecordBatching::WholeCycles {
+                messages_per_cycle: 1536
+            }
+        );
+        for uniform in [
+            LoadShape::UniformPassthrough,
+            LoadShape::UniformUppercase,
+            LoadShape::UniformFilterMap,
+            LoadShape::UniformFanout {
+                outputs_per_input: 3,
+            },
+        ] {
+            assert_eq!(
+                RecordBatching::for_shape(&uniform, wire_bytes)
+                    .assured("uniform messages need no particular batching"),
+                RecordBatching::Throughput
+            );
+        }
+    }
+
+    #[test]
+    fn keyed_batches_wait_for_their_cycle_and_uniform_batches_keep_the_throughput_linger() {
+        let throughput = RecordBatching::Throughput.producer_config("127.0.0.1:9092");
+        assert_eq!(throughput.get("linger.ms"), Some("5"));
+        assert_eq!(throughput.get("batch.num.messages"), Some("10000"));
+        let cycles = RecordBatching::WholeCycles {
+            messages_per_cycle: 1536,
+        }
+        .producer_config("127.0.0.1:9092");
+        assert_eq!(cycles.get("linger.ms"), Some("50000"));
+        assert_eq!(cycles.get("batch.num.messages"), Some("1536"));
+        for config in [&throughput, &cycles] {
+            assert_eq!(config.get("bootstrap.servers"), Some("127.0.0.1:9092"));
+            assert_eq!(config.get("delivery.timeout.ms"), Some("60000"));
+            assert_eq!(config.get("message.max.bytes"), Some("1000000"));
+        }
+    }
+
+    #[test]
+    fn refuses_a_keyed_cycle_that_cannot_travel_in_one_record_batch() {
+        let keyed = dedup_window_shape();
+        let wire_bytes = PayloadWriter::new(&keyed, 1024)
+            .assured("a 1024-byte value fits a payload")
+            .wire_bytes();
+        let error = RecordBatching::for_shape(&keyed, wire_bytes)
+            .err()
+            .assured("1536 messages of over a kilobyte exceed one record batch");
+        assert_eq!(
+            error.to_string(),
+            "a keyed cycle of 1536 messages of 1065 bytes needs up to 1692160 bytes, more than \
+             the 1000000 bytes of the one record batch that keeps every key's copies together"
+        );
+    }
+
+    #[test]
+    fn fails_a_keyed_cycle_queued_for_as_long_as_its_record_batch_waits() {
+        let keyed = RecordBatching::WholeCycles {
+            messages_per_cycle: 1536,
+        };
+        let within = CYCLE_LINGER
+            .checked_sub(Duration::from_millis(1))
+            .assured("the cycle linger is longer than a millisecond");
+        keyed
+            .check_cycle_queued(7, within)
+            .assured("a cycle queued within the linger left in one record batch");
+        let error = keyed
+            .check_cycle_queued(7, CYCLE_LINGER)
+            .err()
+            .assured("a cycle queued for the whole linger may have left in two batches");
+        assert_eq!(
+            error.to_string(),
+            "queueing keyed cycle 7 took 50s, so its record batch may have been sent after 50s \
+             without the rest of the cycle"
+        );
+        RecordBatching::Throughput
+            .check_cycle_queued(7, Duration::MAX)
+            .assured("uniform messages need not travel together");
+    }
+
+    #[test]
+    fn a_keyed_cycle_leaves_in_one_record_batch_when_its_enqueueing_pauses() {
+        let shape = dedup_window_shape();
+        let mut partition = BatchedPartition::open(&shape);
+        let cycles = 4;
+        for cycle in 0..cycles {
+            // A driver descheduled in the middle of a cycle, as it is on a loaded host.
+            partition.send_cycle(BATCH_TOPIC, cycle, 500, Duration::from_millis(50));
+        }
+        partition.assert_one_cycle_per_batch(cycles);
+    }
+
+    #[test]
+    fn a_keyed_cycle_leaves_in_one_record_batch_after_its_broker_returns() {
+        let shape = dedup_window_shape();
+        let mut partition = BatchedPartition::open(&shape);
+        partition
+            .cluster
+            .broker_down(1)
+            .assured("the mock broker can be taken down");
+        let cycles = 8;
+        for cycle in 0..cycles {
+            partition.send_cycle(BATCH_TOPIC, cycle, 0, Duration::ZERO);
+        }
+        partition
+            .cluster
+            .broker_up(1)
+            .assured("the mock broker can be brought back");
+        partition.assert_one_cycle_per_batch(cycles);
     }
 }

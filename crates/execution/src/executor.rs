@@ -31,6 +31,7 @@ struct ExecutorInner {
     bulk_cpu: WorkerPool,
     consensus_storage: WorkerPool,
     filesystem_storage: WorkerPool,
+    connector_storage: WorkerPool,
     management_memory: MemoryBudget,
     commands_memory: MemoryBudget,
     relay_memory: MemoryBudget,
@@ -50,6 +51,7 @@ pub struct ExecutorSnapshot {
     pub bulk_cpu: WorkerClassSnapshot,
     pub consensus_storage: WorkerClassSnapshot,
     pub filesystem_storage: WorkerClassSnapshot,
+    pub connector_storage: WorkerClassSnapshot,
     pub management_memory: MemoryBudgetSnapshot,
     pub commands_memory: MemoryBudgetSnapshot,
     pub relay_memory: MemoryBudgetSnapshot,
@@ -121,6 +123,11 @@ impl Executor {
                 filesystem_storage: WorkerPool::new(
                     StorageClass::Filesystem.into(),
                     validated.workers.filesystem_storage,
+                    validated.workers.pending_jobs,
+                ),
+                connector_storage: WorkerPool::new(
+                    StorageClass::Connector.into(),
+                    *validated.workers.connector_storage.value(),
                     validated.workers.pending_jobs,
                 ),
                 management_memory: MemoryBudget::new(
@@ -232,6 +239,9 @@ impl Executor {
 
     /// Run one storage job on `class`'s workers. The consensus class has a single worker, so its
     /// jobs execute in the order they were admitted.
+    ///
+    /// A class whose wait queue is full refuses the job, which is what work answering a request
+    /// needs; [`Self::run_storage_with`] states another [`QueueAdmission`].
     pub async fn run_storage<T>(
         &self,
         class: StorageClass,
@@ -241,8 +251,24 @@ impl Executor {
     where
         T: Send + 'static,
     {
+        self.run_storage_with(class, QueueAdmission::RefuseWhenFull, reservation, job)
+            .await
+    }
+
+    /// Run one storage job like [`Self::run_storage`], with `admission` saying what a full wait
+    /// queue does with it.
+    pub async fn run_storage_with<T>(
+        &self,
+        class: StorageClass,
+        admission: QueueAdmission,
+        reservation: Reservation,
+        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
+    ) -> Result<T, Report<ExecutionError>>
+    where
+        T: Send + 'static,
+    {
         self.storage_pool(class)
-            .run(QueueAdmission::RefuseWhenFull, reservation, job)
+            .run(admission, reservation, job)
             .await
     }
 
@@ -268,6 +294,7 @@ impl Executor {
             bulk_cpu: self.inner.bulk_cpu.snapshot(),
             consensus_storage: self.inner.consensus_storage.snapshot(),
             filesystem_storage: self.inner.filesystem_storage.snapshot(),
+            connector_storage: self.inner.connector_storage.snapshot(),
             management_memory: self.inner.management_memory.snapshot(),
             commands_memory: self.inner.commands_memory.snapshot(),
             relay_memory: self.inner.relay_memory.snapshot(),
@@ -313,6 +340,7 @@ impl Executor {
         match class {
             StorageClass::Consensus => &self.inner.consensus_storage,
             StorageClass::Filesystem => &self.inner.filesystem_storage,
+            StorageClass::Connector => &self.inner.connector_storage,
         }
     }
 }

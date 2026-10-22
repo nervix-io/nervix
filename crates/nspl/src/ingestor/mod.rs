@@ -424,6 +424,9 @@ pub fn suggest_alter_ingestor(input: &str, cursor: usize) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod conformance_tests;
+
+#[cfg(test)]
 mod tests {
     use nervix_models::{
         ClientIngestMode, ClientIngestorAlteration, ClientProducerSource, CodecName,
@@ -432,9 +435,10 @@ mod tests {
         IngestQuiesceOverflow, KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource,
         MqttIngestMode, MqttIngestorAlteration, MqttQos, MqttSession, MqttSource, MqttTopicSource,
         NatsIngestMode, NatsSource, NatsSubjectSource, PrometheusIngestMode, PrometheusQuerySource,
-        PrometheusSource, PulsarIngestMode, PulsarSource, PulsarTopicSource, RabbitMqIngestMode,
-        RabbitMqQueueSource, RabbitMqSource, RedisPubSubIngestMode, RedisPubSubSource, RedisSource,
-        RetryPolicy, SchemaName, SqsIngestMode, SqsQueueSource, SqsSource, SyslogIngestMode,
+        PrometheusSource, PulsarIngestMode, PulsarSource, PulsarSubscription,
+        PulsarSubscriptionOwnership, PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource,
+        RabbitMqSource, RedisPubSubIngestMode, RedisPubSubSource, RedisSource, RetryPolicy,
+        SchemaName, SqsIngestMode, SqsQueueSource, SqsSource, SyslogIngestMode,
         SyslogListenerSource, SyslogSource, WebsocketsConnectionSource, WebsocketsEndpointSource,
         WebsocketsIngestMode, WebsocketsSource, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqSource,
     };
@@ -485,8 +489,10 @@ mod tests {
         let sources = [
             "KAFKA TOPIC INGESTOR i FROM c TOPIC 't' OFFSET BY DOMAIN MODE NO ACK ON QUIESCE \
              SUSPEND",
-            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' MODE NO ACK ON QUIESCE \
-             SUSPEND",
+            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' OWNED BY INGESTOR MODE NO \
+             ACK ON QUIESCE SUSPEND",
+            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' PROVISIONED MODE NO ACK ON \
+             QUIESCE SUSPEND",
             "RABBITMQ QUEUE INGESTOR i FROM c QUEUE 'q' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY \
              POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND",
             "SQS QUEUE INGESTOR i FROM c QUEUE 'q' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY \
@@ -546,7 +552,7 @@ mod tests {
             ),
             (
                 "PULSAR TOPIC INGESTOR i FROM c TOPIC 'public/default/orders' SUBSCRIPTION 's' \
-                 MODE NO ACK ON QUIESCE SUSPEND",
+                 PROVISIONED MODE NO ACK ON QUIESCE SUSPEND",
                 "invalid pulsar_topic 'public/default/orders': holds '/' without naming its \
                  domain, one of persistent, non-persistent",
             ),
@@ -1076,7 +1082,7 @@ mod tests {
     fn parses_create_ingestor_pulsar_ack_sequential() {
         let input = r#"
             CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-              FROM pulsar_main TOPIC 'notifications' SUBSCRIPTION 'nervix_subscription' MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
+              FROM pulsar_main TOPIC 'notifications' SUBSCRIPTION 'nervix_subscription' OWNED BY INGESTOR MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
               ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1093,10 +1099,11 @@ mod tests {
                     .expect("valid client identifier"),
                 topic: nervix_models::PulsarTopicName::try_from("notifications")
                     .expect("valid topic identifier"),
-                subscription: nervix_models::PulsarSubscriptionName::try_from(
-                    "nervix_subscription"
-                )
-                .expect("valid subscription identifier"),
+                subscription: PulsarSubscription {
+                    name: nervix_models::PulsarSubscriptionName::try_from("nervix_subscription")
+                        .expect("valid subscription identifier"),
+                    ownership: PulsarSubscriptionOwnership::Ingestor,
+                },
                 instances: nonzero!(1u64),
                 mode: PulsarIngestMode::AckSequential {
                     timeout: "15s".to_string(),
@@ -1260,7 +1267,8 @@ mod tests {
 
     #[test]
     fn pulsar_mode_context_does_not_offer_kafka_offset_keywords() {
-        let input = "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' MODE ";
+        let input = "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' OWNED \
+                     BY INGESTOR MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO ACK".to_string()));
@@ -1275,6 +1283,89 @@ mod tests {
         assert!(suggestions.contains(&"pulsar_subscription".to_string()));
         assert!(!suggestions.contains(&"SHARED".to_string()));
         assert!(!suggestions.contains(&"MODE".to_string()));
+    }
+
+    #[test]
+    fn parses_who_owns_a_pulsar_subscription_in_any_case() {
+        for (ownership, expected) in [
+            ("OWNED BY INGESTOR", PulsarSubscriptionOwnership::Ingestor),
+            ("owned by Ingestor", PulsarSubscriptionOwnership::Ingestor),
+            ("PROVISIONED", PulsarSubscriptionOwnership::Provisioned),
+            ("Provisioned", PulsarSubscriptionOwnership::Provisioned),
+        ] {
+            let source = format!(
+                "PULSAR TOPIC INGESTOR i FROM c TOPIC 'orders' SUBSCRIPTION 'Readers' {ownership} \
+                 INSTANCES 2 MODE NO ACK ON QUIESCE SUSPEND"
+            );
+            let parsed = parse_create_ingestor(&ingestor_with_source(&source))
+                .unwrap_or_else(|error| panic!("`{source}` should parse: {error:?}"));
+            let IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
+                subscription,
+                instances,
+                ..
+            })) = &transport(&parsed).source
+            else {
+                panic!("expected a Pulsar topic source from `{source}`");
+            };
+            assert_eq!(subscription.name.as_str(), "Readers", "{source}");
+            assert_eq!(subscription.ownership, expected, "{source}");
+            assert_eq!(*instances, nonzero!(2u64), "{source}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_pulsar_subscription_whose_ownership_is_missing_or_misspelled() {
+        for ownership in [
+            "",
+            "OWNED",
+            "OWNED BY",
+            "OWNED BY DOMAIN",
+            "BY INGESTOR",
+            "PROVISIONED OWNED BY INGESTOR",
+            "OWNED BY INGESTOR PROVISIONED",
+        ] {
+            let source = format!(
+                "PULSAR TOPIC INGESTOR i FROM c TOPIC 'orders' SUBSCRIPTION 'readers' {ownership} \
+                 MODE NO ACK ON QUIESCE SUSPEND"
+            );
+            let error = parse_create_ingestor(&ingestor_with_source(&source)).expect_err(&format!(
+                "`{source}` declares no single ownership of its subscription"
+            ));
+            assert!(
+                matches!(error.current_context(), ParseFromSourceError::Parse { .. }),
+                "the grammar refuses `{source}`, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pulsar_subscription_name_is_followed_by_exactly_its_ownership_choices() {
+        let input = "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' ";
+        let suggestions = suggest_create_ingestor(input, input.len());
+        assert!(suggestions.contains(&"OWNED BY INGESTOR".to_string()));
+        assert!(suggestions.contains(&"PROVISIONED".to_string()));
+        for leaked in ["MODE", "INSTANCES", "OWNED", "BY", "INGESTOR", "OFFSET BY"] {
+            assert!(
+                !suggestions.contains(&leaked.to_string()),
+                "{leaked} offered after the subscription name: {suggestions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pulsar_ownership_is_followed_by_the_instances_and_the_mode() {
+        for ownership in ["OWNED BY INGESTOR", "PROVISIONED"] {
+            let input = format!(
+                "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' {ownership} "
+            );
+            let suggestions = suggest_create_ingestor(&input, input.len());
+            assert!(suggestions.contains(&"INSTANCES".to_string()), "{input}");
+            assert!(suggestions.contains(&"MODE".to_string()), "{input}");
+            assert!(
+                !suggestions.contains(&"PROVISIONED".to_string()),
+                "{input}: {suggestions:?}"
+            );
+        }
     }
 
     #[test]
@@ -1746,12 +1837,101 @@ mod tests {
                 client: nervix_models::ClientName::try_from("prom_main")
                     .expect("valid client identifier"),
                 query: r#"label_replace(vector(42.5), "source", "local", "", "")"#.to_string(),
+                max_body_size: None,
                 every: "15s"
                     .parse()
                     .assured("the fixture cadence is a positive duration"),
                 mode: PrometheusIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             }))
+        );
+    }
+
+    #[test]
+    fn a_prometheus_query_bounds_its_response_between_query_and_every() {
+        let parsed = parse_create_ingestor(&ingestor_with_source(
+            "PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' max body size 4mib EVERY 15s MODE NO \
+             ACK ON QUIESCE SUSPEND",
+        ))
+        .expect("a positive whole size between QUERY and EVERY parses");
+        let IngestSource::Prometheus(PrometheusSource::Query(source)) = &transport(&parsed).source
+        else {
+            panic!("the head names a Prometheus query");
+        };
+
+        assert_eq!(
+            source.max_body_size,
+            Some(
+                "4MiB"
+                    .parse()
+                    .assured("the fixture size is a whole number of mebibytes")
+            )
+        );
+    }
+
+    #[test]
+    fn a_prometheus_response_bound_is_a_positive_whole_size_written_before_every() {
+        for (body, diagnostic) in [
+            (
+                "QUERY 'up' MAX BODY SIZE 0B EVERY 15s",
+                "MAX BODY SIZE must be greater than zero",
+            ),
+            (
+                "QUERY 'up' MAX BODY SIZE 1.5MiB EVERY 15s",
+                "MAX BODY SIZE '1.5MiB' must be a whole number",
+            ),
+            (
+                "QUERY 'up' MAX BODY SIZE 16777216TiB EVERY 15s",
+                "MAX BODY SIZE '16777216TiB' exceeds the largest size",
+            ),
+            ("QUERY 'up' MAX BODY SIZE EVERY 15s", "byte_size_literal"),
+            ("QUERY 'up' MAX BODY 4MiB EVERY 15s", "SIZE"),
+            ("QUERY 'up' EVERY 15s MAX BODY SIZE 4MiB", "found MAX"),
+            ("MAX BODY SIZE 4MiB QUERY 'up' EVERY 15s", "QUERY"),
+        ] {
+            let source = ingestor_with_source(&format!(
+                "PROMETHEUS QUERY INGESTOR i FROM c {body} MODE NO ACK ON QUIESCE SUSPEND"
+            ));
+            let error = parse_create_ingestor(&source).expect_err("the bound must be refused");
+
+            assert!(
+                format!("{error:?}").contains(diagnostic),
+                "expected `{diagnostic}` for `{body}`, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prometheus_completion_offers_the_response_bound_once_before_every() {
+        let after_query = "CREATE PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' ";
+        let suggestions = suggest_create_ingestor(after_query, after_query.len());
+        assert!(
+            suggestions.contains(&"MAX BODY SIZE".to_string()),
+            "{suggestions:?}"
+        );
+        assert!(
+            suggestions.contains(&"EVERY".to_string()),
+            "{suggestions:?}"
+        );
+        assert!(!suggestions.contains(&"MAX".to_string()), "{suggestions:?}");
+
+        let after_bound =
+            "CREATE PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' MAX BODY SIZE 4MiB ";
+        let suggestions = suggest_create_ingestor(after_bound, after_bound.len());
+        assert_eq!(suggestions, vec!["EVERY".to_string()]);
+
+        let after_every = "CREATE PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' EVERY 15s ";
+        let suggestions = suggest_create_ingestor(after_every, after_every.len());
+        assert!(
+            !suggestions.contains(&"MAX BODY SIZE".to_string()),
+            "{suggestions:?}"
+        );
+
+        let http = "CREATE HTTP REQUEST INGESTOR i FROM c ";
+        let suggestions = suggest_create_ingestor(http, http.len());
+        assert!(
+            !suggestions.contains(&"MAX BODY SIZE".to_string()),
+            "the HTTP polling body declares no response bound yet: {suggestions:?}"
         );
     }
 

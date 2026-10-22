@@ -90,8 +90,9 @@ impl DatabaseSink {
                         ", CONSTRAINT reject_poison CHECK (note <> 'poison')"
                     }
                 };
-                let client = postgres_client(dependencies, false)
-                    .await
+                let client = world
+                    .dependencies
+                    .postgres_client(false)
                     .expect("failed to connect to Postgres");
                 sqlx::raw_sql(SqlxAssertSqlSafe(format!(
                     "DROP TABLE IF EXISTS {table};
@@ -234,8 +235,9 @@ impl DatabaseSink {
                     .collect()
             }
             Self::Postgres => {
-                let client = postgres_client(dependencies, false)
-                    .await
+                let client = world
+                    .dependencies
+                    .postgres_client(false)
                     .expect("failed to connect to Postgres");
                 let rows = sqlx::query(SqlxAssertSqlSafe(format!(
                     "SELECT row_count FROM {table}_writes ORDER BY id"
@@ -336,8 +338,9 @@ impl DatabaseSink {
                 }
             }
             Self::Postgres => {
-                let client = postgres_client(dependencies, false)
-                    .await
+                let client = world
+                    .dependencies
+                    .postgres_client(false)
                     .expect("failed to connect to Postgres");
                 let stored = sqlx::query(SqlxAssertSqlSafe(format!(
                     "SELECT seq, note, tags::text, pair::text, encode(raw, 'hex') FROM {table}"
@@ -441,8 +444,9 @@ impl DatabaseSink {
                 })
             }
             Self::Postgres => {
-                let client = postgres_client(dependencies, false)
-                    .await
+                let client = world
+                    .dependencies
+                    .postgres_client(false)
                     .expect("failed to connect to Postgres");
                 let count: i64 =
                     sqlx::query(SqlxAssertSqlSafe(format!("SELECT count(*) FROM {table}")))

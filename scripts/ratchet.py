@@ -7,11 +7,12 @@ script prints each count next to its baseline and exits non-zero when any count 
 naming the offending counts. A count that has fallen is reported too, with the reminder that
 `--update` rewrites the baseline in the same change.
 
-Semantic rules are compiler-resolved through the pinned tooling workspace. The three disjoint
-counts cover physical file length, Rust cast expressions and testing-gated struct fields. A
-stable Rust syntax parser visits authored casts and fields, including inactive configurations,
-while skipping test-only items. It parses the original source so Unicode token locations remain
-accurate; comments and embedded fixture text never become syntax findings.
+Semantic rules are compiler-resolved through the pinned tooling workspace. The five disjoint
+counts cover physical file length, Rust cast expressions, testing-gated struct fields,
+functions above a cyclomatic complexity and hidden numeric policy. A stable Rust syntax parser visits authored casts and
+fields, including inactive configurations, while skipping test-only items. It parses the original
+source so Unicode token locations remain accurate; comments and embedded fixture text never become
+syntax findings. The pinned cargo-crap analyzer measures complexity over the same discovered files.
 """
 
 from __future__ import annotations
@@ -25,13 +26,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+from scripts import cargo_crap
 from scripts.rust_source import (
-    RustFile, Site, load_files, product_files, repository_root,
+    TEST_DIRECTORIES, RustFile, Site, load_files, product_files, repository_root,
 )
 
 BASELINE_FILE = "debt-baseline.json"
 
 LARGE_FILE_LINES = 3000
+
+COMPLEXITY_COUNT = "functions_over_complexity_30"
+COMPLEXITY_LIMIT = 30
 
 def count_files_over_3000_lines(files: Sequence[RustFile]) -> list[Site]:
     return [
@@ -39,6 +44,40 @@ def count_files_over_3000_lines(files: Sequence[RustFile]) -> list[Site]:
         for file in files
         if file.lines > LARGE_FILE_LINES
     ]
+
+
+def count_functions_over_complexity_30(root: Path, files: Sequence[RustFile], target: Path) -> list[Site]:
+    """Functions the pinned analyzer scores above the limit, over exactly the discovered files.
+
+    The analyzer reads the same eligible files as file size, so in-crate test files count. It
+    reports no `#[test]` function and nothing inside a `#[cfg(test)]` module, and it cannot see a
+    function inside a macro, a trait's provided method or a function nested in another's body.
+    """
+
+    unreachable = cargo_crap.unreachable_sources(root, [file.path for file in files])
+    if unreachable:
+        raise SystemExit(
+            "error: the complexity analyzer cannot read these discovered Rust files, so the count "
+            "would miss their functions:\n" + "\n".join(unreachable)
+        )
+    excludes = [f"**/{directory}/**" for directory in sorted(TEST_DIRECTORIES)]
+    try:
+        functions = cargo_crap.analyze(root, target, excludes)
+    except cargo_crap.AnalyzerError as error:
+        raise SystemExit(f"error: complexity analysis failed: {error}") from error
+    discovered = {file.path for file in files}
+    outside = sorted({function.path for function in functions} - discovered)
+    if outside:
+        raise SystemExit(
+            "error: the complexity analysis measured Rust files that source discovery does not "
+            "govern:\n" + "\n".join(outside)
+        )
+    sites = []
+    for function in functions:
+        if function.complexity > COMPLEXITY_LIMIT:
+            detail = f"{function.name} has cyclomatic complexity {function.complexity:g}"
+            sites.append(Site(function.path, function.line, detail))
+    return sorted(sites, key=lambda site: (site.path, site.line))
 
 
 @dataclass(frozen=True)
@@ -55,9 +94,15 @@ COUNTS: tuple[Count, ...] = (
         count_files_over_3000_lines,
     ),
     Count("as_casts", "Rust cast expressions", None),
+    Count("hidden_tunables", "numeric policy outside class-typed settings or fixed contracts", None),
     Count(
         "testing_feature_struct_fields",
         'struct fields gated on `feature = "testing"`',
+        None,
+    ),
+    Count(
+        COMPLEXITY_COUNT,
+        f"functions whose cyclomatic complexity exceeds {COMPLEXITY_LIMIT}",
         None,
     ),
 )
@@ -76,6 +121,7 @@ def measure_sources(root: Path) -> dict[str, list[Site]]:
         raise SystemExit("error: Rust source analysis failed\n" + completed.stderr)
     for site in json.loads(completed.stdout):
         sites[site["rule"]].append(Site(site["path"], site["line"], site["rule"]))
+    sites[COMPLEXITY_COUNT] = count_functions_over_complexity_30(root, files, target)
     return sites
 
 
@@ -205,6 +251,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f" (+{counts[name] - baseline[name]});"
                 f" `just ratchet --show {name}` lists the sites"
             )
+        # The baseline holds counts, not sites, so the gate names every site of a risen count and
+        # the one a change added is among them.
+        for name in risen:
+            print(f"\n{name} sites:")
+            for site in sites[name]:
+                print(f"  {site.render()}")
         return 1
 
     if arguments.update:

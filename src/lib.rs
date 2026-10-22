@@ -63,7 +63,10 @@ pub mod subscription_row;
 pub(crate) mod task_shutdown;
 
 #[cfg(feature = "testing")]
-pub use fault_injection::{FaultInjection, WasmCheckpointWindow, WasmStateResetRequestError};
+pub use fault_injection::{
+    BackupCutBoundary, DomainResumeBoundary, FaultInjection, ModelPublicationRefusalKind,
+    StandaloneTransactionBoundary, WasmCheckpointWindow, WasmStateResetRequestError,
+};
 #[cfg(feature = "testing")]
 pub use registry::SchedulerMode;
 

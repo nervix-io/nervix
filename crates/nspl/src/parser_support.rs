@@ -27,14 +27,14 @@ use nervix_models::{
     AckMode, AckWindow, AlterProcessorOperation, AssignmentTargetScope, BranchName,
     BranchSelection, ChannelName, ClientConfigEntry, ClientName, ClusterNodeName, CodecName,
     CollectionName, CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName, EmitterName,
-    EndpointName, Expression, ExternalNameError, FieldName, FlushPolicy, GeneralErrorPolicy,
+    EndpointName, Expression, ExternalName, FieldName, FlushPolicy, GeneralErrorPolicy,
     GeneratorName, InferencerName, IngestorName, InputCollectPolicy, InspectionFormat,
     JunctionName, LookupName, MaterializedStateDependency, MaterializedStatePolicy,
-    MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, QueueName, ReingestorName, RelayName,
-    ReordererName, RequestedResourceVersion, ResourceName, RetryPolicy, RouteConstruction,
-    SchemaName, SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName,
-    TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
+    MessageErrorPolicy, ModelName, NameError, OutputBranch, PayloadSizeLimit, PlacementName,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, QueueName,
+    ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName, RetryPolicy,
+    RouteConstruction, SchemaName, SignalingProtocolName, SubjectName, SubscriptionName, TableName,
+    TopicName, TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
     WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
@@ -930,19 +930,19 @@ pub fn session_subscription_ref<'src>()
 /// type itself.
 ///
 /// An external system names its entities case and punctuation included, so a position that holds
-/// one reads a string literal, and `parse` is the name type's own constructor: the grammar never
-/// restates the rule an entity's names follow. The label goes on the literal itself, so a refused
-/// name keeps the reason its rule gives.
-pub fn external_name<'src, N: Clone + 'static>(
-    label: &'static str,
-    parse: fn(&str) -> Result<N, Report<ExternalNameError>>,
-) -> impl Parser<'src, &'src [Token], N, extra::Err<ParseError<'src>>> + Clone {
+/// one reads a string literal, and the name type both constructs it and declares the label
+/// completion offers for it: the grammar never restates the rule an entity's names follow or the
+/// word that names them. The label goes on the literal itself, so a refused name keeps the reason
+/// its rule gives.
+pub fn external_name<'src, N: ExternalName>()
+-> impl Parser<'src, &'src [Token], N, extra::Err<ParseError<'src>>> + Clone {
+    let label = N::DECLARATION.label;
     select! {
         Token::StringLiteral(value) => value,
     }
     .labelled(label)
     .try_map(move |raw: String, span| {
-        parse(raw.as_str())
+        N::parse(raw.as_str())
             .map_err(|err| Rich::custom(span, format!("invalid {label} '{raw}': {err:#}")))
     })
     .boxed()
@@ -1092,6 +1092,19 @@ pub fn max_batch_size_clause<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     kw_phrase3(Identifier::Max, Identifier::Batch, Identifier::Size)
         .ignore_then(byte_size_lit())
+        .boxed()
+}
+
+/// `MAX BODY SIZE <bytes>`: the most bytes of one response a polled source reads. The size is a
+/// whole number greater than zero followed by its unit, refused here rather than rounded.
+pub fn max_body_size_clause<'src>()
+-> impl Parser<'src, &'src [Token], PayloadSizeLimit, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase3(Identifier::Max, Identifier::Body, Identifier::Size)
+        .ignore_then(byte_size_lit().try_map(|literal, span| {
+            literal
+                .parse::<PayloadSizeLimit>()
+                .map_err(|issue| Rich::custom(span, format!("MAX BODY SIZE {issue}")))
+        }))
         .boxed()
 }
 

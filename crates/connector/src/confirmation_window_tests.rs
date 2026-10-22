@@ -23,10 +23,13 @@ use std::{
     time::Duration,
 };
 
-use error_stack::Report;
+use error_stack::{AttachmentKind, FrameKind, Report};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{MessageErrorCode, MessageErrorOperation, Timestamp};
-use nervix_primitives::time::{Instant, Sleep, sleep, sleep_until};
+use nervix_primitives::{
+    sync::oneshot,
+    time::{Instant, Sleep, sleep, sleep_until},
+};
 
 use super::{BrokerAnswer, BrokerVerdict, ConfirmationWindow, ConfirmationWindowError};
 use crate::sink::{
@@ -251,6 +254,8 @@ impl ScriptedRecord {
 struct WindowCase {
     /// `MAX`: one to six records await answers at once.
     max_in_flight: u8,
+    /// The driver's queue: one to six records before it asks for an answer on demand.
+    queue_capacity: u8,
     /// `ACK TIMEOUT`: one to forty milliseconds.
     timeout: u8,
     #[generator(bolero::generator::produce_with::<Vec<ScriptedRecord>>().len(0_usize..=24))]
@@ -343,6 +348,10 @@ impl WindowCase {
         usize::from(self.max_in_flight % 6) + 1
     }
 
+    fn queue_capacity(&self) -> usize {
+        usize::from(self.queue_capacity % 6) + 1
+    }
+
     fn timeout_millis(&self) -> u64 {
         u64::from(self.timeout % 40) + 1
     }
@@ -385,6 +394,16 @@ impl WindowCase {
                     verdict,
                     answer_after,
                 } => {
+                    if in_flight.len() >= self.queue_capacity()
+                        && let Some(failure) = Self::await_oldest(&mut in_flight, &mut now)
+                    {
+                        return ReferencePublish {
+                            end: now,
+                            taken,
+                            refused,
+                            failure: Some(failure),
+                        };
+                    }
                     let given_at = answer_after.map(|after| now + after);
                     let handed_over = ReferenceRecord {
                         record: id,
@@ -476,6 +495,12 @@ impl WindowCase {
                     verdict,
                     answer_after,
                 } => {
+                    if held.get() >= self.queue_capacity() {
+                        match window.settle_next().await {
+                            Ok(record) => assert!(record.is_some()),
+                            Err(failure) => return Some(failure),
+                        }
+                    }
                     let given_at =
                         answer_after.map(|after| Instant::now() + Duration::from_millis(after));
                     let answer = ScriptedAnswer::new(id, verdict, given_at, held);
@@ -489,6 +514,7 @@ impl WindowCase {
                         held.get(),
                         self.max_in_flight()
                     );
+                    assert!(held.get() <= self.queue_capacity());
                 }
             }
         }
@@ -568,6 +594,17 @@ fn assert_failure(
             "the oldest record's missed deadline ends the publish: {failure:?}"
         ),
     }
+}
+
+/// The first printable attachment of `failure`: the description an emitter shows as its transient
+/// error.
+fn printable_description(failure: &Report<SinkPublishError>) -> Option<String> {
+    for frame in failure.frames() {
+        if let FrameKind::Attachment(AttachmentKind::Printable(attachment)) = frame.kind() {
+            return Some(attachment.to_string());
+        }
+    }
+    None
 }
 
 #[test]
@@ -690,6 +727,61 @@ async fn a_driver_failure_settles_every_answer_the_broker_already_gave() {
     assert_eq!(held.get(), 0);
 }
 
+/// More given answers than Tokio's cooperative budget lets one task poll read.
+const ANSWERS_BEYOND_ONE_BUDGET: usize = 300;
+
+/// A window larger than the publish, so taking its records never waits for an answer.
+const WINDOW_LARGER_THAN_THE_PUBLISH: usize = 512;
+
+const _: () = assert!(WINDOW_LARGER_THAN_THE_PUBLISH > ANSWERS_BEYOND_ONE_BUDGET);
+
+/// An answer a driver gives through a runtime channel, as broker drivers answer their publishes.
+type ChannelAnswer = Pin<Box<dyn Future<Output = BrokerAnswer> + Send>>;
+
+/// The answer `receiver` carries, which its sender gave before the window reads it.
+fn channel_answer(receiver: oneshot::Receiver<BrokerVerdict>) -> ChannelAnswer {
+    Box::pin(async move {
+        let verdict = receiver
+            .await
+            .assured("each sender gives its answer before the publish fails");
+        Ok(verdict)
+    })
+}
+
+/// A failure settles every answer a driver already gave through a runtime channel, even when there
+/// are more of them than one cooperative budget lets a task read: the runtime never refuses the
+/// window an answer that has arrived, so the host's retry never resends a confirmed record.
+#[nervix_primitives::test]
+async fn a_failure_settles_more_given_answers_than_one_cooperative_budget() {
+    let mut window = ConfirmationWindow::new(
+        SINK,
+        settings(WINDOW_LARGER_THAN_THE_PUBLISH, Duration::from_secs(30)),
+        ANSWERS_BEYOND_ONE_BUDGET,
+    );
+    for index in 0..ANSWERS_BEYOND_ONE_BUDGET {
+        nervix_primitives::task::consume_budget().await;
+        let record = SinkRecordId::new(index);
+        let (give, receiver) = oneshot::channel();
+        give.send(BrokerVerdict::Confirmed)
+            .assured("the window holds the receiver as the record's answer");
+        window
+            .admit(record, occurred_at(record), channel_answer(receiver))
+            .await
+            .verified("a window larger than the publish never waits while it takes the records");
+    }
+
+    let outcome = window.fail(driver_refused()).into_parts();
+
+    assert_eq!(
+        outcome.delivered.len(),
+        ANSWERS_BEYOND_ONE_BUDGET,
+        "every answer the driver gave is settled"
+    );
+    let every_record: Vec<usize> = (0..ANSWERS_BEYOND_ONE_BUDGET).collect();
+    assert_eq!(sorted_delivered(&outcome), record_ids(&every_record));
+    assert!(outcome.rejected.is_empty());
+}
+
 /// A full window waits for its oldest answer until the oldest's own deadline, not a full timeout
 /// from the wait, and the missed deadline still settles the answers given before it.
 #[nervix_primitives::test(start_paused = true)]
@@ -743,6 +835,11 @@ async fn a_full_window_waits_for_the_oldest_until_its_own_deadline() {
          10ms",
         "the rendered chain names the sink, then the deadline it missed"
     );
+    assert_eq!(
+        printable_description(&failure).as_deref(),
+        Some("the broker did not answer within ACK TIMEOUT 10ms"),
+        "the window describes the deadline it missed for the emitter's transient error"
+    );
     let outcome = window.fail(failure).into_parts();
     assert_eq!(sorted_delivered(&outcome), record_ids(&[1]));
     assert!(outcome.rejected.is_empty());
@@ -767,6 +864,58 @@ async fn an_answer_given_at_its_deadline_is_settled() {
 
     assert_eq!(began.elapsed(), timeout);
     assert_eq!(sorted_delivered(&outcome), record_ids(&[0]));
+    assert!(outcome.infrastructure_error.is_none());
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn driver_backpressure_settles_the_oldest_below_max_and_reports_an_empty_window() {
+    let held = Cell::new(0);
+    let began = Instant::now();
+    let mut window = ConfirmationWindow::new(SINK, settings(4, Duration::from_millis(20)), 2);
+    let records = [
+        Taken {
+            verdict: ScriptedVerdict::Confirmed,
+            answer_after: Some(Duration::from_millis(7)),
+        },
+        Taken {
+            verdict: ScriptedVerdict::Rejected,
+            answer_after: Some(Duration::from_millis(2)),
+        },
+    ];
+    hand_over_all(&mut window, &records, &held)
+        .await
+        .assured("two records fit below MAX four");
+    assert_eq!(held.get(), 2);
+    assert_eq!(
+        window
+            .settle_next()
+            .await
+            .assured("the oldest answer arrives by its deadline"),
+        Some(SinkRecordId::new(0))
+    );
+    assert_eq!(began.elapsed(), Duration::from_millis(7));
+    assert_eq!(
+        window
+            .settle_next()
+            .await
+            .assured("the younger answer has already arrived"),
+        Some(SinkRecordId::new(1))
+    );
+    assert!(
+        window
+            .settle_next()
+            .await
+            .assured("an empty window waits for nothing")
+            .is_none()
+    );
+    assert_eq!(began.elapsed(), Duration::from_millis(7));
+    assert_eq!(held.get(), 0);
+    let outcome = window.finish().await.into_parts();
+    assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+    assert_eq!(
+        rejected_records(&outcome),
+        vec![RejectedRecord::by_broker(SinkRecordId::new(1))]
+    );
     assert!(outcome.infrastructure_error.is_none());
 }
 
@@ -869,6 +1018,16 @@ async fn a_deadline_past_the_clock_range_ends_the_publish() {
         Some(&ConfirmationWindowError::DeadlineOutOfRange {
             timeout: Duration::MAX
         })
+    );
+    assert_eq!(
+        printable_description(&failure),
+        Some(
+            ConfirmationWindowError::DeadlineOutOfRange {
+                timeout: Duration::MAX
+            }
+            .to_string()
+        ),
+        "the window describes the deadline it has no clock for"
     );
     assert_eq!(
         held.get(),

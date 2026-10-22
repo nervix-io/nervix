@@ -511,6 +511,14 @@ fn invalid_transport_options_report_the_failed_contract() {
                 ..TransportOptions::default()
             },
         ),
+        (
+            "relay_channel_watermark_capacity",
+            TransportOptions {
+                incoming_queue_capacity: 4,
+                relay_channel_watermark_capacity: 4,
+                ..TransportOptions::default()
+            },
+        ),
     ];
     for (contract, options) in cases {
         let error = options
@@ -833,6 +841,122 @@ async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
                 .is_none()
         );
     }
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+/// A quiesced cut publishes new checkpoint revisions, and a replica catching up a state above the
+/// bulk budget then holds the one Snapshot stream toward that state's owner for as long as the
+/// transfer takes. The coordinator's section fetch to the same owner must not wait behind it.
+#[nervix_primitives::test]
+async fn a_held_snapshot_stream_leaves_a_backup_section_fetch_its_own_slot() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = connected_transports().await;
+    let release = watch::channel(false).0;
+    let snapshot_executor = Executor::default();
+    transport_b
+        .register_stream_handler::<SnapshotStreamRequest, _, _>({
+            let release = release.clone();
+            move |_context, _request| {
+                let mut release = release.subscribe();
+                let executor = snapshot_executor.clone();
+                async move {
+                    let chunk = executor
+                        .charge_owned(MemoryClass::Bulk, b"snapshot".to_vec())
+                        .await
+                        .map_err(StreamHandlerError::with_cause)?;
+                    let chunks = futures_util::stream::once(async move {
+                        if !*release.borrow() {
+                            release
+                                .changed()
+                                .await
+                                .expect("the release sender lives through the test");
+                        }
+                        Ok(chunk)
+                    });
+                    Ok(StreamingResponse::new(8, chunks))
+                }
+            }
+        })
+        .expect("snapshot stream handler should register");
+    let section_executor = Executor::default();
+    transport_b
+        .register_stream_handler::<backup::FetchCapturedSection, _, _>(move |_context, _request| {
+            let executor = section_executor.clone();
+            async move {
+                let chunk = executor
+                    .charge_owned(MemoryClass::Bulk, b"section".to_vec())
+                    .await
+                    .map_err(StreamHandlerError::with_cause)?;
+                Ok(StreamingResponse::new(
+                    7,
+                    futures_util::stream::iter([Ok(chunk)]),
+                ))
+            }
+        })
+        .expect("section stream handler should register");
+    timeout(Duration::from_secs(5), async {
+        while !transport_a.is_connected_to(&node_b) {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the target should become ready");
+
+    let mut snapshot = transport_a
+        .request_stream(&node_b, SnapshotStreamRequest)
+        .await
+        .expect("the snapshot stream should open and hold its slot until released");
+    let coordination = transport_a
+        .next_coordination_identity()
+        .expect("the coordinator should allocate an identity");
+    // No external deadline: a fetch that waited for the held Snapshot slot would fail at its own
+    // opening deadline instead of opening.
+    let mut section = transport_a
+        .request_stream(
+            &node_b,
+            backup::FetchCapturedSection {
+                coordination,
+                domain: DomainName::parse("default").expect("test domain should be valid"),
+                path: "domains/default/state/section".to_string(),
+            },
+        )
+        .await
+        .expect("a held snapshot stream must not occupy the section fetch's slot");
+    let section_chunk = section
+        .next_chunk()
+        .await
+        .expect("the section chunk should be readable")
+        .expect("the section stream should contain one chunk");
+    assert_eq!(section_chunk.as_ref(), b"section");
+    assert!(
+        section
+            .next_chunk()
+            .await
+            .expect("the section completion should be readable")
+            .is_none()
+    );
+
+    release.send_replace(true);
+    let snapshot_chunk = snapshot
+        .next_chunk()
+        .await
+        .expect("the snapshot chunk should be readable")
+        .expect("the snapshot stream should contain one chunk");
+    assert_eq!(snapshot_chunk.as_ref(), b"snapshot");
+    assert!(
+        snapshot
+            .next_chunk()
+            .await
+            .expect("the snapshot completion should be readable")
+            .is_none()
+    );
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;
@@ -1426,6 +1550,15 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         error.current_context(),
         TransportError::RemoteRejected { status: 403, .. }
     ));
+    // Admission progress shares the sender's bounded application queue. Keep one update queued
+    // so terminal delivery cannot assume the application has consumed every progress frame.
+    transport_b
+        .send(
+            &node_a,
+            Envelope::Ack(registration(1, &node_a).resolution(RemoteAckOutcome::Alive)),
+        )
+        .await
+        .expect("admission progress should enter the sender application queue");
     transport_a
         .send(
             &node_b,
@@ -1451,17 +1584,34 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
     ));
 
     drop(first);
-    transport_b
-        .send(
+    let terminal = timeout(Duration::from_secs(2), async {
+        loop {
+            let received = incoming_a
+                .recv()
+                .await
+                .expect("the sender application queue should remain open");
+            if let Envelope::Ack(resolution) = &received.envelope
+                && resolution.outcome.is_progress()
+            {
+                assert_eq!(resolution.registration, registration(1, &node_a));
+                continue;
+            }
+            break received.envelope;
+        }
+    });
+    let (sent, terminal) = futures_util::future::join(
+        transport_b.send(
             &node_a,
             Envelope::Ack(registration(1, &node_a).resolution(RemoteAckOutcome::Ack)),
-        )
-        .await
-        .expect("the first relay terminal outcome should be sent");
-    let _terminal = timeout(Duration::from_secs(2), incoming_a.recv())
-        .await
-        .expect("the terminal outcome should enter the sender application queue")
-        .expect("the sender application queue should remain open");
+        ),
+        terminal,
+    )
+    .await;
+    sent.expect("the first relay terminal outcome should be sent");
+    assert_eq!(
+        terminal.expect("the terminal outcome should enter the sender application queue"),
+        Envelope::Ack(registration(1, &node_a).resolution(RemoteAckOutcome::Ack))
+    );
     transport_a
         .send(
             &node_b,

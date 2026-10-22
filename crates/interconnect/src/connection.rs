@@ -39,7 +39,7 @@ use h2::{Ping, PingPong, Reason, RecvStream, client, server};
 use http::{Method, Request, StatusCode, Version};
 use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_dns::ConnectionBudget;
+use nervix_dns::{LookupShare, OperationBudget};
 use nervix_execution::{
     BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
 };
@@ -92,6 +92,7 @@ mod published_tls;
 mod relay;
 mod relay_admission_choice;
 mod relay_owner;
+mod relay_watermarks;
 use relay_admission_choice::{AdmissionChoice, ChosenAdmission};
 mod stream;
 mod stream_releases;
@@ -122,7 +123,10 @@ const RELAY_PATH_PREFIX: &str = "/v1/relay/";
 const RELAY_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const RELAY_PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 const RELAY_CANCELLATION_RETRY_WINDOW: Duration = Duration::from_secs(30);
-const RELAY_CHANNEL_RETENTION: Duration = Duration::from_secs(600);
+/// How long a receiver retains a relay channel's watermark after it was last recorded or consulted,
+/// unless its peer's watermark budget needs the position first. A sender rotates a channel it
+/// leaves idle well within this, so a channel it resumes still finds its watermark.
+pub const RELAY_CHANNEL_RETENTION: Duration = Duration::from_secs(600);
 const RELAY_CHANNEL_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const RESPONSE_LIMIT: u64 = 1024 * 1024;
 const BODY_CHUNK_BYTES: usize = 16 * 1024;
@@ -1040,11 +1044,13 @@ impl TransportState {
         let mut relay_channels = 0;
         let mut relay_attempts = 0;
         let mut relay_grants = 0;
+        let mut relay_channel_watermarks = 0;
         for owner in self.relay_owners.load().owners.values() {
             let snapshot = owner.snapshot();
             relay_channels = increment(relay_channels, snapshot.channels);
             relay_attempts = increment(relay_attempts, snapshot.attempts);
             relay_grants = increment(relay_grants, snapshot.grants);
+            relay_channel_watermarks = increment(relay_channel_watermarks, snapshot.watermarks);
             oldest_unresolved_outcome = oldest_unresolved_outcome.max(snapshot.oldest);
         }
 
@@ -1056,6 +1062,7 @@ impl TransportState {
             relay_channels,
             relay_attempts,
             relay_grants,
+            relay_channel_watermarks,
             oldest_unresolved_outcome,
         }
     }
@@ -1433,7 +1440,8 @@ impl TransportState {
         slot_cancel: &CancellationToken,
     ) -> Result<StdArc<ClientConnection>, Report<TransportError>> {
         let binding_sequence = self.allocate_binding_sequence();
-        let budget = ConnectionBudget::start(self.options.connection_setup_timeout);
+        let budget =
+            OperationBudget::start(self.options.connection_setup_timeout, LookupShare::Whole);
         let setup = async {
             let DialedStream {
                 stream: tcp,

@@ -1,3 +1,10 @@
+//! Outside the layer order: the scenario suite's shared external dependencies.
+//!
+//! - **Owns.** Suite startup and teardown, publishing endpoint snapshots, and sharing ready Postgres
+//!   observation clients with scenarios.
+//! - **Depends on.** The test environment's container, client, TLS, and observation contracts.
+//! - **Must not know.** Product graph construction, connector plans, or node lifecycle policy.
+
 use std::{
     fmt, io,
     path::{Path, PathBuf},
@@ -8,14 +15,15 @@ pub(crate) use nervix_test_environment::{
     CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
     KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
     MONGODB_ADDR, MONGODB_REPLICA_SET_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR,
-    MYSQL_TLS_ADDR, NATS_ADDR, NATS_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
-    PULSAR_ADMIN_ADDR, PULSAR_TLS_ADDR, QUICKWIT_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR,
-    REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+    MYSQL_TLS_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR, PULSAR_ADMIN_ADDR, PULSAR_TLS_ADDR,
+    QUICKWIT_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR,
+    SQS_ENDPOINT, SQS_TLS_ENDPOINT,
     collector_exports::CollectorSignal,
     collector_output::{CollectorOutput, CollectorWait},
 };
 use nervix_test_environment::{
-    ContainerMode, DependencyEnvironment, TeardownFailures, configure_process_lifecycle,
+    ContainerMode, DependencyEnvironment, PostgresClients, TeardownFailures,
+    configure_process_lifecycle,
 };
 
 static SUITE_DEPENDENCIES: OnceLock<Mutex<DependencyEnvironment>> = OnceLock::new();
@@ -26,6 +34,7 @@ pub(crate) struct TestDependencies {
     tls_dir: Option<PathBuf>,
     /// The suite's view of the OpenTelemetry Collector's output, once the Collector started.
     otel_collector_output: Option<CollectorOutput>,
+    postgres_clients: Option<PostgresClients>,
 }
 
 impl fmt::Debug for TestDependencies {
@@ -60,6 +69,28 @@ macro_rules! dependency_starters {
 }
 
 impl TestDependencies {
+    pub(crate) fn postgres_client(&self, tls: bool) -> io::Result<sqlx::PgPool> {
+        let clients = self.postgres_clients.as_ref().ok_or_else(|| {
+            io::Error::other("Postgres clients are unavailable; add 'Given Postgres is running'")
+        })?;
+        Ok(clients.client(tls))
+    }
+
+    /// A lock controller owns its socket while it waits, leaving observer permits available.
+    pub(crate) async fn postgres_lock_connection(
+        &self,
+        tls: bool,
+    ) -> io::Result<sqlx::PgConnection> {
+        let pool = self.postgres_client(tls)?;
+        let connection = pool.acquire().await.map_err(io::Error::other)?;
+        let mut connection = connection.detach();
+        sqlx::query("SET application_name = 'nervix_test_lock'")
+            .execute(&mut connection)
+            .await
+            .map_err(io::Error::other)?;
+        Ok(connection)
+    }
+
     pub(crate) fn configure_process_lifecycle() {
         configure_process_lifecycle(ContainerMode::from_environment());
     }
@@ -248,6 +279,7 @@ impl TestDependencies {
         self.endpoints = environment.endpoints().clone();
         self.tls_dir = environment.tls_dir().ok().map(Path::to_path_buf);
         self.otel_collector_output = environment.otel_collector_output();
+        self.postgres_clients = environment.postgres_clients();
     }
 }
 

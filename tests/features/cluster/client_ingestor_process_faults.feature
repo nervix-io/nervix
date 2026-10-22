@@ -21,7 +21,7 @@ Feature: Client producers across real node process faults
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -77,6 +77,8 @@ Feature: Client producers across real node process faults
     And batch "third" is not admitted because "producer ended"
     And batch "fourth" is not admitted because "producer ended"
     When HTTP receiver "sink" releases its held responses with "respond 200"
+    # The restart ends once every node reaches the restarted process, so the leader the relocation
+    # reaches already counts the owner as a live voter.
     And server process node "{{owner}}" restarts from its existing database
     And these NSPL commands are executed on the server process cluster
       """
@@ -117,7 +119,7 @@ Feature: Client producers across real node process faults
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -215,7 +217,7 @@ Feature: Client producers across real node process faults
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders

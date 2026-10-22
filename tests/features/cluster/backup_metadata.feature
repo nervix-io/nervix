@@ -1,7 +1,7 @@
 Feature: Large native restore metadata
   Restoring a complete state set publishes one durable generation before START.
 
-  @restore_installation @native_metadata_restore @deloxide_stress_restore
+  @restore_installation @native_metadata_restore @deloxide_stress_restore @long_running
   Scenario Outline: Native lifecycle and Kafka metadata above the bulk budget on <cluster_size> nodes restore exactly
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "10m"
@@ -26,7 +26,7 @@ Feature: Large native restore metadata
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA result BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -156,6 +156,7 @@ Feature: Large native restore metadata
       | 1            | 1        | 2        | 4               | 1              |
       | 3            | 1        | 2        | 4               | 2              |
 
+  @long_running
   Scenario Outline: Native lifecycle and Kafka metadata above the bulk budget back up within it and resume exactly on <cluster_size> nodes
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "10m"
@@ -180,7 +181,7 @@ Feature: Large native restore metadata
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA result BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

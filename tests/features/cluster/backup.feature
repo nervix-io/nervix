@@ -112,7 +112,7 @@ Feature: Configuration backup into a public archive
       START;
       """
     Given the active domain is "{{primary_domain}}"
-    And the backup cut for domain "{{primary_domain}}" will pause after draining
+    And the backup cut for domain "{{primary_domain}}" will pause before its capture
     Then the current leader node is saved as placeholder "leader"
     When the CLI begins backing up "domain {{primary_domain}} --timeout 30s" from node "{{leader}}" into "isolated-cut.nvxb" in the background
     Then the backup cut for domain "{{primary_domain}}" has reached its pause
@@ -151,7 +151,7 @@ Feature: Configuration backup into a public archive
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE CLIENT drop_nats TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };
+      CREATE NATS CLIENT drop_nats CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE NATS SUBJECT INGESTOR event_source FROM drop_nats
         SUBJECT 'backup_drop_{{test_id}}' QUEUE GROUP 'backup_drop_group_{{test_id}}'
         INSTANCES 1 MODE NO ACK
@@ -162,7 +162,7 @@ Feature: Configuration backup into a public archive
       CREATE SUBSCRIPTION events_subscription TO events;
       START;
       """
-    Given the backup cut for domain "{{domain}}" will pause after draining
+    Given the backup cut for domain "{{domain}}" will pause before its capture
     Then the current leader node is saved as placeholder "leader"
     When the CLI begins backing up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "dropped.nvxb" in the background
     Then the backup cut for domain "{{domain}}" has reached its pause
@@ -204,7 +204,7 @@ Feature: Configuration backup into a public archive
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
-      CREATE CLIENT wait_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT wait_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -290,7 +290,7 @@ Feature: Configuration backup into a public archive
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
       CREATE ATTACHED EMITTER published FROM outgoing
@@ -368,7 +368,7 @@ Feature: Configuration backup into a public archive
       """
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "survivor"
-    Given the backup cut for domain "{{domain}}" will pause after draining
+    Given the backup cut for domain "{{domain}}" will pause before its capture
     When the CLI begins backing up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "interrupted.nvxb" in the background
     Then the backup cut for domain "{{domain}}" has reached its pause
     When leadership is transferred from node "{{leader}}" to node "{{survivor}}"
@@ -404,7 +404,7 @@ Feature: Configuration backup into a public archive
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -538,7 +538,7 @@ Feature: Configuration backup into a public archive
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5s;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -619,7 +619,7 @@ Feature: Configuration backup into a public archive
       | 1            |
       | 3            |
 
-  @restore_installation @deloxide_stress_restore
+  @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: A quiesced backup restores two WASM branches and Kafka domain offsets
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "10m"
@@ -642,7 +642,7 @@ Feature: Configuration backup into a public archive
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -961,7 +961,7 @@ Feature: Configuration backup into a public archive
     And a node other than placeholder "leader" is saved as placeholder "follower"
     When the CLI backs up "cluster" from node "{{follower}}" into "follower.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
-    When the session backs up the cluster on node "{{leader}}" without downloading its archive
+    When the session backs up the cluster on node "{{follower}}" without downloading its archive
     And the backup's archive is downloaded from node "{{follower}}"
     Then the download is redirected to node "{{leader}}"
 

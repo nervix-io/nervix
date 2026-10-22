@@ -127,6 +127,77 @@ fn the_decimal_expansion_reproduces_every_reference_including_ties() {
     }
 }
 
+// Exact decimal ROUND_HALF_UP references, including the saved F64 fuzz finding.
+#[rstest::rstest]
+#[case::fractional(0x0f80_0000_0000_0000, 249, 0x0f7f_ffff_ffff_ffff)]
+#[case::integer(0x4580_0000_0000_0000, -11, 0x457f_ffff_ffff_ffff)]
+fn wide_powers_of_two_round_to_the_nearest_float(
+    #[case] bits: u64,
+    #[case] digits: i16,
+    #[case] expected: u64,
+) {
+    for sign in [0, 1_u64 << 63] {
+        let value = f64::from_bits(bits | sign);
+        let rounded = value.rounded_to_digits(digits);
+        assert_eq!(
+            rounded.to_bits(),
+            expected | sign,
+            "round({value:e}, {digits})"
+        );
+    }
+}
+
+#[rstest::rstest]
+#[case::fractional(0x0c00_0000, 38, 0x0bff_ffff)]
+#[case::integer(0x6b00_0000, -19, 0x6aff_ffff)]
+fn narrow_powers_of_two_round_to_the_nearest_float(
+    #[case] bits: u32,
+    #[case] digits: i16,
+    #[case] expected: u32,
+) {
+    for sign in [0, 1_u32 << 31] {
+        let value = f32::from_bits(bits | sign);
+        let rounded = value.rounded_to_digits(digits);
+        assert_eq!(
+            rounded.to_bits(),
+            expected | sign,
+            "round({value:e}, {digits})"
+        );
+    }
+}
+
+#[test]
+fn every_binade_boundary_and_its_neighbors_match_the_decimal_expansion() {
+    for biased_exponent in 1..2047_u64 {
+        let bits = biased_exponent << 52;
+        for neighbor in [bits - 1, bits, bits + 1] {
+            let value = f64::from_bits(neighbor);
+            assert_boundary_rounding(value);
+            assert_boundary_rounding(-value);
+        }
+    }
+    for biased_exponent in 1..255_u32 {
+        let bits = biased_exponent << 23;
+        for neighbor in [bits - 1, bits, bits + 1] {
+            let value = f32::from_bits(neighbor);
+            assert_boundary_rounding(value);
+            assert_boundary_rounding(-value);
+        }
+    }
+}
+
+/// Checks the decimal steps near the float's unit, including the half-unit below a binade.
+fn assert_boundary_rounding<F: FloatBits>(value: F) {
+    let unit_exponent = f64::from(value.binary_parts().exponent);
+    let approximate_digits = (-unit_exponent / std::f64::consts::LOG2_10).floor();
+    let digits: i16 = approximate_digits
+        .checked_approx_into()
+        .assured("a float's unit exponent gives a decimal count within ±324");
+    for digits in [digits - 1, digits, digits + 1] {
+        assert_scalar_rounding(value, digits);
+    }
+}
+
 /// A digit count as a column writes it. Most counts lie within forty places either side, around
 /// every exactly representable power of ten; the rest reach the whole bound and beyond it, where a
 /// count reads as the nearer end of the bound.

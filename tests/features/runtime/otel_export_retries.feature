@@ -47,7 +47,7 @@ Feature: OTEL Export requests through unknown outcomes
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_main TYPE OTEL CONFIG {
+      CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = '{{otlp_receiver.collector}}',
         'protocol' = '<protocol>',
         'compression' = 'gzip',
@@ -133,7 +133,7 @@ Feature: OTEL Export requests through unknown outcomes
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_main TYPE OTEL CONFIG {
+      CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = '{{otlp_receiver.collector}}',
         'protocol' = '<protocol>',
         'timeout_ms' = 1000

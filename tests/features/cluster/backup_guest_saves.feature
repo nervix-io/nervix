@@ -1,7 +1,7 @@
 Feature: Guest saves above the bulk budget
   A public backup stages complete guest saves within every owner's bulk budget.
 
-  @restore_installation @deloxide_stress_restore
+  @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: Guest saves above the bulk budget stream, retry and resume on <cluster_size> nodes
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "10m"
@@ -26,7 +26,7 @@ Feature: Guest saves above the bulk budget
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA result BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

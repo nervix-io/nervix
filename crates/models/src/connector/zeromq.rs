@@ -17,17 +17,22 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, DEFAULT_CONNECT_TIMEOUT, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
 };
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SinkBody,
+    SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity,
+    SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
-configured_client!(ZeroMq: unpooled CreateClientZeroMq => ZeroMqConfigEntry);
+configured_client!(ZeroMq: unpooled, config Nervix, CreateClientZeroMq => ZeroMqConfigEntry);
 
 /// The pull socket of a ZeroMQ client, which the client's configuration addresses.
 #[derive(
@@ -39,13 +44,71 @@ pub struct ZeroMqPullSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a ZEROMQ PULL holds and how long it waits.
+const ZEROMQ_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "the frame a peer is sending",
+        bound: BufferBound::Unbounded,
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "connecting, retried without limit",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "the ZMTP handshake",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "receiving the next message",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &["The driver has no high-water mark, maximum message size or heartbeat."],
+};
+
+/// What the connector of a ZEROMQ PUSH holds and how long it waits.
+const ZEROMQ_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "bytes queued for a peer",
+        bound: BufferBound::Unbounded,
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "connecting and the ZMTP handshake",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "a send",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
+        },
+    ],
+    driver_limits: &["The driver has no high-water mark, maximum message size or heartbeat."],
+};
+
 impl SourceEntity for ZeroMqPullSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
+        headers: None,
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::ZeroMq),
         position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::NO_ACK],
+        quiesce: &[
+            DeclaredQuiesce::SUSPEND,
+            DeclaredQuiesce::BUFFER,
+            DeclaredQuiesce::DROP,
+        ],
+        locator: None,
+        options: &[],
+        bounds: ZEROMQ_SOURCE_BOUNDS,
     };
 }
 
@@ -60,13 +123,6 @@ impl SourceBody for ZeroMqPullSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(
-            quiesce,
-            IngestQuiesceMode::Suspend | IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop
-        )
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -111,16 +167,18 @@ pub struct ZeroMqPushSink {
 
 impl SinkEntity for ZeroMqPushSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
-        requires_codec: true,
-        batch_requirement: EmitterBatchRequirement::Optional,
+        headers: None,
+        reference: SinkReferenceKind::Client(ConnectorKind::ZeroMq),
+        body: EmitterBodyForm::Codec,
+        batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        batch_size_maximum: None,
+        publishing_modes: &[EmitterPublishingModeKind::NoAck],
+        locator: None,
+        options: &[],
+        envelope: &[],
+        properties: &[],
+        bounds: ZEROMQ_SINK_BOUNDS,
     };
-
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::NoAck { .. })
-    }
 }
 
 impl SinkBody for ZeroMqPushSink {

@@ -32,7 +32,7 @@ owners of their respective rules:
 ## Ownership And Routing
 
 The ingestor or emitter name is the attachment target. An application open neither creates a graph
-node nor adds a graph edge. `CREATE CLIENT ... TYPE ...` describes an external connector connection;
+node nor adds a graph edge. `CREATE <CONNECTOR> CLIENT` describes an external connector connection;
 native endpoints instead name an internal schema directly and use the existing session listeners.
 Starting a domain needs no connected application. With no consumer, an emitter retains bounded
 pending work and applies graph backpressure.
@@ -102,6 +102,11 @@ length and reassembles one delivery before answering the application read. Settl
 writes proceed beside response reads. Both forwarding forms use two-second idle heartbeats and a
 ten-second peer-silence limit. The [Interconnect](./interconnect.md#client-consumer-streams) owns
 setup budgets, peer identity, quotas and link-ending semantics.
+
+HTTP and WebSocket endpoint ingestors also project these shared submission outcome labels. Their
+`MODE ACK MAX <n> ACK TIMEOUT <duration>` window and request transport are separate from native
+client producer credit and session recovery. See [endpoint ingestion](ingestors.md#http-endpoint-and-websockets-endpoint)
+for HTTP statuses, signaling frames, sender retry and intake-ending behavior.
 
 ## Configure A Native Graph
 
@@ -499,7 +504,10 @@ as a fallback. [Domain Clock](./domain-clock.md#logical-and-physical-deadlines) 
 
 An open succeeds only after current routing and capacity are installed. During process-start
 catch-up, an endpoint open is temporarily `EndpointUnavailable`; stale local missing/stopped state
-is not exposed as terminal before the barrier. A node unable to establish the required current
+is not exposed as terminal before the barrier. The node executing the endpoint never exposes its
+local state as terminal either: one that has not installed the endpoint, since it started or for
+the revision the serving node checked, answers `EndpointUnavailable`, and only the serving node
+classifies a missing, stopped or changed endpoint from committed state. A node unable to establish the required current
 open/admission authority refuses that operation. The startup proof is not a continuous quorum
 lease that revokes already-admitted runtime work after every connectivity loss.
 

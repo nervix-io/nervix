@@ -21,13 +21,14 @@ use std::collections::BTreeSet;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
-    ConsensusError, DomainMutationLease, DomainPlanningInputs, TransactionStepEffect,
+    ConsensusError, DomainMutationLease, DomainPlanningInputs, ReplicatedTransaction,
+    TransactionStepEffect,
 };
 use nervix_interconnect::EntityGatePurpose;
 use nervix_models::{
-    DomainName, DomainSchedule, DomainStatus, ImpactDiagnosticKind, ModelKind, ModelName,
-    OperationImpactReason, OperationImpactReport, PauseRequirement, QuiesceLevel,
-    RequestedResourceVersion, ResourceBindingImpact, Statement, TransactionOperation,
+    DomainName, DomainSchedule, DomainStatus, ExecutionStepImpactReport, ImpactDiagnosticKind,
+    ModelKind, ModelName, OperationImpactReason, OperationImpactReport, PauseRequirement,
+    QuiesceLevel, RequestedResourceVersion, ResourceBindingImpact, Statement, TransactionOperation,
     TransactionOperationNumber,
 };
 use nervix_nspl::client_statement::ClientStatement;
@@ -863,6 +864,28 @@ impl SessionServiceImpl {
         .await
     }
 
+    /// Records the effect of a transaction model step in `domain`.
+    ///
+    /// A test build can make the leader refuse it before appending it, the way a leader whose lease
+    /// lapsed or whose retained log is saturated refuses a write.
+    async fn publish_transaction_model_step(
+        &self,
+        _domain: &DomainName,
+        transaction: &ReplicatedTransaction,
+        impact: ExecutionStepImpactReport,
+        result: CommandResult,
+        effect: TransactionStepEffect,
+    ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
+        #[cfg(feature = "testing")]
+        if let Some(refusal) = self.inner.runtime.take_model_publication_refusal(_domain) {
+            return Err(Report::new(ConsensusError::from(refusal))
+                .change_context(nervix_consensus::ConsensusTransactionError::Consensus)
+                .change_context(TransactionCommitError::Proposal));
+        }
+        self.record_transaction_step(transaction, impact, result, Some(effect))
+            .await
+    }
+
     /// Applies one batch of model mutations. A transaction step publishes under its transaction's
     /// lease, and a batch a command owns under `command_lease`, the lease that command holds on the
     /// domain; a batch with neither presents none.
@@ -951,6 +974,20 @@ impl SessionServiceImpl {
                 domain.as_str()
             ));
         }
+        // A coordinator before this one engaged the pause for this step and stopped before it could
+        // release it, so the pause is this transaction's own. Recording it before anything can end
+        // the step lets every outcome release it under the transaction's lease, including a
+        // refusal this step records instead of applying.
+        let adopted_pause_attempt = match transaction_step.as_ref() {
+            Some(step) if adopted_domain_pause => {
+                let attempt = step.actual.request(PauseRequirement::Domain {
+                    domain: domain.clone(),
+                });
+                step.actual.confirm(attempt);
+                Some(attempt)
+            }
+            Some(_) | None => None,
+        };
         let CollectedModelMutations {
             results,
             mutations,
@@ -1135,7 +1172,7 @@ impl SessionServiceImpl {
             let changes_vhosts = planned.changes_vhosts();
             let mut cluster_entity_gate = None;
             let mut ownership_handoff = None;
-            let mut domain_pause_attempt = None;
+            let mut domain_pause_attempt = adopted_pause_attempt;
             // Ordered plans and direct model commits share this schedule publication boundary.
             #[cfg(feature = "testing")]
             if !is_noop
@@ -1200,6 +1237,12 @@ impl SessionServiceImpl {
             } else {
                 ScheduleTransition::default()
             };
+            // The plan captured its inputs before this transaction paused the domain. An adopted
+            // pause is this transaction's own transition, so this step expects the inputs as that
+            // pause left them, and publishes against them.
+            if adopted_domain_pause && let Some(captured) = inputs.take() {
+                inputs = Some(captured.after_domain_pause());
+            }
             if !is_noop
                 && let Some(inputs) = inputs.as_ref()
                 && let Err(error) = self.validate_domain_planning_inputs(inputs).await
@@ -1252,17 +1295,6 @@ impl SessionServiceImpl {
                 }
             };
             let requires_domain_pause = classified_level.requires_domain_pause();
-            if !is_noop
-                && requires_domain_pause
-                && adopted_domain_pause
-                && let Some(step) = transaction_step.as_ref()
-            {
-                let attempt = step.actual.request(PauseRequirement::Domain {
-                    domain: domain.clone(),
-                });
-                step.actual.confirm(attempt);
-                domain_pause_attempt = Some(attempt);
-            }
             if transaction_step.is_none()
                 && let Some(prepared_schedule) = prepared_schedule.as_mut()
             {
@@ -1354,7 +1386,25 @@ impl SessionServiceImpl {
                 };
                 domain_pause_attempt = attempt;
             }
-            if !is_noop && requires_domain_pause {
+            if !is_noop
+                && requires_domain_pause
+                && adopted_domain_pause
+                && let Err(error) = Box::pin(self.drain_adopted_domain_pause(&domain)).await
+            {
+                // The step records this failure, and its application completion releases the
+                // adopted pause under the transaction's lease before the outcome is recorded.
+                if let Some(step) = transaction_step.as_ref()
+                    && let Some(attempt) = domain_pause_attempt
+                {
+                    step.actual.fail(
+                        attempt,
+                        ImpactDiagnosticKind::Quiescence,
+                        format!("{error:#}"),
+                    );
+                }
+                return command_error(format!("{error:#}"));
+            }
+            if !is_noop && requires_domain_pause && !adopted_domain_pause {
                 let paused_inputs = inputs
                     .take()
                     .verified("a model plan that pauses its domain carries publication inputs")
@@ -1547,13 +1597,14 @@ impl SessionServiceImpl {
                             .clone(),
                     );
                     match Box::pin(
-                        self.record_transaction_step(
+                        self.publish_transaction_model_step(
+                            &domain,
                             transaction_step.transaction,
                             transaction_step
                                 .actual
                                 .apply_to(transaction_step.planned_step.impact.clone()),
                             step_result,
-                            Some(effect),
+                            effect,
                         ),
                     )
                     .await
@@ -1869,11 +1920,17 @@ impl SessionServiceImpl {
                     .await
                     {
                         if transaction_step.is_some() {
-                            transaction_application_failure = Some(format!(
-                                "committed transaction model step in domain '{}' failed to \
-                                 release its pause: {error:#}",
-                                domain.as_str()
-                            ));
+                            // Application completion recovers this hold under the same mutation
+                            // lease before it can record a terminal outcome.
+                            if let DomainAlterError::RestoreIngestion { .. } =
+                                error.current_context()
+                            {
+                                transaction_application_failure = Some(format!(
+                                    "committed transaction model step in domain '{}' failed to \
+                                     restore ingestion after releasing its pause: {error:#}",
+                                    domain.as_str()
+                                ));
+                            }
                             self.broadcast_error(format!(
                                 "failed to release transaction-owned pause in domain '{}': \
                                  {error:#}",
@@ -2705,8 +2762,7 @@ mod tests {
              notification;",
             "CREATE RELAY notifications SCHEMA notification UNBRANCHED;",
             "CREATE RELAY forwarded_notifications SCHEMA notification UNBRANCHED;",
-            "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
-             };",
+            "CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };",
             "CREATE KAFKA TOPIC INGESTOR notifications_ingestor FROM kafka_main TOPIC \
              'notifications' OFFSET BY CONSUMER GROUP 'notifications_group' MODE NO ACK ON \
              QUIESCE SUSPEND DECODE USING notification_codec TIMESTAMP NOW TO notifications \
@@ -2770,8 +2826,7 @@ mod tests {
             "CREATE RELAY notifications_a SCHEMA notification UNBRANCHED;",
             "CREATE RELAY notifications_b SCHEMA notification UNBRANCHED;",
             "CREATE RELAY notifications_all SCHEMA notification UNBRANCHED;",
-            "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
-             };",
+            "CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };",
             "CREATE KAFKA TOPIC INGESTOR ingest_a FROM kafka_main TOPIC 'notifications_a' OFFSET \
              BY CONSUMER GROUP 'notifications_a_group' MODE NO ACK ON QUIESCE SUSPEND DECODE \
              USING notification_codec TIMESTAMP NOW TO notifications_a INHERIT ALL UNBRANCHED \
@@ -2832,8 +2887,7 @@ mod tests {
              transaction;",
             "CREATE RELAY inbound SCHEMA transaction UNBRANCHED;",
             "CREATE RELAY deduped SCHEMA transaction UNBRANCHED;",
-            "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
-             };",
+            "CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };",
             "CREATE KAFKA TOPIC INGESTOR inbound_ingestor FROM kafka_main TOPIC 'inbound' OFFSET \
              BY CONSUMER GROUP 'inbound_group' MODE NO ACK ON QUIESCE SUSPEND DECODE USING \
              transaction_codec TIMESTAMP NOW TO inbound INHERIT ALL UNBRANCHED FLUSH EACH 100ms \

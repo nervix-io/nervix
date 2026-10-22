@@ -155,6 +155,15 @@ identity while the transaction remains `OPEN`; no gate or external effect has be
 each step uses the stored decisions and captured inputs. A restart or new leader does not replan it
 from newer configuration.
 
+An eligible statement sent outside `BEGIN`/`COMMIT` applies through an internal transaction of its
+own under the command's execution reference, with the same preflight, queue admission, and commit
+admission. Each of those decisions is made against the coordinator's own observation of that
+transaction, and a leader that resumes the applying command after a leadership change can open and
+advance the same transaction meanwhile. A refusal therefore becomes the command's outcome only
+while the transaction still stands where it was observed; otherwise the coordinator continues from
+the recorded progress, as [Command Completion](./command-completion.md#lifecycle-and-ownership)
+describes.
+
 A `COMMIT` request may name the preview it expects to apply. The expected identity covers the
 transaction id, its accepted queue position, and the whole planning basis, whether the client read
 that identity from an accepted append or from an inspection. When the preview no longer describes
@@ -287,7 +296,11 @@ whole report. Every format carries the same typed envelope in the command result
 
 A new leader automatically resumes every `COMMITTING` transaction from its recorded applying step.
 Completed effects are not repeated, and a failed remaining step records its statement number and
-error while preserving the applied prefix. A model step that did not pause and whose VHOSTs an HTTPS
+error while preserving the applied prefix. A model step whose earlier coordinator paused the domain
+and stopped before publishing it runs again under the pause it finds: the step adopts that pause as
+its own, drains it, checks its frozen inputs against the domain as the pause left it, and releases
+it before recording any outcome. An ordinary command whose internal transaction is still
+`COMMITTING` stays applying and keeps its domain mutation lease until that transaction finishes. A model step that did not pause and whose VHOSTs an HTTPS
 listener could not install is the one step whose failure removes its own effect: the record of that
 failure also restores the schedule the step replaced, so the applied prefix ends before it. Both
 the first attempt and a resuming leader apply this rule. Repeating the outstanding `COMMIT` joins
@@ -295,10 +308,15 @@ this execution and waits for the retained terminal result. Atomicity still does 
 transaction.
 
 Finished transactions remain as small tombstones containing the outcome, step progress, errors,
-and executed quiesce levels. Their final report revision remains available for committed, failed,
-reverted, and expired outcomes even after later graph changes. Removing the tombstone removes its
-plan and report records and any topology content no retained report references. During retention,
-attach reports the exact outcome and aggregate commit output; after removal the id is unknown.
+and executed quiesce levels. A tombstone also keeps the request identity, position, source digest
+and admitted result of every statement the transaction accepted, without the statement itself. An
+exact repetition of an accepted append, including a command execution that resumes it after the
+transaction finished, is answered with that admitted result; an append the transaction never
+accepted is refused. A finished transaction's final report revision remains available for
+committed, failed, reverted, and expired outcomes even after later graph changes. Removing the
+tombstone removes its plan and report records and any topology content no retained report
+references. During retention, attach reports the exact outcome and aggregate commit output; after
+removal the id is unknown.
 `SHOW TRANSACTIONS;`
 can be served by any node from locally applied replicated state and lists the id, owner, domain,
 state, pending count, progress, age, and idle time for live transactions and retained tombstones.
@@ -521,14 +539,20 @@ its own branch, and `ON REJECTED STATE RESET`. See
 
 A normal domain backup acquires a replicated mutation lease under its persistent command
 execution. The leader also takes its node-local alteration guard, pauses and drains the domain,
-reads the configuration at the cut, and asks state owners to stage their checkpoints. It resumes
+reads the configuration at the cut, and asks the scheduled state owners to stage their checkpoints.
+A cut refuses, naming the domain, the entity and the node, when the cluster does not report a
+scheduled state owner live, or, before a quiesced cut pauses, a node that runs the domain's work,
+and naming the domain and the entity when the schedule places an entity whose state it archives on
+no node. It resumes
 the domain and explicitly releases that domain's lease before transferring its sections into the
 archive. A cluster backup repeats this process per domain, so one domain's archive transfer does
 not hold another domain paused or mutation locked. A stopped domain is confirmed under its lease
-and has no intake to pause;
-`WITHOUT STATE` takes no mutation lease, and `WITHOUT PAUSE` reads a live checkpoint without
-quiescing. A retry still uses the command execution's stable identity and outcome.
-The backup drain reads admitted work on every live node and uses a separate confirming force-flush
+and has no intake to pause; `WITHOUT STATE` takes no mutation lease, and `WITHOUT PAUSE` takes none
+either and reads a live checkpoint without quiescing. A retry still uses the command execution's
+stable identity and outcome, and a new leader re-executes an applying backup under it. [The
+Quiesced Cut](./backup-and-restore-architecture.md#the-quiesced-cut) describes the protocol.
+The backup drain reads admitted work on every live node and every node the schedule assigns the
+domain's work to, and uses a separate confirming force-flush
 round after the cluster first appears quiet. A parked materialized-state wait is reported but does
 not keep the cut open, and neither do the rows a window retains, which the cut captures as window
 state. If work reappears, the leader drains and confirms again. Each drain request
@@ -546,11 +570,14 @@ disk. The verified description, parsed Models and reservation share one owner th
 retain until they finish, including cancellation. Parsing and the pure restore planner run on
 admitted bulk CPU workers. Native checkpoints stream into quota-owned files and use the same
 bounded installation path as guest saves. The ordinary bulk budget stays at 32 MiB, with fixed
-2 MiB conversion I/O and installation jobs. [Backup And Restore](backup-and-restore.md#restoring)
-owns the preparation estimate and its allocation limits.
+2 MiB conversion I/O and installation jobs. [Restore Intake And
+Preparation](backup-and-restore-architecture.md#restore-intake-and-preparation) owns the preparation
+estimate, and [Backup And Restore](backup-and-restore.md#limits) its allocation limits.
 
 A restore is a persistent administrative command whose progress is replicated state; the operator
-view is in [Backup And Restore](./backup-and-restore.md#restoring). The leader admits a restore
+view is in [Backup And Restore](./backup-and-restore.md#restoring), and [Admission And Durable
+Progress](./backup-and-restore-architecture.md#admission-and-durable-progress) describes how each
+step is recorded. The leader admits a restore
 under its execution reference only after the archive verified and the whole restore planned, and
 admission takes the mutation lease of every domain the restore creates. The admitted execution
 records the `RESTORE` statement, the size and digest of its archive, every step the restore has
@@ -585,7 +612,8 @@ validation and the leader's content checks, and without the statement and source
 transaction. The lease keeps every other command from changing the domain while the restore holds
 it, so a leader that finds exactly the archived models already committed knows that an earlier
 attempt applied them. It stages all compatible state before any node replaces its published set,
-then publishes one durable batch per node. Only after every publication succeeds does it record
+then has every node durably select its complete set through one publication pointer. Only after
+every publication succeeds does it record
 the model step and release the start gate. For `RESUME`, this same consensus effect sets `Running`
 and installs the archived clock mapping, preserving the archived start generation and start point.
 State installation includes materialized checkpoints bound to that generation before any branch
@@ -629,7 +657,9 @@ unaffected nodes and branches keep their sessions, buffers, state, and in-flight
 released after the destination owners activate the published runtime revision. A fence or drain
 timeout releases the old graph without writing the candidate schedule. If activation fails after a
 schedule commit, the gate stays closed until its lease deadline rather than opening before the
-destination is ready.
+destination is ready. That holds on every node that keeps running; a node that stops ends the leases
+it holds with its runtime, as [Ownership Handoff During Shutdown](shutdown.md#ownership-handoff-during-shutdown)
+describes.
 
 Pending `REQUIRED WAIT` materialized records cannot finish a planned drain because the dependency is
 absent. They do not block the handoff; destroying the old task negatively acknowledges their
@@ -639,12 +669,21 @@ has a replica slot, the live former owner is the first replica candidate after t
 
 `RELOCATE` differs from the others in one respect: it holds and commits its whole unit at once,
 because the unit is the plan the operator inspected and approved. A hold that cannot complete
-leaves the domain on its previous schedule and moves nothing. It holds the domain's exclusive
-alteration lock from planning through release, so it and a concurrent model change, placement
-change, or `DRAIN NODE` of the same domain are mutually exclusive. `RELOCATE` is immediate,
-non-transaction content, like `CORDON`, `UNCORDON`, `DRAIN`, and `DROP NODE`, because its plan
-depends on live cluster state that a queued transaction cannot pin. `DESCRIBE RELOCATION` is
-read-only content served by any cluster node. See
+leaves the domain on its previous schedule and moves nothing. `RELOCATE` holds the domain's
+exclusive alteration lock from planning through release, so it and a concurrent model change,
+placement change, or `DRAIN NODE` of the same domain are mutually exclusive.
+
+The leader refuses the relocation's schedule write when it lost its leadership or cannot confirm
+it. A leader whose lease lapsed cannot confirm it, and refuses a new write before appending it. Such
+a refusal leaves the domain on its previous schedule without failing the relocation. The relocation
+releases its hold and answers `OutcomeUnknown` with cause `LeadershipLost`, and its execution stays
+applying. The leader that resumes it, or a repetition under the same execution reference, plans the
+unit again from the schedule committed by then. Any other refusal of the write, such as a schedule
+that changed since planning, fails the relocation.
+
+`RELOCATE` is immediate, non-transaction content, like `CORDON`, `UNCORDON`, `DRAIN`, and
+`DROP NODE`, because its plan depends on live cluster state that a queued transaction cannot pin.
+`DESCRIBE RELOCATION` is read-only content served by any cluster node. See
 [Placement Policies](placement.md#relocating-runtime-nodes) for the statements, the selection
 forms, and the plan output.
 
@@ -674,7 +713,11 @@ first, the deadline or a repeated signal, decides how the process exits.
 
 When graceful shutdown begins, the process advertises that its current incarnation is terminating.
 The incarnation remains live for Raft and for ownership handoffs already in progress, while placement
-and explicit relocation exclude it as a new destination. The advertisement is transient state of
+and explicit relocation exclude it as a new destination. A leader whose gossip has not yet observed
+the advertisement can still choose the incarnation, so the incarnation itself refuses to prepare a
+new planned handoff for which it is the destination; see
+[Terminating Incarnation And Placement Eligibility](shutdown.md#terminating-incarnation-and-placement-eligibility).
+The advertisement is transient state of
 that process incarnation, so a restarted incarnation is eligible again unless the stable node name
 is cordoned in Raft. The process then stops accepting on its public gRPC, connector, observability,
 and console listeners and closes the client connections they had accepted. Closing a connection

@@ -252,6 +252,19 @@ const SERIES: &[SeriesSpec] = &[
         labels: NO_LABELS,
     },
     SeriesSpec {
+        name: "nervix_interconnect_relay_channel_watermarks",
+        help: "Relay channel watermarks this node retains for the channels its peers opened.",
+        kind: SeriesKind::Gauge,
+        labels: NO_LABELS,
+    },
+    SeriesSpec {
+        name: "nervix_interconnect_relay_channel_watermarks_evicted_total",
+        help: "Relay channel watermarks forgotten before their retention ended, to make room in \
+               their peer's budget for another channel.",
+        kind: SeriesKind::Counter,
+        labels: NO_LABELS,
+    },
+    SeriesSpec {
         name: "nervix_interconnect_connections_established_total",
         help: "Interconnect connections this node has established.",
         kind: SeriesKind::Counter,
@@ -625,6 +638,16 @@ fn transport_families(families: &mut Families, transport: &TransportSnapshot) {
     grants.sample(&[], transport.relay_grants.approx_into());
     let mut outcome_age = families.open("nervix_interconnect_unresolved_outcome_age_seconds");
     outcome_age.sample(&[], transport.oldest_unresolved_outcome.as_secs_f64());
+    let mut watermarks = families.open("nervix_interconnect_relay_channel_watermarks");
+    watermarks.sample(&[], transport.relay_channel_watermarks.approx_into());
+    let mut evicted = families.open("nervix_interconnect_relay_channel_watermarks_evicted_total");
+    evicted.sample(
+        &[],
+        transport
+            .counters
+            .relay_channel_watermarks_evicted
+            .approx_into(),
+    );
 
     let counters = &transport.counters;
     let mut established = families.open("nervix_interconnect_connections_established_total");
@@ -779,6 +802,10 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
             class: "filesystem_storage",
             workers: executor.filesystem_storage,
         },
+        WorkerClassSample {
+            class: "connector_storage",
+            workers: executor.connector_storage,
+        },
     ];
 
     let mut capacity = families.open("nervix_execution_memory_capacity_bytes");
@@ -929,6 +956,7 @@ mod tests {
                 request_time: [Duration::ZERO; RequestSubquota::COUNT],
                 relay_outcomes: [0; RelayAdmissionOutcome::COUNT],
                 relay_admission_wait: Duration::ZERO,
+                relay_channel_watermarks_evicted: 0,
                 bulk_bytes: [[0; TransferDirection::COUNT]; PoolClass::COUNT],
             },
             connections: [[0; PoolClass::COUNT]; ConnectionDirection::COUNT],
@@ -937,6 +965,7 @@ mod tests {
             relay_channels: 0,
             relay_attempts: 0,
             relay_grants: 0,
+            relay_channel_watermarks: 0,
             oldest_unresolved_outcome: Duration::ZERO,
         }
     }

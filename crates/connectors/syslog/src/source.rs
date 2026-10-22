@@ -2,10 +2,11 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Syslog UDP, TCP and TLS listeners, RFC 6587 stream framing, peer metadata, and
-//!   source lifecycle operations.
-//! - **Depends on.** The connector source contract, connector-owned Syslog configuration, Tokio
-//!   sockets, `memchr`, and rustls.
+//! - **Owns.** Syslog UDP, TCP and TLS listeners, RFC 6587 stream framing, peer metadata, the
+//!   deadlines of the connections they accept, dropping an oversized datagram, and source
+//!   lifecycle operations.
+//! - **Depends on.** The connector source contract and its client deadlines, connector-owned
+//!   Syslog configuration, Tokio sockets and timers, `memchr`, and rustls.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
 #![cfg_attr(
@@ -27,18 +28,20 @@ use bytes::{BufMut as _, buf::Limit};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, SourceBatch,
-    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
+    BrokerSourceConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMetadataRow,
+    NoIngestHeaders, SourceBatch, SourceBatchRequest, SourceConnector, SourceError, SourceMessage,
+    SourceReadCancellation, SourceResult, SourceResume,
 };
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::{
-    net::{TcpListener, UdpSocket},
+    net::{TcpListener, TcpStream, UdpSocket},
     sync::{mpsc, watch},
     task::JoinSet,
+    time::timeout,
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::debug;
 
 use crate::config::{SyslogClientConfig, SyslogConfigError, SyslogDirection, SyslogProtocol};
@@ -54,6 +57,7 @@ const STREAM_READ_CHUNK: usize = 8_192;
 pub struct SyslogSourcePlan {
     config: SyslogClientConfig,
     bind_addr: String,
+    connections: ConnectionDeadlines,
 }
 
 impl SyslogSourcePlan {
@@ -62,8 +66,36 @@ impl SyslogSourcePlan {
         bind_addr: impl FnOnce(&str) -> String,
     ) -> error_stack::Result<Self, SyslogConfigError> {
         let config = SyslogClientConfig::parse(&entries, SyslogDirection::Ingest)?;
+        let connections = ConnectionDeadlines::read(&entries)?;
         let bind_addr = bind_addr(&config.addr);
-        Ok(Self { config, bind_addr })
+        Ok(Self {
+            config,
+            bind_addr,
+            connections,
+        })
+    }
+}
+
+/// What ends the waits of a connection a stream listener accepted, as the listener's client sets
+/// them.
+#[derive(Debug, Clone, Copy)]
+struct ConnectionDeadlines {
+    /// The client's `connect_timeout_ms`, 30 seconds where it leaves the key out. A TLS listener
+    /// bounds its handshake with each connection by it; a TCP listener performs no handshake, and
+    /// its client cannot set the key.
+    handshake: ConfiguredDeadline,
+    /// The client's `idle_timeout_ms`, which closes a connection that sends nothing for that long
+    /// while the listener waits to read from it, where the client sets one.
+    idle: Option<ConfiguredDeadline>,
+}
+
+impl ConnectionDeadlines {
+    fn read(entries: &[ClientConfigEntry]) -> error_stack::Result<Self, SyslogConfigError> {
+        let handshake = ConfiguredDeadline::connect(entries)
+            .change_context(SyslogConfigError::InvalidDeadline)?;
+        let idle =
+            ConfiguredDeadline::idle(entries).change_context(SyslogConfigError::InvalidDeadline)?;
+        Ok(Self { handshake, idle })
     }
 }
 
@@ -112,6 +144,13 @@ struct ReceivedSyslogFrame {
     peer_addr: SocketAddr,
 }
 
+/// What one receive took from a listener's transport.
+enum SyslogReceived {
+    Message(SyslogSourceMessage),
+    /// A datagram larger than `max_message_size`, which the listener dropped.
+    OversizedDatagram,
+}
+
 enum SyslogListener {
     Udp(SyslogUdpListener),
     Stream(SyslogStreamListener),
@@ -133,6 +172,7 @@ struct SyslogStreamListener {
 pub struct SyslogSource {
     config: SyslogClientConfig,
     bind_addr: String,
+    connections: ConnectionDeadlines,
     tls_acceptor: Option<TlsAcceptor>,
     listener: Option<SyslogListener>,
 }
@@ -167,6 +207,10 @@ enum SyslogConnectionError {
         #[source]
         source: std::io::Error,
     },
+    /// A wait of the connection ran out of the deadline a client key sets, which the frame beneath
+    /// names: its TLS handshake, or its next bytes.
+    #[error("connection ran out of its deadline")]
+    Deadline,
     #[error("stream read failed")]
     StreamRead {
         #[source]
@@ -218,6 +262,7 @@ impl SourceConnector for SyslogSource {
         Ok(Self {
             config: plan.config.clone(),
             bind_addr: plan.bind_addr.clone(),
+            connections: plan.connections,
             tls_acceptor,
             listener: None,
         })
@@ -263,20 +308,33 @@ impl BrokerSourceConnector for SyslogSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
-        let result = match self.listener.as_mut() {
+        let received = match self.listener.as_mut() {
             Some(SyslogListener::Udp(listener)) => {
-                listener.receive(self.config.max_message_size).await
+                let receive = listener.receive(self.config.max_message_size);
+                cancellation.unless_cancelled(receive).await
             }
             Some(SyslogListener::Stream(listener)) => {
-                listener
-                    .receive(self.config.max_message_size, self.tls_acceptor.clone())
-                    .await
+                let receive = listener.receive(
+                    self.config.max_message_size,
+                    self.tls_acceptor.clone(),
+                    self.connections,
+                );
+                cancellation.unless_cancelled(receive).await
             }
             None => return Ok(SourceBatch::ResumeRequired),
         };
+        let Some(result) = received else {
+            return Ok(SourceBatch::Interrupted {
+                gathered: Vec::new(),
+            });
+        };
         match result {
-            Ok(message) => Ok(SourceBatch::Messages(vec![message])),
+            Ok(SyslogReceived::Message(message)) => Ok(SourceBatch::Messages(vec![message])),
+            Ok(SyslogReceived::OversizedDatagram) => Ok(SourceBatch::Oversized {
+                payloads: NonZeroUsize::MIN,
+            }),
             Err(error) => {
                 self.drop_listener();
                 Err(error.change_context(SourceError::Read { connector: SYSLOG }))
@@ -339,31 +397,30 @@ impl SyslogSource {
 }
 
 impl SyslogUdpListener {
+    /// Receives one datagram. One larger than `max_message_size` is dropped and answered as such,
+    /// so the host counts it; the next datagram is intact.
     async fn receive(
         &mut self,
         max_message_size: NonZeroUsize,
-    ) -> error_stack::Result<SyslogSourceMessage, SyslogListenerError> {
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let (size, peer_addr) = self
-                .socket
-                .recv_from(&mut self.datagram)
-                .await
-                .map_err(|source| Report::new(SyslogListenerError::UdpReceive { source }))?;
-            if size > max_message_size.get() {
-                debug!(
-                    peer_addr = %peer_addr,
-                    size,
-                    max_message_size,
-                    "dropped oversized syslog UDP datagram"
-                );
-                continue;
-            }
-            return Ok(SyslogSourceMessage::new(
-                self.datagram[..size].to_vec(),
-                peer_addr,
-            ));
+    ) -> error_stack::Result<SyslogReceived, SyslogListenerError> {
+        let (size, peer_addr) = self
+            .socket
+            .recv_from(&mut self.datagram)
+            .await
+            .map_err(|source| Report::new(SyslogListenerError::UdpReceive { source }))?;
+        if size > max_message_size.get() {
+            debug!(
+                peer_addr = %peer_addr,
+                size,
+                max_message_size,
+                "dropped oversized syslog UDP datagram"
+            );
+            return Ok(SyslogReceived::OversizedDatagram);
         }
+        Ok(SyslogReceived::Message(SyslogSourceMessage::new(
+            self.datagram[..size].to_vec(),
+            peer_addr,
+        )))
     }
 }
 
@@ -372,7 +429,8 @@ impl SyslogStreamListener {
         &mut self,
         max_message_size: NonZeroUsize,
         tls_acceptor: Option<TlsAcceptor>,
-    ) -> error_stack::Result<SyslogSourceMessage, SyslogListenerError> {
+        deadlines: ConnectionDeadlines,
+    ) -> error_stack::Result<SyslogReceived, SyslogListenerError> {
         loop {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::select! {
@@ -393,15 +451,14 @@ impl SyslogStreamListener {
                     let connection_tls = tls_acceptor.clone();
                     self.connections.spawn(async move {
                         if let Some(acceptor) = connection_tls {
-                            let stream = acceptor
-                                .accept(stream)
-                                .await
-                                .map_err(|source| Report::new(SyslogConnectionError::TlsHandshake { source }))?;
+                            let stream =
+                                accept_tls(&acceptor, stream, deadlines.handshake).await?;
                             read_stream_connection(
                                 stream,
                                 peer_addr,
                                 max_message_size,
                                 false,
+                                deadlines.idle,
                                 tx,
                                 paused,
                             )
@@ -412,6 +469,7 @@ impl SyslogStreamListener {
                                 peer_addr,
                                 max_message_size,
                                 true,
+                                deadlines.idle,
                                 tx,
                                 paused,
                             )
@@ -423,7 +481,10 @@ impl SyslogStreamListener {
                     let Some(frame) = frame else {
                         return Err(Report::new(SyslogListenerError::IntakeQueueClosed));
                     };
-                    return Ok(SyslogSourceMessage::new(frame.payload, frame.peer_addr));
+                    return Ok(SyslogReceived::Message(SyslogSourceMessage::new(
+                        frame.payload,
+                        frame.peer_addr,
+                    )));
                 }
                 joined = self.connections.join_next(), if !self.connections.is_empty() => {
                     match joined {
@@ -441,6 +502,22 @@ impl SyslogStreamListener {
     }
 }
 
+/// Completes the TLS handshake of an accepted connection, closing the connection once the
+/// handshake has taken longer than the client's `connect_timeout_ms`.
+async fn accept_tls(
+    acceptor: &TlsAcceptor,
+    stream: TcpStream,
+    handshake: ConfiguredDeadline,
+) -> error_stack::Result<TlsStream<TcpStream>, SyslogConnectionError> {
+    let accepted = timeout(handshake.bound(), acceptor.accept(stream)).await;
+    match accepted {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(source)) => Err(Report::new(SyslogConnectionError::TlsHandshake { source })),
+        Err(_) => Err(Report::new(handshake.elapsed("the TLS handshake"))
+            .change_context(SyslogConnectionError::Deadline)),
+    }
+}
+
 #[cfg_attr(
     nervix_lint,
     nervix::dispatch(
@@ -453,6 +530,7 @@ async fn read_stream_connection(
     peer_addr: SocketAddr,
     max_message_size: NonZeroUsize,
     allow_non_transparent: bool,
+    idle: Option<ConfiguredDeadline>,
     tx: mpsc::Sender<ReceivedSyslogFrame>,
     mut paused: watch::Receiver<bool>,
 ) -> error_stack::Result<(), SyslogConnectionError> {
@@ -493,9 +571,8 @@ async fn read_stream_connection(
                 }
                 continue;
             }
-            read = stream.read_buf(&mut buffer) => read,
-        }
-        .map_err(|source| Report::new(SyslogConnectionError::StreamRead { source }))?;
+            read = read_unless_idle(&mut stream, &mut buffer, idle) => read,
+        }?;
         if read == 0 {
             return if decoder.is_empty() {
                 Ok(())
@@ -504,6 +581,35 @@ async fn read_stream_connection(
             };
         }
     }
+}
+
+/// Reads a connection's next bytes into `buffer`, failing once the read has waited for them longer
+/// than the client's `idle_timeout_ms`. Each read starts its own wait, so only a connection that
+/// sends nothing while the listener reads it runs out of the deadline.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the generic external stream reader owns its I/O effects; local callbacks remain \
+                  analyzed"
+    )
+)]
+async fn read_unless_idle(
+    stream: &mut (impl AsyncRead + Unpin),
+    buffer: &mut Limit<&mut Vec<u8>>,
+    idle: Option<ConfiguredDeadline>,
+) -> error_stack::Result<usize, SyslogConnectionError> {
+    let read = stream.read_buf(buffer);
+    let read = match idle {
+        None => read.await,
+        Some(idle) => {
+            let Ok(read) = timeout(idle.bound(), read).await else {
+                let elapsed = idle.elapsed("waiting for the connection's next bytes");
+                return Err(Report::new(elapsed).change_context(SyslogConnectionError::Deadline));
+            };
+            read
+        }
+    };
+    read.map_err(|source| Report::new(SyslogConnectionError::StreamRead { source }))
 }
 
 /// How far the frame at the read cursor has been examined, in bytes past the cursor, so that a

@@ -4,8 +4,9 @@
 //!
 //! - **Owns.** Container lifecycle, the in-process DNS authority tests point resolvers at, the
 //!   followed output of the OpenTelemetry Collector and the exports its debug exporter printed,
-//!   the addresses and TLS material a run is given, and the parallelism budget it is allowed.
-//! - **Depends on.** Container and process management, and the DNS message grammar.
+//!   the addresses and TLS material a run is given, its shared Postgres observation clients, and
+//!   the parallelism budget it is allowed.
+//! - **Depends on.** Container and process management, SQLx, and the DNS message grammar.
 //! - **Must not know.** Nervix. It provisions what a test points Nervix at; the entities themselves
 //!   are always provisioned explicitly, never as a side effect of the product starting.
 
@@ -43,7 +44,9 @@ use testcontainers::{
     },
     core::{
         BuildImageOptions, CmdWaitFor, ContainerPort, ContainerState, ExecCommand,
-        IntoContainerPort, WaitFor, client::ClientError, wait::HttpWaitStrategy,
+        IntoContainerPort, WaitFor,
+        client::ClientError,
+        wait::{HttpWaitStrategy, LogWaitStrategy},
     },
     runners::{AsyncBuilder, AsyncRunner},
 };
@@ -52,9 +55,11 @@ use thiserror::Error;
 pub mod collector_exports;
 pub mod collector_output;
 pub mod dns_authority;
+mod postgres_clients;
 mod reaper;
 
 use collector_output::{CollectorFollower, CollectorOutput};
+pub use postgres_clients::PostgresClients;
 use reaper::ResourceReaper;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
@@ -298,6 +303,7 @@ pub struct DependencyEnvironment {
     containers: Vec<RunningContainer>,
     /// The follower of the OpenTelemetry Collector's output, once the Collector started.
     otel_collector_output: Option<CollectorFollower>,
+    postgres_clients: Option<PostgresClients>,
     endpoints: DependencyEndpoints,
     tls: Option<TlsMaterials>,
     tls_configuration_hash: Option<String>,
@@ -316,6 +322,7 @@ impl DependencyEnvironment {
             running: BTreeSet::new(),
             containers: Vec::new(),
             otel_collector_output: None,
+            postgres_clients: None,
             endpoints: DependencyEndpoints::default(),
             tls: None,
             tls_configuration_hash: None,
@@ -327,6 +334,11 @@ impl DependencyEnvironment {
 
     pub fn endpoints(&self) -> &DependencyEndpoints {
         &self.endpoints
+    }
+
+    /// The shared observation clients, once Postgres is ready on both transports.
+    pub fn postgres_clients(&self) -> Option<PostgresClients> {
+        self.postgres_clients.clone()
     }
 
     pub fn tls_dir(&self) -> io::Result<&Path> {
@@ -697,8 +709,13 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                 GenericImage::new("postgres", "17")
                     .with_exposed_port(5432.tcp())
                     .with_entrypoint("bash")
-                    .with_wait_for(WaitFor::message_on_either_std(
-                        "database system is ready to accept connections",
+                    // Initialization starts a Unix-socket server first. Only the second ready
+                    // message belongs to the TCP/TLS server the published endpoints address.
+                    .with_wait_for(WaitFor::log(
+                        LogWaitStrategy::stdout_or_stderr(
+                            "database system is ready to accept connections",
+                        )
+                        .with_times(2),
                     ))
                     .with_env_var("POSTGRES_USER", "postgres")
                     .with_env_var("POSTGRES_PASSWORD", "nervix")
@@ -722,6 +739,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             POSTGRES_TLS_ADDR,
             format!("postgresql://postgres:nervix@localhost:{port}/postgres?sslmode=verify-full"),
         );
+        self.postgres_clients = Some(PostgresClients::open(&self.endpoints).await?);
         self.containers.push(RunningContainer::Generic(container));
         Ok(())
     }
@@ -1062,7 +1080,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         }
         let tls = self.ensure_tls()?.clone();
         let workspace_root = workspace_root();
-        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "answered-polls")
+        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "prometheus-vectors")
             .with_dockerfile(workspace_root.join("docker/mock-server/Dockerfile"))
             .with_file(
                 workspace_root.join("docker/mock-server/app.py"),
@@ -1482,6 +1500,9 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
     /// environment started, then its Ryuk cleanup container. A container that fails to tear down
     /// does not stop the others from being torn down, and its failure is kept with the rest.
     pub async fn shutdown(&mut self) -> Result<(), TeardownFailures> {
+        if let Some(clients) = self.postgres_clients.take() {
+            clients.close().await;
+        }
         if let Some(follower) = self.otel_collector_output.take() {
             follower.stop().await;
         }

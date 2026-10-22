@@ -54,13 +54,14 @@ use mongodb::{
 };
 use nervix_connector::{
     MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome, RejectedSinkRecord,
-    RowRequest, RowRequestLimits, RowSink, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
+    RowRequest, RowRequestLimits, RowSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
+    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
     optional_client_config_value,
 };
 use nervix_models::{
     ClientConfigEntry, ClientPoolBounds, CollectionName, EmitterBatchPolicy, FieldPath, Timestamp,
 };
+use nervix_primitives::time::Instant;
 use tracing::{debug, trace};
 
 const MONGODB: &str = "mongodb";
@@ -881,7 +882,13 @@ impl ConflictUpsert {
 }
 
 #[async_trait]
-impl SinkLifecycle for MongoDbSink {}
+impl SinkLifecycle for MongoDbSink {
+    /// Each unordered write answers for every document before the publish returns, so the
+    /// client holds nothing.
+    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+        Ok(SinkFinish::NothingHeld)
+    }
+}
 
 #[async_trait]
 impl RowSink for MongoDbSink {
@@ -1573,6 +1580,30 @@ mod tests {
                 "MongoDB insert_many write concern failed with code 100 \
                  (UnsatisfiableWriteConcern)"
             )
+        );
+    }
+
+    #[test]
+    fn a_write_concern_without_a_code_name_retains_its_numeric_code() {
+        use meticulous::OptionExt as _;
+
+        let rows = [written_row(0)];
+        let mut write_concern = unsatisfiable_write_concern();
+        write_concern.code_name.clear();
+        let answers = WriteAnswers::new(FailedRequest::InsertMany, Some(&write_concern));
+        let mut outcome = PerRecordOutcome::empty();
+
+        answers.apply(&rows, &mut outcome);
+
+        let outcome = outcome.into_parts();
+        assert_eq!(outcome.delivered, [rows[0].position]);
+        assert!(outcome.rejected.is_empty());
+        let failure = outcome
+            .infrastructure_error
+            .assured("the unsatisfied write concern always fails the request");
+        assert_eq!(
+            failure_message(&failure),
+            Some("MongoDB insert_many write concern failed with code 100")
         );
     }
 

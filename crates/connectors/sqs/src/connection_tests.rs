@@ -1,12 +1,13 @@
 //! How an SQS client reaches the service, observed against a local DNS authority and loopback
 //! listeners that stand in for the service's addresses.
 //!
-//! A stand-in answers every request with the `GetQueueUrl` result of the AWS JSON protocol and
+//! A stand-in answers every request with one `GetQueueUrl` answer of the AWS JSON protocol and
 //! closes the connection after it, so each request opens a new connection. The real service, and
 //! the HTTPS clients' certificate checks, are the Cucumber suite's.
 
 use std::{
     net::{IpAddr, Ipv4Addr},
+    num::NonZeroUsize,
     time::Duration,
 };
 
@@ -14,12 +15,14 @@ use aws_sdk_sqs::{
     error::SdkError, operation::get_queue_url::GetQueueUrlError, types::error::QueueDoesNotExist,
 };
 use nervix_connector::{
-    RecordSink as _, SinkPublishError, SinkRecord, SinkRecordId, SinkStartError,
+    BrokerSourceConnector as _, RecordSink as _, SinkPublishError, SinkRecord, SinkRecordId,
+    SinkStartError, SourceBatch, SourceBatchRequest, SourceConnector as _, SourceError,
+    SourceReadCancellation, SourceResume,
 };
 use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::{ClientConfigEntry, SqsQueueName, Timestamp};
 use nervix_primitives::{
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
     task::JoinHandle,
 };
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
@@ -27,7 +30,8 @@ use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::{
-    SQS, SqsPublishingMode, SqsSink, SqsSourceError, SqsSourcePlan, connection::FailedRequest,
+    SQS, SqsPublishingMode, SqsSink, SqsSource, SqsSourceError, SqsSourcePlan,
+    connection::FailedRequest,
 };
 
 /// The fixture name every check resolves.
@@ -35,7 +39,7 @@ const SERVICE: &str = "sqs.nervix.test";
 /// The access key every check signs with.
 const ACCESS_KEY_ID: &str = "nervix-access-key";
 /// The queue every check looks up.
-const QUEUE: &str = "orders";
+pub(crate) const QUEUE: &str = "orders";
 
 /// A resolver asking one local authority, with the files it was loaded from.
 pub(crate) struct Fixture {
@@ -88,7 +92,7 @@ impl Fixture {
 }
 
 /// The entries of a client for `endpoint` that signs with a known access key.
-fn client_config(endpoint: &str) -> Vec<ClientConfigEntry> {
+pub(crate) fn client_config(endpoint: &str) -> Vec<ClientConfigEntry> {
     let entry = |key: &str, value: &str| ClientConfigEntry {
         key: key.to_string(),
         value: value.to_string(),
@@ -100,9 +104,61 @@ fn client_config(endpoint: &str) -> Vec<ClientConfigEntry> {
     ]
 }
 
-/// A service on `listener` that answers `connections` connections, one request each, with the URL
-/// of the queue, and returns the requests as they arrived.
-fn stand_in(listener: TcpListener, connections: usize) -> JoinHandle<Vec<String>> {
+/// What a stand-in service answers each `GetQueueUrl` request with.
+#[derive(Clone, Copy, Debug)]
+enum QueueAnswer {
+    /// The URL of the queue.
+    Url,
+    /// AWS's refusal for a queue it does not have: the JSON protocol's error type, and the
+    /// query-compatible code the SDK classifies the answer by.
+    DoesNotExist,
+    /// The same refusal from an SQS-compatible service that sends only the JSON protocol's error
+    /// type, as ElasticMQ does.
+    DoesNotExistByType,
+}
+
+impl QueueAnswer {
+    /// The body of every refusal for a queue the service does not have.
+    const DOES_NOT_EXIST_BODY: &str = concat!(
+        r#"{"__type":"com.amazonaws.sqs#QueueDoesNotExist","#,
+        r#""message":"The specified queue does not exist."}"#
+    );
+
+    /// The whole HTTP response, after which the stand-in closes the connection.
+    fn response(self) -> String {
+        match self {
+            Self::Url => {
+                let body = format!(r#"{{"QueueUrl":"http://{SERVICE}/000000000000/{QUEUE}"}}"#);
+                Self::http_response("200 OK", "", &body)
+            }
+            Self::DoesNotExist => Self::http_response(
+                "400 Bad Request",
+                "x-amzn-query-error: AWS.SimpleQueueService.NonExistentQueue;Sender\r\n",
+                Self::DOES_NOT_EXIST_BODY,
+            ),
+            Self::DoesNotExistByType => {
+                Self::http_response("400 Bad Request", "", Self::DOES_NOT_EXIST_BODY)
+            }
+        }
+    }
+
+    fn http_response(status: &str, headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: \
+             application/x-amz-json-1.0\r\n{headers}Content-Length: {}\r\nConnection: \
+             close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+}
+
+/// A service on `listener` that answers `connections` connections, one request each, with
+/// `answer`, and returns the requests as they arrived. It stops listening after the last one.
+fn stand_in(
+    listener: TcpListener,
+    connections: usize,
+    answer: QueueAnswer,
+) -> JoinHandle<Vec<String>> {
     nervix_primitives::task::spawn(async move {
         let mut requests = Vec::with_capacity(connections);
         for _ in 0..connections {
@@ -110,13 +166,23 @@ fn stand_in(listener: TcpListener, connections: usize) -> JoinHandle<Vec<String>
                 .accept()
                 .await
                 .expect("the client under test dials this listener");
-            requests.push(answer_queue_url(stream).await);
+            requests.push(answer_request(stream, answer).await);
         }
         requests
     })
 }
 
-async fn answer_queue_url(mut stream: TcpStream) -> String {
+async fn answer_request(mut stream: TcpStream, answer: QueueAnswer) -> String {
+    let request = read_request(&mut stream).await;
+    stream
+        .write_all(answer.response().as_bytes())
+        .await
+        .expect("the client under test waits for the response");
+    request
+}
+
+/// Reads one whole request from `stream`: its head and the body its `Content-Length` announces.
+pub(crate) async fn read_request(stream: &mut TcpStream) -> String {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4_096];
     while !holds_whole_request(&request) {
@@ -129,16 +195,6 @@ async fn answer_queue_url(mut stream: TcpStream) -> String {
         }
         request.extend_from_slice(&buffer[..read]);
     }
-    let body = format!(r#"{{"QueueUrl":"http://{SERVICE}/000000000000/{QUEUE}"}}"#);
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/x-amz-json-1.0\r\nContent-Length: \
-         {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream
-        .write_all(response.as_bytes())
-        .await
-        .expect("the client under test waits for the response");
     String::from_utf8_lossy(&request).into_owned()
 }
 
@@ -205,7 +261,7 @@ async fn requests_reach_the_answer_that_accepts_signed_for_the_configured_host()
         IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
         IpAddr::V4(Ipv4Addr::LOCALHOST),
     ]);
-    let service = stand_in(listener, 2);
+    let service = stand_in(listener, 2, QueueAnswer::Url);
     let config = client_config(&format!("http://{SERVICE}:{port}"));
 
     let client = SqsSink::client_from_config(&config, fixture.dns())
@@ -215,10 +271,14 @@ async fn requests_reach_the_answer_that_accepts_signed_for_the_configured_host()
         .await
         .expect("the answer that accepts returns the queue URL");
     assert_eq!(queue_url, format!("http://{SERVICE}/000000000000/{QUEUE}"));
-    let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
-    SqsSourcePlan::connect(&config, &queue, fixture.dns())
-        .await
-        .expect("the source reaches the same answer");
+    let mut source = open_source(&config, fixture.dns()).await;
+    assert_eq!(
+        source
+            .resume()
+            .await
+            .expect("the source reaches the same answer"),
+        SourceResume::Ready
+    );
 
     let requests = service.await.expect("the stand-in does not panic");
     assert_eq!(requests.len(), 2);
@@ -258,7 +318,7 @@ async fn a_literal_endpoint_is_dialled_without_a_lookup() {
         .local_addr()
         .expect("a bound listener has an address")
         .port();
-    let service = stand_in(listener, 1);
+    let service = stand_in(listener, 1, QueueAnswer::Url);
 
     let client = SqsSink::client_from_config(
         &client_config(&format!("http://127.0.0.1:{port}")),
@@ -320,14 +380,8 @@ async fn a_host_that_does_not_resolve_is_the_typed_cause_of_the_queue_lookup_fai
 #[nervix_primitives::test]
 async fn a_refused_connection_is_described_by_its_causes() {
     let fixture = Fixture::start().await;
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .await
-        .expect("a loopback port is available");
-    let port = listener
-        .local_addr()
-        .expect("a bound listener has an address")
-        .port();
-    drop(listener);
+    let endpoint = RefusedEndpoint::reserve();
+    let port = endpoint.port();
     let client = SqsSink::client_from_config(
         &client_config(&format!("http://127.0.0.1:{port}")),
         fixture.dns(),
@@ -364,23 +418,50 @@ fn a_service_response_keeps_its_short_description() {
     assert_eq!(failure.description(), "service error");
 }
 
-/// A port on the loopback address nothing listens on, so every connection to it is refused.
-async fn closed_port() -> u16 {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+/// A bound endpoint that refuses connections and keeps its address reserved for this check.
+pub(crate) struct RefusedEndpoint {
+    socket: TcpSocket,
+}
+
+impl RefusedEndpoint {
+    pub(crate) fn reserve() -> Self {
+        let socket = TcpSocket::new_v4().expect("a loopback socket can be created");
+        socket
+            .bind((Ipv4Addr::LOCALHOST, 0).into())
+            .expect("a loopback port is available");
+        Self { socket }
+    }
+
+    pub(crate) fn port(&self) -> u16 {
+        self.socket
+            .local_addr()
+            .expect("a bound socket has an address")
+            .port()
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_refused_endpoint_keeps_its_port_reserved() {
+    let endpoint = RefusedEndpoint::reserve();
+    let port = endpoint.port();
+
+    assert!(
+        TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_err(),
+        "another fixture must not listen on the refused endpoint"
+    );
+    let error = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
         .await
-        .expect("a loopback port is available");
-    let port = listener
-        .local_addr()
-        .expect("a bound listener has an address")
-        .port();
-    drop(listener);
-    port
+        .expect_err("a reserved endpoint that does not listen refuses connections");
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
 }
 
 #[nervix_primitives::test]
 async fn a_send_that_cannot_connect_fails_the_publish_without_answering_a_record() {
     let fixture = Fixture::start().await;
-    let port = closed_port().await;
+    let endpoint = RefusedEndpoint::reserve();
+    let port = endpoint.port();
     for (mode, operation) in [
         (
             SqsPublishingMode::Single,
@@ -448,25 +529,103 @@ async fn a_ca_file_that_cannot_be_read_is_a_configuration_failure() {
     assert!(message.contains("TLS CA certificate"), "{message}");
 }
 
-#[nervix_primitives::test]
-async fn a_source_that_cannot_reach_the_service_fails_to_open_its_queue() {
-    let fixture = Fixture::start().await;
-    let port = closed_port().await;
+/// A source instance of the client `config` declares, polling the queue every check looks up.
+pub(crate) async fn open_source(config: &[ClientConfigEntry], dns: DnsResolver) -> SqsSource {
     let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
+    let plan = SqsSourcePlan::new(config, queue, dns)
+        .await
+        .expect("the source client configuration is valid");
+    SqsSource::open(&plan, 0)
+        .await
+        .expect("opening a source sends no request")
+}
 
-    let Err(report) = SqsSourcePlan::connect(
-        &client_config(&format!("http://127.0.0.1:{port}")),
-        &queue,
+/// A request for the next batch, which a source that has not looked its queue up never sends.
+pub(crate) fn batch_request() -> SourceBatchRequest {
+    SourceBatchRequest {
+        max_messages: NonZeroUsize::MIN,
+        batch_timeout: None,
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_source_looks_its_queue_up_once_when_it_first_resumes() {
+    let fixture = Fixture::start().await;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("a loopback port is available");
+    let port = listener
+        .local_addr()
+        .expect("a bound listener has an address")
+        .port();
+    fixture.answer(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+    let service = stand_in(listener, 1, QueueAnswer::Url);
+
+    let mut source = open_source(
+        &client_config(&format!("http://{SERVICE}:{port}")),
         fixture.dns(),
     )
-    .await
-    else {
-        panic!("a refused connection cannot return the queue URL");
-    };
+    .await;
 
-    assert!(matches!(
+    // Opening built the client alone: it neither resolved the service's name nor polled.
+    assert_eq!(fixture.authority.questions_for(SERVICE), 0);
+    assert!(source.needs_resume());
+    let batch = source
+        .next_batch(batch_request(), &SourceReadCancellation::new())
+        .await
+        .expect("a source without its queue's URL asks to resume");
+    assert!(matches!(batch, SourceBatch::ResumeRequired));
+
+    assert_eq!(
+        source
+            .resume()
+            .await
+            .expect("the stand-in returns the queue URL"),
+        SourceResume::Ready
+    );
+    assert!(!source.needs_resume());
+    let requests = service.await.expect("the stand-in does not panic");
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .to_ascii_lowercase()
+            .contains("x-amz-target: amazonsqs.getqueueurl"),
+        "{}",
+        requests[0]
+    );
+    // The stand-in no longer listens, so only a source that kept the URL is ready again.
+    assert_eq!(
+        source
+            .resume()
+            .await
+            .expect("a source that has its queue's URL sends no request"),
+        SourceResume::Ready
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_source_that_cannot_reach_the_service_opens_and_fails_its_resume() {
+    let fixture = Fixture::start().await;
+    let endpoint = RefusedEndpoint::reserve();
+    let port = endpoint.port();
+    let mut source = open_source(
+        &client_config(&format!("http://127.0.0.1:{port}")),
+        fixture.dns(),
+    )
+    .await;
+
+    let report = source
+        .resume()
+        .await
+        .expect_err("a refused connection cannot return the queue URL");
+
+    assert_eq!(
         report.current_context(),
-        SqsSourceError::ResolveQueue { queue } if queue == QUEUE
+        &SourceError::Resume { connector: SQS }
+    );
+    assert!(matches!(
+        report.downcast_ref::<SqsSourceError>(),
+        Some(SqsSourceError::ResolveQueue { queue }) if queue == QUEUE
     ));
     assert!(report.downcast_ref::<DnsLookupError>().is_none());
     let message = message_of(&report).expect("the failure carries its description");
@@ -474,4 +633,54 @@ async fn a_source_that_cannot_reach_the_service_fails_to_open_its_queue() {
         message.starts_with("SQS GetQueueUrl failed: dispatch failure: "),
         "{message}"
     );
+    assert!(
+        source.needs_resume(),
+        "a failed lookup leaves the source to resume again"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_queue_the_service_does_not_have_fails_the_resume_with_its_name() {
+    let fixture = Fixture::start().await;
+    for answer in [QueueAnswer::DoesNotExist, QueueAnswer::DoesNotExistByType] {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("a loopback port is available");
+        let port = listener
+            .local_addr()
+            .expect("a bound listener has an address")
+            .port();
+        let service = stand_in(listener, 1, answer);
+        let mut source = open_source(
+            &client_config(&format!("http://127.0.0.1:{port}")),
+            fixture.dns(),
+        )
+        .await;
+
+        let report = source
+            .resume()
+            .await
+            .expect_err("the service does not have the queue");
+
+        assert_eq!(
+            report.current_context(),
+            &SourceError::Resume { connector: SQS },
+            "{answer:?}"
+        );
+        let missing = report
+            .downcast_ref::<SqsSourceError>()
+            .expect("the lookup failure stays typed beneath the resume failure");
+        assert!(
+            matches!(missing, SqsSourceError::MissingQueue { queue } if queue == QUEUE),
+            "{answer:?}: {report:?}"
+        );
+        assert_eq!(missing.to_string(), "SQS queue 'orders' does not exist");
+        assert!(source.needs_resume(), "{answer:?}");
+        let requests = service.await.expect("the stand-in does not panic");
+        assert_eq!(
+            requests.len(),
+            1,
+            "{answer:?}: the SDK does not retry a refusal the service answered"
+        );
+    }
 }

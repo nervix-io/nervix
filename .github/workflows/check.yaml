@@ -5,6 +5,7 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
 env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
   TINYGO_VERSION: "0.41.1"
@@ -30,7 +31,10 @@ jobs:
       - name: Checkout tested merge
         uses: actions/checkout@v4
         with:
+          # The tested merge and its parents. Selection fetches the tested base's commit history with
+          # these credentials only when GitHub merged into a base that advanced past the event's.
           fetch-depth: 2
+          persist-credentials: true
 
       - name: Select required suites from the tested diff
         id: selection
@@ -83,8 +87,10 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
+          components: clippy
           targets: wasm32-unknown-unknown
 
       - name: Setup Rust nightly
@@ -95,7 +101,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just@latest,cargo-autoinherit,toml-cli,trunk,wild-linker
+          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just@latest,cargo-autoinherit,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -173,6 +179,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Runner diagnostics before Validate
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: validate
+
       - name: Validate
         run: |
           just toolchains-install
@@ -233,14 +244,15 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           components: llvm-tools
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,wild-linker
+          tool: just@latest,cargo-llvm-cov,wild-linker
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -280,6 +292,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Runner diagnostics before Check diagnostic evidence and report tool coverage
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: check-diagnostic-evidence-and-report-tool-coverage
+
       - name: Check diagnostic evidence and report tool coverage
         run: just coverage-deadlock
         env:
@@ -317,14 +334,14 @@ jobs:
   # qualification of the lane's supervision on deliberately failing processes. Each selection keeps
   # its own budget, so the stressed restore scenarios, which share the stress selection's build,
   # run beside it rather than after it. Diagnostic coverage stays in this job's artifact, apart
-  # from ordinary coverage and the CRAP gate.
+  # from ordinary coverage and its CRAP report.
   deloxide:
     name: deloxide (${{ matrix.selection }})
     if: contains(github.event.pull_request.labels.*.name, 'deloxide')
     runs-on: blacksmith-16vcpu-ubuntu-2404
     # Setup, then at most the lane's bound, the qualification's bound and the reserve the uploads
     # and the kache report keep after them.
-    timeout-minutes: 120
+    timeout-minutes: 200
     strategy:
       # Each selection's verdict and evidence stand on their own.
       fail-fast: false
@@ -339,14 +356,15 @@ jobs:
       SELECTION: ${{ matrix.selection }}
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -415,13 +433,23 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
-      # The bound covers the prerequisites, the diagnostic builds and workloads inside the
-      # inventory's budget, and the coverage export. At its end the collector and the lane each
+      # The bound covers prerequisites, the inventory's separate build and workload budgets,
+      # and the coverage export. At its end the collector and the lane each
       # record their attempt as interrupted and end every process they started.
+      - name: Runner diagnostics before Diagnostic lane
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: diagnostic-lane
+
       - name: Diagnostic lane
         run: |
           just toolchains-install
-          timeout --signal=TERM --kill-after=60 95m just coverage-native-extras "test-${SELECTION}"
+          timeout --signal=TERM --kill-after=60 175m just coverage-native-extras "test-${SELECTION}"
+
+      - name: Runner diagnostics before Supervision qualification
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: supervision-qualification
 
       - name: Supervision qualification
         run: timeout --signal=TERM --kill-after=60 10m just test-deloxide-qualification "${SELECTION}"
@@ -486,14 +514,15 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -568,6 +597,11 @@ jobs:
         run: |
           python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
+
+      - name: Runner diagnostics before Tests coverage
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: tests-coverage
 
       - name: Tests coverage
         run: |
@@ -659,15 +693,18 @@ jobs:
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # The harness watchdog derives its budget from this limit and leaves time for logs and reports.
-    timeout-minutes: 60
+    # The harness derives 75 minutes of scenarios from this limit, with 30 for setup/builds and
+    # 15 for cleanup/export/uploads. Keep tests/common/suite_watchdog.rs in step.
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      NERVIX_TEST_CONCURRENCY_FACTOR: "2"
+      # Keep the qualified 48-slot load. Recent slow runs need more time at this concurrency:
+      # 39656928785 used 117,587 slot-seconds with 833 attempts still active after 41 minutes.
+      NERVIX_TEST_CONCURRENCY_FACTOR: "3"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -675,14 +712,15 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -760,6 +798,11 @@ jobs:
 
       - name: Setup uv for Python driver coverage
         uses: astral-sh/setup-uv@v6
+
+      - name: Runner diagnostics before Scenario coverage
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: scenario-coverage
 
       - name: Scenario coverage
         run: |
@@ -873,12 +916,42 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
 
-      - name: Install CRAP
+      - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-crap,just,toml-cli
+          tool: just
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
+          pr-comment: "false"
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
+
+      # The CRAP report runs the cargo-crap version scripts/cargo_crap.py pins, built through kache.
+      - name: Runner diagnostics before Install the pinned complexity analyzer
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: install-the-pinned-complexity-analyzer
+
+      - name: Install the pinned complexity analyzer
+        run: just install-cargo-crap
 
       - name: Download tests coverage
         uses: actions/download-artifact@v4
@@ -904,6 +977,14 @@ jobs:
       - name: Merge coverage
         run: just coverage-merge coverage-inputs/tests coverage-inputs/scenarios coverage-inputs/native-extras
 
+      # The pinned cargo-crap scores the repository's Rust sources against the merged report. No score
+      # fails the step: it fails only when the analysis cannot describe the report, and it writes its
+      # JSON and Markdown reports either way.
+      - name: Report CRAP
+        run: just check-coverage
+
+      # The comment carries the CRAP section for the files the pull request changes, or the CRAP
+      # step's failure, or that its report is missing.
       - name: Report patch line coverage
         if: always()
         continue-on-error: true
@@ -915,10 +996,8 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           just coverage-patch "$BASE_SHA" lcov-workspace.info \
+            --crap target/crap-report/crap.json \
             --repo "$GH_REPO" --pr "$PR_NUMBER" --pr-head "$PR_HEAD_SHA"
-
-      - name: Check CRAP
-        run: just check-coverage
 
       - name: Upload merged coverage
         if: always()
@@ -930,6 +1009,144 @@ jobs:
             lcov-workspace.info
             target/coverage-merge/record.json
             target/patch-coverage.md
+            target/crap-report/crap.json
+            target/crap-report/crap.md
+          if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
+      - name: Publish kache report
+        if: always()
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
+  # The workspace line-coverage union of every producer this run's event and labels select: the
+  # ordinary report, the modeled and diagnostic native collections, and the live fuzz campaigns a
+  # pull request carrying `fuzz` requests. It waits for every producer job, including a skipped or
+  # failed one, so a producer that did not succeed fails the union instead of hiding behind a skip.
+  # It downloads the exported reports and records and rebuilds nothing. The ordinary report, its
+  # CRAP report and its patch coverage stay with the coverage job.
+  coverage-full:
+    name: coverage-full
+    needs: [test-selection, bolero, coverage, extra-tests, diagnostic-evidence, shuttle, loom, turmoil, deloxide]
+    if: ${{ !cancelled() && needs.test-selection.outputs.tests-required == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The justfile reads the repository toolchain with Python's TOML parser when it loads.
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Download ordinary coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-merged
+          path: coverage-full-inputs/coverage-merged
+
+      - name: Download native extra coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-native-extras
+          path: coverage-full-inputs/coverage-native-extras
+
+      - name: Download diagnostic evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: diagnostic-evidence
+          path: coverage-full-inputs/diagnostic-evidence
+
+      # The artifacts of label-enabled producers and of the Bolero call. A pattern that matches no
+      # artifact downloads nothing; the union then names what the selection required and lacks.
+      - name: Download Shuttle coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-shuttle
+          path: coverage-full-inputs
+
+      - name: Download Loom coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-loom
+          path: coverage-full-inputs
+
+      - name: Download Turmoil coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-turmoil
+          path: coverage-full-inputs
+
+      - name: Download Deloxide lane coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deloxide-*
+          path: coverage-full-inputs
+
+      - name: Download combined fuzz coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-bolero-fuzz
+          path: coverage-full-inputs
+
+      - name: Download Bolero selection
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bolero-selection
+          path: coverage-full-inputs
+
+      - name: Record the event, labels and producer results
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          TESTS_REQUIRED: ${{ needs.test-selection.outputs.tests-required }}
+          BOLERO_REQUIRED: ${{ needs.test-selection.outputs.bolero-required }}
+          JOBS: ${{ toJSON(needs) }}
+        run: |
+          just coverage-full-select --event "$EVENT" --labels "$LABELS" \
+            --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
+
+      - name: Combine coverage
+        run: just coverage-full coverage-full-inputs/*
+
+      - name: Upload full coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-full
+          path: |
+            target/coverage-full/lcov-full.info
+            target/coverage-full/beyond-ordinary.info
+            target/coverage-full/record.json
+            target/coverage-full/selection.json
+            target/coverage-full/summary.md
           if-no-files-found: warn
 
   # The cross-language client probes: C, C++, Python, Java and Ruby over the shared Rust binding,
@@ -956,14 +1173,15 @@ jobs:
       NERVIX_TEST_SUITE_BUDGET: "15m"
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -1052,6 +1270,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Runner diagnostics before Client conformance
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: client-conformance
+
       - name: Client conformance
         run: |
           just toolchains-install
@@ -1111,8 +1334,9 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Setup Rust nightly
@@ -1123,7 +1347,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov,cargo-mutants,just@latest,toml-cli,trunk,wild-linker
+          tool: cargo-llvm-cov,cargo-mutants,just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -1196,13 +1420,28 @@ jobs:
 
       # Cheapest first, so a workspace that does not build at all is named in seconds rather than
       # after the heavier compilations have run.
+      - name: Runner diagnostics before Capability doctests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: capability-doctests
+
       - name: Capability doctests
         run: |
           just toolchains-install
           just test-capability-docs
 
+      - name: Runner diagnostics before Expiry map Miri
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: expiry-map-miri
+
       - name: Expiry map Miri
         run: just test-expiry-map-miri
+
+      - name: Runner diagnostics before Expiry map mutation tests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: expiry-map-mutation-tests
 
       - name: Expiry map mutation tests
         run: just test-expiry-map-mutants
@@ -1218,6 +1457,12 @@ jobs:
       - name: Ordinary coverage merge
         run: just coverage-merge-runner
 
+      - name: CRAP report
+        run: just coverage-crap-report-runner
+
+      - name: Full coverage union
+        run: just coverage-full-runner
+
       - name: Paced simulation Python open policy
         run: just coverage-paced-simulation-python
 
@@ -1227,13 +1472,26 @@ jobs:
       - name: Kache remote contract
         run: just coverage-kache-ci
 
+      - name: Plexus connector matrix renderer
+        run: just coverage-connector-matrix
+
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
         run: just coverage-model-runner
 
+      - name: Runner diagnostics before Source contracts, compiler diagnostics and paired API doctests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: source-contracts-compiler-diagnostics-and-paired-api-doctests
+
       - name: Source contracts, compiler diagnostics and paired API doctests
         run: just coverage-native-extras test-typed-ratchet
+
+      - name: Runner diagnostics before Compiler cache changes, interruption and runner qualification
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: compiler-cache-changes-interruption-and-runner-qualification
 
       - name: Compiler cache changes, interruption and runner qualification
         run: |
@@ -1246,20 +1504,48 @@ jobs:
       # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
       # without treating noisy shared-runner timings as a performance regression signal. The run is
       # instrumented for source coverage, so its timings are not a measurement either.
+      - name: Runner diagnostics before Benchmark smoke tests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: benchmark-smoke-tests
+
       - name: Benchmark smoke tests
         run: just coverage-native-extras bench-smoke
 
       # The primitive boundary's native conformance collected separately in every execution mode.
+      - name: Runner diagnostics before Primitive boundary conformance
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: primitive-boundary-conformance
+
       - name: Primitive boundary conformance
         run: just coverage-native-extras test-primitives
+
+      - name: Runner diagnostics before Primitive boundary compile and browser checks
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: primitive-boundary-compile-and-browser-checks
 
       - name: Primitive boundary compile and browser checks
         run: just test-primitives-compile
 
       # The walk saturates every core, and its failures are about completion reachability rather
       # than about any one test.
+      - name: Runner diagnostics before Plexus completion walk
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: plexus-completion-walk
+
       - name: NSPL completion walk
         run: just coverage-native-extras nspl-completion-walk
+
+      - name: Runner diagnostics before Plexus connector declaration export
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: plexus-connector-declaration-export
+
+      - name: Plexus connector declaration export
+        run: just coverage-native-extras validate-connector-matrix
 
       # Each collection's report, completion record, executions and export diagnostics, whatever
       # its verdict: a failed or interrupted record is the evidence of what the collection saw. The
@@ -1279,9 +1565,12 @@ jobs:
             target/primitive-boundary/python.lcov
             target/patch-coverage/python.lcov
             target/coverage-merge/python.lcov
+            target/crap-report/python.lcov
+            target/coverage-full/python.lcov
             target/paced-simulation/python.lcov
             target/release-evidence-coverage/python.lcov
             target/kache-ci/python.lcov
+            target/connector-matrix/python.lcov
             target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
@@ -1326,14 +1615,15 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker,cargo-llvm-cov
+          tool: just@latest,trunk,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -1404,10 +1694,20 @@ jobs:
 
       # Every registered Shuttle check under its exploration and under the nondeterminism detector,
       # each in its own process, then the proof that a failing schedule persists and replays.
+      - name: Runner diagnostics before Shuttle concurrency checks
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: shuttle-concurrency-checks
+
       - name: Shuttle concurrency checks
         run: |
           just toolchains-install
           just coverage-native-extras test-shuttle
+
+      - name: Runner diagnostics before Shuttle schedule replay
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: shuttle-schedule-replay
 
       - name: Shuttle schedule replay
         run: just test-shuttle-replay-check
@@ -1484,14 +1784,15 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker,cargo-llvm-cov
+          tool: just@latest,trunk,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -1546,6 +1847,11 @@ jobs:
       # Every registered Loom model of a production owner explored to exhaustion. The proof that
       # each model fails under the ordering weakening it exists to detect runs in the
       # loom-qualification jobs.
+      - name: Runner diagnostics before Loom memory-ordering models
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: loom-memory-ordering-models
+
       - name: Loom memory-ordering models
         run: |
           just toolchains-install
@@ -1620,14 +1926,15 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -1696,6 +2003,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Runner diagnostics before Loom ordering qualification
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: loom-ordering-qualification
+
       - name: Loom ordering qualification
         run: |
           just toolchains-install
@@ -1760,14 +2072,15 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,wild-linker,cargo-llvm-cov
+          tool: just@latest,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -1816,10 +2129,20 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Runner diagnostics before Turmoil simulations
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: turmoil-simulations
+
       - name: Turmoil simulations
         run: |
           just toolchains-install
           just coverage-native-extras test-turmoil --output target/turmoil.lcov
+
+      - name: Runner diagnostics before Turmoil failure replay
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: turmoil-failure-replay
 
       - name: Turmoil failure replay
         run: just test-turmoil-replay-check

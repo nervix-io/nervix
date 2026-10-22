@@ -15,6 +15,7 @@ checks = [
   "tests::shuttle_checks::shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit",
   "tests::shuttle_checks::shuttle_full_wait_queue_is_exact_typed_backpressure",
   "tests::shuttle_checks::shuttle_occupied_bulk_execution_leaves_control_execution_untouched",
+  "tests::shuttle_checks::shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched",
   "tests::shuttle_checks::shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot",
   "tests::shuttle_checks::shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit",
   "tests::shuttle_checks::shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity",
@@ -39,6 +40,7 @@ name = "nervix-interconnect"
 [[package]]
 checks = [
   "consumer::shuttle_tests::shuttle_a_read_parked_while_its_consumer_closes_does_not_outlive_the_close",
+  "consumer::shuttle_tests::shuttle_a_read_starting_as_its_exchange_ends_reports_the_gap_before_restoring",
   "consumer::shuttle_tests::shuttle_a_reply_racing_the_end_of_its_exchange_reports_the_gap_once",
   "consumer::shuttle_tests::shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss",
   "consumer::shuttle_tests::shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange",
@@ -59,8 +61,30 @@ checks = [
   "confirmation_window::shuttle_tests::shuttle_a_failure_settles_every_answer_its_broker_gave_before_it",
   "confirmation_window::shuttle_tests::shuttle_an_expired_oldest_settles_the_answers_given_before_it",
   "confirmation_window::shuttle_tests::shuttle_answers_racing_a_full_window_settle_each_record_exactly_once",
+  "confirmation_window::shuttle_tests::shuttle_driver_backpressure_settles_below_max_in_flight",
 ]
 name = "nervix-connector"
+
+[[package]]
+checks = [
+  "delivery::shuttle_tests::shuttle_a_publish_that_reads_a_report_finds_its_record_no_longer_retained",
+  "delivery::shuttle_tests::shuttle_the_count_holds_every_record_until_its_report_is_served",
+]
+name = "nervix-connector-kafka"
+
+[[package]]
+checks = [
+  "source::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_publish_the_broker_delivered",
+  "source::shuttle_tests::shuttle_a_read_whose_batch_timeout_races_the_cancellation_hands_over_every_publish",
+]
+name = "nervix-connector-mqtt"
+
+[[package]]
+checks = [
+  "source::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_message_its_receives_took",
+  "source::shuttle_tests::shuttle_a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget",
+]
+name = "nervix-connector-sqs"
 
 [[package]]
 checks = [
@@ -100,6 +124,7 @@ checks = [
   "runtime::domain_clock::shuttle_lifecycle_tests::shuttle_delivery_sends_state_before_ticks_without_regressing_progress",
   "runtime::ingestor_quiesce::readiness::shuttle_tests::shuttle_retirement_racing_source_polling_is_final_and_instance_local",
   "runtime::relay_boundary::channels::shuttle_tests::shuttle_first_binding_has_one_winner_and_routing_retirement_cancels_every_slot",
+  "runtime::relay_boundary::channels::shuttle_tests::shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publication",
   "runtime::relay_boundary::channels::shuttle_tests::shuttle_first_delivery_binding_racing_terminal_retirement_cannot_publish_a_live_channel",
   "runtime::relay_boundary::channels::shuttle_tests::shuttle_branch_retirement_racing_a_route_refresh_never_revives_a_retained_producer",
   "runtime::domain_execution::shuttle_tests::shuttle_a_reader_observes_one_complete_typed_routing_revision",
@@ -108,6 +133,11 @@ checks = [
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_retried_payload_acknowledges_each_fanned_in_member_once_after_every_emitter",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_sibling_failure_resolves_each_fanned_in_member_once_despite_a_retry",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_terminal_shutdown_leaves_an_unanswered_request_unacknowledged",
+  "runtime::endpoint_acknowledgement::shuttle_tests::shuttle_endpoint_responses_release_their_own_slot_in_completion_order",
+  "runtime::endpoint_acknowledgement::shuttle_tests::shuttle_endpoint_ending_a_retained_intake_resolves_its_held_response_and_preserves_replacement",
+  "runtime::endpoint_acknowledgement::shuttle_tests::shuttle_endpoint_a_deadline_racing_an_ack_resolves_once_and_returns_its_slot",
+  "runtime::endpoint_acknowledgement::shuttle_tests::shuttle_endpoint_intake_stop_wakes_a_held_response_without_waiting_for_source_close",
+  "runtime::endpoint_acknowledgement::shuttle_tests::shuttle_endpoint_every_binding_starts_before_a_shared_request_waits_for_acknowledgements",
   "runtime::endpoint_route_table::shuttle_tests::shuttle_endpoint_domain_teardown_ends_intake_even_when_a_request_retains_the_table",
   "runtime::endpoint_route_table::shuttle_tests::shuttle_endpoint_publication_keeps_every_route_of_a_domain_in_one_revision",
   "runtime::endpoint_route_table::shuttle_tests::shuttle_endpoint_unbind_fences_retained_requests_and_preserves_a_concurrent_replacement",
@@ -129,7 +159,10 @@ checks = [
   "runtime::ingestor_quiesce::tests::shuttle_checks::shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room",
   "runtime::ingestor_quiesce::tests::shuttle_checks::shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room",
   "runtime::ingestor_quiesce::tests::shuttle_checks::shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads",
+  "runtime::ingestors::source::shuttle_tests::shuttle_a_drain_waits_for_the_transport_to_confirm_a_batch_with_a_refused_payload",
+  "runtime::ingestors::source::shuttle_tests::shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch",
   "runtime::ingestors::source::shuttle_tests::shuttle_a_reconnect_discards_rejections_the_broker_redelivers",
+  "runtime::ingestors::source::shuttle_tests::shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took",
   "runtime::ingestors::source::shuttle_tests::shuttle_broker_source_observes_engagement_during_dispatch",
   "runtime::ingestors::source::shuttle_tests::shuttle_paced_source_observes_engagement_during_dispatch",
   "runtime::ingestors::source::shuttle_tests::shuttle_request_source_observes_engagement_during_dispatch",
@@ -174,6 +207,7 @@ checks = [
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced",
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_checkpoint_announcement_close_cancels_pending_dispatch",
   "runtime::state_replication::routing::shuttle_tests::shuttle_state_replacement_and_retirement_fence_frames_in_flight",
+  "runtime::state_replication::schedule_installation_tests::shuttle_recovery_never_misses_initial_schedule_installation",
   "runtime::state_replication::tasks::shuttle_tests::shuttle_a_closed_snapshot_task_owner_is_waited_for_until_every_task_has_written",
   "runtime::state_store::durability::shuttle_tests::shuttle_a_failed_synchronization_refuses_every_uncovered_writer",
   "runtime::state_store::durability::shuttle_tests::shuttle_an_abandoned_synchronization_frees_the_barrier",
@@ -189,6 +223,7 @@ checks = [
   "runtime::wasm_checkpoint::shuttle_tests::shuttle_a_held_input_whose_checkpoint_and_delivery_failed_resolves_once",
   "runtime::wasm_checkpoint::shuttle_tests::shuttle_a_held_input_whose_checkpoint_failed_is_negatively_acknowledged",
   "runtime::wasm_checkpoint::shuttle_tests::shuttle_a_held_input_whose_delivery_failed_is_negatively_acknowledged",
+  "runtime_ack::shuttle_tests::a_confirmed_root_stays_counted_until_its_owner_confirms_and_releases_once",
   "runtime_ack::shuttle_tests::attachment_losing_its_reservation_to_completion_parks_no_share",
   "runtime_ack::shuttle_tests::attachment_losing_its_reservation_to_completion_resolves_no_share",
   "runtime_ack::shuttle_tests::attachment_racing_the_last_active_share_into_wait_publishes_one_active_share",

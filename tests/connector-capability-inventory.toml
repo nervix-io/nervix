@@ -1,0 +1,1002 @@
+# The Cucumber scenarios that observe, at run time, every capability a connector entity declares.
+#
+# A capability is something a statement can make an entity do once it runs: deliver or publish in
+# one declared mode, write one declared option or make one choice of it, read one typed metadata
+# field, publish in batches, set one envelope clause or property, or, as `STALLED PEER <key>`,
+# report a peer that stops answering within the client deadline key that bounds the wait. Each
+# entity declares its capabilities in the vocabulary, beside everything else a statement can say
+# about it, and `just validate-connector-capabilities`, which `just validate` runs, holds this file
+# to those declarations: every declared capability names at least one scenario that observes it,
+# every entry names a capability its entity declares, once, and every scenario an entry names
+# exists in its feature file. A scenario is named exactly as its `Scenario:` or `Scenario Outline:`
+# line writes it.
+#
+# A change that declares a new capability registers the scenario that observes it in the same
+# change; one that renames or moves a registered scenario updates its entry. Quiesce modes and
+# header access are not capabilities here: the host owns how a source is quiesced, the registry
+# checks a program's header access against the declaration, and the generated conformance tests
+# hold the grammar to both.
+
+[[capability]]
+capability = "BATCH"
+entity = "CLICKHOUSE TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/clickhouse_emission.feature", scenario = "ClickHouse BATCH MAX MESSAGES splits one oversized flush into multiple inserts" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "CLICKHOUSE TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/clickhouse_emission.feature", scenario = "ClickHouse emitter inserts mapped rows from a relay" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "CLICKHOUSE TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A ClickHouse emitter whose server never answers is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "CLIENT CONSUMER EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/client_conformance.feature", scenario = "A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "CLIENT CONSUMER EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/client_conformance.feature", scenario = "A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter" },
+]
+
+[[capability]]
+capability = "MODE ACK PARALLEL"
+entity = "CLIENT PRODUCER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/client_ingestors.feature", scenario = "Producers of one ingestor share its one acknowledgement window" },
+]
+
+[[capability]]
+capability = "MODE ACK SEQUENTIAL"
+entity = "CLIENT PRODUCER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/client_conformance.feature", scenario = "A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_ingestion.feature", scenario = "HTTP endpoint ingestor delivers a single JSON payload to a subscribed relay" },
+]
+
+[[capability]]
+capability = "METHOD"
+entity = "HTTP REQUEST EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP emitter sends each record with its own method, path, headers, and codec body" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "HTTP REQUEST EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP emitter sends each record with its own method, path, headers, and codec body" },
+]
+
+[[capability]]
+capability = "PATH"
+entity = "HTTP REQUEST EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP emitter sends each record with its own method, path, headers, and codec body" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "HTTP REQUEST EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/http_emitter_transport.feature", scenario = "A request whose attempts time out stays pending and reported, releases each timed-out connection, and is delivered once the endpoint answers" },
+]
+
+[[capability]]
+capability = "EVERY"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling resolves its endpoint with the node DNS fixture" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling resolves its endpoint with the node DNS fixture" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An HTTP polling ingestor whose server never answers is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "ICEBERG TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/iceberg_emission.feature", scenario = "An Iceberg emitter that declares BATCH commits every row at its data-file and commit boundaries" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "ICEBERG TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/iceberg_storage_deadlines.feature", scenario = "A paused Iceberg object store reports timeout_ms and recovers on the emitter retry policy" },
+]
+
+[[capability]]
+capability = "CATALOG"
+entity = "ICEBERG TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/iceberg_emission.feature", scenario = "Iceberg emitter flushes a disk-backed batch to S3" },
+]
+
+[[capability]]
+capability = "COMMIT EACH"
+entity = "ICEBERG TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/iceberg_emission.feature", scenario = "Iceberg emitter flushes a disk-backed batch to S3" },
+]
+
+[[capability]]
+capability = "LOCATION"
+entity = "ICEBERG TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/iceberg_emission.feature", scenario = "Iceberg emitter flushes a disk-backed batch to S3" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "ICEBERG TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/iceberg_emission.feature", scenario = "Iceberg emitter flushes a disk-backed batch to S3" },
+  { feature = "tests/features/runtime/iceberg_emission.feature", scenario = "An Iceberg commit its catalog refused retries what it began with, and rows staged during its backoff are acknowledged only once a catalog commit of their own holds them" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "KAFKA TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "KAFKA TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_emission.feature", scenario = "Kafka emitter publishes JSON payloads from a relay" },
+]
+
+[[capability]]
+capability = "MODE NO_ACK"
+entity = "KAFKA TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_emission.feature", scenario = "Kafka emitter filter-map publishes message fields and headers" },
+]
+
+[[capability]]
+capability = "INSTANCES"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/domain_kafka_pacing.feature", scenario = "Domain-owned Kafka offsets rebalance multiple instances when partitions change" },
+]
+
+[[capability]]
+capability = "MODE ACK PARALLEL"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka ACK PARALLEL blocks downstream publish after ack timeout" },
+]
+
+[[capability]]
+capability = "MODE ACK SEQUENTIAL"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka ACK SEQUENTIAL replays on attached emitter failure" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka NO_ACK executes ingestor programs once for a collected ingest group" },
+]
+
+[[capability]]
+capability = "OFFSET BY CONSUMER GROUP"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka NO_ACK executes ingestor programs once for a collected ingest group" },
+]
+
+[[capability]]
+capability = "OFFSET BY DOMAIN"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/domain_kafka_pacing.feature", scenario = "Domain-owned Kafka offsets reset on START AT NOW" },
+]
+
+[[capability]]
+capability = "metadata.offset"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka ACK PARALLEL reads source metadata and headers for every message of a batch" },
+]
+
+[[capability]]
+capability = "metadata.partition"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka ACK PARALLEL reads source metadata and headers for every message of a batch" },
+]
+
+[[capability]]
+capability = "metadata.topic"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka ACK PARALLEL reads source metadata and headers for every message of a batch" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "MONGODB COLLECTION EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mongodb_emission.feature", scenario = "MongoDB BATCH MAX MESSAGES splits one oversized flush into multiple inserts" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "MONGODB COLLECTION EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mongodb_emission.feature", scenario = "MongoDB emitter inserts mapped documents from a relay" },
+]
+
+[[capability]]
+capability = "ON CONFLICT DO NOTHING"
+entity = "MONGODB COLLECTION EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mongodb_emission.feature", scenario = "MongoDB emitter handles insert conflicts with <conflict_action>" },
+]
+
+[[capability]]
+capability = "ON CONFLICT DO UPDATE"
+entity = "MONGODB COLLECTION EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mongodb_emission.feature", scenario = "MongoDB emitter handles insert conflicts with <conflict_action>" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+]
+
+[[capability]]
+capability = "MODE QOS 0"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+]
+
+[[capability]]
+capability = "MODE QOS 1 ACK"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "MQTT QoS 1 holds the input offset until PUBACK" },
+]
+
+[[capability]]
+capability = "MODE QOS 2 ACK"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An MQTT <mode> emitter sends again only the record its broker never answered" },
+]
+
+[[capability]]
+capability = "INSTANCES"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT instances use the non-duplicating subscription model" },
+]
+
+[[capability]]
+capability = "MODE ACK PARALLEL"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT ACK PARALLEL instances continue after a node is drained" },
+]
+
+[[capability]]
+capability = "MODE ACK SEQUENTIAL"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT ACK SEQUENTIAL retries while an attached emitter is faulted" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT NO ACK at QoS 1 delivers QoS 1 payloads" },
+]
+
+[[capability]]
+capability = "QOS 0"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "QOS 1"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT NO ACK at QoS 1 delivers QoS 1 payloads" },
+]
+
+[[capability]]
+capability = "SESSION CLEAN"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "SESSION PERSISTENT"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT publishes a buffering quiesce retains are acknowledged and replayed on release" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "MYSQL TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mysql_emission.feature", scenario = "MySQL BATCH MAX MESSAGES splits one oversized flush into multiple inserts" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "MYSQL TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mysql_emission.feature", scenario = "MySQL emitter inserts mapped rows from a relay" },
+]
+
+[[capability]]
+capability = "ON CONFLICT DO NOTHING"
+entity = "MYSQL TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mysql_emission.feature", scenario = "MySQL emitter handles insert conflicts with <conflict_action>" },
+]
+
+[[capability]]
+capability = "ON CONFLICT DO UPDATE"
+entity = "MYSQL TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mysql_emission.feature", scenario = "MySQL emitter handles insert conflicts with <conflict_action>" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "NATS SUBJECT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+]
+
+[[capability]]
+capability = "MODE JETSTREAM ACK"
+entity = "NATS SUBJECT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/nats_emission.feature", scenario = "NATS JetStream emitter retries a missing stream until it is provisioned" },
+]
+
+[[capability]]
+capability = "MODE NO_ACK"
+entity = "NATS SUBJECT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/nats_emission.feature", scenario = "NATS emitter publishes JSON payloads from a relay" },
+]
+
+[[capability]]
+capability = "INSTANCES"
+entity = "NATS SUBJECT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_ingestion.feature", scenario = "NATS ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "NATS SUBJECT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_ingestion.feature", scenario = "NATS ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "QUEUE GROUP"
+entity = "NATS SUBJECT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/nats_ingestion.feature", scenario = "NATS ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "ATTRIBUTES"
+entity = "OTEL LOGS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL log and trace emitters export typed relay records over OTLP gRPC" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "OTEL LOGS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "OTEL LOGS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_export_retries.feature", scenario = "An OTEL Export request that timed out is sent again byte for byte" },
+]
+
+[[capability]]
+capability = "RESOURCE"
+entity = "OTEL LOGS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_export_retries.feature", scenario = "An OTEL Export request that timed out is sent again byte for byte" },
+]
+
+[[capability]]
+capability = "SCOPE"
+entity = "OTEL LOGS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_export_retries.feature", scenario = "An OTEL Export request that timed out is sent again byte for byte" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "OTEL LOGS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An OTEL <signal> emitter whose collector never answers over <protocol> is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "ATTRIBUTES"
+entity = "OTEL METRICS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL metric emitters export over OTLP HTTP protobuf and gRPC" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "OTEL METRICS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+]
+
+[[capability]]
+capability = "METRIC GAUGE"
+entity = "OTEL METRICS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL gauge and histogram metric emitters export their points" },
+]
+
+[[capability]]
+capability = "METRIC HISTOGRAM"
+entity = "OTEL METRICS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL gauge and histogram metric emitters export their points" },
+]
+
+[[capability]]
+capability = "METRIC SUM"
+entity = "OTEL METRICS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL metric emitters export over OTLP HTTP protobuf and gRPC" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "OTEL METRICS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL metric emitters export over OTLP HTTP protobuf and gRPC" },
+]
+
+[[capability]]
+capability = "RESOURCE"
+entity = "OTEL METRICS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL metric emitters export over OTLP HTTP protobuf and gRPC" },
+]
+
+[[capability]]
+capability = "SCOPE"
+entity = "OTEL METRICS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL metric emitters export over OTLP HTTP protobuf and gRPC" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "OTEL METRICS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An OTEL <signal> emitter whose collector never answers over <protocol> is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "ATTRIBUTES"
+entity = "OTEL TRACES EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL log and trace emitters export typed relay records over OTLP gRPC" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "OTEL TRACES EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "OTEL TRACES EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL log and trace emitters export typed relay records over OTLP gRPC" },
+]
+
+[[capability]]
+capability = "RESOURCE"
+entity = "OTEL TRACES EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL log and trace emitters export typed relay records over OTLP gRPC" },
+]
+
+[[capability]]
+capability = "SCOPE"
+entity = "OTEL TRACES EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL log and trace emitters export typed relay records over OTLP gRPC" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "OTEL TRACES EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An OTEL <signal> emitter whose collector never answers over <protocol> is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "POSTGRES TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/postgres_emission.feature", scenario = "Postgres BATCH MAX MESSAGES splits one oversized flush into multiple inserts" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "POSTGRES TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/postgres_emission.feature", scenario = "Postgres emitter inserts mapped rows from a relay" },
+]
+
+[[capability]]
+capability = "ON CONFLICT DO NOTHING"
+entity = "POSTGRES TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/postgres_emission.feature", scenario = "Postgres emitter handles insert conflicts with <conflict_action>" },
+]
+
+[[capability]]
+capability = "ON CONFLICT DO UPDATE"
+entity = "POSTGRES TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/postgres_emission.feature", scenario = "Postgres emitter handles insert conflicts with <conflict_action>" },
+]
+
+[[capability]]
+capability = "EVERY"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_ingestion.feature", scenario = "Prometheus ingestor follows paced domain logical time and cadence" },
+]
+
+[[capability]]
+capability = "MAX BODY SIZE"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_ingestion.feature", scenario = "A Prometheus response above the ingestor's MAX BODY SIZE fails the poll" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_ingestion.feature", scenario = "Prometheus ingestor follows paced domain logical time and cadence" },
+]
+
+[[capability]]
+capability = "QUERY"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_ingestion.feature", scenario = "Prometheus ingestor follows paced domain logical time and cadence" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Prometheus ingestor whose server never answers is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "PULSAR TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "PULSAR TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "Pulsar emitter publishes JSON payloads from a relay" },
+]
+
+[[capability]]
+capability = "MODE NO_ACK"
+entity = "PULSAR TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "Pulsar mode controls when the input offset is committed" },
+]
+
+[[capability]]
+capability = "INSTANCES"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_ingestion.feature", scenario = "Pulsar ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "MODE ACK PARALLEL"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_ingestion.feature", scenario = "A Pulsar ingestor delivers every payload it reads under MODE <delivery>" },
+]
+
+[[capability]]
+capability = "MODE ACK SEQUENTIAL"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_ingestion.feature", scenario = "Pulsar ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_ingestion.feature", scenario = "A Pulsar ingestor delivers every payload it reads under MODE <delivery>" },
+]
+
+[[capability]]
+capability = "SUBSCRIPTION OWNED BY INGESTOR"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_subscriptions.feature", scenario = "Dropping a Pulsar ingestor removes the subscription it owns" },
+]
+
+[[capability]]
+capability = "SUBSCRIPTION PROVISIONED"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_subscriptions.feature", scenario = "A provisioned Pulsar subscription outlives its dropped ingestor and keeps what arrives meanwhile" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_emission.feature", scenario = "RabbitMQ emitter publishes JSON payloads from a relay" },
+]
+
+[[capability]]
+capability = "MODE NO_ACK"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ emitter whose broker never answers its TLS handshake is reported within connect_timeout_ms" },
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ emitter whose broker never answers its AMQP handshake is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ NO ACK emitter whose broker stops answering its round trip is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "INSTANCES"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "MODE ACK SEQUENTIAL"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK SEQUENTIAL delivers again a delivery acknowledged after its connection was lost" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ ingestor whose broker never answers its TLS handshake is reported within connect_timeout_ms" },
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ ingestor whose broker never answers its AMQP handshake is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "REDIS PUBSUB EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+]
+
+[[capability]]
+capability = "MODE NO_ACK"
+entity = "REDIS PUBSUB EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/redis_emission.feature", scenario = "Redis emitter publishes JSON payloads from a relay" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "REDIS PUBSUB EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Redis emitter whose server never answers is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "REDIS PUBSUB INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/redis_ingestion.feature", scenario = "Redis ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "REDIS PUBSUB INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Redis subscription whose server never answers is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "SENTRY EVENT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "Sentry accepts one event whose extra field preserves every batch member" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "SENTRY EVENT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/sentry_emission.feature", scenario = "Sentry emitter publishes codec JSON as authenticated event envelopes" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "SENTRY EVENT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Sentry emitter whose server never answers is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "An SQS batch request answers for every batch message it carries" },
+]
+
+[[capability]]
+capability = "FIFO GROUP <expression>"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS FIFO preserves order independently for interleaved branch groups" },
+]
+
+[[capability]]
+capability = "FIFO GROUP FROM BRANCH"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS FIFO groups follow the rows an emitter route keeps" },
+]
+
+[[capability]]
+capability = "MODE BATCH"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS batch emission isolates a poison record" },
+]
+
+[[capability]]
+capability = "MODE SINGLE"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS emitter publishes JSON payloads from a relay" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An SQS emitter whose service stops answering is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "INSTANCES"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "SQS ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "MODE ACK SEQUENTIAL"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "SQS ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "SYSLOG COLLECTOR EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "A Syslog TLS receiver sees one batched RFC 5425 frame" },
+]
+
+[[capability]]
+capability = "MODE NO_ACK"
+entity = "SYSLOG COLLECTOR EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_dns_resolution.feature", scenario = "Syslog UDP emitter reaches an endpoint named by the node DNS fixture" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "SYSLOG COLLECTOR EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Syslog collector whose server never answers its TLS handshake is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "SYSLOG COLLECTOR EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Syslog collector whose server stops reading is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_support.feature", scenario = "Syslog UDP intake decodes and forwards RFC 5424 messages" },
+]
+
+[[capability]]
+capability = "metadata.peer_addr"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_support.feature", scenario = "Syslog TCP intake accepts mixed RFC 6587 framing and exposes peer metadata" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_support.feature", scenario = "A Syslog TLS listener closes a client that stalls its handshake within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "STALLED PEER idle_timeout_ms"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_support.feature", scenario = "A Syslog TCP listener closes a connection idle beyond idle_timeout_ms" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_client_ingestion.feature", scenario = "Websocket client ingestor connects to a remote endpoint and delivers a JSON payload" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A WebSocket connection whose server never answers its upgrade is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "WEBSOCKETS ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_ingestion.feature", scenario = "Websocket endpoint ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "ZEROMQ PULL INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/zeromq_ingestion.feature", scenario = "ZeroMQ ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "BATCH"
+entity = "ZEROMQ PUSH EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+]
+
+[[capability]]
+capability = "MODE NO_ACK"
+entity = "ZEROMQ PUSH EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/zeromq_emission.feature", scenario = "ZeroMQ emitter publishes JSON payloads from a relay" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "ZEROMQ PUSH EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A ZeroMQ emitter whose peer never answers its handshake is reported within connect_timeout_ms" },
+  { feature = "tests/features/runtime/zeromq_emission.feature", scenario = "A connect-mode ZeroMQ emitter whose peer never accepts is reported within connect_timeout_ms and delivers once the peer appears" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "ZEROMQ PUSH EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A ZeroMQ emitter whose peer stops reading is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_acknowledgement.feature", scenario = "An HTTP response follows the attached consumer's <decision> decision" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "WEBSOCKETS ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_acknowledgement.feature", scenario = "A WebSocket endpoint acknowledges each <result> frame during and after signaling" },
+]

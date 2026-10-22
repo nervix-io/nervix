@@ -1,6 +1,6 @@
 //! Ingestors: the transport or client source they read, and the routes that build their records.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroUsize};
 
 use meticulous::OptionExt as _;
 use nervix_models::{
@@ -10,13 +10,13 @@ use nervix_models::{
     IngestTimestampSource, IngestorInput, KafkaIngestMode, KafkaOffsetMode, KafkaSourceEntity,
     KafkaTopicSource, MqttIngestMode, MqttQos, MqttSession, MqttSourceEntity, MqttTopicSource,
     NatsIngestMode, NatsSourceEntity, NatsSubjectSource, PrometheusIngestMode,
-    PrometheusQuerySource, PrometheusSourceEntity, PulsarSourceEntity, PulsarTopicSource,
-    RabbitMqIngestMode, RabbitMqQueueSource, RabbitMqSourceEntity, RedisPubSubIngestMode,
-    RedisPubSubSource, RedisSourceEntity, RetryPolicy, SourceBody, SqsIngestMode, SqsQueueSource,
-    SqsSourceEntity, SyslogIngestMode, SyslogListenerSource, SyslogSourceEntity,
-    TransportIngestorInput, WebsocketsConnectionSource, WebsocketsEndpointSource,
-    WebsocketsIngestMode, WebsocketsSourceEntity, ZeroMqIngestMode, ZeroMqPullSource,
-    ZeroMqSourceEntity,
+    PrometheusQuerySource, PrometheusSourceEntity, PulsarSourceEntity, PulsarSubscription,
+    PulsarSubscriptionOwnership, PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource,
+    RabbitMqSourceEntity, RedisPubSubIngestMode, RedisPubSubSource, RedisSourceEntity, RetryPolicy,
+    SourceBody, SourceEntity, SqsIngestMode, SqsQueueSource, SqsSourceEntity, SyslogIngestMode,
+    SyslogListenerSource, SyslogSourceEntity, TransportIngestorInput, WebsocketsConnectionSource,
+    WebsocketsEndpointSource, WebsocketsIngestMode, WebsocketsSourceEntity, ZeroMqIngestMode,
+    ZeroMqPullSource, ZeroMqSourceEntity,
 };
 
 use crate::{
@@ -150,7 +150,7 @@ impl Arbitrary<'_> {
     pub fn http_endpoint_source(&mut self) -> HttpEndpointSource {
         let source = HttpEndpointSource {
             endpoint: self.name(),
-            mode: EndpointIngestMode::NoAck,
+            mode: self.endpoint_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -174,12 +174,21 @@ impl Arbitrary<'_> {
         self.quiescing_as_supported(source)
     }
 
-    /// A Pulsar topic read through a subscription.
+    /// A Pulsar topic read through a subscription that the ingestor owns or an operator
+    /// provisioned.
     pub fn pulsar_topic_source(&mut self) -> PulsarTopicSource {
+        let client = self.name();
+        let topic = self.pulsar_topic_name();
+        let name = self.pulsar_subscription_name();
+        let ownership = if self.entropy.flag() {
+            PulsarSubscriptionOwnership::Ingestor
+        } else {
+            PulsarSubscriptionOwnership::Provisioned
+        };
         let source = PulsarTopicSource {
-            client: self.name(),
-            topic: self.pulsar_topic_name(),
-            subscription: self.pulsar_subscription_name(),
+            client,
+            topic,
+            subscription: PulsarSubscription { name, ownership },
             instances: self.positive_u64(),
             mode: self.kafka_mode(),
             quiesce: IngestQuiesceMode::Suspend,
@@ -238,11 +247,19 @@ impl Arbitrary<'_> {
         self.quiescing_as_supported(source)
     }
 
-    /// A PromQL query evaluated on a cadence of domain time.
+    /// A PromQL query evaluated on a cadence of domain time, with or without its response bound.
     pub fn prometheus_query_source(&mut self) -> PrometheusQuerySource {
+        let client = self.name();
+        let query = self.string();
+        let max_body_size = if self.entropy.flag() {
+            Some(self.payload_size_limit())
+        } else {
+            None
+        };
         let source = PrometheusQuerySource {
-            client: self.name(),
-            query: self.string(),
+            client,
+            query,
+            max_body_size,
             every: self.clock_period(),
             mode: PrometheusIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,
@@ -289,7 +306,7 @@ impl Arbitrary<'_> {
     pub fn websockets_endpoint_source(&mut self) -> WebsocketsEndpointSource {
         let source = WebsocketsEndpointSource {
             endpoint: self.name(),
-            mode: EndpointIngestMode::NoAck,
+            mode: self.endpoint_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -306,7 +323,10 @@ impl Arbitrary<'_> {
     }
 
     /// `source` quiescing in one of the modes it supports.
-    fn quiescing_as_supported<Source: SourceBody>(&mut self, mut source: Source) -> Source {
+    fn quiescing_as_supported<Source: SourceBody + SourceEntity>(
+        &mut self,
+        mut source: Source,
+    ) -> Source {
         let quiesce = self.supported_quiesce(&source);
         *source.quiesce_mut() = quiesce;
         source
@@ -320,8 +340,11 @@ impl Arbitrary<'_> {
         candidates[chosen].clone()
     }
 
-    /// One of the quiesce modes `source` supports, as its vocabulary states them.
-    fn supported_quiesce<Source: SourceBody>(&mut self, source: &Source) -> IngestQuiesceMode {
+    /// One of the quiesce modes `source` supports, as its entity declares them.
+    fn supported_quiesce<Source: SourceBody + SourceEntity>(
+        &mut self,
+        source: &Source,
+    ) -> IngestQuiesceMode {
         let candidates = self.quiesce_candidates();
         let mut supported = Vec::with_capacity(candidates.len());
         for candidate in candidates {
@@ -354,6 +377,18 @@ impl Arbitrary<'_> {
                 max_size: self.positive_byte_size(),
             },
         ]
+    }
+
+    fn endpoint_mode(&mut self) -> EndpointIngestMode {
+        if self.entropy.flag() {
+            let count = self.entropy.pick([1u16, 8, 256, u16::MAX]);
+            EndpointIngestMode::Ack {
+                max: NonZeroU16::new(count).assured("every declared window boundary is positive"),
+                timeout: self.duration(),
+            }
+        } else {
+            EndpointIngestMode::NoAck
+        }
     }
 
     fn kafka_mode(&mut self) -> KafkaIngestMode {

@@ -714,6 +714,24 @@ impl BranchInstanceTemplate {
         Ok(())
     }
 
+    /// End the delivery channels this branch lane publishes through for `key`, and every delivery
+    /// still waiting for admission on them, because the lane's branch for that key has ended. A
+    /// recreated branch binds fresh channels. The channels another relay holds for the same key
+    /// belong to that relay's own branch, which ends only with its own expiry or eviction.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "branch expiry scans and capacity admission end the channels of each branch \
+                      they release"
+        )
+    )]
+    pub(super) fn retire_branch_channels(&self, key: &Option<BranchKey>) {
+        for relay in self.relays.values() {
+            relay.services.remove_branch_slots(key);
+        }
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -870,6 +888,10 @@ impl BranchInstanceTemplate {
         }))
     }
 }
+
+#[cfg(test)]
+#[path = "branch_lane_channel_tests.rs"]
+mod branch_lane_channel_tests;
 
 #[cfg(test)]
 #[cfg_attr(

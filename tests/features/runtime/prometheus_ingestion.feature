@@ -27,8 +27,7 @@ Feature: Prometheus ingestion
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
         CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
-        CREATE CLIENT prom_main
-        TYPE PROMETHEUS
+        CREATE PROMETHEUS CLIENT prom_main
         CONFIG {
           'addr' = '{{prometheus_dns_addr}}',
           'timeout_ms' = 5000
@@ -86,8 +85,7 @@ Feature: Prometheus ingestion
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
         CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
-        CREATE CLIENT prom_main
-        TYPE PROMETHEUS
+        CREATE PROMETHEUS CLIENT prom_main
         CONFIG {
           'addr' = '{{prometheus_addr}}',
           'timeout_ms' = 5000
@@ -150,8 +148,7 @@ Feature: Prometheus ingestion
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
         CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
-        CREATE CLIENT prom_main
-        TYPE PROMETHEUS
+        CREATE PROMETHEUS CLIENT prom_main
         CONFIG {
           'addr' = '{{prometheus_addr}}',
           'timeout_ms' = 5000
@@ -184,3 +181,243 @@ Feature: Prometheus ingestion
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+
+  @prometheus_client_config
+  Scenario Outline: A Prometheus client refuses a Prometheus CONFIG that cannot configure a query source
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string"
+      """
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = 'http://prometheus.nervix.test:9090/?stale=true',
+        'timeout_ms' = 5000
+      };
+      """
+    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'addr' is not an API root: the URL has a fragment"
+      """
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = 'http://prometheus.nervix.test:9090/#graph',
+        'timeout_ms' = 5000
+      };
+      """
+    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'addr' is not an API root: the URL's scheme is not http or https"
+      """
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = 'prometheus.nervix.test:9090',
+        'timeout_ms' = 5000
+      };
+      """
+    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'timeout_ms' is required"
+      """
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = 'http://prometheus.nervix.test:9090'
+      };
+      """
+    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'timeout_ms' is not a usable request timeout: not a positive whole number of milliseconds"
+      """
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = 'http://prometheus.nervix.test:9090',
+        'timeout_ms' = 0
+      };
+      """
+    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'timeout' is not a key this client reads"
+      """
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = 'http://prometheus.nervix.test:9090',
+        'timeout_ms' = 5000,
+        'timeout' = 5000
+      };
+      """
+    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'tls_cert_file' and 'tls_key_file' must be set together"
+      """
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = 'https://prometheus.nervix.test:9090',
+        'timeout_ms' = 5000,
+        'tls_cert_file' = '/etc/nervix/tls/client.pem'
+      };
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = 'https://prometheus.nervix.test:9090/monitoring/',
+        'timeout_ms' = 5000,
+        'tls_ca_file' = '/etc/nervix/tls/ca.pem',
+        'tls_cert_file' = '/etc/nervix/tls/client.pem',
+        'tls_key_file' = '/etc/nervix/tls/client-key.pem'
+      };
+      SHOW CREATE CLIENT prom_main;
+      """
+    Then the last command output contains
+      """
+      'addr' = 'https://prometheus.nervix.test:9090/monitoring/'
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @prometheus_query_statement
+  Scenario Outline: A Prometheus query ingestor refuses a statement its entity does not declare
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA sample ( source STRING, value F64, timestamp STRING );
+      CREATE WIRE JSON SCHEMA sample_wire MODE STRICT ( source string, value number, timestamp string );
+      CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
+      CREATE RELAY samples SCHEMA sample UNBRANCHED;
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = 'http://prometheus.nervix.test:9090',
+        'timeout_ms' = 5000
+      };
+      """
+    When these Plexus statements fail with "expected NO ACK"
+      """
+      CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'up' EVERY 1s
+        MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s
+        ON QUIESCE SUSPEND DECODE USING sample_codec
+        TO samples INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these Plexus statements fail with "found BATCH"
+      """
+      CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'up' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
+        TO samples INHERIT ALL UNBRANCHED
+        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these Plexus statements fail with "PROMETHEUS QUERY ingestors do not support read_header or read_headers"
+      """
+      CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'up' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
+        TO samples INHERIT ALL
+        SET source = read_header('source')
+        UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'up' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
+        TO samples INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      SHOW CREATE INGESTOR prom_samples;
+      """
+    Then the last command output contains
+      """
+      MODE NO ACK
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @prometheus_body_bound
+  Scenario Outline: A Prometheus response above the ingestor's MAX BODY SIZE fails the poll
+    Given the HTTP mock server is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA bulk_sample ( source STRING, index STRING, value F64, timestamp STRING );
+      CREATE WIRE JSON SCHEMA bulk_sample_wire MODE STRICT ( source string, index string, value number, timestamp string );
+      CREATE CODEC bulk_sample_codec FROM WIRE JSON SCHEMA bulk_sample_wire TO SCHEMA bulk_sample;
+      CREATE RELAY samples SCHEMA bulk_sample UNBRANCHED;
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = '{{mock_http_addr}}/prometheus-vector/{{test_id}}/100/always',
+        'timeout_ms' = 5000
+      };
+      """
+    When these Plexus statements fail with "MAX BODY SIZE must be greater than zero"
+      """
+      CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'bulk' MAX BODY SIZE 0B EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING bulk_sample_codec
+        TO samples INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'bulk' MAX BODY SIZE 1KiB EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING bulk_sample_codec
+        TO samples INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      SHOW CREATE INGESTOR prom_samples;
+      """
+    Then the last command output contains
+      """
+      QUERY 'bulk' MAX BODY SIZE 1KiB EVERY 1s
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "prom_samples" on the leader node contains
+      """
+      transient error: failed to read from prometheus source: Prometheus query response exceeds MAX BODY SIZE 1KiB
+      """
+    And the last command output contains
+      """
+      prometheus max body size: 1KiB
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # MAX BATCH SIZE 1B flushes every route input on its own, so each relay batch the ingestor sends is
+  # exactly one ingest group: the count of batches is the count of intake batches.
+  @prometheus_intake_batches
+  Scenario Outline: A Prometheus vector arrives in intake batches of at most 1024 samples, each sample once
+    Given the HTTP mock server is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA bulk_sample ( source STRING, index STRING, value F64, timestamp STRING );
+      CREATE WIRE JSON SCHEMA bulk_sample_wire MODE STRICT ( source string, index string, value number, timestamp string );
+      CREATE CODEC bulk_sample_codec FROM WIRE JSON SCHEMA bulk_sample_wire TO SCHEMA bulk_sample;
+      CREATE RELAY samples SCHEMA bulk_sample UNBRANCHED;
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = '{{mock_http_addr}}/prometheus-vector/{{test_id}}/50000/once',
+        'timeout_ms' = 5000
+      };
+      CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'bulk' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING bulk_sample_codec
+        TO samples INHERIT ALL UNBRANCHED
+        FLUSH EACH 1h MAX BATCH SIZE 1B ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "60s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "samples" across physical nodes totals 50000
+    And within "30s" DESCRIBE DOMAIN section "input_output" metric "batches_total" "sent" relay "samples" across physical nodes totals 49
+    And within "30s" DESCRIBE INGESTOR "prom_samples" on the leader node contains
+      """
+      prometheus max body size: 16MiB
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

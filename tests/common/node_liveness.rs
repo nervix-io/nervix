@@ -2,15 +2,17 @@
 //!
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
-//! - **Owns.** Readiness probe outcomes, the single owned node task, its terminal outcome, and the
-//!   diagnostic produced when startup does not reach readiness.
+//! - **Owns.** Readiness probe outcomes, the bounded history of the outcomes one readiness wait
+//!   saw, the single owned node task, its terminal outcome, and the diagnostic produced when
+//!   startup does not reach readiness.
 //! - **Depends on.** The bounded status request used for readiness, the application error returned
 //!   by the in-process server, Tokio task ownership, and the phase deadline of a startup attempt.
 //! - **Must not know.** Production retry policy, production session internals, or scenario state.
 
-use std::{fmt, future::Future, time::Duration};
+use std::{collections::VecDeque, fmt, future::Future, time::Duration};
 
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use nervix_client_wire::{CommandDisposition, Diagnostic};
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{sync::Arc, task::JoinHandle, time::timeout};
@@ -19,8 +21,15 @@ use thiserror::Error;
 
 use super::{
     phase_deadline::PhaseDeadline,
-    status_request::{StatusEndpoint, StatusRequestError},
+    status_request::{StatusEndpoint, StatusRequestEnding, StatusRequestError},
 };
+
+/// How many runs of probes a readiness history keeps from the start of its wait, and how many of
+/// the latest runs it keeps after those. Policy inputs: a startup normally passes through two or
+/// three kinds of answer, so the bounds only shorten the history of a node whose answers keep
+/// changing.
+const READINESS_HISTORY_FIRST_RUNS: usize = 8;
+const READINESS_HISTORY_LATEST_RUNS: usize = 8;
 
 /// What a node answered a readiness probe's status command with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +94,168 @@ impl ReadinessProbeOutcome {
 
     pub(crate) fn is_ready(&self) -> bool {
         matches!(self, Self::Ready { .. })
+    }
+
+    /// What kind of answer the probe got.
+    pub(crate) fn kind(&self) -> ReadinessProbeKind {
+        match self {
+            Self::Ready { response_kind } => ReadinessProbeKind::Ready(*response_kind),
+            Self::RequestFailed(error) => {
+                ReadinessProbeKind::RequestEnded(error.current_context().ending())
+            }
+            Self::UnsuccessfulResponse { response_kind, .. } => {
+                ReadinessProbeKind::UnsuccessfulResponse(*response_kind)
+            }
+        }
+    }
+}
+
+/// What kind of answer one readiness probe got, without the details that differ between probes of
+/// the same kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReadinessProbeKind {
+    Ready(ResponseKind),
+    /// The status request ended without a command result, where its ending says.
+    RequestEnded(StatusRequestEnding),
+    UnsuccessfulResponse(ResponseKind),
+}
+
+impl fmt::Display for ReadinessProbeKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ready(response_kind) => write!(formatter, "ready response ({response_kind:?})"),
+            Self::RequestEnded(ending) => write!(formatter, "status request: {ending}"),
+            Self::UnsuccessfulResponse(response_kind) => {
+                write!(formatter, "non-ready response ({response_kind:?})")
+            }
+        }
+    }
+}
+
+/// One run of consecutive readiness probes that got the same kind of answer.
+#[derive(Clone, Copy, Debug)]
+struct ReadinessRun {
+    kind: ReadinessProbeKind,
+    probes: u64,
+    /// When the run's first probe ended, measured from the start of the wait's phase.
+    first_at: Duration,
+    /// When the run's last probe ended, measured the same way.
+    last_at: Duration,
+}
+
+impl fmt::Display for ReadinessRun {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{:.1?}–{:.1?} {} ×{}",
+            self.first_at, self.last_at, self.kind, self.probes
+        )
+    }
+}
+
+/// The runs a readiness history dropped between its first and its latest runs.
+#[derive(Clone, Copy, Debug, Default)]
+struct OmittedRuns {
+    runs: u64,
+    probes: u64,
+}
+
+/// The readiness probes of one wait, as runs of consecutive probes that got the same kind of
+/// answer, with when each run began and ended, and the last probe's outcome in full.
+///
+/// It keeps the first runs of the wait and the latest ones and counts the runs it dropped between
+/// them, so it stays bounded however long the wait lasts and however often the answers change.
+#[derive(Debug)]
+pub(crate) struct ReadinessHistory {
+    first: Vec<ReadinessRun>,
+    latest: VecDeque<ReadinessRun>,
+    omitted: OmittedRuns,
+    last: LastReadinessOutcome,
+}
+
+impl ReadinessHistory {
+    pub(crate) fn new() -> Self {
+        Self {
+            first: Vec::with_capacity(READINESS_HISTORY_FIRST_RUNS),
+            latest: VecDeque::with_capacity(READINESS_HISTORY_LATEST_RUNS),
+            omitted: OmittedRuns::default(),
+            last: LastReadinessOutcome::NoCompletedProbe,
+        }
+    }
+
+    /// Records one probe's outcome. `at` is when the probe ended, measured from the start of the
+    /// wait's phase.
+    pub(crate) fn record(&mut self, at: Duration, outcome: ReadinessProbeOutcome) {
+        let kind = outcome.kind();
+        self.last = LastReadinessOutcome::Observed(outcome);
+        let current = match self.latest.back_mut() {
+            Some(run) => Some(run),
+            None => self.first.last_mut(),
+        };
+        if let Some(run) = current
+            && run.kind == kind
+        {
+            run.probes = run
+                .probes
+                .checked_add(1)
+                .assured("a wait ends long before it could make u64::MAX probes");
+            run.last_at = at;
+            return;
+        }
+        let run = ReadinessRun {
+            kind,
+            probes: 1,
+            first_at: at,
+            last_at: at,
+        };
+        if self.first.len() < READINESS_HISTORY_FIRST_RUNS {
+            self.first.push(run);
+            return;
+        }
+        if self.latest.len() == READINESS_HISTORY_LATEST_RUNS
+            && let Some(dropped) = self.latest.pop_front()
+        {
+            self.omitted.runs = self
+                .omitted
+                .runs
+                .checked_add(1)
+                .assured("a wait ends long before it could make u64::MAX probes");
+            self.omitted.probes = self
+                .omitted
+                .probes
+                .checked_add(dropped.probes)
+                .assured("a wait ends long before it could make u64::MAX probes");
+        }
+        self.latest.push_back(run);
+    }
+
+    /// The outcome of the last probe recorded, in full.
+    pub(crate) fn last(&self) -> &LastReadinessOutcome {
+        &self.last
+    }
+}
+
+impl fmt::Display for ReadinessHistory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.first.is_empty() {
+            return formatter.write_str("no readiness probe completed");
+        }
+        let mut separator = "";
+        for run in &self.first {
+            write!(formatter, "{separator}{run}")?;
+            separator = "; ";
+        }
+        if self.omitted.runs > 0 {
+            write!(
+                formatter,
+                "; {} runs of {} probes omitted",
+                self.omitted.runs, self.omitted.probes
+            )?;
+        }
+        for run in &self.latest {
+            write!(formatter, "; {run}")?;
+        }
+        Ok(())
     }
 }
 

@@ -19,8 +19,8 @@
 use async_trait::async_trait;
 use error_stack::ResultExt as _;
 use nervix_connector::{
-    PerRecordOutcome, RejectedSinkRecord, SinkLifecycle, SinkPublishError, SinkRecordPosition,
-    SinkStagedCommit,
+    PerRecordOutcome, RejectedSinkRecord, SinkFinish, SinkFinishResult, SinkLifecycle,
+    SinkPublishError, SinkRecordPosition, SinkStagedCommit,
 };
 
 use super::{emitter_supervision::EmitterConfirmationWaitGuard, *};
@@ -247,7 +247,58 @@ pub(super) struct OpenEmitterSink {
     commit_cadence: BranchBufferTimer,
 }
 
+/// The owning sink's stop-drain answer, kept distinct from a missing host-bound answer.
+pub(super) enum EmitterStopDrainOutcome {
+    Finished {
+        report: Option<PublishReport>,
+        finished: SinkFinish,
+    },
+    Failed(Report<EmitterRuntimeError>),
+    DeadlineElapsed,
+}
+
 impl EmitterSinkState {
+    /// Drains by the stop deadline, then receives the sink's own deadline outcome.
+    pub(super) async fn drain_for_stop(
+        &mut self,
+        label: &str,
+        context: &EmitterSinkContext,
+        control: &mut EmitterPublishControl<'_>,
+        buffer: &mut EmitterBatchBuffer,
+        deadline: Instant,
+    ) -> EmitterStopDrainOutcome {
+        let drained = nervix_primitives::time::timeout_at(
+            deadline,
+            self.flush_all(label, context, control, buffer),
+        )
+        .await;
+        let report = match drained {
+            Ok(Ok(report)) => report,
+            Ok(Err(error)) => return EmitterStopDrainOutcome::Failed(error),
+            Err(_) => return EmitterStopDrainOutcome::DeadlineElapsed,
+        };
+        // The supervisor already waits through this grace for the stop answer. Reserve half for
+        // receiving the sink's deadline report, and half for delivering it to the supervisor.
+        // The sink still receives only the original deadline.
+        let finish_bound = deadline + PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE / 2;
+        match nervix_primitives::time::timeout_at(finish_bound, self.finish_transport(deadline))
+            .await
+        {
+            Ok(Ok(finished)) if Instant::now() <= deadline => {
+                EmitterStopDrainOutcome::Finished { report, finished }
+            }
+            Ok(Err(error)) => {
+                let description = error.current_context().to_string();
+                EmitterStopDrainOutcome::Failed(
+                    error
+                        .change_context(EmitterRuntimeError::FinishTransport)
+                        .attach_printable(description),
+                )
+            }
+            Ok(Ok(_)) | Err(_) => EmitterStopDrainOutcome::DeadlineElapsed,
+        }
+    }
+
     /// The state of an emitter whose connector just opened and has staged nothing yet.
     pub(super) fn opened(sink: Box<dyn EmitterSink>) -> Self {
         Self::Open(OpenEmitterSink {
@@ -358,15 +409,12 @@ impl EmitterSinkState {
         }
     }
 
-    pub(super) async fn finish_transport(&mut self, deadline: Instant) -> EmitterRuntimeResult<()> {
+    /// Finishes the open connector's transport client by `deadline`. An emitter without an open
+    /// connector has no client, so it holds nothing.
+    pub(super) async fn finish_transport(&mut self, deadline: Instant) -> SinkFinishResult {
         match self {
-            Self::Open(open) => open
-                .sink
-                .lifecycle_mut()
-                .finish(deadline)
-                .await
-                .map_err(sink_publish_failure),
-            Self::Unavailable { .. } => Ok(()),
+            Self::Open(open) => open.sink.lifecycle_mut().finish(deadline).await,
+            Self::Unavailable { .. } => Ok(SinkFinish::NothingHeld),
         }
     }
 
@@ -853,7 +901,6 @@ pub(super) fn sink_publish_failure(error: Report<SinkPublishError>) -> Report<Em
         }
         SinkPublishError::NotInitialized { .. }
         | SinkPublishError::Publish { .. }
-        | SinkPublishError::Finish { .. }
         | SinkPublishError::Commit { .. } => {
             error.change_context(EmitterRuntimeError::PublishBatch)
         }
@@ -1015,7 +1062,12 @@ mod tests {
     /// drives the publish path up to the connector and observes what the host keeps afterwards.
     struct UnencodableSink;
 
-    impl SinkLifecycle for UnencodableSink {}
+    #[async_trait]
+    impl SinkLifecycle for UnencodableSink {
+        async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+            Ok(SinkFinish::NothingHeld)
+        }
+    }
 
     #[async_trait]
     impl EmitterSink for UnencodableSink {
@@ -1057,6 +1109,10 @@ mod tests {
 
     #[async_trait]
     impl SinkLifecycle for StagingSink {
+        async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+            Ok(SinkFinish::NothingHeld)
+        }
+
         fn staged_commit(&self) -> Option<SinkStagedCommit> {
             if self.staged == 0 {
                 return None;

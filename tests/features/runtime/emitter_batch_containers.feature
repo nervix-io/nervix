@@ -82,7 +82,7 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE EMITTER record_json FROM events
         TO KAFKA kafka_main TOPIC containers_{{test_id}}
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
@@ -174,7 +174,7 @@ Feature: Emitter batch containers
       hex:83bf6373657101646e6f74656161ffbf6373657102646e6f74656162ffbf6373657103646e6f74656163ff
       hex:0602026104026206026300
       text:[{"seq": 1, "note": "a"}, {"seq": 2, "note": "b"}, {"seq": 3, "note": "c"}]
-      hex:5b7b7365713a20312c206e6f74653a20617d2c207b7365713a20322c206e6f74653a20627d2c207b7365713a20332c206e6f74653a20637d5d0a
+      text:[{"seq": 1, "note": "a"}, {"seq": 2, "note": "b"}, {"seq": 3, "note": "c"}]
       hex:5b5b62617463685d5d0a736571203d20310a6e6f7465203d202261220a0a5b5b62617463685d5d0a736571203d20320a6e6f7465203d202262220a0a5b5b62617463685d5d0a736571203d20330a6e6f7465203d202263220a
       hex:83a26373657101646e6f74656161a26373657102646e6f74656162a26373657103646e6f74656163
       hex:3c62617463683e3c6576656e74207365713d223122206e6f74653d2261222f3e3c6576656e74207365713d223222206e6f74653d2262222f3e3c6576656e74207365713d223322206e6f74653d2263222f3e3c2f62617463683e
@@ -229,7 +229,7 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE EMITTER identity_batches FROM events
         TO KAFKA kafka_main TOPIC transformed_{{test_id}}
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
@@ -333,7 +333,7 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -436,7 +436,7 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE EMITTER subdivided FROM events
         TO KAFKA kafka_main TOPIC subdivided_{{test_id}}
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
@@ -515,7 +515,7 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE EMITTER failing_batches FROM events
         TO KAFKA kafka_main TOPIC failed_batches_{{test_id}}
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
@@ -590,7 +590,7 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE EMITTER syslog_frames FROM syslog_events
         TO KAFKA kafka_main TOPIC syslog_frames_{{test_id}}
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s

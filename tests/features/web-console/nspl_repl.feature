@@ -157,9 +157,9 @@ Feature: Web console NSPL REPL
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "created domain 'production'"
     And selector ".prompt-row" contains "production"
-    When selector ".prompt-row input" is filled with "BEGIN; CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
+    When selector ".prompt-row input" is filled with "BEGIN; CREATE HTTP CLIENT http_main CONFIG { 'url' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "BEGIN; CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
+    Then selector ".terminal" contains "BEGIN; CREATE HTTP CLIENT http_main CONFIG { 'url' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
     And selector ".terminal" contains "quiesce level: DYNAMIC"
     When selector ".prompt-row input" is filled with "SHOW CREATE SCHEMA notification"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -247,14 +247,18 @@ Feature: Web console NSPL REPL
     And selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{new_leader}}'"
     And selector ".prompt-row" contains "{{domain}} tx"
+    And selector ".terminal" contains "domain clock [{{domain}}] attached" exactly 2 times
+    Given command response delivery on node "{{new_leader}}" pauses after execution
     When selector ".prompt-row input" is filled with "CREATE SCHEMA after_switchover ( value I64 );"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "quiesce level: DYNAMIC"
+    Then the command response delivery pause on node "{{new_leader}}" is reached
     When selector ".transaction-indicator" is pressed with "Enter"
     Then selector ".transaction-inspector .inspector-summary" contains "2 accepted"
     And selector ".transaction-inspector .inspector-item[data-name='before_switchover']" contains "SCHEMA"
     And selector ".transaction-inspector .inspector-item[data-name='after_switchover']" contains "SCHEMA"
     When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is pressed with "Enter"
+    And the command response delivery pause on node "{{new_leader}}" is released
+    Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 2 times
     When selector ".prompt-row input" is filled with "COMMIT;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 3 times
@@ -638,7 +642,7 @@ Feature: Web console NSPL REPL
     Given the leader node is configured with these NSPL commands
       """
       CREATE HASH MAP lookup_by_id KEY id FROM RESOURCE lookup_bundle VERSION 1 PATH 'lookup.jsonl' DECODE USING lookup_codec;
-      CREATE CLIENT lookup_store TYPE HTTP MOUNT lookup_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
+      CREATE HTTP CLIENT lookup_store MOUNT lookup_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
       """
     When selector ".resource-dialog .file-upload-input" uploads resource directory "lookup_v2"
     Then selector ".resource-upload-status" contains "uploaded resource version 2"
@@ -1544,7 +1548,7 @@ Feature: Web console NSPL REPL
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
       CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };
+      CREATE ZEROMQ CLIENT zeromq_main CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };
       CREATE EMITTER zeromq_notifications FROM notifications TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -1573,7 +1577,7 @@ Feature: Web console NSPL REPL
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
-      CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://example.com/ingest' };
+      CREATE HTTP CLIENT http_main CONFIG { 'url' = 'http://example.com/ingest' };
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
@@ -1644,17 +1648,17 @@ Feature: Web console NSPL REPL
       CREATE RELAY security_events SCHEMA activity BRANCHED BY by_iot_device_activity;
       CREATE RELAY connected_sessions SCHEMA activity BRANCHED BY by_iot_device_activity;
       CREATE RELAY location_distance_alerts SCHEMA activity BRANCHED BY by_iot_device_activity;
-      CREATE CLIENT kafka_auth TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE CLIENT mqtt_devices TYPE MQTT CONFIG { 'addr' = 'mqtt://127.0.0.1:1883' };
-      CREATE CLIENT nats_edge TYPE NATS CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
-      CREATE CLIENT s3_lakehouse TYPE S3 CONFIG {
+      CREATE KAFKA CLIENT kafka_auth CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE MQTT CLIENT mqtt_devices CONFIG { 'addr' = 'mqtt://127.0.0.1:1883' };
+      CREATE NATS CLIENT nats_edge CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
+      CREATE S3 CLIENT s3_lakehouse CONFIG {
         'endpoint' = 'http://127.0.0.1:9900',
         'region' = 'us-east-1',
         'access_key_id' = 'rustfsadmin',
         'secret_access_key' = 'rustfsadmin',
         'path_style_access' = true
       };
-      CREATE CLIENT lakehouse_catalog TYPE ICEBERG_REST CONFIG {
+      CREATE ICEBERG_REST CLIENT lakehouse_catalog CONFIG {
         'uri' = 'http://127.0.0.1:8181',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       }; CREATE MQTT TOPIC INGESTOR iot_device_activity
@@ -1988,7 +1992,7 @@ Feature: Web console NSPL REPL
       CREATE RELAY normal_telemetry SCHEMA telemetry BRANCHED BY by_device_repartition;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT telemetry_ingress ON edge PATH '/telemetry' TYPE HTTP;
-      CREATE CLIENT redis_alerts TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379/' }; CREATE HTTP ENDPOINT INGESTOR http_telemetry
+      CREATE REDIS CLIENT redis_alerts POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379/' }; CREATE HTTP ENDPOINT INGESTOR http_telemetry
         FROM telemetry_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec
         TO telemetry_by_site

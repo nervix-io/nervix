@@ -33,6 +33,22 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(memory.swap_used_mib, 0.0)
 
 
+class FrequencyTests(unittest.TestCase):
+    def test_guest_frequency_range_preserves_its_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cpuinfo = pathlib.Path(directory) / "cpuinfo"
+            cpuinfo.write_text("processor: 0\ncpu MHz : 2400\nprocessor: 1\ncpu MHz : 3200\n")
+            frequency = record_runner_load.frequency_sample(cpuinfo)
+            self.assertEqual(frequency["min_mhz"], 2400)
+            self.assertEqual(frequency["mean_mhz"], 2800)
+            self.assertEqual(frequency["max_mhz"], 3200)
+            self.assertEqual(frequency["source"], "/proc/cpuinfo cpu MHz")
+            cpuinfo.write_text("processor: 0\n")
+            self.assertIsNone(record_runner_load.frequency_sample(cpuinfo)["mean_mhz"])
+            cpuinfo.unlink()
+            self.assertIsNone(record_runner_load.frequency_sample(cpuinfo)["mean_mhz"])
+
+
 class RecordingTests(unittest.TestCase):
     def test_every_sample_reaches_the_record_and_the_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -54,6 +70,10 @@ class RecordingTests(unittest.TestCase):
             with records.open() as stream:
                 rows = list(csv.DictReader(stream))
             self.assertGreaterEqual(len(rows), 3)
+            for row in rows:
+                self.assertTrue(row["utc"].endswith("+00:00"))
+                self.assertIsNotNone(row["reported_mean_mhz"])
+                self.assertIn("io_pressure_some_avg10_pct", row)
             used = [float(row["memory_used_mib"]) for row in rows]
             text = summary.read_text()
             self.assertIn(f"samples: {len(rows)} (0.01 s cadence)", text)

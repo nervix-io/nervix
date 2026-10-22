@@ -13,28 +13,28 @@
     nervix::layer(decisions, reason = "owns the decisions boundary declared above")
 )]
 
-use std::time::Duration;
-
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_jaq::StatefulJaqProgram;
 use nervix_models::{
-    Assignment, AssignmentTarget, ClientIngestMode, CodecBatchContainer, CreateClientHttp,
-    CreateCodec, CreateEmitter, CreateIngestor, CreateSchema, CreateSignalingProtocol, DomainName,
-    EmitSink, EndpointName, Expression, FieldName, HttpApplicationHeaders, HttpBodyMode,
-    HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestSink, HttpSink,
-    IngestTimestampSource, IngestorInput, Model, ModelIndex, ModelName, OtelAggregationTemporality,
-    OtelMappings, OtelMetricKind, OtelMetricsSink, OtelSink, ParseAsType, ProcessorOutput,
-    RelayName, RouteConstruction, SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup,
-    SqsQueueSink, SqsSink, VhostName, parse_duration_text,
+    Assignment, AssignmentTarget, ClientDeadline, ClientIngestMode, CodecBatchContainer,
+    CreateClientHttp, CreateCodec, CreateEmitter, CreateIngestor, CreateSchema,
+    CreateSignalingProtocol, DomainName, EmitSink, EndpointName, Expression, FieldName,
+    HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
+    HttpRequestSink, HttpSink, IngestTimestampSource, IngestorInput, LiteralHeaderWrite, Model,
+    ModelIndex, ModelName, OtelAggregationTemporality, OtelMappings, OtelMetricKind,
+    OtelMetricsSink, OtelSink, ParseAsType, ProcessorOutput, RelayName, RouteConstruction,
+    SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, SqsQueueSink, SqsSink, VhostName,
+    parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SchemaSensitivity, SemanticScopePolicy,
     compile_program_with_options_for_bindings_with_sensitivity,
     infer_set_expr_types_for_bindings_with_udfs, lower_route_construction,
-    lower_transforming_route, program::FunctionName,
+    lower_transforming_route,
+    program::{Expr, FunctionName, Literal, Program, SpannedNode},
 };
 
 use crate::registry::{
@@ -821,19 +821,11 @@ pub(in crate::registry) fn validate_http_emitter_client(
 
     let timeout =
         entry("timeout_ms").ok_or_else(|| invalid("HTTP emitter client requires timeout_ms"))?;
-    if timeout.is_empty() || !timeout.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(invalid(
-            "HTTP emitter client timeout_ms must be a positive schedulable integer",
-        ));
-    }
-    let timeout = timeout.parse::<u64>().map_err(|_| {
-        invalid("HTTP emitter client timeout_ms must be a positive schedulable integer")
+    ClientDeadline::parse(timeout).change_context(RegistryError::InvalidModel {
+        domain: domain.as_str().to_string(),
+        identifier: identifier.as_str().to_string(),
+        reason: "HTTP emitter client timeout_ms must be a positive schedulable integer".to_string(),
     })?;
-    if timeout == 0 || Duration::from_millis(timeout).as_nanos() > u128::from(u64::MAX / 2) {
-        return Err(invalid(
-            "HTTP emitter client timeout_ms must be a positive schedulable integer",
-        ));
-    }
 
     if entry("tls_cert_file").is_some() != entry("tls_key_file").is_some() {
         return Err(invalid(
@@ -1252,7 +1244,49 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
 }
 
 fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
-    sink.capabilities().writes_headers
+    sink.capabilities().writes_headers()
+}
+
+/// Refuses an emitter whose sink keeps one value per header name and whose `INVOKE` clause writes
+/// one literal name twice: on every record the later write would replace the earlier one, so the
+/// earlier write could never reach a message. Names compare as the sink's header model records
+/// them, and a name an expression computes is left to the sink at run time.
+fn refuse_replaced_header_writes(
+    domain: &DomainName,
+    identifier: &ModelName,
+    emitter: &CreateEmitter,
+    program: &SpannedNode<Program>,
+) -> Result<(), Report<RegistryError>> {
+    let Some(model) = emitter.sink.capabilities().headers else {
+        return Ok(());
+    };
+    let mut writes = Vec::new();
+    for (index, invocation) in program.inner.invoke.iter().enumerate() {
+        if invocation.inner.function != FunctionName::WriteHeader {
+            continue;
+        }
+        let Some(name) = invocation.inner.args.first() else {
+            continue;
+        };
+        let Expr::Literal(Literal::String(name)) = &name.inner else {
+            continue;
+        };
+        let position = index
+            .checked_add(1)
+            .assured("an index into an in-memory invocation vector is below usize::MAX");
+        writes.push(LiteralHeaderWrite { position, name });
+    }
+    let Some(replaced) = model.replaced_write(writes) else {
+        return Ok(());
+    };
+    Err(Report::new(RegistryError::ReplacedHeaderWrite {
+        domain: domain.clone(),
+        emitter: identifier.clone(),
+        sink: emitter.sink.kind(),
+        header: model.names.recorded(replaced.later.name).into_owned(),
+        earlier: replaced.earlier.position,
+        later: replaced.later.position,
+    }))
 }
 
 pub(in crate::registry) fn effective_emitter_filter_map_schema(
@@ -1321,6 +1355,7 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
             ),
         }));
     }
+    refuse_replaced_header_writes(domain, identifier, emitter, &parsed)?;
 
     let original_parsed = parsed.clone();
     let LookupHashMapRewriteResult {

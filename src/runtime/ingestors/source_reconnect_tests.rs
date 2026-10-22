@@ -4,7 +4,7 @@
 //! Layer: test harness.
 //! - **Owns.** The connection-bound broker, source and host doubles that the reconnect unit tests
 //!   and the Shuttle check share, and the unit tests of each position class across a lost
-//!   connection.
+//!   connection, and retry backoff across successful reconnects until a batch is delivered.
 //! - **Depends on.** The production broker host loop, the source contract and its position
 //!   classes.
 //! - **Must not know.** Broker drivers, the runtime source host or the quiesce control.
@@ -14,9 +14,15 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use std::collections::{BTreeMap, VecDeque};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    future,
+};
 
-use nervix_connector::{IngestMessageHeaders, IngestMetadataRow, SourceResult};
+use nervix_connector::{
+    IngestMessageHeaders, IngestMetadataRow, SourceBatchAcknowledgementServices,
+    SourceReadCancellation, SourceResult,
+};
 use nervix_primitives::sync::blocking::Mutex;
 
 use super::*;
@@ -179,6 +185,7 @@ impl BrokerSourceConnector for RedeliveringSource {
     async fn next_batch(
         &mut self,
         _request: SourceBatchRequest,
+        _cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let mut broker = self.broker.lock();
         if !broker.serves(self.connection) {
@@ -229,8 +236,8 @@ impl BrokerSourceConnector for RedeliveringSource {
 struct ConfirmedAcknowledgement;
 
 #[async_trait]
-impl SourceAcknowledgementServices for ConfirmedAcknowledgement {
-    async fn wait(self: Box<Self>, _timeout: Duration) -> SourceAcknowledgementOutcome {
+impl SourceBatchAcknowledgementServices for ConfirmedAcknowledgement {
+    async fn wait(&mut self, _timeout: Duration) -> SourceAcknowledgementOutcome {
         SourceAcknowledgementOutcome::Ack
     }
 }
@@ -258,20 +265,22 @@ impl RedeliveryHost {
 
 #[async_trait]
 impl SourceHostServices for RedeliveryHost {
-    async fn intake(
+    async fn intake_unacknowledged(
         &mut self,
-        batch: SourceIntakeBatch<'_>,
-    ) -> SourceIntakeResult<SourceIntakeOutcome> {
+        _messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<()> {
+        panic!("a connection-bound source reads in an acknowledged mode");
+    }
+
+    async fn intake_acknowledged(
+        &mut self,
+        _messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<SourceBatchAcknowledgement> {
         if self.lose_during_first_intake {
             self.lose_during_first_intake = false;
             self.broker.lock().lose_connection();
         }
-        let acknowledgements = batch
-            .messages
-            .iter()
-            .map(|_| SourceAcknowledgement::new(ConfirmedAcknowledgement))
-            .collect();
-        Ok(SourceIntakeOutcome { acknowledgements })
+        Ok(SourceBatchAcknowledgement::new(ConfirmedAcknowledgement))
     }
 
     async fn flush(&mut self) -> SourceIntakeResult<()> {
@@ -317,6 +326,14 @@ impl SourceHostServices for RedeliveryHost {
             .counted_redeliveries
             .checked_add(positions)
             .verified("a check counts only a few redeliveries");
+    }
+    fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+        panic!("a check broker whose payloads all fit dropped {payloads} for their size");
+    }
+    fn record_unconfirmed_stop(&self, positions: usize) {
+        panic!(
+            "every acknowledgement tree of the check resolves, but {positions} positions did not"
+        );
     }
 }
 
@@ -381,4 +398,118 @@ async fn a_source_without_positions_keeps_no_failed_rejection() {
     assert_eq!(broker.failed_rejections, 1);
     assert_eq!(broker.counted_redeliveries, 0);
     assert_eq!(broker.suspensions, 0);
+}
+
+/// A transport that upgrades successfully but fails reads until it delivers a real batch.
+struct ClosingSource {
+    source: RedeliveringSource,
+    reads: Arc<Mutex<Vec<Instant>>>,
+    steps: VecDeque<ScriptedRead>,
+    reconnect: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ScriptedRead {
+    Failure,
+    ResumeRequired,
+    Deliver,
+}
+
+#[async_trait]
+impl SourceConnector for ClosingSource {
+    type Plan = ();
+
+    async fn open(_plan: &Self::Plan, _instance_index: u64) -> SourceResult<Self> {
+        panic!("the test supplies its already constructed source");
+    }
+
+    fn needs_resume(&mut self) -> bool {
+        self.reconnect
+    }
+
+    async fn resume(&mut self) -> SourceResult<SourceResume> {
+        self.reconnect = false;
+        self.source.resume().await
+    }
+}
+
+#[async_trait]
+impl BrokerSourceConnector for ClosingSource {
+    type Message = BrokerDelivery;
+    type Position = u64;
+
+    async fn next_batch(
+        &mut self,
+        request: SourceBatchRequest,
+        cancellation: &SourceReadCancellation,
+    ) -> SourceResult<SourceBatch<Self::Message>> {
+        self.reads.lock().push(Instant::now());
+        match self.steps.pop_front() {
+            Some(ScriptedRead::Deliver) => self.source.next_batch(request, cancellation).await,
+            Some(ScriptedRead::Failure) => {
+                self.reconnect = true;
+                Err(Report::new(SourceError::Read {
+                    connector: "closing",
+                }))
+            }
+            Some(ScriptedRead::ResumeRequired) => {
+                self.reconnect = true;
+                Ok(SourceBatch::ResumeRequired)
+            }
+            None => Ok(SourceBatch::Closed),
+        }
+    }
+
+    async fn acknowledge(&mut self, positions: &[u64]) -> SourceResult<()> {
+        self.source.acknowledge(positions).await
+    }
+
+    async fn reject(&mut self, positions: &[u64]) -> SourceResult<()> {
+        self.source.reject(positions).await
+    }
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn successful_upgrades_keep_read_failure_backoff_until_a_batch_is_delivered() {
+    for interruption in [ScriptedRead::Failure, ScriptedRead::ResumeRequired] {
+        let broker = RedeliveringBroker::shared([1]);
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let source = ClosingSource {
+            source: RedeliveringSource::new(broker.clone()),
+            reads: reads.clone(),
+            steps: VecDeque::from([
+                interruption,
+                interruption,
+                ScriptedRead::Deliver,
+                interruption,
+                interruption,
+            ]),
+            reconnect: true,
+        };
+        let mut policy = sequential_policy(PositionClass::BrokerRedelivered);
+        policy.retry = ParsedRetryPolicy {
+            backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(4),
+        };
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        run_source_instance_with_retry(
+            source,
+            SourceHost::new(RedeliveryHost::new(broker.clone(), false)),
+            policy,
+            shutdown_rx,
+        )
+        .await;
+        drop(shutdown);
+        let reads = reads.lock();
+        let delays: Vec<_> = reads
+            .windows(2)
+            .map(|pair| pair[1].duration_since(pair[0]))
+            .collect();
+        assert_eq!(
+            delays,
+            [1, 2, 0, 1, 2].map(Duration::from_secs),
+            "interruption: {interruption:?}"
+        );
+        assert_eq!(broker.lock().acknowledged, [1]);
+    }
 }

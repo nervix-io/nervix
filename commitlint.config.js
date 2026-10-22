@@ -19,7 +19,6 @@ module.exports = {
         "security",
         "revert",
         "drop",
-        "obs",
         "agent",
         "bench",
       ],

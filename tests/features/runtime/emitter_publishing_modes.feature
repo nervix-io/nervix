@@ -1,5 +1,5 @@
 Feature: Emitter publishing modes
-  @emitter_publishing_mode_canonical_roundtrip
+  @emitter_publishing_mode_canonical_roundtrip @long_running
   Scenario Outline: Every emitter publishing mode round-trips through SHOW CREATE
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -17,60 +17,60 @@ Feature: Emitter publishing modes
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY tenant_outgoing SCHEMA event BRANCHED BY by_tenant;
 
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '127.0.0.1:9092'
       };
-      CREATE CLIENT pulsar_main TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT pulsar_main CONFIG {
         'addr' = 'pulsar://127.0.0.1:6650'
       };
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
       };
-      CREATE CLIENT mqtt_main TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_main CONFIG {
         'addr' = 'mqtt://127.0.0.1:1883',
         'client_id' = 'publishing-modes-{{test_id}}'
       };
-      CREATE CLIENT nats_main TYPE NATS CONFIG {
+      CREATE NATS CLIENT nats_main CONFIG {
         'addr' = 'nats://127.0.0.1:4222'
       };
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG {
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG {
         'addr' = 'redis://127.0.0.1:6379/'
       };
-      CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT zeromq_main CONFIG {
         'addr' = 'tcp://127.0.0.1:63001',
         'bind' = 'false'
       };
-      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+      CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9324',
         'region' = 'us-east-1'
       };
-      CREATE CLIENT sentry_main TYPE SENTRY CONFIG {
+      CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = 'http://public@127.0.0.1:8000/1',
         'timeout_ms' = 5000
       };
-      CREATE CLIENT clickhouse_main TYPE CLICKHOUSE CONFIG {
+      CREATE CLICKHOUSE CLIENT clickhouse_main CONFIG {
         'addr' = 'http://127.0.0.1:8123',
         'user' = 'default',
         'password' = 'nervix'
       };
-      CREATE CLIENT postgres_main TYPE POSTGRES POOL SIZE MIN 2 MAX 8 CONFIG {
+      CREATE POSTGRES CLIENT postgres_main POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = 'postgresql://postgres:nervix@127.0.0.1:5432/postgres?sslmode=disable'
       };
-      CREATE CLIENT mysql_main TYPE MYSQL POOL SIZE MIN 2 MAX 8 CONFIG {
+      CREATE MYSQL CLIENT mysql_main POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = 'mysql://nervix:nervix@127.0.0.1:3306/nervix'
       };
-      CREATE CLIENT mongodb_main TYPE MONGODB POOL SIZE MIN 2 MAX 8 CONFIG {
+      CREATE MONGODB CLIENT mongodb_main POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = 'mongodb://127.0.0.1:27017',
         'database' = 'nervix'
       };
-      CREATE CLIENT object_store TYPE S3 CONFIG {
+      CREATE S3 CLIENT object_store CONFIG {
         'endpoint' = 'http://127.0.0.1:9000',
         'region' = 'us-east-1',
         'access_key_id' = 'test',
         'secret_access_key' = 'test',
         'path_style_access' = true
       };
-      CREATE CLIENT iceberg_catalog TYPE ICEBERG_REST CONFIG {
+      CREATE ICEBERG_REST CLIENT iceberg_catalog CONFIG {
         'uri' = 'http://127.0.0.1:8181',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
@@ -454,14 +454,14 @@ Feature: Emitter publishing modes
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY tenant_outgoing SCHEMA event BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '127.0.0.1:9092'
       };
-      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+      CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9324',
         'region' = 'us-east-1'
       };
-      CREATE CLIENT clickhouse_main TYPE CLICKHOUSE CONFIG {
+      CREATE CLICKHOUSE CLIENT clickhouse_main CONFIG {
         'addr' = 'http://127.0.0.1:8123',
         'user' = 'default',
         'password' = 'nervix'
@@ -606,7 +606,7 @@ Feature: Emitter publishing modes
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -667,7 +667,7 @@ Feature: Emitter publishing modes
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };

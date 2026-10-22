@@ -1679,7 +1679,7 @@ mod tests {
             .await
             .assured("the tracked watcher sends before entering its pending state");
 
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
 
         let dropped = timeout(ASYNC_EVENT_FAILSAFE, dropped_rx).await;
         assert!(
@@ -1694,8 +1694,7 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn ack_alive_resets_ingestor_ack_timeout() {
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let (acks, completion) = AckSet::root();
+        let (acks, mut completion) = AckSet::root();
         let ack_task = acks.clone();
 
         nervix_primitives::task::spawn(async move {
@@ -1706,15 +1705,11 @@ mod tests {
         });
 
         assert_eq!(
-            Runtime::await_ack_completion(
-                &mut shutdown_rx,
-                completion,
-                Duration::from_millis(200),
-            )
-            .await,
-            Some(AckOutcome::Ack)
+            completion
+                .wait_while_alive(Duration::from_millis(200))
+                .await,
+            AckOutcome::Ack
         );
-        drop(shutdown_tx);
     }
 
     /// A runtime attached to a loopback cluster of one node, and the dispatcher that hands out its
@@ -1752,7 +1747,7 @@ mod tests {
             dispatcher.executor.snapshot().relay_memory.reserved_bytes,
             0
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[nervix_primitives::test]
@@ -1780,7 +1775,7 @@ mod tests {
             0
         );
         acks.ack_success();
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[nervix_primitives::test]
@@ -1823,7 +1818,7 @@ mod tests {
             executor.snapshot().relay_memory.reserved_bytes,
             expected_bytes,
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0,);
         drop(roots);
     }
@@ -1860,7 +1855,7 @@ mod tests {
             1024 + 4096
         );
         acks.ack_success();
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
         assert_eq!(
             dispatcher.executor.snapshot().relay_memory.reserved_bytes,
             0
@@ -1893,8 +1888,7 @@ mod tests {
     async fn remote_ack_alive_packet_resets_ingestor_ack_timeout() {
         let (runtime, dispatcher) = joined_runtime().await;
         nervix_primitives::time::pause();
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let (acks, completion) = AckSet::root();
+        let (acks, mut completion) = AckSet::root();
         let registration = dispatcher
             .register_pending_ack(&receiving_node(), acks)
             .assured("the fixture has free correlation capacity");
@@ -1909,19 +1903,15 @@ mod tests {
         });
 
         assert_eq!(
-            Runtime::await_ack_completion(
-                &mut shutdown_rx,
-                completion,
-                Duration::from_millis(200),
-            )
-            .await,
-            Some(AckOutcome::Ack)
+            completion
+                .wait_while_alive(Duration::from_millis(200))
+                .await,
+            AckOutcome::Ack
         );
         assert!(
             !runtime.inner.remote_dispatch.holds_ack(registration.ack_id),
             "terminal ack must clear the pending remote ack"
         );
-        drop(shutdown_tx);
     }
 
     #[nervix_primitives::test]
@@ -2588,7 +2578,7 @@ mod tests {
         });
         teardown.cancelled().await;
 
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
 
         assert_eq!(
             sweeps.load(Ordering::Relaxed),

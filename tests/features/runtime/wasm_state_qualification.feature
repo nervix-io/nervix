@@ -43,7 +43,7 @@ Feature: WASM guest-state qualification across crash windows
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest',
         'session.timeout.ms' = '6000',
@@ -130,6 +130,7 @@ Feature: WASM guest-state qualification across crash windows
       | 1            | 0             | after_local_durability | "value":3            |
       | 1            | 0             | before_acknowledgement | "value":3            |
 
+  @long_running
   Scenario Outline: An owner lost inside a checkpoint window continues each branch from its replica
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "100ms"
@@ -160,7 +161,7 @@ Feature: WASM guest-state qualification across crash windows
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest',
         'session.timeout.ms' = '6000',
@@ -260,6 +261,7 @@ Feature: WASM guest-state qualification across crash windows
   # Stopping a node ends each processor task within its shutdown grace. A branch task still waiting
   # for its checkpoint when its processor task is ended is ended with it, so it cannot outlive its
   # node, keep the node's state store open, or settle acknowledgements after the node stopped.
+  @long_running
   Scenario: A cluster stopped while its owner holds a checkpoint ends the held branch with its node
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "100ms"
@@ -285,7 +287,7 @@ Feature: WASM guest-state qualification across crash windows
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest',
         'session.timeout.ms' = '6000',

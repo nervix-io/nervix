@@ -7,24 +7,25 @@ never evidence of its owner or effect.
 
 `just ratchet` runs both owners. `just validate` and `just validate-ci` require the same gate;
 formatting is applied by the former and checked by the latter. The compiler emits ordinary
-`nervix::` diagnostics. The three structural counts compare with `debt-baseline.json`; a count
+`nervix::` diagnostics. The five structural counts compare with `debt-baseline.json`; a count
 may decrease and cannot increase. `just ratchet --update` records a decrease only after the
 complete gate passes. No numeric allowance controls a semantic rule.
 
 ## Rule Contracts
 
-The fourteen rule families below have one implementation each. The family name remains useful
+The sixteen rule families below have one implementation each. The family name remains useful
 for describing its purpose; a compiler family can emit more than one diagnostic where a missing
 contract and a violated contract require different corrections.
 
 | Family | Purpose and owning fact | Allowed example | Rejected example | Enforcement and qualification |
 | --- | --- | --- | --- | --- |
-| `data_plane_lock_acquisitions` | Resolve synchronization APIs and the execution contract of their callers. [Concurrency](data-plane-concurrency.md#source-contracts) owns contexts, effects and bounds. | A task-local `HashMap::entry`; a registry acquisition with a lifecycle contract. | A recurring callback reaching a DashMap shard or a lifecycle-only helper. | Compiler `sync_acquisition`, `lifecycle_call`, `unknown_effect`; resolved receiver, helper, callback, trait, macro and expectation fixtures. |
+| `hidden_tunables` | Numeric policy belongs to a class-typed setting or an explicitly fixed constant. [Node Settings](node-settings.md) owns the classification. | One definition default; a constant with its fixed-format reason; a capacity derived from typed input. | A numeric constant or literal policy call outside that boundary. | Stable source parser; governed-type, alias, exclusion, tracked/new-source, inactive and macro controls; fixed-contract compiler fixtures and the registered bounded `typed-hidden-tunables` property. |
+| `data_plane_lock_acquisitions` | Resolve synchronization APIs and the execution contract of their callers. [Concurrency](data-plane-concurrency.md#source-contracts) owns contexts, effects and bounds. | A task-local `HashMap::entry`; a registry acquisition with a lifecycle contract. | A recurring callback reaching a DashMap shard or a lifecycle-only helper. | Compiler `sync_acquisition`, `lifecycle_call`, `unknown_effect`; resolved receiver, helper, callback, trait, foreign item, macro and expectation fixtures. |
 | `bare_error_signatures` | A Nervix failure contract carries its complete contextual report. [Errors](errors-and-diagnostics.md) owns outcome, library and foreign-interface classifications. | `Result<T, Report<DomainError>>`; an exact reason-bearing outcome contract. | An owned failure in an alias, inferred future or stream without its report. | Compiler `bare_error_signature`; associated-output, alias, inference, metadata and report-carrier fixtures. |
 | `discarded_results` | Preserve a failure or classify recovery at its consuming operation. | A propagated failure or the recovery owner's explicit `Discarded` operation. | A failed outcome discarded through a binding, projection or `drop`. | Compiler `discarded_outcome`; complete and partial-discard, borrowed, tuple and collection fixtures. |
 | `bare_unwrap_and_expect` | A canonical Option/Result panic needs a construction or checked guarantee, expressed through meticulous. | `verified` after checking the condition; an unrelated object's method named `expect`. | Canonical `unwrap` or `expect`, including aliases and UFCS. | Compiler `bare_panic`; canonical/custom methods, dereference and call-form fixtures. |
 | `model_matches_in_data_plane` | Configuration Models stay inside their owning boundary; data plane and connector engines consume plans. | A vocabulary Model or a typed connector plan. | A forbidden Model in a body, normalized interface or nested aggregate. | Compiler `model_in_data_plane`; source `layer`, `value` and `input` contracts, cross-crate and projection fixtures. |
-| `parser_imports_outside_edges` | Language dependencies belong to the language and its declared edges. | The session adapter consuming public parsing; a runtime consuming Models. | A language reference outside its authorized layer, including aliases. | Compiler `parser_dependency` plus disjoint inactive import/manifest provenance; qualified names, reexports and dependency fixtures. |
+| `parser_imports_outside_edges` | Language dependencies belong to the language and its declared edges. | The session adapter consuming public parsing; a runtime consuming Models. | A language reference outside its authorized layer, including aliases. | Compiler `parser_dependency` plus disjoint inactive import/manifest provenance; qualified names, reexports, foreign items and dependency fixtures. |
 | `data_plane_cluster_awaits` | Recurring processing retains observations instead of awaiting cluster control access. | A lifecycle observation; reading an installed immutable publication. | Recurring work awaiting a declared cluster-access capability. | Compiler `cluster_await`; direct, bound-future, helper and trait fixtures. |
 | `string_node_ids` | Declared node identities use the shared typed vocabulary. [Typed States](typed-states.md#source-owned-identity-and-installation-contracts) owns the identity contract. | `ClusterNodeId`; an ordinary string unrelated to node identity. | A declared identity interface or field represented by a string. | Compiler `node_identity`; alias, interface, aggregate, field and metadata fixtures. |
 | `write_once_rwlock_fields` | Installation-only state is an installed value rather than replaceable locked absence. | An installed value; a genuinely mutable field with its lifetime reason. | An installed field containing an RwLock, or an unclassified candidate requiring review. | Compiler `installed_state` and `state_contract`; normalized representation, lifetime, review and exception fixtures. |
@@ -33,6 +34,7 @@ contract and a violated contract require different corrections.
 | `as_casts` | Count actual Rust cast expressions, not words in imports, attributes or qualified paths. | `use Value as Alias`; `r#as`; `<Type as Trait>::item`; ordinary literals. | An expression using `as`, including a const expression nested in a qualified type. | Stable source parser; inactive cfg, raw identifiers, nested syntax, macro fragments and bounded source properties. Clippy independently denies conversions in its broader build scope. |
 | `testing_feature_struct_fields` | A product struct has one field shape rather than a shape selected by `testing`. | A test-only item, an API gate or a conditional documentation attribute. | A named or tuple struct field whose presence depends on `testing`, including a conditional `cfg` attribute. | Stable source parser; field ownership, tuple, inactive, compound-predicate and `cfg_attr` controls. Enum fields are outside this specific struct rule. |
 | `files_over_3000_lines` | Keep product and in-crate test files within a source-size bound. | At most 3,000 lines, counting a final line without a newline. | An eligible file with more than 3,000 lines. | Source discovery and physical line count; exact boundary and newly authored source tests. |
+| `functions_over_complexity_30` | Keep each function's decisions within a cyclomatic complexity of 30. At full coverage a function's CRAP score equals its complexity, so a function above 30 exceeds a CRAP threshold of 30 at any coverage. [Function complexity](#function-complexity) owns the analyzer and its limits. | A function the pinned analyzer scores at most 30; an existing function above 30 that grows, which keeps the count. | A function newly scored above 30, including one in an inactive configuration or an in-crate test file. | Pinned cargo-crap analysis over source discovery; exact 30/31 boundary, inactive configuration, macro, trait and nesting limits, eligibility, and missing, failing, other-version, skipped-source, empty, configured, undiscovered and unreadable-file fixtures. |
 
 The Option/Result adapter catalog covers `and_then`, `filter`, `map`, `map_err`, `map_or`,
 `map_or_else`, `ok_or`, `ok_or_else`, `or_else`, `unwrap_or`, `unwrap_or_default` and
@@ -59,10 +61,25 @@ must be present, current and complete. Authored macro expansion and captured cal
 provenance; generated build-directory code and external definitions are explicit exclusions.
 The compiler does not infer the APIs of code that no declared configuration compiles.
 
-Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The three
+Cargo runs the driver for each workspace target through `scripts/typed_lint_wrapper.py`, below the
+compiler wrapper the host configures. That compiler wrapper reports a compiler ended by a signal with
+the exit status of a compile error, so the driver runs as the workspace wrapper's child instead of
+replacing it. It inherits the wrapper's descriptors, Cargo's jobserver among them, and ends when the
+wrapper ends, so a compiler wrapper that stops a compilation still stops the driver. Every
+compilation leaves a compilation record in a `compilations` directory beside the reports: its exit
+status or signal, its start, duration and peak resident size, the out-of-memory kills the kernel
+counted in its cgroup while it ran, and its [host memory admission](#host-memory-admission). When
+Cargo fails, the gate names each compilation whose record holds a failure as terminated by a signal,
+failed with compiler errors, or exited without a compiler error, which means the driver itself
+failed, for example while publishing its report. A Cargo failure with no failed compilation happened
+outside them, in Cargo, a build script or the compiler wrapper. Records of an earlier run are
+discarded before Cargo starts. The kernel's out-of-memory killer ends a compilation with a signal and
+no message, which the gate reports as such instead of as a missing report.
+
+Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The five
 counts retain their product-debt scope: directory components named `tests`, `benches` or
 `examples` are excluded. In-crate `tests.rs`, `*_tests.rs` and `test_fixtures.rs` count toward
-file size but are excluded from cast/field debt. Test-only items are excluded from those two
+file size and function complexity but are excluded from cast/field debt. Test-only items are excluded from those two
 syntax counts. Other inactive configuration branches remain visible. These exclusions belong
 to these counts; they do not exempt a file from the primitive, manifest, clock or language
 provenance validators, which own their broader authored-source contracts.
@@ -79,6 +96,147 @@ The parser requires no rustc internals or analysis driver. `just typed-ratchet-s
 builds it on the stable toolchain. Native compiler coverage builds it on that producer's pinned
 toolchain so LLVM profiles and exporters match. The tooling workspace stays outside product
 dependencies, including browser and ordinary release graphs.
+
+## Hidden Tunables
+
+`hidden_tunables` counts one site for each numeric `const` item typed as `Duration`, `usize`,
+`u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`, `NonZero*` or `ByteUnit`. Associated constants
+count too. A counted initializer contributes no further policy-call sites. Names are read from
+the source type, following explicit import renames and type aliases within their lexical scope,
+independent of their declaration order.
+This syntax rule does not resolve custom types, glob imports or cross-file reexports; the
+eventual compiler rule owns those semantic facts.
+
+The count also includes a call with a numeric literal in its arguments when it constructs a
+Duration through `from_*`, chooses `with_capacity*`, a `channel` capacity (excluding a watch
+channel's initial value), `bounded` or `sync_channel`, constructs `Semaphore` or `ArrayQueue`,
+or calls `add_permits`. Numeric arithmetic inside an argument counts; a capacity supplied
+entirely by a named value does not add a call site. These names deliberately describe source
+syntax, including same-spelled custom calls; they do not claim resolved API recognition.
+Raw identifier spellings retain the same recognized type, policy call and definition owner.
+
+The shared source discovery excludes test directories and in-crate test files. This count also
+excludes `tools/`, the `arbitrary`, `benchmark`, `model-harness` and `test-environment` crates,
+test-only items and test functions. Other inactive configurations remain visible. Authored
+macro fragments use the same token substitution and parsing owner as the cast count.
+
+An exact `SettingDefinition::default_value` implementation owns its one default. A `Default`
+implementation of a nonempty struct whose fields are all `Setting<D>` owns its group defaults.
+Their bodies are outside the count; unrelated `Default` bodies and other definition methods
+remain counted. A fixed constant is excluded only with one valid
+`#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = "..."))]` annotation. The source check
+refuses invalid contracts before measuring. The compiler independently checks exact placement,
+kind, reason and duplication on compiled constants. A reason is reviewed justification, not a
+proof that the literal is fixed. No filename or per-site allowance substitutes for it.
+
+The baseline is introduced at the measured repository count and may only decrease. The area
+owners classify the counted values while preserving their existing defaults. The settings
+compiler-rule cutover removes this detector and its numeric baseline entry in the same change.
+`scripts/tests/test_ratchet.py` pins eligibility and the gate; compiler fixtures qualify the
+constant contract; the registered `typed-hidden-tunables` property checks complete source/site
+representations and every generated location in ordinary and sanitizer execution.
+
+## Host Memory Admission
+
+An analysis compilation needs about the memory of rustc's own check of its target, and the server
+library's dwarfs every other: it peaks between about 11 and 13.5 GiB in each of the ten declared
+configurations that compile it, while no other analysis compilation reaches 2 GiB. Configurations
+run one after another, and inside one the server library compiles after the crates it depends on,
+so one validation holds little more than one server analysis at a time. Validations in several
+worktrees of one host run at the same time, though, and nothing else admits them against the
+host's memory: kache, the compiler wrapper the host configures, runs a chain with a workspace
+wrapper directly, outside its own memory-weighted scheduler. Five server analyses at once exceed a
+62 GiB host, and the kernel's out-of-memory killer ends one of them.
+
+`tools/nervix-lint/configurations.toml` declares the admission: a threshold, a wait limit and a
+reservation for every compilation, by crate and target kind, that peaks above the threshold. The
+runner hands the policy to every compilation through the workspace wrapper. A compilation with a
+reservation takes a place in one queue, `/tmp/nervix-analysis-admission-<uid>`, which every worktree
+of the user shares on the host, before its driver starts, and holds it until the driver ends:
+
+- It waits while an older waiter is ahead of it. A waiter that has not decided for ten polls, such
+  as a stopped wrapper, keeps its place but no longer holds back the waiters behind it.
+- It is admitted when its reservation fits in what each memory domain it runs in has left after the
+  growth still to come of every compilation admitted in that domain. The domains are the host, with
+  the kernel's estimate of its available memory, and each ancestor cgroup with a memory limit, with
+  its limit less its usage plus its inactive file pages. An admitted compilation's growth still to
+  come is its reservation less its driver's resident size.
+- It is admitted when no other compilation is admitted, whether or not its reservation fits, so the
+  queue always progresses: with too little memory the declared compilations run one at a time. A
+  compilation admitted alone into too little memory can still be killed, and its record names the
+  kill as before.
+- It starts at the wait limit when neither happens first, so every wait is bounded. Admission never
+  fails a compilation.
+
+A place is an exclusive advisory lock on the compilation's lease file, so the kernel releases the
+place of a wrapper that ends without releasing it, and the next decision deletes its lease. Every
+decision holds the queue's lock. A waiter reports what it waits for when it starts waiting and every
+minute after: its reservation, the waiters ahead of it, each admitted compilation by crate,
+configuration, worktree and process, and the memory left. A queue that cannot be used admits
+nothing: the compilation starts at once, and its report and record name the failure. A platform
+that does not report its memory, such as one without `/proc`, runs the declared compilations one at
+a time.
+
+The admission lands in each compilation record: the reservation, the outcome (`fit`, `alone`,
+`wait_limit`, `queue_locked` when the queue's lock stayed held through the wait limit, or
+`unavailable`), the seconds waited, the memory left at the decision and the number of admitted
+compilations. The runner requires a record for every expected target Cargo compiled in the run and
+holds every record of the run to the declaration, including those of the workspace libraries a
+binary configuration compiles for its binaries: a compilation that peaks above its reservation, or
+above the threshold without one, fails the gate and names the declaration to change, so the
+reservations keep covering what the compilations use. Such a failure also discards the configuration's analysis, because Cargo
+would find the compilation fresh and the next run would measure nothing. The completion evidence
+keeps the measurements, and the runner prints each configuration's largest compilation and every
+admission that waited or did not fit.
+
+Admission covers the declared analysis compilations only. Clippy's compilations go through kache's
+own scheduler, and tests, scenario clusters and other work on the host are admitted by nothing; each
+decision sees the memory they use, not the memory they will use. The queue belongs to one user on
+one host, so separate users, containers and machines have queues of their own.
+
+## Function Complexity
+
+`functions_over_complexity_30` counts the functions whose cyclomatic complexity exceeds 30, as one
+pinned analyzer measures it: cargo-crap at the version `scripts/cargo_crap.py` declares, the same
+build the advisory CRAP report of `just check-coverage` runs. `just install-cargo-crap` builds that
+version with `cargo install --locked` into `target/tools/cargo-crap-<version>/`, through the
+compiler wrapper the host configures, and keeps a build that is already there. `just ratchet`,
+`just test-ratchet-units`, `just check-coverage`, `just test-crap-report` and
+`just coverage-crap-report-runner` depend on it, and the CI `checks`, `coverage` and `extra-tests`
+jobs build it through kache. A binary that reports another version is refused with
+the command that installs the pinned one; a different version in `PATH` is never used.
+
+The complexity is classical McCabe: one, plus one for every `if`, `for`, `while`, `loop`, `match`
+arm, `&&`, `||` and `?`. A function at exactly 30 is not counted and one at 31 is. Growing a
+function that already exceeds 30 leaves the count unchanged; a new function above 30, or one that
+crosses it, raises the count.
+
+The analyzer walks the repository root with the eligibility above. It reads syntax and expands
+nothing, so these are outside the count:
+
+- a `#[test]` function and everything inside a `#[cfg(test)]` module;
+- a function inside a macro, whether an authored `macro_rules!` body or an invoked item macro such
+  as `cfg_if!`;
+- the body of a trait's provided method;
+- a function nested in another function's body, and the decisions of a closure, which belong to
+  no reported function.
+
+Fixtures pin each limit, so a new analyzer version that changes one fails a test. Inactive
+configuration branches stay visible.
+
+Missing analysis never reads as zero debt. The count fails, naming the cause, when the pinned
+binary is missing or reports another version; when the analyzer exits with an error or writes a
+warning, which it does only for a source it could not read or parse; when it measures no function;
+when its report has another version or a `?` weight other than one; when a `.cargo-crap.toml`
+in the repository root or above it could change the analysis; when it measures a file source
+discovery does not govern, such as one in a nested repository; and when a discovered file is
+hidden, a symbolic link or tracked but ignored by Git, which the analyzer's walk would skip.
+
+`just ratchet --show functions_over_complexity_30` lists each function's file, line, name and
+complexity. The baseline holds counts rather than sites, so when a count rises the gate lists every
+site of that count and the function a change added is named among them. Decomposing a function is
+the repair. Extracting a forwarding wrapper only to move the number is the workaround
+`just lint-audit` attributes to a lowering of this count.
 
 ## Exceptions And Ownership Review
 
