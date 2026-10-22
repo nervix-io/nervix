@@ -30,6 +30,9 @@ pub(super) struct HostIntake {
     admission: QueueAdmission,
     /// Whether what the source reads while quiesced passes through the quiesce control.
     buffered: bool,
+    /// Whether the host flushes the ingest group after each payload it takes in, rather than
+    /// leaving the group to its source loop's flush.
+    flush_each_intake: bool,
 }
 
 /// The intake of a source whose loop may be held while its payload waits for the extension
@@ -37,6 +40,7 @@ pub(super) struct HostIntake {
 pub(super) const WAITING_INTAKE: HostIntake = HostIntake {
     admission: QueueAdmission::WaitForPlace,
     buffered: true,
+    flush_each_intake: true,
 };
 
 /// The intake of a source whose transport a held loop would cost its connection or unbounded
@@ -44,6 +48,15 @@ pub(super) const WAITING_INTAKE: HostIntake = HostIntake {
 const REFUSING_INTAKE: HostIntake = HostIntake {
     admission: QueueAdmission::RefuseWhenFull,
     buffered: true,
+    flush_each_intake: true,
+};
+
+/// The intake a paced source's host has: its polls wait for the extension workers, and its loop,
+/// not each intake, flushes the ingest group.
+pub(super) const PACED_INTAKE: HostIntake = HostIntake {
+    admission: QueueAdmission::WaitForPlace,
+    buffered: false,
+    flush_each_intake: false,
 };
 
 /// A running domain whose endpoint ingestor `event_source` unfolds every payload on the extension
@@ -176,7 +189,7 @@ impl UnfoldingDomain {
                 .assured("the source fixture declares one instance"),
             metadata_scope: plan.ingestor.metadata_scope(),
             buffered_intake: intake.buffered,
-            flush_each_intake: true,
+            flush_each_intake: intake.flush_each_intake,
             unacknowledged_admission: intake.admission,
             general_error_policy: plan.ingestor.general_error_policy.clone(),
         })
@@ -254,7 +267,7 @@ async fn a_poll_waits_for_the_extension_workers_when_the_node_cannot_unfold_it()
 
     let filled = FilledCpuClass::fill(&fixture.executor, CpuClass::Extension).await;
     let polled = nervix_primitives::task::spawn(async move {
-        let intake = host.intake_poll(poll_of(7)).await;
+        let intake = host.intake_poll(poll_of(7), NonZeroUsize::MIN).await;
         (host, intake)
     });
     fixture.reach_unfolding().await;
@@ -441,7 +454,7 @@ async fn the_ingestor_stopping_ends_a_poll_waiting_for_the_extension_workers() {
 
     let filled = FilledCpuClass::fill(&fixture.executor, CpuClass::Extension).await;
     let polled = nervix_primitives::task::spawn(async move {
-        let intake = host.intake_poll(poll_of(7)).await;
+        let intake = host.intake_poll(poll_of(7), NonZeroUsize::MIN).await;
         (host, intake)
     });
     fixture.reach_unfolding().await;
@@ -553,7 +566,7 @@ async fn a_poll_waiting_for_the_extension_workers_waits_on_through_a_suspending_
 
     let filled = FilledCpuClass::fill(&fixture.executor, CpuClass::Extension).await;
     let polled = nervix_primitives::task::spawn(async move {
-        let intake = host.intake_poll(poll_of(7)).await;
+        let intake = host.intake_poll(poll_of(7), NonZeroUsize::MIN).await;
         (host, intake)
     });
     fixture.reach_unfolding().await;
@@ -626,7 +639,7 @@ async fn a_new_buffering_quiesce_retains_a_poll_waiting_for_the_extension_worker
 
     let filled = FilledCpuClass::fill(&fixture.executor, CpuClass::Extension).await;
     let polled = nervix_primitives::task::spawn(async move {
-        let intake = host.intake_poll(poll_of(7)).await;
+        let intake = host.intake_poll(poll_of(7), NonZeroUsize::MIN).await;
         (host, intake)
     });
     fixture.reach_unfolding().await;
@@ -665,6 +678,7 @@ async fn a_batch_whose_source_bypasses_the_quiesce_control_waits_on_through_a_ne
             HostIntake {
                 admission: QueueAdmission::WaitForPlace,
                 buffered: false,
+                flush_each_intake: true,
             },
         )
         .await;

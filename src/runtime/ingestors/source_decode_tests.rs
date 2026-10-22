@@ -24,6 +24,10 @@ use super::{
 /// A payload the fixture's codec refuses: its `user_id` is not an integer.
 const REFUSED: &[u8] = br#"{"user_id":"seven"}"#;
 
+/// The intake batch bound that takes each poll in as one batch, so a refused message shares its
+/// batch with the messages beside it.
+const WHOLE_POLL: NonZeroUsize = NonZeroUsize::MAX;
+
 /// The report the fixture's ingestor logs for a payload its codec refused.
 const REJECTION: &str =
     "ingestor 'event_source' general error in domain 'default': decode rejection ";
@@ -204,14 +208,17 @@ async fn a_poll_its_codec_refuses_whole_enters_nothing() {
     let mut host = fixture.host(quiesce, shutdown, WAITING_INTAKE).await;
 
     let polled = host
-        .intake_poll(SourcePoll {
-            messages: vec![SourcePollMessage {
-                payload: REFUSED.to_vec(),
-                headers: RetainedIngestHeaders::none(),
-            }],
-            failures: Vec::new(),
-            observed_at: Timestamp::from_unix_nanos(1),
-        })
+        .intake_poll(
+            SourcePoll {
+                messages: vec![SourcePollMessage {
+                    payload: REFUSED.to_vec(),
+                    headers: RetainedIngestHeaders::none(),
+                }],
+                failures: Vec::new(),
+                observed_at: Timestamp::from_unix_nanos(1),
+            },
+            WHOLE_POLL,
+        )
         .await;
 
     assert!(
@@ -234,20 +241,23 @@ async fn a_poll_consumes_a_message_its_codec_refuses_and_delivers_the_rest() {
     let mut host = fixture.host(quiesce, shutdown, WAITING_INTAKE).await;
 
     let polled = host
-        .intake_poll(SourcePoll {
-            messages: vec![
-                SourcePollMessage {
-                    payload: REFUSED.to_vec(),
-                    headers: RetainedIngestHeaders::none(),
-                },
-                SourcePollMessage {
-                    payload: br#"{"user_id":9}"#.to_vec(),
-                    headers: RetainedIngestHeaders::none(),
-                },
-            ],
-            failures: Vec::new(),
-            observed_at: Timestamp::from_unix_nanos(1),
-        })
+        .intake_poll(
+            SourcePoll {
+                messages: vec![
+                    SourcePollMessage {
+                        payload: REFUSED.to_vec(),
+                        headers: RetainedIngestHeaders::none(),
+                    },
+                    SourcePollMessage {
+                        payload: br#"{"user_id":9}"#.to_vec(),
+                        headers: RetainedIngestHeaders::none(),
+                    },
+                ],
+                failures: Vec::new(),
+                observed_at: Timestamp::from_unix_nanos(1),
+            },
+            WHOLE_POLL,
+        )
         .await;
 
     assert!(

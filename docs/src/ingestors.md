@@ -1622,6 +1622,7 @@ visibility timeout ends.
 CREATE PROMETHEUS QUERY INGESTOR <name>
   FROM <client>
   (QUERY 'up')
+  [MAX BODY SIZE 16MiB]
   (EVERY 15s)
   MODE <mode>
   ON QUIESCE <quiesce>
@@ -1637,14 +1638,14 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | PROMETHEUS client |
 | Locator and validation rule | Not offered: QUERY is a PromQL expression option rather than an external entity name. |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | `QUERY 'up'` (string literal); required<br>`EVERY 15s` (duration); required |
+| Options in statement order | `QUERY 'up'` (string literal); required<br>`MAX BODY SIZE 16MiB` (byte size); optional; default 16MiB<br>`EVERY 15s` (duration); required |
 | Headers | Not offered: The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | Not offered: The current query result is decoded as payload; no separate typed query or evaluation-time metadata namespace is declared. |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | the query response: unbounded |
+| Buffers | the query response: set by MAX BODY SIZE; when exceeded, fails the poll; the next poll reads again<br>samples the host takes in as one intake batch: at most 1024 samples; when full, holds back what fills it |
 | Network waits | a query: name resolution, connection, TLS and the response: `timeout_ms`; required |
 | Driver limits | Response heads above 100 headers or 417,792 bytes are refused. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
@@ -1653,6 +1654,19 @@ See the [PROMETHEUS QUERY capability and mirror reference](connector-capabilitie
 <!-- connector-matrix:ingest-prometheus-query:end -->
 
 Prometheus samples are flattened into JSON before codec decoding.
+`MAX BODY SIZE <bytes>`, written between `QUERY` and `EVERY`, bounds how many bytes of one query
+response a poll reads; a statement that leaves it out reads at most `16MiB`. The size is a whole
+number greater than zero followed by `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`, and
+`SHOW CREATE` renders it as written. A response whose announced length or whose body exceeds the
+bound fails the poll before any of its samples is delivered: `DESCRIBE INGESTOR` shows the failure
+as the ingestor's transient error, such as `transient error: failed to read from prometheus source:
+Prometheus query response exceeds MAX BODY SIZE 16MiB`, and the next poll queries again.
+`DESCRIBE INGESTOR` prints the bound in effect, whether the statement wrote it or not, as
+`prometheus max body size: 16MiB`.
+The samples of one response enter the graph in intake batches of at most 1024 samples, and each
+batch is decoded and routed as its own group, so a large vector is never taken in as one batch of
+any size. The remaining samples wait while a batch is routed, and the next query waits until every
+sample of the current one has entered the graph.
 The first query becomes due after one `EVERY` interval. Nervix supplies each anchored due instant
 as Prometheus's evaluation time; a slow query coalesces missed occurrences and returned samples are
 evaluated with a fresh domain execution snapshot.

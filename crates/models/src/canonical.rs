@@ -50,20 +50,20 @@ use crate::{
     MqttSession, MqttSink, MqttSource, MqttTopicSink, MqttTopicSource, MySqlConflictAction,
     MySqlSink, MySqlTableSink, NamePosition, NatsIngestMode, NatsSink, NatsSource, NatsSubjectSink,
     NatsSubjectSource, OtelMappings, OtelMetricKind, OtelMetricsSink, OtelSink, OutputBranch,
-    ParseAsType, PlacementPolicy, PostgresConflictAction, PostgresSink, PostgresTableSink,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PrometheusIngestMode,
-    PrometheusQuerySource, PrometheusSource, PulsarSink, PulsarSource, PulsarTopicSink,
-    PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSink, RabbitMqQueueSource, RabbitMqSink,
-    RabbitMqSource, RangeOperator, RedisPubSubIngestMode, RedisPubSubSink, RedisPubSubSource,
-    RedisSink, RedisSource, RelayBranching, RelayName, Restore, RestoreLifecycle, RestoreMode,
-    RestoreScope, RestoreState, RetryPolicy, RouteConstruction, SchemaField, SentryEventSink,
-    SentrySink, SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-    SqsFifoGroup, SqsIngestMode, SqsQueueSink, SqsQueueSource, SqsSink, SqsSource, Statement,
-    SubscriptionLiteral, SyslogCollectorSink, SyslogIngestMode, SyslogListenerSource, SyslogSink,
-    SyslogSource, TransactionInspectionTarget, UnaryOperator, WebsocketsConnectionSource,
-    WebsocketsEndpointSource, WebsocketsIngestMode, WebsocketsSource, WindowBound,
-    WindowStateLimit, WireSchemaField, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqPushSink,
-    ZeroMqSink, ZeroMqSource,
+    ParseAsType, PayloadSizeLimit, PlacementPolicy, PostgresConflictAction, PostgresSink,
+    PostgresTableSink, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
+    PrometheusIngestMode, PrometheusQuerySource, PrometheusSource, PulsarSink, PulsarSource,
+    PulsarTopicSink, PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSink, RabbitMqQueueSource,
+    RabbitMqSink, RabbitMqSource, RangeOperator, RedisPubSubIngestMode, RedisPubSubSink,
+    RedisPubSubSource, RedisSink, RedisSource, RelayBranching, RelayName, Restore,
+    RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, RetryPolicy, RouteConstruction,
+    SchemaField, SentryEventSink, SentrySink, SignalingProtocolName, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, SqsQueueSink,
+    SqsQueueSource, SqsSink, SqsSource, Statement, SubscriptionLiteral, SyslogCollectorSink,
+    SyslogIngestMode, SyslogListenerSource, SyslogSink, SyslogSource, TransactionInspectionTarget,
+    UnaryOperator, WebsocketsConnectionSource, WebsocketsEndpointSource, WebsocketsIngestMode,
+    WebsocketsSource, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
+    ZeroMqPullSource, ZeroMqPushSink, ZeroMqSink, ZeroMqSource,
 };
 
 /// The NSPL release canonical rendering writes.
@@ -2960,6 +2960,14 @@ fn optional_instances_to_nspl(instances: NonZeroU64) -> String {
     }
 }
 
+/// ` MAX BODY SIZE <bytes>` as the statement wrote it, or nothing where it wrote no bound.
+fn optional_max_body_size_to_nspl(max_body_size: Option<PayloadSizeLimit>) -> String {
+    match max_body_size {
+        Some(limit) => format!(" MAX BODY SIZE {limit}"),
+        None => String::new(),
+    }
+}
+
 impl IngestorBodyNspl for ClientProducerSource {
     /// Its quiesce mode is always `SUSPEND`, which the grammar requires it to state.
     fn body_to_nspl(&self) -> String {
@@ -3163,6 +3171,7 @@ impl IngestorBodyNspl for PrometheusQuerySource {
         let Self {
             client,
             query,
+            max_body_size,
             every,
             mode,
             quiesce,
@@ -3171,9 +3180,10 @@ impl IngestorBodyNspl for PrometheusQuerySource {
             PrometheusIngestMode::NoAck => NO_ACK,
         };
         format!(
-            "{} QUERY {} EVERY {} MODE {} ON QUIESCE {}",
+            "{} QUERY {}{} EVERY {} MODE {} ON QUIESCE {}",
             client.as_str(),
             string_literal(query),
+            optional_max_body_size_to_nspl(*max_body_size),
             duration_literal(every.as_nanos()),
             mode,
             ingest_quiesce_to_nspl(quiesce)
@@ -5521,6 +5531,7 @@ mod tests {
                     decoded(PrometheusQuerySource {
                         client: named("prom_main"),
                         query: "rate(orders_total[5m])".to_string(),
+                        max_body_size: None,
                         every: every("15s"),
                         mode: PrometheusIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Suspend,
@@ -5528,6 +5539,25 @@ mod tests {
                 ),
                 "CREATE PROMETHEUS QUERY INGESTOR prom_ingestor\n  FROM prom_main QUERY \
                  'rate(orders_total[5m])' EVERY 15s MODE NO ACK ON QUIESCE SUSPEND",
+            ),
+            (
+                orders_ingestor(
+                    "bounded_prom_ingestor",
+                    decoded(PrometheusQuerySource {
+                        client: named("prom_main"),
+                        query: "up".to_string(),
+                        max_body_size: Some(
+                            "4MB"
+                                .parse()
+                                .assured("the fixture size is a whole number of megabytes"),
+                        ),
+                        every: every("15s"),
+                        mode: PrometheusIngestMode::NoAck,
+                        quiesce: crate::IngestQuiesceMode::Suspend,
+                    }),
+                ),
+                "CREATE PROMETHEUS QUERY INGESTOR bounded_prom_ingestor\n  FROM prom_main QUERY \
+                 'up' MAX BODY SIZE 4MB EVERY 15s MODE NO ACK ON QUIESCE SUSPEND",
             ),
             (
                 orders_ingestor(
