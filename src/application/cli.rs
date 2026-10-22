@@ -17,6 +17,8 @@ mod diagnostics;
 mod membership;
 mod memory_pressure;
 mod node;
+#[cfg(test)]
+mod properties;
 mod resources;
 mod runtime;
 mod scheduling;
