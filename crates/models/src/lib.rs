@@ -55,6 +55,7 @@ mod restore;
 mod schedule;
 mod schema;
 mod schema_fingerprint;
+mod settings;
 mod statement;
 mod timestamp;
 mod udf;
@@ -134,11 +135,11 @@ pub use connector::{
     OptionPresence, OptionValue, OtelAggregationTemporality, OtelConfigEntry, OtelEmitterMode,
     OtelLogsPublishingMode, OtelLogsSink, OtelMappings, OtelMetric, OtelMetricKind,
     OtelMetricsPublishingMode, OtelMetricsSink, OtelScope, OtelSink, OtelSinkEntity,
-    OtelTracesPublishingMode, OtelTracesSink, OtelValueMapping, PositionClass, PostgresConfigEntry,
-    PostgresConflictAction, PostgresEmitterMode, PostgresSink, PostgresSinkEntity,
-    PostgresTableName, PostgresTablePublishingMode, PostgresTableSink, PostgresValueMapping,
-    PrometheusApiRoot, PrometheusApiRootError, PrometheusClientConfigError, PrometheusClientKey,
-    PrometheusConfigEntry, PrometheusIngestMode, PrometheusIngestorAlteration,
+    OtelTracesPublishingMode, OtelTracesSink, OtelValueMapping, PROMETHEUS_DEFAULT_MAX_BODY_SIZE,
+    PositionClass, PostgresConfigEntry, PostgresConflictAction, PostgresEmitterMode, PostgresSink,
+    PostgresSinkEntity, PostgresTableName, PostgresTablePublishingMode, PostgresTableSink,
+    PostgresValueMapping, PrometheusApiRoot, PrometheusApiRootError, PrometheusClientConfigError,
+    PrometheusClientKey, PrometheusConfigEntry, PrometheusIngestMode, PrometheusIngestorAlteration,
     PrometheusQuerySource, PrometheusSource, PrometheusSourceEntity, PropertyDeclaration,
     PulsarConfigEntry, PulsarEmitterMode, PulsarIngestMode, PulsarIngestorAlteration, PulsarSink,
     PulsarSinkEntity, PulsarSource, PulsarSourceEntity, PulsarSubscription, PulsarSubscriptionName,
@@ -177,7 +178,7 @@ pub use emitter::{
 };
 pub use emitter_batch::{
     BatchMessageLimit, BatchUnavailability, ByteSizeUnit, EmitterBatchLegality,
-    EmitterBatchLimitError, EmitterBatchPolicy, PayloadSizeLimit,
+    EmitterBatchLimitError, EmitterBatchPolicy, PayloadSizeError, PayloadSizeLimit,
 };
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
@@ -278,6 +279,9 @@ pub use schema::{
     WireSchemaField, WireSchemaStrictness,
 };
 pub use schema_fingerprint::SchemaFingerprint;
+pub use settings::{
+    ClusterParameters, NodeCapabilities, Prerequisites, Setting, SettingClass, SettingDefinition,
+};
 pub use statement::{
     AckWindow, AlterDomain, AlterGenerator, AlterGeneratorError, AlterGeneratorOperation,
     AlterIngestor, AlterIngestorError, AlterIngestorOperation, AlterPlacement, AlterPlacementError,

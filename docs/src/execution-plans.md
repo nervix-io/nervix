@@ -84,6 +84,11 @@ plan into connector configuration without normalization. Iceberg resolves its co
 client into the S3, GCS or Azure Blob backend while constructing this plan; the runtime receives
 that resolved backend and never infers it from the statement or location.
 
+Kafka source installation also binds the node-owned executor into the connector plan. Partition
+inspectors used by scheduling and the host's partition watch use that same node executor. The
+connector interprets the effective native client deadline and admits its synchronous driver calls;
+the decision layer neither opens a consumer nor selects a worker backend.
+
 The tables describe distinct decisions in one revision, not independently selectable runtime
 configurations. Every node, including one placed elsewhere, is planned from the same domain
 schedule. This lets a local owner, its replicas, a remote relay consumer, and a future owner

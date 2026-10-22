@@ -304,6 +304,9 @@ impl SourceHostServices for ChannelHost {
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a channel source without positions discarded {positions} after a reconnect");
     }
+    fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+        panic!("a channel source whose payloads all fit dropped {payloads} for their size");
+    }
     fn record_unconfirmed_stop(&self, positions: usize) {
         panic!("a channel source without positions left {positions} unconfirmed");
     }
@@ -311,7 +314,12 @@ impl SourceHostServices for ChannelHost {
 
 #[async_trait]
 impl PacedSourceHostServices for ChannelHost {
-    async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
+    /// The channel double takes in a whole poll at once: the checks drive polls of one message.
+    async fn intake_poll(
+        &mut self,
+        poll: SourcePoll,
+        _intake_batch: NonZeroUsize,
+    ) -> SourceIntakeResult<bool> {
         let mut messages = Vec::with_capacity(poll.messages.len());
         for message in &poll.messages {
             nervix_primitives::task::consume_budget().await;
@@ -433,6 +441,7 @@ fn engagement_during_dispatch(family: SourceFamily, cause: IngestorQuiesceCause)
                 ChannelCadence {
                     due: cadence_receiver,
                 },
+                NonZeroUsize::MIN,
                 shutdown_rx,
             )),
             SourceFamily::Request => nervix_primitives::task::spawn(run_request_source(
@@ -807,6 +816,9 @@ impl SourceHostServices for GraphHost {
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a replayable check source discarded {positions} positions after a reconnect");
     }
+    fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+        panic!("a check source whose payloads all fit dropped {payloads} for their size");
+    }
     fn record_unconfirmed_stop(&self, positions: usize) {
         panic!("the check's source closes on its own, but {positions} positions were left");
     }
@@ -1025,6 +1037,9 @@ impl SourceHostServices for RefusingGraphHost {
     }
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a replayable check source discarded {positions} positions after a reconnect");
+    }
+    fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+        panic!("a check source whose payloads all fit dropped {payloads} for their size");
     }
     fn record_unconfirmed_stop(&self, positions: usize) {
         panic!("the check's source closes on its own, but {positions} positions were left");

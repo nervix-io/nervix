@@ -143,9 +143,11 @@ fn source_surface(kind: IngestSourceKind) -> SourceSurface {
             locator: Some(("CHANNEL", "redis_channel")),
             options: &[],
         },
-        IngestSourceKind::Prometheus(PrometheusSourceEntity::Query) => {
-            unlocated(NO_ACK, POLLING, &[("QUERY", true), ("EVERY", true)])
-        }
+        IngestSourceKind::Prometheus(PrometheusSourceEntity::Query) => unlocated(
+            NO_ACK,
+            POLLING,
+            &[("QUERY", true), ("MAX BODY SIZE", false), ("EVERY", true)],
+        ),
         IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull)
         | IngestSourceKind::Syslog(SyslogSourceEntity::Listener) => {
             unlocated(NO_ACK, FLEXIBLE, &[])

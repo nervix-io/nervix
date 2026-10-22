@@ -62,6 +62,7 @@ fn option_value(value: OptionValue) -> String {
         OptionValue::Mapping => "named expressions".to_owned(),
         OptionValue::Client(connector) => format!("{connector} client"),
         OptionValue::Clause => "composed clause".to_owned(),
+        OptionValue::Size => "byte size".to_owned(),
     }
 }
 
@@ -231,6 +232,7 @@ fn buffer_bound(bound: BufferBound) -> String {
         BufferOverflow::RefuseRequest => {
             "when full, immediately refuses the request for its sender to retry"
         }
+        BufferOverflow::FailPoll => "when exceeded, fails the poll; the next poll reads again",
     };
     format!("{capacity}; {overflow}")
 }

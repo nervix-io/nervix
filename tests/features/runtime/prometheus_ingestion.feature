@@ -324,3 +324,100 @@ Feature: Prometheus ingestion
       | cluster_size |
       | 1            |
       | 3            |
+
+  @prometheus_body_bound
+  Scenario Outline: A Prometheus response above the ingestor's MAX BODY SIZE fails the poll
+    Given the HTTP mock server is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA bulk_sample ( source STRING, index STRING, value F64, timestamp STRING );
+      CREATE WIRE JSON SCHEMA bulk_sample_wire MODE STRICT ( source string, index string, value number, timestamp string );
+      CREATE CODEC bulk_sample_codec FROM WIRE JSON SCHEMA bulk_sample_wire TO SCHEMA bulk_sample;
+      CREATE RELAY samples SCHEMA bulk_sample UNBRANCHED;
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = '{{mock_http_addr}}/prometheus-vector/{{test_id}}/100/always',
+        'timeout_ms' = 5000
+      };
+      """
+    When these Plexus statements fail with "MAX BODY SIZE must be greater than zero"
+      """
+      CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'bulk' MAX BODY SIZE 0B EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING bulk_sample_codec
+        TO samples INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'bulk' MAX BODY SIZE 1KiB EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING bulk_sample_codec
+        TO samples INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      SHOW CREATE INGESTOR prom_samples;
+      """
+    Then the last command output contains
+      """
+      QUERY 'bulk' MAX BODY SIZE 1KiB EVERY 1s
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "prom_samples" on the leader node contains
+      """
+      transient error: failed to read from prometheus source: Prometheus query response exceeds MAX BODY SIZE 1KiB
+      """
+    And the last command output contains
+      """
+      prometheus max body size: 1KiB
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # MAX BATCH SIZE 1B flushes every route input on its own, so each relay batch the ingestor sends is
+  # exactly one ingest group: the count of batches is the count of intake batches.
+  @prometheus_intake_batches
+  Scenario Outline: A Prometheus vector arrives in intake batches of at most 1024 samples, each sample once
+    Given the HTTP mock server is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA bulk_sample ( source STRING, index STRING, value F64, timestamp STRING );
+      CREATE WIRE JSON SCHEMA bulk_sample_wire MODE STRICT ( source string, index string, value number, timestamp string );
+      CREATE CODEC bulk_sample_codec FROM WIRE JSON SCHEMA bulk_sample_wire TO SCHEMA bulk_sample;
+      CREATE RELAY samples SCHEMA bulk_sample UNBRANCHED;
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = '{{mock_http_addr}}/prometheus-vector/{{test_id}}/50000/once',
+        'timeout_ms' = 5000
+      };
+      CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'bulk' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING bulk_sample_codec
+        TO samples INHERIT ALL UNBRANCHED
+        FLUSH EACH 1h MAX BATCH SIZE 1B ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "60s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "samples" across physical nodes totals 50000
+    And within "30s" DESCRIBE DOMAIN section "input_output" metric "batches_total" "sent" relay "samples" across physical nodes totals 49
+    And within "30s" DESCRIBE INGESTOR "prom_samples" on the leader node contains
+      """
+      prometheus max body size: 16MiB
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

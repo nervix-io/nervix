@@ -485,6 +485,7 @@ pub struct IngestorDescribeEnvelope {
     pub transport_redeliveries_total: u64,
     pub decode_rejections_total: u64,
     pub last_decode_rejection: Option<DecodeRejectionEnvelope>,
+    pub oversized_payloads_total: u64,
     pub memory_backpressure_paused: bool,
     pub transient_error: Option<String>,
     pub reconnect_backoff: Option<String>,

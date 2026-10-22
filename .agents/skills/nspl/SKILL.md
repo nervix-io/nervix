@@ -405,12 +405,16 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   the lazy connection, and the configured hostname remains the HTTPS certificate name. A DNS
   outage follows the emitter's declared retry policy.
 - Client deadline keys mean the same thing everywhere: `timeout_ms` bounds a whole request,
-  name resolution, connection and TLS included, and `connect_timeout_ms` bounds establishing a
-  connection, the protocol handshake included. RabbitMQ, Redis, Syslog emitter, ZeroMQ emitter and
-  WebSocket clients take `connect_timeout_ms` and allow 30 seconds without it, while a ZeroMQ PULL
-  ingestor reads neither key; a RabbitMQ client's
-  deadline also covers the AMQP handshake and opening the entity's channel, and its `timeout_ms`
-  bounds the round trip that ends a `NO ACK` write. Read `Ingestors` or
+  name resolution, connection and TLS included, `connect_timeout_ms` bounds establishing a
+  connection, the protocol handshake included, and `idle_timeout_ms` bounds how long a connection
+  may carry nothing while its connector waits to read. RabbitMQ, Redis, Syslog emitter, ZeroMQ
+  emitter and WebSocket clients take `connect_timeout_ms` and allow 30 seconds without it, while a
+  ZeroMQ PULL ingestor reads none of these keys; a RabbitMQ client's deadline also covers the AMQP
+  handshake and opening the entity's channel, and its `timeout_ms` bounds the round trip that ends
+  a `NO ACK` write. A Syslog emitter's client bounds each frame write by `timeout_ms`; a TLS Syslog
+  listener's client bounds each accepted handshake by `connect_timeout_ms`, 30 seconds without it,
+  and a TCP or TLS listener's client may close idle connections with `idle_timeout_ms`. Put each
+  key only on a client whose direction performs the wait it bounds. Read `Ingestors` or
   `Emitters` → `Client Deadlines`, and `Connector Capabilities` for each entity's waits and what
   bounds them.
 - For an HTTP emitter, write `CREATE HTTP REQUEST EMITTER <name> FROM <relay> TO <client> METHOD <string_expression> PATH

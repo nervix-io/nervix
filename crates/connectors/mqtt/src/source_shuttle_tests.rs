@@ -140,6 +140,9 @@ fn a_cancelled_read_hands_over_every_publish_the_broker_delivered(
         let (mut handed_over, interrupted) = match batch {
             SourceBatch::Messages(messages) => (ids(&messages), false),
             SourceBatch::Interrupted { gathered } => (ids(&gathered), true),
+            SourceBatch::Oversized { payloads } => {
+                panic!("an MQTT read drops no publish for its size, yet it dropped {payloads}")
+            }
             SourceBatch::ResumeRequired | SourceBatch::Closed => {
                 panic!("a read from a connection neither resumes nor closes")
             }

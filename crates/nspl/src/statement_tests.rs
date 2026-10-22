@@ -1480,6 +1480,22 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
         None,
         &[]
     )]
+#[case::prometheus_ingestor_bounds_its_response(
+        r#"
+            CREATE PROMETHEUS QUERY INGESTOR prom_samples
+                FROM prom_main
+                QUERY 'up'
+                MAX BODY SIZE 4MiB
+                EVERY 15s
+                MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
+                TO samples UNBRANCHED
+                    FLUSH IMMEDIATE
+                    ON MESSAGE ERROR LOG
+                ON GENERAL ERROR LOG;
+        "#,
+        None,
+        &["QUERY 'up' MAX BODY SIZE 4MiB EVERY 15s"]
+    )]
 #[case::prometheus_ingestor(
         r#"
             CREATE PROMETHEUS QUERY INGESTOR prom_samples

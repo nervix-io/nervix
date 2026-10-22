@@ -1830,12 +1830,101 @@ mod tests {
                 client: nervix_models::ClientName::try_from("prom_main")
                     .expect("valid client identifier"),
                 query: r#"label_replace(vector(42.5), "source", "local", "", "")"#.to_string(),
+                max_body_size: None,
                 every: "15s"
                     .parse()
                     .assured("the fixture cadence is a positive duration"),
                 mode: PrometheusIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             }))
+        );
+    }
+
+    #[test]
+    fn a_prometheus_query_bounds_its_response_between_query_and_every() {
+        let parsed = parse_create_ingestor(&ingestor_with_source(
+            "PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' max body size 4mib EVERY 15s MODE NO \
+             ACK ON QUIESCE SUSPEND",
+        ))
+        .expect("a positive whole size between QUERY and EVERY parses");
+        let IngestSource::Prometheus(PrometheusSource::Query(source)) = &transport(&parsed).source
+        else {
+            panic!("the head names a Prometheus query");
+        };
+
+        assert_eq!(
+            source.max_body_size,
+            Some(
+                "4MiB"
+                    .parse()
+                    .assured("the fixture size is a whole number of mebibytes")
+            )
+        );
+    }
+
+    #[test]
+    fn a_prometheus_response_bound_is_a_positive_whole_size_written_before_every() {
+        for (body, diagnostic) in [
+            (
+                "QUERY 'up' MAX BODY SIZE 0B EVERY 15s",
+                "MAX BODY SIZE must be greater than zero",
+            ),
+            (
+                "QUERY 'up' MAX BODY SIZE 1.5MiB EVERY 15s",
+                "MAX BODY SIZE '1.5MiB' must be a whole number",
+            ),
+            (
+                "QUERY 'up' MAX BODY SIZE 16777216TiB EVERY 15s",
+                "MAX BODY SIZE '16777216TiB' exceeds the largest size",
+            ),
+            ("QUERY 'up' MAX BODY SIZE EVERY 15s", "byte_size_literal"),
+            ("QUERY 'up' MAX BODY 4MiB EVERY 15s", "SIZE"),
+            ("QUERY 'up' EVERY 15s MAX BODY SIZE 4MiB", "found MAX"),
+            ("MAX BODY SIZE 4MiB QUERY 'up' EVERY 15s", "QUERY"),
+        ] {
+            let source = ingestor_with_source(&format!(
+                "PROMETHEUS QUERY INGESTOR i FROM c {body} MODE NO ACK ON QUIESCE SUSPEND"
+            ));
+            let error = parse_create_ingestor(&source).expect_err("the bound must be refused");
+
+            assert!(
+                format!("{error:?}").contains(diagnostic),
+                "expected `{diagnostic}` for `{body}`, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prometheus_completion_offers_the_response_bound_once_before_every() {
+        let after_query = "CREATE PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' ";
+        let suggestions = suggest_create_ingestor(after_query, after_query.len());
+        assert!(
+            suggestions.contains(&"MAX BODY SIZE".to_string()),
+            "{suggestions:?}"
+        );
+        assert!(
+            suggestions.contains(&"EVERY".to_string()),
+            "{suggestions:?}"
+        );
+        assert!(!suggestions.contains(&"MAX".to_string()), "{suggestions:?}");
+
+        let after_bound =
+            "CREATE PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' MAX BODY SIZE 4MiB ";
+        let suggestions = suggest_create_ingestor(after_bound, after_bound.len());
+        assert_eq!(suggestions, vec!["EVERY".to_string()]);
+
+        let after_every = "CREATE PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' EVERY 15s ";
+        let suggestions = suggest_create_ingestor(after_every, after_every.len());
+        assert!(
+            !suggestions.contains(&"MAX BODY SIZE".to_string()),
+            "{suggestions:?}"
+        );
+
+        let http = "CREATE HTTP REQUEST INGESTOR i FROM c ";
+        let suggestions = suggest_create_ingestor(http, http.len());
+        assert!(
+            !suggestions.contains(&"MAX BODY SIZE".to_string()),
+            "the HTTP polling body declares no response bound yet: {suggestions:?}"
         );
     }
 
