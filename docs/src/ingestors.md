@@ -1657,23 +1657,31 @@ Prometheus samples are flattened into JSON before codec decoding.
 `MAX BODY SIZE <bytes>`, written between `QUERY` and `EVERY`, bounds how many bytes of one query
 response a poll reads; a statement that leaves it out reads at most `16MiB`. The size is a whole
 number greater than zero followed by `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`, and
-`SHOW CREATE` renders it as written. A response whose announced length or whose body exceeds the
-bound fails the poll before any of its samples is delivered: `DESCRIBE INGESTOR` shows the failure
-as the ingestor's transient error, such as `transient error: failed to read from prometheus source:
-Prometheus query response exceeds MAX BODY SIZE 16MiB`, and the next poll queries again.
-`DESCRIBE INGESTOR` prints the bound in effect, whether the statement wrote it or not, as
-`prometheus max body size: 16MiB`.
+`SHOW CREATE` renders it in the unit it was written in. The bound counts the bytes of the
+response's JSON: a response the server compressed is counted as it is decompressed, so the bound
+limits the JSON a poll reads rather than the size of its transfer. A response whose announced
+length or whose body exceeds the bound fails the poll before any of its samples is delivered:
+`DESCRIBE INGESTOR` shows the failure as the ingestor's transient error, such as `transient error:
+failed to read from prometheus source: Prometheus query response exceeds MAX BODY SIZE 16MiB`, and
+the next poll queries again. `DESCRIBE INGESTOR` prints the bound in effect, whether the statement
+wrote it or not, as `prometheus max body size: 16MiB`. `SET FROM` replaces the whole body, so an
+`ALTER PROMETHEUS QUERY INGESTOR` whose new body leaves `MAX BODY SIZE` out reads at most `16MiB`
+again.
 The samples of one response enter the graph in intake batches of at most 1024 samples, and each
 batch is decoded and routed as its own group, so a large vector is never taken in as one batch of
 any size. The remaining samples wait while a batch is routed, and the next query waits until every
-sample of the current one has entered the graph.
+sample of the current one has entered the graph or, while a `BUFFER` quiesce holds the ingestor,
+has been handed to its buffer.
 The first query becomes due after one `EVERY` interval. Nervix supplies each anchored due instant
 as Prometheus's evaluation time; a slow query coalesces missed occurrences and returned samples are
 evaluated with a fresh domain execution snapshot.
 `SUSPEND` skips scrapes and leaves a sampling gap. `BUFFER` keeps querying at the declared cadence
-and delivers retained results in order after resume. A scrape whose `ON INGESTION` unfolding finds
-the node's extension workers full waits for them; see
-[When The Extension Workers Are Full](#when-the-extension-workers-are-full).
+and delivers retained results in order after resume. It retains each intake batch as one payload:
+`MAX SIZE` counts the bytes of its samples' JSON, `ON OVERFLOW` drops whole batches, and
+`nervix_ingestor_quiesce_buffered_records` and `nervix_ingestor_quiesce_dropped_total` count
+batches rather than samples. On resume, each retained batch enters the graph as an ingest group of
+its own, oldest first. A scrape whose `ON INGESTION` unfolding finds the node's extension workers
+full waits for them; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
 
 The ingestor reads through a `PROMETHEUS CLIENT`. Every key of its `CONFIG` is Nervix's own:
 
