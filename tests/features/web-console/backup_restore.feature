@@ -293,6 +293,7 @@ Feature: Web console backup and restore
     And selector ".prompt-row input" is pressed with "Enter" and the web console's download is saved as backup archive "typed.nvxb"
     Then selector ".backup-status" contains "downloaded 'typed.nvxb'"
     And selector ".terminal" contains "BACKUP DOMAIN {{domain}} TO 'typed.nvxb';"
+    And selector ".terminal" contains "backed up domain '{{domain}}'" exactly 1 times
     And selector ".terminal" contains "archive downloaded as 'typed.nvxb'"
     When selector ".prompt-row input" is filled with "RESTORE DOMAIN {{domain}} AS {{domain}}_typed FROM 'typed.nvxb';"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -303,8 +304,56 @@ Feature: Web console backup and restore
     Then selector ".restore-status" contains "dry run planned"
     When selector ".restore-submit" is clicked
     Then selector ".restore-status" contains "restored"
-    And selector ".terminal" contains "connected to leader '{{leader}}'" exactly 1 times
-    And selector ".terminal" does not contain "redirected"
+    And the web console never held two session connections at once
+    And the web console's session reached node "{{follower}}" until it was redirected to node "{{leader}}"
+    And the web console's backup downloads and restores reached node "{{leader}}"
+    When these NSPL commands are executed on the leader node
+      """
+      LIST DOMAINS;
+      """
+    Then the last command output contains
+      """
+      {{domain}}_typed pace=UNPACED status=STOPPED
+      """
+
+  @console_backup_shared_session
+  Scenario: The REPL's backup keeps one console session and its leader redirect when the session's connection is lost
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA item ( id I64 );
+      CREATE RELAY items SCHEMA item UNBRANCHED;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "follower"
+    When the web console is opened on node "{{follower}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".terminal" contains "connected to leader '{{leader}}'"
+    Given command response delivery on node "{{leader}}" pauses after execution
+    And the web console's next download is expected as backup archive "typed.nvxb"
+    When selector ".prompt-row input" is filled with "BACKUP DOMAIN {{domain}} TO 'typed.nvxb';"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the command response delivery pause on node "{{leader}}" is reached
+    When the web console loses its session connection
+    And the command response delivery pause on node "{{leader}}" is released
+    Then the web console's session reconnects to node "{{leader}}"
+    And the web console's expected download is saved
+    And selector ".backup-status" contains "downloaded 'typed.nvxb'"
+    And selector ".terminal" contains "backed up domain '{{domain}}'" exactly 1 times
+    And selector ".terminal" contains "archive downloaded as 'typed.nvxb'"
+    When selector ".prompt-row input" is filled with "RESTORE DOMAIN {{domain}} AS {{domain}}_typed FROM 'typed.nvxb';"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".restore-status" contains "choose the archive"
+    When selector ".restore-file" is given backup archive "typed.nvxb"
+    And selector ".restore-dry-run" is clicked
+    Then selector ".restore-status" contains "dry run planned"
+    When selector ".restore-submit" is clicked
+    Then selector ".restore-status" contains "restored"
+    And the web console never held two session connections at once
+    And the web console's session reached node "{{follower}}" until it was redirected to node "{{leader}}"
+    And the web console's backup downloads and restores reached node "{{leader}}"
     When these NSPL commands are executed on the leader node
       """
       LIST DOMAINS;
