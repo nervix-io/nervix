@@ -1822,6 +1822,11 @@ the existing 360-second teardown reserve. The baseline lifecycle process retains
 bound, and every invocation shares the selection's unchanged 4,800-second workload budget. The
 inventory checks require the baseline and endpoint groups to be disjoint and account for every
 registered example; this partition changes no product deadline or ordinary scenario concurrency.
+The six transaction-retention examples carry `@deloxide_stress_transaction_retention` in the
+separate serial `stress-transaction-retention` invocation, with the same 900-second process bound
+and 360-second teardown reserve. This phase runs before the baseline lifecycle process and shares
+the selection workload budget. Inventory checks cover all three disjoint lifecycle groups and
+their complete correspondence with the active-only workloads.
 The restore selection runs the build's probes and its `stress-restore-scenarios` invocation of the
 scenarios tagged `@deloxide_stress_restore`: backup capture and restore of WASM branches, Kafka
 offsets, deduplicator keys and windows, materialized relays and native metadata, complete restore
@@ -1999,6 +2004,14 @@ modeled configurations retain their own feature selections. A record is a review
 the lane's coverage report is evidence about it, not a proof of ownership. Format
 equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
 counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
+
+The command transaction retention workloads reach tracked consensus state and report ownership
+while cleanup runs with an execution held before finalization. Ordinary and stressed cases cover
+one- and three-node retention, followed by cleanup after finalization, and three-node leadership
+recovery after the transaction's configured age. Their asynchronous barriers, proposals, leader
+observations and transport waits remain outside Deloxide; the public outcomes and direct
+state-machine regressions cover the retention decision. No synchronization protocol or memory
+ordering changes at this boundary.
 
 The WebSocket source lifecycle workloads drop an ingestor, move its owner and recover from repeated
 peer closes. Their ordinary and stressed selections reach tracked quiesce, schedule and teardown
