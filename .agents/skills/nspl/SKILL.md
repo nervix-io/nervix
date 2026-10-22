@@ -100,8 +100,8 @@ Build configuration in dependency order:
    wrote; an uncompilable candidate module rejects the whole rebinding with every binding and its
    saved state still in place.
 3. Define internal schemas, branch-key schemas, branches, wire schemas, and codecs.
-4. Define clients, signaling protocols, virtual hosts/endpoints, lookup models, and trusted Roto
-   UDFs as needed.
+4. Define clients with a `<CONNECTOR> CLIENT` head, such as `CREATE KAFKA CLIENT`. Define signaling
+   protocols, virtual hosts/endpoints, lookup models, and trusted Roto UDFs as needed.
 5. Define relays before nodes that read or write them.
 6. Define ingestors, processors, generators, and emitters in graph order.
 7. Define placement rules after every referenced runtime node, including each relay, exists.
@@ -407,12 +407,16 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   the lazy connection, and the configured hostname remains the HTTPS certificate name. A DNS
   outage follows the emitter's declared retry policy.
 - Client deadline keys mean the same thing everywhere: `timeout_ms` bounds a whole request,
-  name resolution, connection and TLS included, and `connect_timeout_ms` bounds establishing a
-  connection, the protocol handshake included. RabbitMQ, Redis, Syslog emitter, ZeroMQ emitter and
-  WebSocket clients take `connect_timeout_ms` and allow 30 seconds without it, while a ZeroMQ PULL
-  ingestor reads neither key; a RabbitMQ client's
-  deadline also covers the AMQP handshake and opening the entity's channel, and its `timeout_ms`
-  bounds the round trip that ends a `NO_ACK` write. Read `Ingestors` or
+  name resolution, connection and TLS included, `connect_timeout_ms` bounds establishing a
+  connection, the protocol handshake included, and `idle_timeout_ms` bounds how long a connection
+  may carry nothing while its connector waits to read. RabbitMQ, Redis, Syslog emitter, ZeroMQ
+  emitter and WebSocket clients take `connect_timeout_ms` and allow 30 seconds without it, while a
+  ZeroMQ PULL ingestor reads none of these keys; a RabbitMQ client's deadline also covers the AMQP
+  handshake and opening the entity's channel, and its `timeout_ms` bounds the round trip that ends
+  a `NO_ACK` write. A Syslog emitter's client bounds each frame write by `timeout_ms`; a TLS Syslog
+  listener's client bounds each accepted handshake by `connect_timeout_ms`, 30 seconds without it,
+  and a TCP or TLS listener's client may close idle connections with `idle_timeout_ms`. Put each
+  key only on a client whose direction performs the wait it bounds. Read `Ingestors` or
   `Emitters` → `Client Deadlines`, and `Connector Capabilities` for each entity's waits and what
   bounds them.
 - For an HTTP emitter, write `TO HTTP <client> METHOD <string_expression> PATH
@@ -458,7 +462,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   is resolved when the statement is applied, and the stored hash map and `SHOW CREATE HASH MAP`
   contain the resulting number.
 - Declare connection-pool bounds on every `POSTGRES`, `MYSQL`, `MONGODB`, and `REDIS` client, after
-  `TYPE` and before an optional `MOUNT`: `POOL SIZE MIN <u32> MAX <positive_u32>`, in that order,
+  the client name and before an optional `MOUNT`: `POOL SIZE MIN <u32> MAX <positive_u32>`, in that order,
   with the minimum no greater than the maximum. The clause is required even when only ingestors
   reference the client, and no other client type accepts it. Never put pool sizing in connector
   `CONFIG` or an address query parameter. One pool serves every local user of a named client on one
@@ -562,7 +566,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   singleton wire schema directly with `FROM SYSLOG`, keep the format independent of the UDP/TCP/TLS
   client transport, and use only the documented `SYSLOG LISTENER INGESTOR ... MODE NO ACK` source
   and `NO_ACK` sink forms.
-- For a Sentry sink, reference a `TYPE SENTRY` client containing the project DSN and use a codec
+- For a Sentry sink, reference a `SENTRY CLIENT` containing the project DSN and use a codec
   that emits one Sentry event JSON object per record. Do not add header writes to the Sentry route.
 - List topics, queues, streams, tables, buckets, catalogs, namespaces, collections, and other
   external prerequisites separately. Nervix does not create them as a side effect of starting a

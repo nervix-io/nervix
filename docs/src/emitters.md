@@ -230,7 +230,7 @@ counters remain on that node across emitter restarts.
 The [HTTP Emitter Architecture](./http-emitter-architecture.md) chapter follows the validated
 request through host preparation, the connector, retry, lifecycle and qualification evidence.
 
-An HTTP emitter uses an existing `TYPE HTTP` client and declares the request method, path and body
+An HTTP emitter uses an existing `HTTP CLIENT` and declares the request method, path and body
 selection in this order:
 
 <!-- connector-matrix:emit-http-request:start -->
@@ -276,7 +276,7 @@ See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md
 the expression. `MODE ACK` has no acknowledgement window or `ACK TIMEOUT`, and `NO_ACK` is not
 available. The ordinary route-local `FLUSH` clause is required.
 
-The referenced client must be a `TYPE HTTP` client in the same domain. Its `endpoint` is an
+The referenced client must be a `HTTP CLIENT` in the same domain. Its `endpoint` is an
 `http://` or `https://` origin with a host and optional port, and no credentials, non-root path,
 query or fragment. It requires a positive, schedulable `timeout_ms`; the client's polling `method`
 setting does not supply the emitter's `METHOD`. HTTPS retains certificate and hostname verification.
@@ -311,7 +311,7 @@ tenant header and a JSON body of two of its fields, and the second deletes witho
 `api.example.com` stands for an endpoint the operator has already provisioned.
 
 ```nspl
-CREATE CLIENT api TYPE HTTP CONFIG {
+CREATE HTTP CLIENT api CONFIG {
   'endpoint' = 'https://api.example.com',
   'timeout_ms' = 5000
 };
@@ -969,8 +969,7 @@ Emitter TLS is configured on the referenced `CLIENT` exactly the same way as ing
 Common pattern:
 
 ```nspl,ignore
-CREATE [IF NOT EXISTS] CLIENT <name>
-  TYPE <kind>
+CREATE [IF NOT EXISTS] <kind> CLIENT <name>
   MOUNT <tls_resource> VERSION <n>|LATEST
   CONFIG {
     ...
@@ -987,7 +986,7 @@ Transport-specific expectations:
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
 - `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
-- `SENTRY`: the referenced `TYPE SENTRY` client carries an `https://...` `dsn`; Nervix honors the
+- `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; Nervix honors the
   client's `tls_ca_file`, `tls_cert_file`, and `tls_key_file`.
 - `OTEL`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file`, `tls_cert_file`, and
   `tls_key_file` for both OTLP/gRPC and OTLP/HTTP-protobuf.
@@ -1001,8 +1000,7 @@ Transport-specific expectations:
 Example Kafka TLS emitter client:
 
 ```nspl
-CREATE IF NOT EXISTS CLIENT kafka_tls
-  TYPE KAFKA
+CREATE IF NOT EXISTS KAFKA CLIENT kafka_tls
   MOUNT dev_tls VERSION 1
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9094',
@@ -1019,17 +1017,18 @@ TLS and the answer. `connect_timeout_ms` bounds establishing a connection: name 
 address attempts, TLS and the protocol's own handshake. Each value is a positive whole number of
 milliseconds.
 
-`HTTP`, `SENTRY`, `OTEL`, `SQS`, `CLICKHOUSE`, `ZEROMQ` and the Iceberg emitter's object-store
-clients read `timeout_ms`; an `HTTP` request emitter's client requires it. A `RABBITMQ` client's
+`HTTP`, `SENTRY`, `OTEL`, `SQS`, `CLICKHOUSE`, `ZEROMQ`, `SYSLOG` and the Iceberg emitter's
+object-store clients read `timeout_ms`; an `HTTP` request emitter's client requires it, and a
+`SYSLOG` emitter's client bounds writing and flushing each frame by it. A `RABBITMQ` client's
 `timeout_ms` bounds the round trip that ends a `NO_ACK` write. `RABBITMQ`, `REDIS`, `SYSLOG` and
 `ZEROMQ` clients read `connect_timeout_ms`, and allow 30 seconds when it is left out; a `REDIS`
 command pool also waits no longer than that to check out a connection. A `RABBITMQ` client's
 `connect_timeout_ms` covers resolving the broker, the address attempts, TLS, the AMQP handshake,
 opening the emitter's channel, selecting publisher confirms under `ACK` and checking its queue. A
 `ZEROMQ` client's `connect_timeout_ms` covers a connect-mode socket's connection and its ZMTP
-handshake, and its `timeout_ms` bounds each send. A request, send, connection or round trip that
-runs out of its deadline becomes the emitter's transient status, and the emitter retries on its
-policy; a deadline that runs out is reported naming the key and its bound.
+handshake, and its `timeout_ms` bounds each send. A request, send, frame write, connection or round
+trip that runs out of its deadline becomes the emitter's transient status, and the emitter retries
+on its policy; a deadline that runs out is reported naming the key and its bound.
 [Connector Capabilities](connector-capabilities.md) lists each entity's network waits and what
 bounds each one, including the waits nothing bounds yet.
 
@@ -1281,7 +1280,7 @@ See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md
 
 Redis Pub/Sub has no subscriber delivery acknowledgment. The awaited `PUBLISH` response confirms
 server acceptance only. A record-specific server rejection follows `ON MESSAGE ERROR`; connection
-failures retry the undelivered work. A `TYPE REDIS` client declares its connection-pool bounds; see
+failures retry the undelivered work. A `REDIS CLIENT` declares its connection-pool bounds; see
 [Database Client Connection Pools](database-client-pools.md).
 Each physical pooled command connection resolves the `addr` hostname through the node's
 asynchronous DNS resolver when it opens. A replacement connection can use a changed DNS answer;
@@ -1504,9 +1503,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>a write: unbounded |
+| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>writing and flushing a frame: `timeout_ms`; unbounded when omitted |
 | Driver limits | None declared. |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |
 
 See the [SYSLOG COLLECTOR capability and mirror reference](connector-capabilities.md#syslog-collector-emit).
 <!-- connector-matrix:emit-syslog-collector:end -->
@@ -1649,12 +1648,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [SENTRY EVENT capability and mirror reference](connector-capabilities.md#sentry-event-emit).
 <!-- connector-matrix:emit-sentry-event:end -->
 
-Sentry emission uses a `TYPE SENTRY` client whose required `dsn` contains the project endpoint and
+Sentry emission uses a `SENTRY CLIENT` whose required `dsn` contains the project endpoint and
 public key:
 
 ```nspl
-CREATE CLIENT sentry_main
-  TYPE SENTRY
+CREATE SENTRY CLIENT sentry_main
   CONFIG {
     'dsn' = 'https://<public-key>@sentry.example.com/<project-id>',
     'timeout_ms' = 5000
@@ -1833,12 +1831,11 @@ See the [OTEL METRICS capability and mirror reference](connector-capabilities.md
 <!-- connector-matrix:emit-otel-metrics:end -->
 
 OTEL emission is a codec-free direct sink for OTLP logs, traces, and metric data points. It uses a
-`TYPE OTEL` client and supports both OTLP/gRPC and OTLP/HTTP-protobuf. The protocol is always
+`OTEL CLIENT` and supports both OTLP/gRPC and OTLP/HTTP-protobuf. The protocol is always
 explicit; there is no hidden default:
 
 ```nspl
-CREATE CLIENT otel_main
-  TYPE OTEL
+CREATE OTEL CLIENT otel_main
   CONFIG {
     'endpoint' = 'http://127.0.0.1:4317',
     'protocol' = 'grpc',
@@ -2033,8 +2030,7 @@ CREATE EMITTER to_ch
 ClickHouse clients use the HTTP endpoint:
 
 ```nspl
-CREATE CLIENT ch
-  TYPE CLICKHOUSE
+CREATE CLICKHOUSE CLIENT ch
   CONFIG {
     'addr' = 'http://127.0.0.1:8123',
     'user' = 'default',
@@ -2156,8 +2152,7 @@ verification. See [Database Client Connection Pools](database-client-pools.md) f
 pool counts:
 
 ```nspl
-CREATE CLIENT pg
-  TYPE POSTGRES
+CREATE POSTGRES CLIENT pg
   POOL SIZE MIN 2 MAX 8
   CONFIG {
     'addr' = 'postgresql://postgres:nervix@127.0.0.1:5432/postgres?sslmode=disable'
@@ -2242,8 +2237,7 @@ MySQL clients declare their connection-pool bounds and use a mysql_async connect
 [Database Client Connection Pools](database-client-pools.md) for the accepted counts:
 
 ```nspl
-CREATE CLIENT mysql
-  TYPE MYSQL
+CREATE MYSQL CLIENT mysql
   POOL SIZE MIN 2 MAX 8
   CONFIG {
     'addr' = 'mysql://nervix:nervix@127.0.0.1:3306/nervix'
@@ -2334,8 +2328,7 @@ MongoDB clients declare their connection-pool bounds and use a MongoDB connectio
 name. See [Database Client Connection Pools](database-client-pools.md) for the accepted counts:
 
 ```nspl
-CREATE CLIENT mongodb
-  TYPE MONGODB
+CREATE MONGODB CLIENT mongodb
   POOL SIZE MIN 2 MAX 8
   CONFIG {
     'addr' = 'mongodb://root:nervix@127.0.0.1:27017/nervix?authSource=admin',
@@ -2388,8 +2381,7 @@ See the [ICEBERG TABLE capability and mirror reference](connector-capabilities.m
 <!-- connector-matrix:emit-iceberg-table:end -->
 
 ```nspl
-CREATE CLIENT s3_main
-  TYPE S3
+CREATE S3 CLIENT s3_main
   CONFIG {
     'endpoint' = 'http://127.0.0.1:9900',
     'region' = 'us-east-1',
@@ -2398,8 +2390,7 @@ CREATE CLIENT s3_main
     'path_style_access' = true
   };
 
-CREATE CLIENT iceberg_catalog
-  TYPE ICEBERG_REST
+CREATE ICEBERG_REST CLIENT iceberg_catalog
   CONFIG {
     'uri' = 'http://127.0.0.1:8181',
     'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -2420,25 +2411,23 @@ CREATE EMITTER iceberg_notifications
   ON GENERAL ERROR LOG;
 ```
 
-Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The `ON S3`, `ON GCS`, or `ON AZURE_BLOB` backend clause selects the object-store implementation. The referenced blob client supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `TYPE ICEBERG_REST` client that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, mapped output columns, table location, catalog client reference, and flush policy.
+Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The `ON S3`, `ON GCS`, or `ON AZURE_BLOB` backend clause selects the object-store implementation. The referenced blob client supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `ICEBERG_REST CLIENT` that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, mapped output columns, table location, catalog client reference, and flush policy.
 
 The catalog and object-store HTTP clients resolve endpoint names through the node's configured
 DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
 resolver for object operations and credential HTTP calls. DNS failures enter the existing sink
 initialization or commit retry path; they do not advance the commit or ACK boundary.
 
-GCS uses the same emitter shape with a `TYPE GCS` client and `gs://` locations:
+GCS uses the same emitter shape with a `GCS CLIENT` and `gs://` locations:
 
 ```nspl
-CREATE CLIENT gcs_main
-  TYPE GCS
+CREATE GCS CLIENT gcs_main
   CONFIG {
     'service_path' = 'https://storage.googleapis.com',
     'token' = '<oauth2-token>'
   };
 
-CREATE CLIENT iceberg_catalog
-  TYPE ICEBERG_REST
+CREATE ICEBERG_REST CLIENT iceberg_catalog
   CONFIG {
     'uri' = 'https://iceberg-rest.example.com',
     'warehouse' = 'gs://nervix-iceberg/warehouse'
@@ -2459,18 +2448,16 @@ CREATE EMITTER iceberg_notifications
   ON GENERAL ERROR LOG;
 ```
 
-Azure Blob uses `TYPE AZURE_BLOB` and `wasbs://` locations. `wasb://` is also accepted for plain-HTTP local endpoints:
+Azure Blob uses `AZURE_BLOB CLIENT` and `wasbs://` locations. `wasb://` is also accepted for plain-HTTP local endpoints:
 
 ```nspl
-CREATE CLIENT azure_main
-  TYPE AZURE_BLOB
+CREATE AZURE_BLOB CLIENT azure_main
   CONFIG {
     'account_name' = 'myaccount',
     'account_key' = '<account-key>'
   };
 
-CREATE CLIENT iceberg_catalog
-  TYPE ICEBERG_REST
+CREATE ICEBERG_REST CLIENT iceberg_catalog
   CONFIG {
     'uri' = 'https://iceberg-rest.example.com',
     'warehouse' = 'wasbs://nervix-iceberg@myaccount.blob.core.windows.net/warehouse'

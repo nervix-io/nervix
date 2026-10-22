@@ -38,7 +38,10 @@ use nervix_connector::{
     SourceResume,
 };
 use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
-use nervix_models::{ClientConfigEntry, WebsocketsClientConfig, WebsocketsUpgradeHeaders};
+use nervix_models::{
+    ClientConfigEntry, WEBSOCKETS_CONTROL_FRAME_BUDGET, WebsocketsClientConfig,
+    WebsocketsUpgradeHeaders,
+};
 use nervix_primitives::{
     net::TcpStream,
     sync::{Arc, mpsc},
@@ -55,7 +58,6 @@ use crate::{
 };
 
 const WEBSOCKETS: &str = "websockets";
-const CONTROL_FRAME_BUDGET: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Error)]
 enum WebsocketSourceFailure {
@@ -212,7 +214,7 @@ impl WebsocketSource {
             .as_mut()
             .verified("the installed connection requested its ping above");
         let write = timeout(
-            CONTROL_FRAME_BUDGET,
+            WEBSOCKETS_CONTROL_FRAME_BUDGET,
             connection.relay.send(Message::Ping(Vec::new())),
         );
         let Some(outcome) = cancellation.unless_cancelled(write).await else {
@@ -230,7 +232,7 @@ impl WebsocketSource {
                 self.connection = None;
                 Err(Report::new(error)
                     .change_context(WebsocketSourceFailure::PingTimeout {
-                        budget: CONTROL_FRAME_BUDGET,
+                        budget: WEBSOCKETS_CONTROL_FRAME_BUDGET,
                     })
                     .change_context(SourceError::Read {
                         connector: WEBSOCKETS,
@@ -287,11 +289,11 @@ impl WebsocketSource {
                 }
             }
         };
-        timeout(CONTROL_FRAME_BUDGET, closing)
+        timeout(WEBSOCKETS_CONTROL_FRAME_BUDGET, closing)
             .await
             .map_err(|error| {
                 Report::new(error).change_context(WebsocketSourceFailure::CloseTimeout {
-                    budget: CONTROL_FRAME_BUDGET,
+                    budget: WEBSOCKETS_CONTROL_FRAME_BUDGET,
                 })
             })?
     }
@@ -507,7 +509,8 @@ impl BrokerSourceConnector for WebsocketSource {
                         .connection
                         .take()
                         .verified("the installed transport yielded the Close above");
-                    let answered = timeout(CONTROL_FRAME_BUDGET, connection.relay.flush()).await;
+                    let answered =
+                        timeout(WEBSOCKETS_CONTROL_FRAME_BUDGET, connection.relay.flush()).await;
                     let report = Report::new(failure);
                     let report = match answered {
                         Ok(Ok(())) => report,

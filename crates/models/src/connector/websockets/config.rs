@@ -75,9 +75,6 @@ pub struct WebsocketsClientConfig {
 }
 
 impl WebsocketsClientConfig {
-    /// The existing physical DNS, TCP and upgrade budget where no value is written.
-    pub const CONNECT_TIMEOUT: Duration = DEFAULT_CONNECT_TIMEOUT;
-
     pub fn parse(
         config: &[ClientConfigEntry],
     ) -> error_stack::Result<Self, WebsocketsClientConfigError> {
@@ -126,7 +123,7 @@ impl WebsocketsClientConfig {
         let connect_timeout = match Self::duration(&values, WebsocketsClientKey::ConnectTimeoutMs)?
         {
             Some(duration) => duration,
-            None => Self::CONNECT_TIMEOUT,
+            None => DEFAULT_CONNECT_TIMEOUT,
         };
         let ping_interval = Self::duration(&values, WebsocketsClientKey::PingIntervalMs)?;
         Ok(Self {

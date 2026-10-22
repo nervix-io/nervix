@@ -50,6 +50,9 @@ use acknowledgement::{BatchRoots, RuntimeBatchAcknowledgement};
 mod read;
 use read::{ReadOutcome, read_batch};
 
+#[path = "source_poll.rs"]
+mod poll;
+
 const SOURCE_ERROR_RETRY: Duration = Duration::from_millis(100);
 
 /// How a source whose delivery mode declares no retry policy reopens after a failure: the delay
@@ -280,6 +283,9 @@ pub(super) struct PacedSourceStart<P> {
     pub(super) every: DomainClockPeriod,
     /// Whether the first poll is due as soon as the cadence binds or one period later.
     pub(super) cadence_start: DomainCadenceStart,
+    /// The most messages of one poll the host takes in as one intake batch, which it executes as
+    /// an ingest group of its own, as the source's entity declares.
+    pub(super) intake_batch: NonZeroUsize,
     pub(super) client_mounts: Vec<Arc<ClientResourceMounts>>,
     pub(super) connector_label: &'static str,
 }
@@ -298,6 +304,7 @@ impl<P> PacedSourceStart<P> {
             connector,
             every,
             cadence_start,
+            intake_batch,
             client_mounts,
             connector_label,
         } = self;
@@ -313,7 +320,11 @@ impl<P> PacedSourceStart<P> {
         let cadence = runtime
             .bind_domain_cadence(&ingestor.domain, every, cadence_start)
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let instance: Box<dyn SourceInstance> = Box::new(PacedSourceInstance { source, cadence });
+        let instance: Box<dyn SourceInstance> = Box::new(PacedSourceInstance {
+            source,
+            cadence,
+            intake_batch,
+        });
         Ok(SourceStart {
             instances: vec![instance],
             companions: Vec::new(),
@@ -333,6 +344,7 @@ impl<P> PacedSourceStart<P> {
 struct PacedSourceInstance<C> {
     source: C,
     cadence: DomainCadence,
+    intake_batch: NonZeroUsize,
 }
 
 impl<C> SourceInstance for PacedSourceInstance<C>
@@ -344,8 +356,18 @@ where
         host: RuntimeSourceHost,
         shutdown: watch::Receiver<bool>,
     ) -> BoxFuture<'static, ()> {
-        let Self { source, cadence } = *self;
-        Box::pin(run_paced_source(source, host, cadence, shutdown))
+        let Self {
+            source,
+            cadence,
+            intake_batch,
+        } = *self;
+        Box::pin(run_paced_source(
+            source,
+            host,
+            cadence,
+            intake_batch,
+            shutdown,
+        ))
     }
 }
 
@@ -533,6 +555,8 @@ pub(super) struct RuntimeSourceHost {
     /// Counts the positions this host discarded after a reconnect because the broker redelivers
     /// them.
     transport_redeliveries: prometheus::IntCounter,
+    /// Counts the payloads this host's source dropped because they exceed its client's size bound.
+    oversized_payloads: prometheus::IntCounter,
     /// Consumes the payloads the ingestor's codec refuses, for this host and the endpoint bindings
     /// it hands out.
     decode_rejections: DecodeRejections,
@@ -565,6 +589,11 @@ impl RuntimeSourceHost {
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
         );
         let transport_redeliveries = spec.runtime.inner.metrics.ingestor_transport_redeliveries(
+            &spec.domain,
+            &spec.ingestor,
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+        );
+        let oversized_payloads = spec.runtime.inner.metrics.ingestor_oversized_payloads(
             &spec.domain,
             &spec.ingestor,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
@@ -609,33 +638,10 @@ impl RuntimeSourceHost {
             unacknowledged_admission: spec.unacknowledged_admission,
             unfolding_refused,
             transport_redeliveries,
+            oversized_payloads,
             decode_rejections,
             confirmation_delay,
         }
-    }
-
-    async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
-        for failure in poll.failures {
-            nervix_primitives::task::consume_budget().await;
-            self.report_error(format!(
-                "source poll could not materialize one message: {failure:?}"
-            ));
-        }
-        if poll.messages.is_empty() {
-            return Ok(false);
-        }
-        let entries = poll
-            .messages
-            .into_iter()
-            .map(|message| {
-                (
-                    message.payload,
-                    BufferedIngestMetadata::Headers(message.headers),
-                )
-            })
-            .collect();
-        let payload = BufferedIngestPayload::batch(entries, poll.observed_at);
-        self.intake_unacknowledged_payload(payload).await
     }
 
     /// The intake a request-scoped source binds its routes to.
@@ -1245,6 +1251,10 @@ impl SourceHostServices for RuntimeSourceHost {
         self.transport_redeliveries.inc_by(positions.arch_into());
     }
 
+    fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+        self.oversized_payloads.inc_by(payloads.get().arch_into());
+    }
+
     fn record_unconfirmed_stop(&self, positions: usize) {
         info!(
             domain = self.domain.as_str(),
@@ -1347,15 +1357,25 @@ impl RuntimeSourceHost {
     )
 )]
 trait PacedSourceHostServices: SourceHostServices {
-    async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool>;
+    /// Takes in the messages `poll` returned, in intake batches of at most `intake_batch`
+    /// messages, each an ingest group of its own.
+    async fn intake_poll(
+        &mut self,
+        poll: SourcePoll,
+        intake_batch: NonZeroUsize,
+    ) -> SourceIntakeResult<bool>;
     fn should_skip_poll(&self) -> bool;
     fn record_poll_error(&self, reason: String);
 }
 
 #[async_trait]
 impl PacedSourceHostServices for RuntimeSourceHost {
-    async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
-        RuntimeSourceHost::intake_poll(self, poll).await
+    async fn intake_poll(
+        &mut self,
+        poll: SourcePoll,
+        intake_batch: NonZeroUsize,
+    ) -> SourceIntakeResult<bool> {
+        RuntimeSourceHost::intake_poll(self, poll, intake_batch).await
     }
 
     fn should_skip_poll(&self) -> bool {
@@ -1471,6 +1491,7 @@ async fn run_paced_source<C, H, D>(
     mut source: C,
     mut host: H,
     mut cadence: D,
+    intake_batch: NonZeroUsize,
     mut shutdown: watch::Receiver<bool>,
 ) where
     C: PacedSourceConnector,
@@ -1540,7 +1561,7 @@ async fn run_paced_source<C, H, D>(
             }
         };
         host.clear_transient_error();
-        match host.intake_poll(poll).await {
+        match host.intake_poll(poll, intake_batch).await {
             Ok(true) => flush_paced_source(&mut host).await,
             Ok(false) => {}
             Err(error) => host.report_error(format!("{error:#}")),
@@ -2378,6 +2399,9 @@ mod tests {
         fn record_transport_redeliveries(&self, positions: usize) {
             panic!("a replayable test source discarded {positions} positions after a reconnect");
         }
+        fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+            panic!("a test source whose payloads all fit dropped {payloads} for their size");
+        }
         fn record_unconfirmed_stop(&self, positions: usize) {
             panic!("a test source stopped with {positions} positions waiting on their trees");
         }
@@ -2385,7 +2409,11 @@ mod tests {
 
     #[async_trait]
     impl PacedSourceHostServices for FakeHost {
-        async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
+        async fn intake_poll(
+            &mut self,
+            poll: SourcePoll,
+            _intake_batch: NonZeroUsize,
+        ) -> SourceIntakeResult<bool> {
             Ok(!poll.messages.is_empty())
         }
 
@@ -2556,6 +2584,7 @@ mod tests {
             SingleOccurrenceCadence {
                 occurrence: Some(Timestamp::from_unix_nanos(1)),
             },
+            NonZeroUsize::MIN,
             shutdown,
         )
         .await;
@@ -2597,7 +2626,7 @@ mod tests {
         let host = FakeHost::running(observations.clone());
         let (_shutdown_tx, shutdown) = watch::channel(false);
 
-        run_paced_source(source, host, FailedCadence, shutdown).await;
+        run_paced_source(source, host, FailedCadence, NonZeroUsize::MIN, shutdown).await;
 
         let observations = observations.lock();
         assert_eq!(
@@ -2980,6 +3009,10 @@ mod read_tests;
 #[cfg(test)]
 #[path = "source_metadata_tests.rs"]
 mod metadata_tests;
+
+#[cfg(test)]
+#[path = "source_poll_tests.rs"]
+mod poll_tests;
 
 impl Drop for RuntimeSourceHost {
     fn drop(&mut self) {

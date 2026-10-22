@@ -296,7 +296,7 @@ declare_names! {
     WireSchemaName => Allowed,
     /// A codec declared with `CREATE CODEC`.
     CodecName => Allowed,
-    /// A connector client declared with `CREATE CLIENT`.
+    /// A connector client declared with a Plexus `<CONNECTOR> CLIENT` head.
     ClientName => Allowed,
     /// A virtual host declared with `CREATE VHOST`.
     VhostName => Allowed,

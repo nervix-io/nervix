@@ -134,10 +134,7 @@ fn config_refusals_keep_the_offending_key_and_never_credential_values() {
     }
     let defaults = WebsocketsClientConfig::parse(&config(&[("endpoint", "ws://example.test")]))
         .assured("endpoint is the only required key");
-    assert_eq!(
-        defaults.connect_timeout(),
-        WebsocketsClientConfig::CONNECT_TIMEOUT
-    );
+    assert_eq!(defaults.connect_timeout(), crate::DEFAULT_CONNECT_TIMEOUT);
     assert_eq!(defaults.ping_interval(), None);
 }
 

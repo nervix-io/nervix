@@ -40,6 +40,14 @@ outcomes stay in [Shutdown And Recovery](./shutdown.md#when-the-former-owner-is-
 
 ## A State Has One Owner
 
+Settings use the same construction boundary. A `SettingDefinition` declares its sealed class,
+semantic value, name, one default, optional derivation and validation against typed context.
+`Setting<D>` validates explicit and default values before construction, retains the complete
+typed validation report on failure, and provides no mutable access around that boundary.
+`Prerequisites`, `ClusterParameters` and `NodeCapabilities` classify the fields; omitting the
+class is a compile-time error. [Node Settings](node-settings.md) owns their operational meaning,
+carriers, defaults, change procedures and source ratchet.
+
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,
 and planning produces an execution plan. Each stage passes forward a value whose type expresses
 what has already been established. Runtime code executes the plan; it does not reinterpret a Model
@@ -651,6 +659,12 @@ beside it. A Kafka ingestor's offsets are either a consumer group or domain offs
 their placement. The planner lowers every filter, route and branch construction before a node binds
 them, so a bound route always carries its compiled program and a running task has no
 missing-program or undeclared-branch state to check.
+
+The Kafka source's assignment knowledge distinguishes unknown, cleared and installed partitions.
+Moving an assignment operation into an admitted job leaves its source's knowledge unknown until
+the job returns the confirmed state. Cancellation or failure cannot leave a cached assignment
+claiming that a native operation the caller did not observe completed successfully. The next
+operation therefore reinstalls or clears it rather than trusting an unconfirmed cache.
 
 The owner reports a semantic typed error; contextual propagation uses `error-stack`. A
 per-record conversion error is reported at the record boundary without formatting a fresh

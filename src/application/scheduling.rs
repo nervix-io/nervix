@@ -2344,6 +2344,7 @@ impl SessionServiceImpl {
                         spec_for_task.domain.as_str(),
                         spec_for_task.ingestor.as_str()
                     ),
+                    service.inner.runtime.executor().clone(),
                 ) {
                     Ok(inspector) => inspector,
                     Err(error) => {

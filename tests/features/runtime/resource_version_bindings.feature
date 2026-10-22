@@ -66,8 +66,7 @@ Feature: Resource version bindings
       """
     And these NSPL commands fail with "expected VERSION"
       """
-      CREATE CLIENT mounted_http
-        TYPE HTTP
+      CREATE HTTP CLIENT mounted_http
         MOUNT tls_bundle
         CONFIG {'endpoint' = 'http://127.0.0.1:1'};
       """
@@ -195,8 +194,7 @@ Feature: Resource version bindings
       """
     When these NSPL commands are executed on the leader node
       """
-      CREATE CLIENT mounted_http
-        TYPE HTTP
+      CREATE HTTP CLIENT mounted_http
         MOUNT tls_bundle VERSION LATEST
         CONFIG {'endpoint' = 'http://127.0.0.1:1'};
       """
@@ -685,10 +683,10 @@ Feature: Resource version bindings
       CREATE RESOURCE other_bundle;
       UPLOAD RESOURCE other_bundle VERSION '{{tls_v1}}';
       CREATE VHOST edge select-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
-      CREATE CLIENT primary TYPE HTTP MOUNT tls_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
-      CREATE CLIENT secondary TYPE HTTP MOUNT tls_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
-      CREATE CLIENT spare TYPE HTTP MOUNT tls_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
-      CREATE CLIENT foreign TYPE HTTP MOUNT other_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
+      CREATE HTTP CLIENT primary MOUNT tls_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
+      CREATE HTTP CLIENT secondary MOUNT tls_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
+      CREATE HTTP CLIENT spare MOUNT tls_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
+      CREATE HTTP CLIENT foreign MOUNT other_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
       """
     When these NSPL commands are executed on the leader node
       """

@@ -32,6 +32,9 @@ pub use upgrade_headers::{
     WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, WebsocketsUpgradeHeadersError,
 };
 
+/// The existing transport budget shared by ping writes and the close handshake.
+pub const WEBSOCKETS_CONTROL_FRAME_BUDGET: Duration = Duration::from_secs(1);
+
 use super::{
     bounds::{
         BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
@@ -114,11 +117,11 @@ const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
         DeclaredWait {
             wait: "writing a configured ping",
-            bound: WaitBound::Fixed(Duration::from_secs(1)),
+            bound: WaitBound::Fixed(WEBSOCKETS_CONTROL_FRAME_BUDGET),
         },
         DeclaredWait {
             wait: "close",
-            bound: WaitBound::Fixed(Duration::from_secs(1)),
+            bound: WaitBound::Fixed(WEBSOCKETS_CONTROL_FRAME_BUDGET),
         },
     ],
     driver_limits: &["A message above 64 MiB or a frame above 16 MiB ends the connection."],

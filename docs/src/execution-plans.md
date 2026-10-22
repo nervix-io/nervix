@@ -81,6 +81,11 @@ both use the same schedule-to-revision planning boundary.
 | Emitters | Typed sink and optional connector client or codec, ordered source relays and predicates, construction, request and ordering expressions, flush, batching, ACK, and error policies | Resolve local mounts and schemas, bind programs, register local or remote consumers, and open the sink |
 | Message errors | Source and optional partial-output schemas, target relay and branch, route flush contract, and ordered `SET` program | Bind once for the installed revision; execute it for failed records using their captured state |
 
+Kafka source installation also binds the node-owned executor into the connector plan. Partition
+inspectors used by scheduling and the host's partition watch use that same node executor. The
+connector interprets the effective native client deadline and admits its synchronous driver calls;
+the decision layer neither opens a consumer nor selects a worker backend.
+
 The tables describe distinct decisions in one revision, not independently selectable runtime
 configurations. Every node, including one placed elsewhere, is planned from the same domain
 schedule. This lets a local owner, its replicas, a remote relay consumer, and a future owner

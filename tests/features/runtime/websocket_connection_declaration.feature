@@ -10,7 +10,7 @@ Feature: WebSockets connection declarations
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY received SCHEMA received_event UNBRANCHED;
-      CREATE CLIENT socket TYPE WEBSOCKETS CONFIG { 'endpoint' = '{{websocket_peer}}' };
+      CREATE WEBSOCKETS CLIENT socket CONFIG { 'endpoint' = '{{websocket_peer}}' };
       CREATE WEBSOCKETS CONNECTION INGESTOR socket_events
         FROM socket HEADERS { 'authorization' = 'Bearer fixture' }
         MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
@@ -50,7 +50,7 @@ Feature: WebSockets connection declarations
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE CODEC next_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY received SCHEMA received_event UNBRANCHED;
-      CREATE CLIENT socket TYPE WEBSOCKETS CONFIG { 'endpoint' = '{{websocket_peer}}' };
+      CREATE WEBSOCKETS CLIENT socket CONFIG { 'endpoint' = '{{websocket_peer}}' };
       CREATE WEBSOCKETS CONNECTION INGESTOR socket_events
         FROM socket HEADERS { 'authorization' = 'Bearer fixture' }
         MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST DECODE USING event_codec
@@ -99,14 +99,14 @@ Feature: WebSockets connection declarations
       """
     When these Plexus statements fail with "WEBSOCKETS client 'socket' in domain '{{domain}}' cannot use its CONFIG: 'unexpected' is not a key this client reads"
       """
-      CREATE CLIENT socket TYPE WEBSOCKETS CONFIG {
+      CREATE WEBSOCKETS CLIENT socket CONFIG {
         'endpoint' = 'ws://websocket.nervix.test/events',
         'unexpected' = 'value'
       };
       """
     When these Plexus statements fail with "WEBSOCKETS client 'socket' in domain '{{domain}}' cannot use its CONFIG: 'tls_ca_file' requires a wss endpoint"
       """
-      CREATE CLIENT socket TYPE WEBSOCKETS CONFIG {
+      CREATE WEBSOCKETS CLIENT socket CONFIG {
         'endpoint' = 'ws://websocket.nervix.test/events',
         'tls_ca_file' = '/etc/nervix/ca.pem'
       };
@@ -118,7 +118,7 @@ Feature: WebSockets connection declarations
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY received SCHEMA event UNBRANCHED;
-      CREATE CLIENT socket TYPE WEBSOCKETS CONFIG { 'endpoint' = 'ws://websocket.nervix.test/events' };
+      CREATE WEBSOCKETS CLIENT socket CONFIG { 'endpoint' = 'ws://websocket.nervix.test/events' };
       """
     When these Plexus statements fail with "ingestor 'socket_events' in domain '{{domain}}' cannot use its HEADERS: upgrade header 'Host' is invalid or reserved"
       """

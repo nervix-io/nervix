@@ -13,6 +13,8 @@
 
 use arrow_buffer::BooleanBuffer;
 use nervix_connector::{IngestMetadataRow, NoIngestHeaders};
+use nervix_models::WebsocketsFrameType;
+use strum::IntoEnumIterator as _;
 
 use super::*;
 
@@ -151,9 +153,16 @@ impl IngestMetadataBuilders {
         #[cfg(test)]
         INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(count.get() + 1));
         let integration = match scope {
-            SourceMetadataScope::Websockets => IngestIntegrationBuilders::Websockets {
-                frame_type: StringBuilder::with_capacity(row_bound, 0),
-            },
+            SourceMetadataScope::Websockets => {
+                let mut maximum_label_bytes = 0;
+                for kind in WebsocketsFrameType::iter() {
+                    maximum_label_bytes = maximum_label_bytes.max(kind.as_ref().len());
+                }
+                let label_capacity = row_bound.saturating_mul(maximum_label_bytes);
+                IngestIntegrationBuilders::Websockets {
+                    frame_type: StringBuilder::with_capacity(row_bound, label_capacity),
+                }
+            }
             SourceMetadataScope::Kafka => {
                 IngestIntegrationBuilders::Kafka(Box::new(KafkaIntegrationBuilders {
                     topic: StringBuilder::with_capacity(row_bound, 0),
