@@ -37,15 +37,13 @@ Feature: Ingestor branch consistency
 
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
 
-      CREATE CLIENT mqtt_main
-        TYPE MQTT
+      CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-mqtt-{{test_id}}'
         };
 
-      CREATE CLIENT redis_main
-        TYPE REDIS
+      CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{redis_addr}}'
@@ -111,15 +109,13 @@ Feature: Ingestor branch consistency
 
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications_secondary;
 
-      CREATE CLIENT mqtt_main
-        TYPE MQTT
+      CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-mqtt-a-{{test_id}}'
         };
 
-      CREATE CLIENT mqtt_secondary
-        TYPE MQTT
+      CREATE MQTT CLIENT mqtt_secondary
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-mqtt-b-{{test_id}}'

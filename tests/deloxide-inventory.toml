@@ -1214,12 +1214,12 @@ selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
 coverage = "Diagnostic native-client pending-reply cancellation after wait expiry, followed by a fresh client's reference-preserving recovery and archive download."
-examples = 2
+examples = 4
 feature = "tests/features/cluster/backup_wait.feature"
 id = "scenario.backup-native-recovery"
-invariant = "A bounded native wait preserves the original multi-domain execution for recovery by a fresh client on one and three nodes."
+invariant = "A bounded native wait preserves the original multi-domain execution for recovery by a fresh client on one and three nodes, including expiry before the second cut."
 invocation = "scenarios"
-scenario = "A bounded native wait recovers the original multi-domain backup"
+scenario = "A bounded native wait recovers the original multi-domain backup after a <first_cut_seconds> second first cut"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1754,12 +1754,12 @@ selections = ["deloxide-stress-restore"]
 
 [[workload]]
 coverage = "Under scheduling stress: diagnostic native-client pending-reply cancellation after wait expiry, followed by a fresh client's reference-preserving recovery and archive download."
-examples = 2
+examples = 4
 feature = "tests/features/cluster/backup_wait.feature"
 id = "stress.backup-native-recovery"
-invariant = "A bounded native wait preserves the original multi-domain execution for recovery by a fresh client on one and three nodes."
+invariant = "A bounded native wait preserves the original multi-domain execution for recovery by a fresh client on one and three nodes, including expiry before the second cut."
 invocation = "stress-restore-scenarios"
-scenario = "A bounded native wait recovers the original multi-domain backup"
+scenario = "A bounded native wait recovers the original multi-domain backup after a <first_cut_seconds> second first cut"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]

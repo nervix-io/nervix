@@ -28,8 +28,7 @@ Feature: Shared database client pools
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_shared
-        TYPE POSTGRES
+      CREATE POSTGRES CLIENT postgres_shared
         POOL SIZE MIN 1 MAX 2
         CONFIG {
           'addr' = '{{postgres_addr}}&application_name=nervix_shared_{{test_id}}'
@@ -85,8 +84,7 @@ Feature: Shared database client pools
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_contended
-        TYPE POSTGRES
+      CREATE POSTGRES CLIENT postgres_contended
         POOL SIZE MIN 1 MAX 1
         CONFIG {
           'addr' = '{{postgres_addr}}&application_name=nervix_contended_{{test_id}}'
@@ -142,8 +140,7 @@ Feature: Shared database client pools
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_retired
-        TYPE POSTGRES
+      CREATE POSTGRES CLIENT postgres_retired
         POOL SIZE MIN 1 MAX 2
         CONFIG {
           'addr' = '{{postgres_addr}}&application_name=nervix_retired_{{test_id}}'

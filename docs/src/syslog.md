@@ -5,7 +5,7 @@ Nervix separates the syslog message format from syslog network transport:
 - the predefined singleton `SYSLOG` wire schema represents the fixed syslog message format
 - a codec that uses that wire schema decodes RFC 3164 and RFC 5424 messages and encodes RFC 5424
   messages
-- a `TYPE SYSLOG` client declares a UDP, TCP, or TLS socket endpoint
+- a `SYSLOG CLIENT` declares a UDP, TCP, or TLS socket endpoint
 - a `SYSLOG LISTENER` ingestor receives transport frames and passes each frame to its declared codec
 - a `TO SYSLOG` emitter sends codec output with the selected syslog transport framing
 
@@ -111,8 +111,8 @@ Record-specific encoding failures follow the emitter's `ON MESSAGE ERROR` policy
 A syslog client describes one direction-dependent socket endpoint:
 
 ```nspl,ignore
-CREATE CLIENT <name>
-  TYPE SYSLOG [MOUNT <resource> VERSION <n>|LATEST]
+CREATE SYSLOG CLIENT <name>
+  [MOUNT <resource> VERSION <n>|LATEST]
   CONFIG {
     'protocol' = 'udp'|'tcp'|'tls',
     'addr' = '<host:port>',
@@ -148,8 +148,8 @@ expired answer can be replaced without restarting the node.
 TLS file paths use normal client resource mounts. For example:
 
 ```nspl
-CREATE CLIENT syslog_tls
-  TYPE SYSLOG MOUNT syslog_identity VERSION 1
+CREATE SYSLOG CLIENT syslog_tls
+  MOUNT syslog_identity VERSION 1
   CONFIG {
     'protocol' = 'tls',
     'addr' = '0.0.0.0:6514',
@@ -181,7 +181,7 @@ The generated [SYSLOG LISTENER ingest table](connector-capabilities.md#syslog-li
 and [SYSLOG COLLECTOR emit table](connector-capabilities.md#syslog-collector-emit) record the
 Plexus declarations, including peer metadata, header availability, quiesce and batching.
 
-A `SYSLOG LISTENER` ingestor reads through a `TYPE SYSLOG` client. It has one delivery mode,
+A `SYSLOG LISTENER` ingestor reads through a `SYSLOG CLIENT`. It has one delivery mode,
 `NO ACK`, and no `INSTANCES` clause:
 
 ```nspl,ignore

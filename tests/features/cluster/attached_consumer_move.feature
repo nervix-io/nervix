@@ -22,7 +22,7 @@ Feature: Attached acknowledgements across consumer moves
       CREATE BRANCH moved_sink_branch SCHEMA moved_sink_key TTL 5m;
       CREATE RELAY moved_sink_records SCHEMA moved_sink_event
         BRANCHED BY moved_sink_branch CAPACITY 1;
-      CREATE CLIENT moved_sink_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT moved_sink_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -120,7 +120,7 @@ Feature: Attached acknowledgements across consumer moves
       CREATE CODEC owner_move_codec
         FROM WIRE JSON SCHEMA owner_move_wire TO SCHEMA owner_move_event;
       CREATE RELAY owner_move_records SCHEMA owner_move_event UNBRANCHED CAPACITY 1;
-      CREATE CLIENT owner_move_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT owner_move_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
