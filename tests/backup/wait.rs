@@ -9,7 +9,10 @@
 use std::future::Future;
 
 use super::*;
-use crate::common::injected_hold::{HeldGate, InjectedHold, hold_in_order};
+use crate::common::{
+    injected_hold::{HeldGate, InjectedHold, hold_in_order},
+    runner_observation::observe_off_the_runner,
+};
 
 /// How long a backup may take to reach a controlled cut before the step fails.
 const CUT_ARRIVAL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -236,8 +239,11 @@ async fn when_nspl_cluster_backup_crosses_delayed_cuts(world: &mut ScenarioWorld
     world.last_command_output = Some(outcome.message);
 }
 
-#[when("a bounded native backup wait is recovered under its original reference")]
-async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld) {
+#[when(
+    expr = "a bounded native backup wait is recovered under its original reference after a {int} \
+            second first cut"
+)]
+async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld, first_cut_seconds: u64) {
     let initial_archive = archive_path(world, "native-pending.nvxb");
     let recovered_archive = archive_path(world, "native-recovered.nvxb");
     let leader = current_leader_node(world).await;
@@ -245,92 +251,100 @@ async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld) {
         .cluster()
         .grpc_uri(&leader)
         .assured("the leader exists");
+    let domain = client_domain(&world.domain);
     let mut options = client_connect_options(&uri).assured("the client is configured");
     options.request_timeout = Duration::from_secs(20);
     options.retry_timeout = Duration::from_secs(20);
     options.backup_wait_timeout = Duration::from_secs(10);
-    let client = Client::connect_with_options(&uri, client_domain(&world.domain), options.clone())
-        .await
-        .assured("the initial native client connects");
-    let mut backup = nervix_models::Backup {
-        scope: nervix_models::BackupScope::Cluster,
-        destination: initial_archive.display().to_string(),
-        resources: nervix_models::BackupResources::Included,
-        capture: nervix_models::BackupCapture::Quiesced {
-            timeout: Some(Duration::from_secs(30)),
-        },
-    };
-    let execution = client.prepare_execution(backup.to_canonical_nspl()).await;
-    let expected = execution.reference().clone();
-    let mut task =
-        nervix_primitives::task::spawn(async move { client.execute_prepared(&execution).await });
     let first = InjectedHold {
         gate: BackupCutGate::of(world, "{{backup_base}}_a"),
-        duration: Duration::from_secs(2),
+        duration: Duration::from_secs(first_cut_seconds),
     };
-    let second = scenario_domain(world, "{{backup_base}}_b");
-    let mut held = std::pin::pin!(hold_in_order(vec![first], CUT_ARRIVAL_TIMEOUT));
-    nervix_primitives::select! {
-        biased;
-        released = &mut held => {
-            released.assured("the native backup reaches the first controlled cut");
-        }
-        result = &mut task => panic!("the native wait ended before the second cut: {result:?}"),
-    }
-    nervix_primitives::select! {
-        result = &mut task => panic!("the native wait ended before the second cut: {result:?}"),
-        reached = nervix_primitives::time::timeout(
-            CUT_ARRIVAL_TIMEOUT,
-            world
-                .fault_injection
-                .wait_for_backup_cut_pause(&second, BackupCutBoundary::Capture),
-        ) => reached.assured("the native backup reaches the controlled cut"),
-    }
-    let result = nervix_primitives::time::timeout(Duration::from_secs(12), task)
-        .await
-        .assured("the bounded native wait ends before the ordinary request budget")
-        .assured("the native command task finishes");
-    let Err(report) = &result else {
-        panic!("the unanswered native backup preserves its uncertain identity: {result:?}");
-    };
-    let nervix_client_core::ClientError::UncertainCommand { reference } = report.current_context()
-    else {
-        panic!("the unanswered native backup preserves its uncertain identity: {result:?}");
-    };
-    let reference = reference.clone();
-    assert_eq!(reference, expected);
-    assert!(
-        !initial_archive.exists(),
-        "uncertainty does not download an archive"
-    );
+    let second = BackupCutGate::of(world, "{{backup_base}}_b");
+    let recovered = observe_off_the_runner(async move {
+        let client = Client::connect_with_options(&uri, domain.clone(), options.clone())
+            .await
+            .assured("the initial native client connects");
+        let mut backup = nervix_models::Backup {
+            scope: nervix_models::BackupScope::Cluster,
+            destination: initial_archive.display().to_string(),
+            resources: nervix_models::BackupResources::Included,
+            capture: nervix_models::BackupCapture::Quiesced {
+                timeout: Some(Duration::from_secs(30)),
+            },
+        };
+        let execution = client.prepare_execution(backup.to_canonical_nspl()).await;
+        let expected = execution.reference().clone();
+        let wait_deadline = nervix_primitives::time::Instant::now() + Duration::from_secs(12);
+        let initial_wait = observe_off_the_runner(async move {
+            nervix_primitives::time::timeout_at(wait_deadline, client.execute_prepared(&execution))
+                .await
+                .assured("the bounded native wait ends before the ordinary request budget")
+        });
+        // Expiry does not cancel admitted work and need not follow the second cut. Keep
+        // observing both gates independently of the client's bounded wait.
+        hold_in_order(vec![first], CUT_ARRIVAL_TIMEOUT)
+            .await
+            .assured("the native backup reaches the first controlled cut");
+        nervix_primitives::time::timeout(CUT_ARRIVAL_TIMEOUT, second.reached())
+            .await
+            .assured("the native backup reaches the second controlled cut");
+        let result = initial_wait.await;
+        let Err(report) = &result else {
+            panic!("the unanswered native backup preserves its uncertain identity: {result:?}");
+        };
+        let nervix_client_core::ClientError::UncertainCommand { reference } =
+            report.current_context()
+        else {
+            panic!("the unanswered native backup preserves its uncertain identity: {result:?}");
+        };
+        let reference = reference.clone();
+        assert_eq!(reference, expected);
+        assert!(
+            !initial_archive.exists(),
+            "uncertainty does not download an archive"
+        );
 
-    options.backup_wait_timeout = Duration::from_secs(60);
-    let recovery_client = Client::connect_with_options(&uri, client_domain(&world.domain), options)
-        .await
-        .assured("a fresh native client connects for recovery");
-    backup.destination = recovered_archive.display().to_string();
-    let recovery = recovery_client
-        .prepare_backup_with_reference(&backup, &reference)
-        .await;
-    world
-        .fault_injection
-        .release_backup_cut_pause(&second, BackupCutBoundary::Capture);
-    let outcome = recovery_client
-        .execute_prepared(&recovery)
-        .await
-        .assured("the original native backup is recovered");
-    assert!(outcome.succeeded(), "{}", outcome.message);
-    assert_eq!(outcome.execution_reference.as_ref(), Some(&expected));
-    world.last_backup = Some(TestBackup {
-        reference: expected,
-        summary: *outcome
-            .backup
-            .assured("the recovered backup has its summary"),
-    });
+        options.backup_wait_timeout = Duration::from_secs(60);
+        let recovery_client = Client::connect_with_options(&uri, domain, options)
+            .await
+            .assured("a fresh native client connects for recovery");
+        backup.destination = recovered_archive.display().to_string();
+        let recovery = recovery_client
+            .prepare_backup_with_reference(&backup, &reference)
+            .await;
+        second.release();
+        let outcome = recovery_client
+            .execute_prepared(&recovery)
+            .await
+            .assured("the original native backup is recovered");
+        assert!(outcome.succeeded(), "{}", outcome.message);
+        assert_eq!(outcome.execution_reference.as_ref(), Some(&expected));
+        assert_eq!(
+            outcome.origin,
+            Some(nervix_client_core::OutcomeOrigin::Recovered),
+            "the fresh client recovers the admitted execution"
+        );
+        TestBackup {
+            reference: expected,
+            summary: *outcome
+                .backup
+                .assured("the recovered backup has its summary"),
+        }
+    })
+    .await;
+    world.last_backup = Some(recovered);
 }
 
-#[then(expr = "backup archive {string} retains both native recovery cuts")]
-async fn then_archive_retains_native_recovery_cuts(world: &mut ScenarioWorld, file: String) {
+#[then(
+    expr = "backup archive {string} retains both native recovery cuts after a {int} second first \
+            cut"
+)]
+async fn then_archive_retains_native_recovery_cuts(
+    world: &mut ScenarioWorld,
+    file: String,
+    first_cut_seconds: u64,
+) {
     let description = described_archive(archive_path(world, &file)).await;
     assert_eq!(
         description.domains.len(),
@@ -356,7 +370,7 @@ async fn then_archive_retains_native_recovery_cuts(world: &mut ScenarioWorld, fi
                 released_at
                     .duration_since(*engaged_at)
                     .assured("the cut ends after engagement")
-                    >= Duration::from_secs(2),
+                    >= Duration::from_secs(first_cut_seconds),
                 "native recovery retains the completed first cut"
             );
         }
