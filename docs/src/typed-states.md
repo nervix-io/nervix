@@ -393,6 +393,13 @@ no eligible destination.
 
 ## External Encodings And Conversion Failure
 
+The emitter sink state owns its stop drain and returns one typed answer: finished with its
+publish report and finish outcome, failed with the typed connector/runtime cause, or elapsed
+without an answer within the host bound. A connector reporting its own finish-deadline failure
+remains a failed finish with that cause. It does not become an absent answer because a host timer
+used the same instant. [Connector Crates And The Connector Contract](connector-contract.md) owns
+the finish contract and [Shutdown And Recovery](shutdown.md) owns the deadline and response grace.
+
 The stopping-node drain action carries a required remaining `Duration` budget. Its sender deducts
 elapsed request time before each leader redirect; the receiving leader owns the typed budget for
 the handoffs it performs. Preparation and activation deadlines are derived from that one value,

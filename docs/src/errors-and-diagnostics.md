@@ -1034,6 +1034,12 @@ and fails with `ExecutionBuildError::StopEmitter` above the stop report, beneath
 drain as a printable attachment, which a rendered chain does not show, so `StopEmitter` carries that
 description and its message ends with it. A later stop can still end the retained task.
 
+The task bounds buffer draining by its deadline, then lets the sink's finish answer within half the
+supervisor's response grace while still passing the original deadline to the sink. A finish that
+reports unsent records at its deadline supplies its own count to the stop report. A buffer drain
+that misses the deadline, or a finish that never answers within that reporting window, reports the
+stop deadline instead.
+
 ### Node Startup
 
 The integration harness keeps a readiness failure and the exact node task's cleanup outcome in

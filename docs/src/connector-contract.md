@@ -1104,7 +1104,12 @@ The host calls `finish` once the emitter will publish nothing more through the s
 the emitter's buffer, publishes and commits everything it holds, and then finishes the sink by the
 stop's own deadline; an alteration, placement move or ownership handoff that replaces the emitter
 stops it this way. A failed finish fails that stop, so the emitter keeps running and the stop can be
-asked again. Terminal teardown of a domain execution, when the domain stops, its execution is
+asked again. The host bounds the buffer drain by the stop deadline. It gives `finish` that same
+deadline, then uses half of the task supervisor's existing response grace to receive the finish's
+outcome and leaves the other half to deliver the stop answer. A finish that does not answer in that
+window fails with a stop deadline error. This reporting grace gives no sink more time to send.
+
+Terminal teardown of a domain execution, when the domain stops, its execution is
 rebuilt or the node shuts down, ends the emitter task wherever it is, including in the middle of a
 publish, and then finishes the sink. The stopping execution gives every emitter its deadline before
 it signals the shutdown: the domain drain timeout from that moment, and no later than the node's
