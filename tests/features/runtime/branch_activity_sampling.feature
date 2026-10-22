@@ -1,7 +1,7 @@
 Feature: Branch activity sampling
 
   @branch_activity_sampling
-  Scenario Outline: Activity sampled after an awaited record keeps each logical branch alive
+  Scenario Outline: Fresh interleaved records correlate after all initial branch state retires
     Given branched relay expiration scan interval is configured as "6s"
     And runtime replication is configured with replica count 0 and snapshot interval "30s"
     And a <cluster_size> node nervix cluster is started
@@ -175,9 +175,8 @@ Feature: Branch activity sampling
       {"user_id":42,"event_seq":11}
       {"user_id":7,"event_seq":13}
       """
-    # Both branches receive their matching input before waiting for either subscription result.
-    # A delayed result for one branch must not consume the other branch's retention interval.
-    And physical time passes for "3s"
+    # Match inside the live input lifetime. Each TTL/rate pair is three physical seconds,
+    # so a sleep before the matching requests would race legitimate branch expiration.
     And http payloads are posted concurrently to host "http-{{test_id}}.example.com" path "/right"
       """
       {"user_id":42,"event_seq":12}
@@ -187,6 +186,20 @@ Feature: Branch activity sampling
       """
       "left_seq":11,"right_seq":12,"user_id":42
       "left_seq":13,"right_seq":14,"user_id":7
+      """
+
+    When physical time passes for "3s"
+    Then within "30s" node "node-1" observability metric "nervix_branch_instances" with labels eventually equals 0
+      """
+      domain="{{domain}}"
+      branch="by_correlated_users"
+      physical_node_id="node-1"
+      """
+    And within "30s" node "{{correlator_owner}}" observability metric "nervix_branch_instances" with labels eventually equals 0
+      """
+      domain="{{domain}}"
+      branch="by_correlated_users"
+      physical_node_id="{{correlator_owner}}"
       """
 
     Examples:
