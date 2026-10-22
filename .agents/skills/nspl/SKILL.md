@@ -490,10 +490,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; an ingestor's `NO ACK` and an emitter's
   `NO_ACK` have no in-flight ACK window and never accept `MAX`.
 - Do not promise that an emitter's `NO_ACK` survives a stop on every sink. A `STOP`, a replacement
-  or a node shutdown sends what a Kafka producer still queues and awaits the receipts of what a
-  Pulsar producer accepted within its deadline, reporting what is outstanding when it passes, and
-  MQTT QoS 0 discards what its client still holds. Choose an `ACK` mode where a stop must not lose
-  emitted records; `Emitters` → `ACK Semantics And Effective Delivery` has the rule.
+  or a node shutdown sends what a Kafka producer still queues, awaits the receipts of what a Pulsar
+  producer accepted and waits for an MQTT QoS 0 client to send what it holds, all within its
+  deadline, reporting what is outstanding when it passes. Choose an `ACK` mode where a stop must not
+  lose emitted records; `Emitters` → `ACK Semantics And Effective Delivery` has the rule.
 - Name the connector and entity in every ingestor head, such as `CREATE KAFKA TOPIC INGESTOR`,
   `CREATE HTTP ENDPOINT INGESTOR`, or `CREATE SYSLOG LISTENER INGESTOR`, and write the body after
   `FROM` without a connector keyword. Reference a client of the head's connector, and pair

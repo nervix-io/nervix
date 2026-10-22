@@ -57,7 +57,13 @@ step's tracked impact recorder to recover an engaged domain pause before retaini
 outcome. The public pause-release regression controls two leadership transfers and is registered
 in the active, order and stressed lifecycle selections. The detector observes the surrounding
 tracked acquisitions; asynchronous proposal waits and the test barriers remain outside its scope.
-No new synchronization protocol or hot-path map access is introduced.
+No new synchronization protocol or hot-path map access is introduced. A coordinator that adopts its
+transaction's pause records it on the same tracked impact recorder before anything can end the
+step, then drains and releases it on the existing paths. The public outline whose leader refuses a
+model publication and the pause release after it, as a leader whose lease lapsed, joins the same
+three selections on one and three nodes. Its saturated-log counterpart, which keeps an ordinary
+command applying while its transaction commits, adds no tracked acquisition and stays outside
+them; its owner test and public scenario cover it.
 
 ## Remote ACK And Admission Owners
 
@@ -1689,9 +1695,14 @@ line was reused.
 
 **Bounds and handoff.** The live registry owns the live lock, waiting attempt and thread records;
 none of its shard guards cross a tracked acquisition. Order instrumentation adds a run-bounded
-history of at most 16,384 directed instance edges, 1,024 source witnesses per edge, and 64 guard
-leases per thread. Ending a lock does not reclaim the historical edge budget. Refused history or
-count overflow becomes an explicit overload finding. The witness budget retains distinct storage
+history of at most 65,536 directed instance edges, 1,024 source witnesses per edge, and 64 guard
+leases per thread. Ending a lock does not reclaim the historical edge budget, so a lock that lives
+for one request and is taken under the lock of an owner that outlives it spends one edge per
+request: relay admission records under their peer owner leave more than 13,000 such edges in the
+three-node 40-relay materialized restore with a leadership handoff, and more when its relay
+deliveries retry. A process regression keeps 32,768 per-request edges under one owner within the
+history, and the edge-limit regression takes one more per-request lock than it keeps. Refused
+history or count overflow becomes an explicit overload finding. The witness budget retains distinct storage
 worker identities across checkpoint staging. Its process regression retains all 512 worker
 contexts in one historical edge; a separate 1,025-context workload must record order-history
 overload and fail qualification. The independent edge and held-guard limits remain fatal too.
@@ -2101,6 +2112,15 @@ while publishing and awaits the rest at finish under the host's deadline. No rec
 is persisted or published through a shared map. The driver and its asynchronous channels remain
 outside Deloxide's tracked locks. The registered `scenario.pulsar-finish-at-stop` and
 `stress.pulsar-finish-at-stop` workloads exercise that finish through one- and three-node STOP,
+including the host's tracked quiesce and teardown paths.
+
+The MQTT sink's QoS 0 publishing has the same shape. One sink task owns the flush notices of the
+publishes its client took, the driver's one-shot completions that its event loop ends once it has
+written and flushed each publish. The task drops the notices that ended at the start of each
+publish and awaits the rest at finish under the host's deadline, in the order the client took them.
+No notice or outcome is persisted or published through a shared map, and the driver's event loop and
+its channels remain outside Deloxide's tracked locks. The registered `scenario.mqtt-finish-at-stop`
+and `stress.mqtt-finish-at-stop` workloads exercise that finish through one- and three-node STOP,
 including the host's tracked quiesce and teardown paths.
 
 The ordering contracts above are checked against the production owners under Shuttle. A check
