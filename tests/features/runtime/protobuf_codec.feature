@@ -114,7 +114,7 @@ Feature: Protobuf codec
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

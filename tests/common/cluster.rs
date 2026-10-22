@@ -48,6 +48,7 @@ use nervix_interconnect::{
     Transport, TransportClock, TransportIdentity, TransportOptions,
 };
 use nervix_models::{ClusterNodeName, NodeEndpoint};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statement_sources};
 use nervix_primitives::{
     runtime::Handle,
     sync::{
@@ -137,7 +138,7 @@ use super::{
         STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, STATUS_WAIT_BUDGET, StatusEndpoint,
         StatusRequestError, StatusTransport,
     },
-    suite_watchdog::{LiveClusterRegistration, NodeStop},
+    suite_watchdog::{LiveClusterRegistration, NodeStop, SUITE_BUDGET},
 };
 
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -503,6 +504,52 @@ pub(crate) fn client_connect_options(server: &str) -> io::Result<ConnectOptions>
     } else {
         Ok(ConnectOptions::default().with_basic_auth(TEST_AUTH_USERNAME, TEST_AUTH_PASSWORD))
     }
+}
+
+/// The slowest healthy `UPLOAD RESOURCE` of a 48 MiB archive measured beside other large uploads.
+/// With 48 of them on one shared, disk-backed host, those that completed did so just inside the
+/// client's 120-second window and 35 others did not; on an idle host 72 of them took at most 52
+/// seconds.
+const SLOWEST_HEALTHY_UPLOAD: Duration = Duration::from_secs(120);
+/// A policy input: an upload's pace follows the storage and CPU the rest of the suite leaves it,
+/// and both transfers of its archive slow down together.
+const UPLOAD_WAIT_HEADROOM_FACTOR: u32 = 5;
+/// How long a native client the harness runs an `UPLOAD RESOURCE` through waits for the upload,
+/// every attempt and redirect included. The leader answers an upload only once every live node has
+/// fetched, verified and installed its archive, so the wait is two transfers of the archive at the
+/// pace the suite's load allows, which the client's default request and retry windows do not
+/// always cover.
+pub(crate) const UPLOAD_COMMAND_WAIT: Duration =
+    match SLOWEST_HEALTHY_UPLOAD.checked_mul(UPLOAD_WAIT_HEADROOM_FACTOR) {
+        Some(wait) => wait,
+        None => panic!("the upload command wait must fit a duration"),
+    };
+const _: () = assert!(
+    UPLOAD_COMMAND_WAIT.as_nanos() < SUITE_BUDGET.as_nanos(),
+    "an upload the harness waits for must end inside the suite budget"
+);
+
+/// The options of a native client the harness runs `commands` through. A client that runs an
+/// `UPLOAD RESOURCE` waits [`UPLOAD_COMMAND_WAIT`] for its requests and their retries; every other
+/// client keeps the client's own defaults.
+pub(crate) fn command_connect_options(server: &str, commands: &str) -> io::Result<ConnectOptions> {
+    let mut options = client_connect_options(server)?;
+    if uploads_resource(commands) {
+        options.request_timeout = UPLOAD_COMMAND_WAIT;
+        options.retry_timeout = UPLOAD_COMMAND_WAIT;
+    }
+    Ok(options)
+}
+
+/// Whether `commands` holds an `UPLOAD RESOURCE`. Commands that do not parse upload nothing, and
+/// the client reports them as it would any other.
+fn uploads_resource(commands: &str) -> bool {
+    let Ok(statements) = parse_client_statement_sources(commands) else {
+        return false;
+    };
+    statements
+        .iter()
+        .any(|parsed| matches!(parsed.statement, ClientStatement::UploadResource(_)))
 }
 
 pub(crate) struct InterconnectTestCa {
@@ -4464,7 +4511,7 @@ pub(crate) async fn run_command_via_client(
     let client = Client::connect_with_options(
         server,
         client_domain(domain),
-        client_connect_options(server)?,
+        command_connect_options(server, query)?,
     )
     .await
     .map_err(|report| io::Error::other(format!("{report:#}")))?;

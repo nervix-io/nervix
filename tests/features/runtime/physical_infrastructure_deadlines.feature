@@ -23,8 +23,7 @@ Feature: Physical infrastructure deadlines under domain pacing
         FROM WIRE JSON SCHEMA physical_poll_wire
         TO SCHEMA physical_poll_record;
       CREATE RELAY physical_poll_records SCHEMA physical_poll_record UNBRANCHED;
-      CREATE CLIENT physical_poll_source
-        TYPE HTTP
+      CREATE HTTP CLIENT physical_poll_source
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?delay_ms=10000',
           'method' = 'GET',
@@ -91,8 +90,7 @@ Feature: Physical infrastructure deadlines under domain pacing
         TO SCHEMA physical_prometheus_sample;
       CREATE RELAY physical_prometheus_samples
         SCHEMA physical_prometheus_sample UNBRANCHED;
-      CREATE CLIENT physical_prometheus_source
-        TYPE PROMETHEUS
+      CREATE PROMETHEUS CLIENT physical_prometheus_source
         CONFIG {
           'addr' = '{{mock_http_addr}}/prometheus-clock-source/{{test_id}}/10000',
           'timeout_ms' = 30000
@@ -142,8 +140,7 @@ Feature: Physical infrastructure deadlines under domain pacing
         FROM WIRE JSON SCHEMA physical_timeout_wire
         TO SCHEMA physical_timeout_record;
       CREATE RELAY physical_timeout_records SCHEMA physical_timeout_record UNBRANCHED;
-      CREATE CLIENT physical_timeout_source
-        TYPE HTTP
+      CREATE HTTP CLIENT physical_timeout_source
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?delay_ms=10000',
           'method' = 'GET',
@@ -335,8 +332,7 @@ Feature: Physical infrastructure deadlines under domain pacing
         FROM WIRE JSON SCHEMA physical_ack_wire
         TO SCHEMA physical_ack_record;
       CREATE RELAY physical_ack_records SCHEMA physical_ack_record UNBRANCHED;
-      CREATE CLIENT physical_ack_kafka
-        TYPE KAFKA
+      CREATE KAFKA CLIENT physical_ack_kafka
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'

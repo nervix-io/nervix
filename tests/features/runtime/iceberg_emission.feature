@@ -19,7 +19,7 @@ Feature: Iceberg emission
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_ingress TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_ingress CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-iceberg-dns-{{test_id}}'
       };
@@ -32,14 +32,14 @@ Feature: Iceberg emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT s3_main TYPE S3 CONFIG {
+      CREATE S3 CLIENT s3_main CONFIG {
         'endpoint' = '{{rustfs_dns_addr}}',
         'region' = 'us-east-1',
         'access_key_id' = 'rustfsadmin',
         'secret_access_key' = 'rustfsadmin',
         'path_style_access' = true
       };
-      CREATE CLIENT iceberg_catalog TYPE ICEBERG_REST CONFIG {
+      CREATE ICEBERG_REST CLIENT iceberg_catalog CONFIG {
         'uri' = '{{iceberg_rest_dns_addr}}',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
@@ -85,15 +85,13 @@ Feature: Iceberg emission
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
-      CREATE CLIENT gcs_main
-        TYPE GCS
+      CREATE GCS CLIENT gcs_main
         CONFIG {
           'service_path' = '{{gcs_addr}}',
           'no_auth' = true
         };
 
-      CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -154,8 +152,7 @@ Feature: Iceberg emission
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-iceberg-values-error-{{test_id}}'
@@ -170,8 +167,7 @@ Feature: Iceberg emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT s3_main
-      TYPE S3
+      CREATE S3 CLIENT s3_main
       CONFIG {
         'endpoint' = '{{rustfs_addr}}',
         'region' = 'us-east-1',
@@ -179,8 +175,7 @@ Feature: Iceberg emission
         'secret_access_key' = 'rustfsadmin',
         'path_style_access' = true
       };
-      CREATE CLIENT iceberg_catalog
-      TYPE ICEBERG_REST
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
       CONFIG {
         'uri' = '{{iceberg_rest_addr}}',
         'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -256,15 +251,13 @@ Feature: Iceberg emission
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
-      CREATE CLIENT azure_main
-        TYPE AZURE_BLOB
+      CREATE AZURE_BLOB CLIENT azure_main
         CONFIG {
           'account_name' = 'devstoreaccount1',
           'account_key' = 'local-key'
         };
 
-      CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -321,8 +314,7 @@ Feature: Iceberg emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-{{test_id}}'
@@ -337,8 +329,7 @@ Feature: Iceberg emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT s3_main
-        TYPE S3
+        CREATE S3 CLIENT s3_main
         CONFIG {
           'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
@@ -346,8 +337,7 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-        CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+        CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -423,8 +413,7 @@ Feature: Iceberg emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT s3_main
-      TYPE S3
+      CREATE S3 CLIENT s3_main
       CONFIG {
         'endpoint' = '{{rustfs_addr}}',
         'region' = 'us-east-1',
@@ -432,8 +421,7 @@ Feature: Iceberg emission
         'secret_access_key' = 'rustfsadmin',
         'path_style_access' = true
       };
-      CREATE CLIENT iceberg_catalog
-      TYPE ICEBERG_REST
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
       CONFIG {
         'uri' = '{{iceberg_rest_addr}}',
         'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -494,7 +482,7 @@ Feature: Iceberg emission
       CREATE CODEC notification_codec FROM JSON TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_ingress TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_ingress CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-iceberg-nested-{{test_id}}'
       };
@@ -505,14 +493,14 @@ Feature: Iceberg emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT s3_main TYPE S3 CONFIG {
+      CREATE S3 CLIENT s3_main CONFIG {
         'endpoint' = '{{rustfs_addr}}',
         'region' = 'us-east-1',
         'access_key_id' = 'rustfsadmin',
         'secret_access_key' = 'rustfsadmin',
         'path_style_access' = true
       };
-      CREATE CLIENT iceberg_catalog TYPE ICEBERG_REST CONFIG {
+      CREATE ICEBERG_REST CLIENT iceberg_catalog CONFIG {
         'uri' = '{{iceberg_rest_addr}}',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
@@ -564,8 +552,7 @@ Feature: Iceberg emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-missing-{{test_id}}'
@@ -580,8 +567,7 @@ Feature: Iceberg emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT s3_main
-        TYPE S3
+        CREATE S3 CLIENT s3_main
         CONFIG {
           'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
@@ -589,8 +575,7 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-        CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+        CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -634,14 +619,14 @@ Feature: Iceberg emission
       """
       CREATE SCHEMA notification (user_id STRING);
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT s3_main TYPE S3 CONFIG {
+      CREATE S3 CLIENT s3_main CONFIG {
         'endpoint' = '{{rustfs_addr}}',
         'region' = 'us-east-1',
         'access_key_id' = 'rustfsadmin',
         'secret_access_key' = 'rustfsadmin',
         'path_style_access' = true
       };
-      CREATE CLIENT iceberg_catalog TYPE ICEBERG_REST CONFIG {
+      CREATE ICEBERG_REST CLIENT iceberg_catalog CONFIG {
         'uri' = '{{iceberg_rest_addr}}',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
@@ -709,8 +694,7 @@ Feature: Iceberg emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-namespace-{{test_id}}'
@@ -725,8 +709,7 @@ Feature: Iceberg emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT s3_main
-        TYPE S3
+        CREATE S3 CLIENT s3_main
         CONFIG {
           'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
@@ -734,8 +717,7 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-        CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+        CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -815,8 +797,7 @@ Feature: Iceberg emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-temp-{{test_id}}'
@@ -831,8 +812,7 @@ Feature: Iceberg emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT s3_main
-        TYPE S3
+        CREATE S3 CLIENT s3_main
         CONFIG {
           'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
@@ -840,8 +820,7 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-        CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+        CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -905,8 +884,7 @@ Feature: Iceberg emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-shutdown-{{test_id}}'
@@ -921,8 +899,7 @@ Feature: Iceberg emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT s3_main
-        TYPE S3
+        CREATE S3 CLIENT s3_main
         CONFIG {
           'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
@@ -930,8 +907,7 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-        CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+        CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -987,8 +963,7 @@ Feature: Iceberg emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-init-{{test_id}}'
@@ -1003,8 +978,7 @@ Feature: Iceberg emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT s3_main
-        TYPE S3
+        CREATE S3 CLIENT s3_main
         CONFIG {
           'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
@@ -1012,8 +986,7 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-        CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+        CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -1074,14 +1047,12 @@ Feature: Iceberg emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-iceberg-ack-{{test_id}}'
         };
-        CREATE CLIENT s3_main
-        TYPE S3
+        CREATE S3 CLIENT s3_main
         CONFIG {
           'endpoint' = '{{rustfs_dns_addr}}',
           'region' = 'us-east-1',
@@ -1089,8 +1060,7 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-        CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+        CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_rest_dns_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -1167,8 +1137,7 @@ Feature: Iceberg emission
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT s3_main
-        TYPE S3
+      CREATE S3 CLIENT s3_main
         CONFIG {
           'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
@@ -1176,8 +1145,7 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-      CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -1246,8 +1214,7 @@ Feature: Iceberg emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT s3_main
-        TYPE S3
+      CREATE S3 CLIENT s3_main
         CONFIG {
           'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
@@ -1255,8 +1222,7 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-      CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_catalog_gate}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -1338,8 +1304,7 @@ Feature: Iceberg emission
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT s3_main
-        TYPE S3
+      CREATE S3 CLIENT s3_main
         CONFIG {
           'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
@@ -1347,8 +1312,7 @@ Feature: Iceberg emission
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-      CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'

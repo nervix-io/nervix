@@ -23,8 +23,7 @@ Feature: Relay fan-out
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 1;
 
-      CREATE CLIENT zeromq_fanout
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT zeromq_fanout
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'

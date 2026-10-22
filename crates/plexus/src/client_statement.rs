@@ -1299,7 +1299,7 @@ mod tests {
     #[test]
     fn client_statement_batch_ignores_semicolon_inside_strings() {
         let parsed = parse_client_statements(
-            "CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://localhost/a;b' }; CREATE \
+            "CREATE HTTP CLIENT http_main CONFIG { 'url' = 'http://localhost/a;b' }; CREATE \
              DOMAIN prod;",
         )
         .expect("parse should succeed");
@@ -1635,7 +1635,7 @@ mod tests {
             "BACKUP CLUSTER TO '/tmp/c.nvxb' |",
             "DESCRIBE RESOURCE proto VERSION |",
             "CREATE USER alice WITH PASSWORD 'sec|",
-            "CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://lo|",
+            "CREATE HTTP CLIENT http_main CONFIG { 'url' = 'http://lo|",
             "DESCRIBE TRANSACTION 'tx|",
             "BACKUP CLUSTER |",
             "RESTORE CLUSTER FROM '/tmp/c.nvxb' |",

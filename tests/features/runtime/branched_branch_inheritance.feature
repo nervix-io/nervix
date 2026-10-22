@@ -24,8 +24,7 @@ Feature: Branched branch inheritance
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE RELAY projected_notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-processor-{{test_id}}'

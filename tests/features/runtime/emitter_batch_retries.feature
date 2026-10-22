@@ -29,7 +29,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -111,7 +111,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -199,7 +199,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_small_messages TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_small_messages CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'message.max.bytes' = '1000'
       };
@@ -270,7 +270,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT mongodb_client TYPE MONGODB POOL SIZE MIN 2 MAX 8 CONFIG {
+      CREATE MONGODB CLIENT mongodb_client POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = '{{mongodb_addr}}',
         'database' = 'nervix'
       };

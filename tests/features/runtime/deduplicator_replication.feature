@@ -53,8 +53,7 @@ Feature: Deduplicator state replication
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'

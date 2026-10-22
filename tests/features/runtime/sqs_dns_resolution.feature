@@ -31,7 +31,7 @@ Feature: SQS name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT sqs_main TYPE SQS MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE SQS CLIENT sqs_main MOUNT dev_tls VERSION 1 CONFIG {
         <client_config>,
         'region' = 'us-east-1'
       };
@@ -96,7 +96,7 @@ Feature: SQS name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT sqs_main TYPE SQS MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE SQS CLIENT sqs_main MOUNT dev_tls VERSION 1 CONFIG {
         'endpoint' = '{{sqs_tls_dns_endpoint}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem',
         'region' = 'us-east-1'
@@ -140,7 +140,7 @@ Feature: SQS name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -155,7 +155,7 @@ Feature: SQS name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+      CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_forwarded_endpoint}}',
         'region' = 'us-east-1'
       };
@@ -219,7 +219,7 @@ Feature: SQS name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+      CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_forwarded_endpoint}}',
         'region' = 'us-east-1'
       };

@@ -1305,7 +1305,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS BRANCH by_kafka_metrics SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_kafka_metrics;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_kafka_metrics;
-        CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+        CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -1396,7 +1396,7 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS BRANCH by_kafka_metrics SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_kafka_metrics;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_kafka_metrics;
-        CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+        CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

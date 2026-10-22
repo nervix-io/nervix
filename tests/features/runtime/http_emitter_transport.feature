@@ -34,7 +34,7 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP MOUNT receiver_tls VERSION 1 CONFIG {
+      CREATE HTTP CLIENT api MOUNT receiver_tls VERSION 1 CONFIG {
         'endpoint' = '{{http_receiver.secure}}', 'timeout_ms' = 5000,
         'tls_ca_file' = '{{receiver_tls}}/ca.pem',
         'tls_cert_file' = '{{receiver_tls}}/client.pem',
@@ -96,7 +96,7 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.secure}}', 'timeout_ms' = 5000<ca_setting>
       };
       CREATE EMITTER published FROM outgoing
@@ -155,7 +155,7 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP MOUNT receiver_tls VERSION 1 CONFIG {
+      CREATE HTTP CLIENT api MOUNT receiver_tls VERSION 1 CONFIG {
         'endpoint' = '{{http_receiver.secure}}', 'timeout_ms' = 5000,
         'tls_ca_file' = '{{receiver_tls}}/ca.pem'
       };
@@ -210,7 +210,7 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 300
       };
       CREATE EMITTER published FROM outgoing
@@ -275,7 +275,7 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO source_b INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER published FROM source_a, source_b
@@ -335,7 +335,7 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 300
       };
       CREATE EMITTER published FROM outgoing
@@ -398,7 +398,7 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER published FROM outgoing
@@ -459,7 +459,7 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://api.nervix.test:{{http_receiver_port.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER published FROM outgoing
@@ -534,7 +534,7 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://api.nervix.test:{{http_receiver_port.api}}', 'timeout_ms' = 20000
       };
       CREATE EMITTER published FROM outgoing

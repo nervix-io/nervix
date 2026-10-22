@@ -41,8 +41,7 @@ Feature: Sentry emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sentry_main
-      TYPE SENTRY
+      CREATE SENTRY CLIENT sentry_main
       CONFIG {
         'dsn' = '{{sentry_dns_dsn}}',
         'timeout_ms' = 5000
@@ -105,7 +104,7 @@ Feature: Sentry emission
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_ingest
         TO errors INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT sentry_main TYPE SENTRY CONFIG {
+      CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = 'http://public@127.0.0.1:{{http_receiver_port.sentry}}/1',
         'timeout_ms' = 5000
       };
@@ -172,7 +171,7 @@ Feature: Sentry emission
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_ingest
         TO errors INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT sentry_main TYPE SENTRY CONFIG {
+      CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = 'http://public@127.0.0.1:{{http_receiver_port.sentry}}/1',
         'timeout_ms' = 5000
       };

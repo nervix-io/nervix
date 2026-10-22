@@ -21,8 +21,7 @@ Feature: Pulsar ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_pulsar_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_pulsar_notifications;
-        CREATE CLIENT pulsar_main
-        TYPE PULSAR
+        CREATE PULSAR CLIENT pulsar_main
         CONFIG {
           'addr' = '{{pulsar_addr}}'
         };
@@ -78,8 +77,7 @@ Feature: Pulsar ingestion
       FROM WIRE JSON SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT pulsar_main
-      TYPE PULSAR
+      CREATE PULSAR CLIENT pulsar_main
       CONFIG {
         'addr' = '{{pulsar_addr}}'
       };
@@ -144,8 +142,7 @@ Feature: Pulsar ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_pulsar_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_pulsar_notifications;
-        CREATE CLIENT pulsar_main
-        TYPE PULSAR
+        CREATE PULSAR CLIENT pulsar_main
         CONFIG {
           'addr' = '{{pulsar_addr}}'
         };
@@ -208,10 +205,10 @@ Feature: Pulsar ingestion
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT pulsar_ingress TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT pulsar_ingress CONFIG {
         'addr' = '{{pulsar_stallable_addr}}'
       };
-      CREATE CLIENT pulsar_egress TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT pulsar_egress CONFIG {
         'addr' = '{{pulsar_addr}}'
       };
       CREATE PULSAR TOPIC INGESTOR confirmed_notifications
@@ -297,10 +294,10 @@ Feature: Pulsar ingestion
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT pulsar_ingress TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT pulsar_ingress CONFIG {
         'addr' = '{{pulsar_stallable_addr}}'
       };
-      CREATE CLIENT pulsar_egress TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT pulsar_egress CONFIG {
         'addr' = '{{pulsar_addr}}'
       };
       CREATE PULSAR TOPIC INGESTOR rejected_notifications

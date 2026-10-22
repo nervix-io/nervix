@@ -30,8 +30,7 @@ Feature: MQTT TLS resource mounts
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_tls
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_tls
         MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{mqtt_tls_addr}}',

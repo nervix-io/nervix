@@ -443,6 +443,7 @@ mod tests {
                 IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
                     client: client_name.clone(),
                     query: "up".to_string(),
+                    max_body_size: None,
                     every: cadence,
                     mode: nervix_models::PrometheusIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Suspend,

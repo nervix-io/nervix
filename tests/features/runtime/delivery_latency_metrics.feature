@@ -39,8 +39,7 @@ Feature: Delivery latency metrics
       CREATE JUNCTION forward FROM reingested_readings
         BRANCHED BY tenants
         TO emitted_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'

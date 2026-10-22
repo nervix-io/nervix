@@ -110,8 +110,7 @@ Feature: Cluster leader failover
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -292,8 +291,7 @@ Feature: Cluster leader failover
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'

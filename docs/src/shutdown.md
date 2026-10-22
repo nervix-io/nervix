@@ -696,6 +696,14 @@ before its shared stop deadline.
 Shutdown does not change any connector's delivery contract. It changes only whether a connector
 reaches its completion point before the process ends.
 
+A graceful stop completes two things for its connectors. Each source in an acknowledged mode
+confirms on its transport the positions of every batch its graph acknowledged before the source
+closes, within the drain timeout, and each emitter finishes its sink when it stops, sending what
+the sink's client still holds by the deadline it is given. [Sources](#sources) and [Sinks](#sinks)
+give each one's deadline and what is left when it passes, and the
+[connector delivery standard](./connector-contract.md#connector-delivery-standard) states the rules
+both follow.
+
 ### Sources
 
 An MQTT execution stop or ownership move retains its persistent broker sessions for resume.

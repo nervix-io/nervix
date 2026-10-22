@@ -23,8 +23,7 @@ Feature: RabbitMQ emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
@@ -39,8 +38,7 @@ Feature: RabbitMQ emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT rabbit_main
-        TYPE RABBITMQ
+        CREATE RABBITMQ CLIENT rabbit_main
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
@@ -99,7 +97,7 @@ Feature: RabbitMQ emission
       CREATE SCHEMA user_id_branch ( user_id I64 );
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -116,7 +114,7 @@ Feature: RabbitMQ emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT rabbitmq_sink TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbitmq_sink CONFIG {
         'addr' = '{{rabbitmq_stallable_addr}}'
       };
       CREATE ATTACHED EMITTER rabbitmq_boundary FROM notifications

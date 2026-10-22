@@ -94,8 +94,7 @@ Feature: Optional fields
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -230,8 +229,7 @@ Feature: Optional fields
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_zeromq_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_zeromq_notifications;
-        CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+        CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_ingest_addr}}',
           'bind' = 'true'

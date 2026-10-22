@@ -53,7 +53,7 @@ pub(super) fn cluster() -> MockCluster<'static, DefaultProducerContext> {
 }
 
 /// The plan of a source in the test group, whose offsets `commit` commits.
-fn plan(
+pub(super) fn plan(
     cluster: &MockCluster<'static, DefaultProducerContext>,
     commit: KafkaGroupCommit,
 ) -> KafkaSourcePlan {
@@ -70,6 +70,7 @@ fn plan(
         })
         .collect();
     KafkaSourcePlan {
+        executor: nervix_execution::Executor::default(),
         config,
         topic: KafkaTopicName::parse(TOPIC).assured("the test topic is a valid Kafka topic"),
         offset_mode: KafkaSourceOffsetMode::ConsumerGroup {
@@ -230,7 +231,9 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
     for _attempt in 0..2 {
         let request = GroupCommitRequest::acknowledged(&first_positions)
             .assured("the read position is a valid offset");
-        let committed = commits.commit(&source.consumer, GROUP, request).await;
+        let committed = commits
+            .commit(&source.control, &source.consumer, GROUP, request)
+            .await;
         let Err(report) = committed else {
             panic!("a commit no coordinator answers fails at its deadline");
         };
@@ -254,7 +257,7 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
     let request = GroupCommitRequest::acknowledged(&second_positions)
         .assured("the read position is a valid offset");
     commits
-        .commit(&source.consumer, GROUP, request)
+        .commit(&source.control, &source.consumer, GROUP, request)
         .await
         .assured("the group's coordinator answers once it releases its answers");
     assert!(commits.unanswered.is_none());

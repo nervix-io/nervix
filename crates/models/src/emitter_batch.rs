@@ -4,10 +4,11 @@
 //!
 //! - **Owns.** The two hard limits of `BATCH MAX MESSAGES <n> MAX SIZE <bytes>` as validated
 //!   values: the member count, bounded by what the message histograms track, and the exact encoded
-//!   size, as a positive whole number of bytes with its canonical Plexus spelling.
+//!   size, as a positive whole number of bytes with its canonical Plexus spelling. The same size
+//!   value bounds a polled source's response through `MAX BODY SIZE`.
 //! - **Depends on.** Serialization primitives.
-//! - **Must not know.** Which sink or codec a policy is declared on, how a batch is packed, encoded
-//!   or measured, or how a connector publishes it.
+//! - **Must not know.** Which sink, source or codec a limit is declared on, how a batch is packed,
+//!   encoded or measured, or how a connector publishes or reads one.
 
 #![cfg_attr(
     nervix_lint,
@@ -28,13 +29,14 @@ use rkyv::{
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
-/// Why a batching limit is not a value an emitter can declare.
+/// Why a batch's member count is not one an emitter can declare. A size that is not one is a
+/// [`PayloadSizeError`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[cfg_attr(
     nervix_lint,
     nervix::error_boundary(
         outcome,
-        reason = "batch-limit construction returns pure range and literal validation refusals"
+        reason = "batch-limit construction returns a pure range validation refusal"
     )
 )]
 pub enum EmitterBatchLimitError {
@@ -43,19 +45,34 @@ pub enum EmitterBatchLimitError {
         max = BatchMessageLimit::MAX
     )]
     MessageLimitOutOfRange { value: u64 },
-    #[error("BATCH MAX SIZE must be greater than zero")]
-    ZeroSize,
+}
+
+/// Why a byte size is not one a [`PayloadSizeLimit`] can hold.
+///
+/// It names no clause: `BATCH MAX SIZE` and `MAX BODY SIZE` both write a size, and the grammar that
+/// reads one names its clause in front of the reason, as in `MAX BODY SIZE must be greater than
+/// zero`.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "size-limit construction returns pure literal and range validation refusals"
+    )
+)]
+pub enum PayloadSizeError {
+    #[error("must be greater than zero")]
+    Zero,
     #[error(
-        "BATCH MAX SIZE '{literal}' must be a whole number followed by B, KB, KiB, MB, MiB, GB, \
-         GiB, TB or TiB"
+        "'{literal}' must be a whole number followed by B, KB, KiB, MB, MiB, GB, GiB, TB or TiB"
     )]
-    MalformedSize { literal: String },
-    #[error("BATCH MAX SIZE '{literal}' exceeds the largest size a 64-bit byte count can hold")]
-    SizeOverflow { literal: String },
+    Malformed { literal: String },
+    #[error("'{literal}' exceeds the largest size a 64-bit byte count can hold")]
+    Overflow { literal: String },
     /// A stored size whose byte count its unit does not divide. Every size is constructed as a
     /// whole number of its unit, so no encoder writes one.
-    #[error("stored BATCH MAX SIZE of {bytes} bytes is not a whole number of {unit}")]
-    SizeNotWholeUnits {
+    #[error("stored size of {bytes} bytes is not a whole number of {unit}")]
+    NotWholeUnits {
         bytes: NonZeroU64,
         unit: ByteSizeUnit,
     },
@@ -179,8 +196,9 @@ impl ByteSizeUnit {
     }
 }
 
-/// The exact encoded size a batch payload may reach: a positive whole number of bytes, kept with
-/// the unit it was written in.
+/// A size limit in bytes: the exact encoded size a batch payload may reach, or the most of a
+/// response body a polled source reads. It is a positive whole number of bytes, kept with the unit
+/// it was written in.
 ///
 /// It is written as a whole number and a unit, such as `1MiB`, and rendered exactly as written, so
 /// `SHOW CREATE` reproduces the declaration. A fractional size, a size past the 64-bit byte range,
@@ -232,12 +250,9 @@ impl PayloadSizeLimit {
     fn from_whole_units(
         bytes: NonZeroU64,
         unit: ByteSizeUnit,
-    ) -> Result<Self, Report<EmitterBatchLimitError>> {
+    ) -> Result<Self, Report<PayloadSizeError>> {
         if !bytes.get().is_multiple_of(unit.bytes()) {
-            return Err(Report::new(EmitterBatchLimitError::SizeNotWholeUnits {
-                bytes,
-                unit,
-            }));
+            return Err(Report::new(PayloadSizeError::NotWholeUnits { bytes, unit }));
         }
         Ok(Self { bytes, unit })
     }
@@ -259,13 +274,13 @@ impl PayloadSizeLimit {
 }
 
 impl FromStr for PayloadSizeLimit {
-    type Err = EmitterBatchLimitError;
+    type Err = PayloadSizeError;
 
     fn from_str(literal: &str) -> Result<Self, Self::Err> {
-        let malformed = || EmitterBatchLimitError::MalformedSize {
+        let malformed = || PayloadSizeError::Malformed {
             literal: literal.to_string(),
         };
-        let overflow = || EmitterBatchLimitError::SizeOverflow {
+        let overflow = || PayloadSizeError::Overflow {
             literal: literal.to_string(),
         };
         let digits_end = literal
@@ -282,7 +297,7 @@ impl FromStr for PayloadSizeLimit {
             return Err(overflow());
         };
         let Some(count) = NonZeroU64::new(count) else {
-            return Err(EmitterBatchLimitError::ZeroSize);
+            return Err(PayloadSizeError::Zero);
         };
         Self::new(count, unit).ok_or_else(overflow)
     }
@@ -425,7 +440,7 @@ mod tests {
 
         assert_eq!(
             error,
-            EmitterBatchLimitError::MalformedSize {
+            PayloadSizeError::Malformed {
                 literal: literal.to_string()
             }
         );
@@ -441,7 +456,7 @@ mod tests {
 
         assert_eq!(
             error,
-            EmitterBatchLimitError::SizeOverflow {
+            PayloadSizeError::Overflow {
                 literal: literal.to_string()
             }
         );
@@ -451,7 +466,7 @@ mod tests {
     fn rejects_a_zero_size() {
         assert_eq!(
             "0MiB".parse::<PayloadSizeLimit>(),
-            Err(EmitterBatchLimitError::ZeroSize)
+            Err(PayloadSizeError::Zero)
         );
     }
 

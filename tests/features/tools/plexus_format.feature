@@ -109,15 +109,14 @@ Feature: Plexus file formatting
   Scenario: A pooled client is rewritten with its pool clause between the type and the mount
     Given a Plexus file "pipeline.plexus" containing
       """
-      create client postgres_main type postgres pool size min 2 max 8 mount dev_tls version 1
+      create postgres client postgres_main pool size min 2 max 8 mount dev_tls version 1
         config { 'addr' = 'postgresql://HOST:5432/DATABASE?sslmode=verify-full' };
       """
     When nervix-plexus-format formats the Plexus file "pipeline.plexus"
     Then the formatter exits with code 0
     And the Plexus file "pipeline.plexus" contains
       """
-      CREATE CLIENT postgres_main
-        TYPE POSTGRES
+      CREATE POSTGRES CLIENT postgres_main
         POOL SIZE MIN 2 MAX 8
         MOUNT dev_tls VERSION 1
         CONFIG {
@@ -338,7 +337,7 @@ Feature: Plexus file formatting
   Scenario: A configuration value holding a comma and a line break stays one entry
     Given a Plexus file "pipeline.plexus" containing
       """
-      create client kafka_main type kafka config { 'bootstrap.servers' = 'localhost:9092', 'sasl.jaas.config' = $v$first,
+      create kafka client kafka_main config { 'bootstrap.servers' = 'localhost:9092', 'sasl.jaas.config' = $v$first,
       second$v$ };
       """
     When nervix-plexus-format formats the Plexus file "pipeline.plexus"

@@ -32,7 +32,7 @@ Feature: ClickHouse name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, action string);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -47,7 +47,7 @@ Feature: ClickHouse name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT clickhouse_client TYPE CLICKHOUSE MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE CLICKHOUSE CLIENT clickhouse_client MOUNT dev_tls VERSION 1 CONFIG {
         <client_config>,
         'user' = 'default',
         'password' = 'nervix'
@@ -110,7 +110,7 @@ Feature: ClickHouse name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, action string);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -125,7 +125,7 @@ Feature: ClickHouse name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT clickhouse_client TYPE CLICKHOUSE MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE CLICKHOUSE CLIENT clickhouse_client MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{clickhouse_tls_dns_addr}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem',
         'user' = 'default',
@@ -180,7 +180,7 @@ Feature: ClickHouse name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, action string);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -195,7 +195,7 @@ Feature: ClickHouse name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT clickhouse_client TYPE CLICKHOUSE CONFIG {
+      CREATE CLICKHOUSE CLIENT clickhouse_client CONFIG {
         'addr' = '{{clickhouse_forwarded_addr}}',
         'user' = 'default',
         'password' = 'nervix'

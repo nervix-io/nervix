@@ -126,6 +126,9 @@ fn handed_over(batch: SourceBatch<super::SqsSourceMessage>) -> Vec<u64> {
     let messages = match batch {
         SourceBatch::Messages(messages) => messages,
         SourceBatch::Interrupted { gathered } => gathered,
+        SourceBatch::Oversized { payloads } => {
+            panic!("an SQS read drops no message for its size, yet it dropped {payloads}")
+        }
         SourceBatch::ResumeRequired | SourceBatch::Closed => {
             panic!("a read of a queue whose URL is known neither resumes nor closes")
         }

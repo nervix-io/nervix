@@ -51,8 +51,7 @@ Feature: Emitter relay inputs
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'

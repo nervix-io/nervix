@@ -131,7 +131,7 @@ Feature: Entity-pause model alterations
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION altered_path FROM incoming UNBRANCHED
         TO outgoing INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };

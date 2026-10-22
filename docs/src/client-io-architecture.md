@@ -34,7 +34,7 @@ owners of their respective rules:
 ## Ownership And Routing
 
 The ingestor or emitter name is the attachment target. An application open neither creates a graph
-node nor adds a graph edge. `CREATE CLIENT ... TYPE ...` describes an external connector connection;
+node nor adds a graph edge. `CREATE <CONNECTOR> CLIENT` describes an external connector connection;
 native endpoints instead name an internal schema directly and use the existing session listeners.
 Starting a domain needs no connected application. With no consumer, an emitter retains bounded
 pending work and applies graph backpressure.

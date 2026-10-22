@@ -229,7 +229,7 @@ The rest of the graph is built with:
 
 - `CREATE DOMAIN`, `CREATE UNPACED DOMAIN`, `CREATE PACED DOMAIN`
 - `CREATE USER`
-- `CREATE CLIENT`
+- `CREATE <CONNECTOR> CLIENT`, such as `CREATE KAFKA CLIENT`
 - `CREATE VHOST`
 - `CREATE ENDPOINT`
 - `CREATE <CONNECTOR> <ENTITY> INGESTOR`, such as `CREATE KAFKA TOPIC INGESTOR` or
@@ -670,16 +670,22 @@ fires. They are not dispatched immediately. Error-record construction failures a
 no-acked without recursively invoking the same policy. General and global errors remain node-wide
 and do not inherit a route-local `FLUSH` policy.
 
-Client definitions are key-value based and may optionally mount a resource for file-backed settings such as TLS material:
+Plexus names a client's connector in its head, such as `CREATE KAFKA CLIENT` or
+`CREATE HTTP CLIENT`. Configuration remains an ordered key-value block. A client may mount a
+resource for file-backed settings such as TLS material:
 
 ```plexus,ignore
-CREATE [IF NOT EXISTS] CLIENT <name>
-  TYPE <client_type>
+CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>
   [MOUNT <resource> VERSION <n>|LATEST]
   CONFIG {
     '<key>' = '<value>'
   };
 ```
+
+`POSTGRES`, `MYSQL`, `MONGODB`, and `REDIS` clients require `POOL SIZE MIN <n> MAX <n>` after the
+name and before the optional mount. See [Database Client Connection Pools](database-client-pools.md).
+`DROP CLIENT` and `SHOW CREATE CLIENT` address the client's name without a
+connector in their head.
 
 WebSocket clients and endpoints may also reference a signaling protocol:
 
@@ -696,8 +702,8 @@ CREATE [IF NOT EXISTS] SIGNALING PROTOCOL <name>
   [FAIL JAQ '<matcher>'[, '<matcher>'...]]
   TIMEOUT <duration>;
 
-CREATE [IF NOT EXISTS] CLIENT <name>
-  TYPE WEBSOCKETS WITH SIGNALING PROTOCOL <name>
+CREATE [IF NOT EXISTS] WEBSOCKETS CLIENT <name>
+  WITH SIGNALING PROTOCOL <name>
   CONFIG {
     'endpoint' = 'wss://example.com/ws'
   };

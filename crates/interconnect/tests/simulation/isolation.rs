@@ -152,6 +152,10 @@ fn executor(pending_jobs: usize) -> Executor {
             bulk_cpu: NonZeroUsize::MIN,
             consensus_storage: NonZeroUsize::MIN,
             filesystem_storage: NonZeroUsize::MIN,
+            connector_storage: nervix_execution::ConnectorStorageWorkers::resolve(Some(
+                NonZeroUsize::MIN,
+            ))
+            .expect("one worker fits the primitive permit bound"),
             pending_jobs: NonZeroUsize::new(pending_jobs).assured("fixture queues are nonzero"),
         },
         ..ExecutionConfig::default()

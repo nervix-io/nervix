@@ -12,7 +12,7 @@ Feature: Runtime report chains
       CREATE WIRE JSON SCHEMA cadence_wire MODE STRICT ( value integer );
       CREATE CODEC cadence_codec FROM WIRE JSON SCHEMA cadence_wire TO SCHEMA cadence_record;
       CREATE RELAY cadence_records SCHEMA cadence_record UNBRANCHED;
-      CREATE CLIENT cadence_http TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT cadence_http CONFIG {
         'endpoint' = 'http://127.0.0.1:1/events',
         'method' = 'GET'
       };

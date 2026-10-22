@@ -22,8 +22,7 @@ Feature: RabbitMQ ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
-        CREATE CLIENT rabbit_main
-        TYPE RABBITMQ
+        CREATE RABBITMQ CLIENT rabbit_main
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
@@ -84,8 +83,7 @@ Feature: RabbitMQ ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
-        CREATE CLIENT rabbit_main
-        TYPE RABBITMQ
+        CREATE RABBITMQ CLIENT rabbit_main
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
@@ -151,13 +149,11 @@ Feature: RabbitMQ ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
-        CREATE CLIENT rabbit_main
-        TYPE RABBITMQ
+        CREATE RABBITMQ CLIENT rabbit_main
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
-        CREATE CLIENT mqtt_out
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_out
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-rabbit-redelivery-out-{{test_id}}'
@@ -235,13 +231,11 @@ Feature: RabbitMQ ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
-        CREATE CLIENT rabbit_main
-        TYPE RABBITMQ
+        CREATE RABBITMQ CLIENT rabbit_main
         CONFIG {
           'addr' = '{{rabbitmq_stallable_addr}}'
         };
-        CREATE CLIENT mqtt_out
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_out
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-rabbit-lost-reject-out-{{test_id}}'
@@ -337,13 +331,11 @@ Feature: RabbitMQ ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
-        CREATE CLIENT rabbit_main
-        TYPE RABBITMQ
+        CREATE RABBITMQ CLIENT rabbit_main
         CONFIG {
           'addr' = '{{rabbitmq_stallable_addr}}'
         };
-        CREATE CLIENT mqtt_out
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_out
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-rabbit-lost-ack-out-{{test_id}}'
@@ -431,8 +423,7 @@ Feature: RabbitMQ ingestion
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main
-        TYPE RABBITMQ
+      CREATE RABBITMQ CLIENT rabbit_main
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };

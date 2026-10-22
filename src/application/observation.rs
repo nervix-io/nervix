@@ -672,6 +672,7 @@ impl SessionServiceImpl {
                 transport_redeliveries_total: 0,
                 decode_rejections_total: 0,
                 last_decode_rejection: None,
+                oversized_payloads_total: 0,
                 memory_backpressure_paused: self
                     .inner
                     .runtime

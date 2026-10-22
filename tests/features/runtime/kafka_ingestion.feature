@@ -23,8 +23,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -84,8 +83,7 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA forwarding_event_wire
         TO SCHEMA forwarding_event;
       CREATE RELAY forwarding_events SCHEMA forwarding_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -145,8 +143,7 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA grouped_event_wire
         TO SCHEMA grouped_event;
       CREATE RELAY grouped_events SCHEMA routed_grouped_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -200,8 +197,7 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA mixed_event_wire
         TO SCHEMA mixed_event;
       CREATE RELAY mixed_events SCHEMA mixed_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -267,8 +263,7 @@ Feature: Kafka ingestion
       CREATE SCHEMA nested_tenant ( tenant STRING );
       CREATE BRANCH by_nested_tenant SCHEMA nested_tenant TTL 5m;
       CREATE RELAY nested_events SCHEMA nested_event BRANCHED BY by_nested_tenant;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -336,8 +331,7 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA poison_event_wire
         TO SCHEMA poison_event;
       CREATE RELAY poison_events SCHEMA poison_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -416,8 +410,7 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA poison_event_wire
         TO SCHEMA poison_event;
       CREATE RELAY poison_events SCHEMA poison_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -479,8 +472,7 @@ Feature: Kafka ingestion
       CREATE CODEC unfolded_codec FROM JSON TO SCHEMA unfolded_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY unfolded_events SCHEMA unfolded_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -552,8 +544,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -610,7 +601,7 @@ Feature: Kafka ingestion
       CREATE CODEC refused_commit_codec
         FROM WIRE JSON SCHEMA refused_commit_wire TO SCHEMA refused_commit_event;
       CREATE RELAY refused_commit_records SCHEMA refused_commit_event UNBRANCHED;
-      CREATE CLIENT refused_commit_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT refused_commit_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -682,8 +673,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant I64 );
         CREATE IF NOT EXISTS BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
         CREATE RELAY events SCHEMA routed_event BRANCHED BY by_tenant;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -777,8 +767,7 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA sourced_event_wire
         TO SCHEMA sourced_event;
       CREATE RELAY sourced_events SCHEMA routed_sourced_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -855,8 +844,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -916,8 +904,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -978,8 +965,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -1040,8 +1026,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -1094,8 +1079,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -1155,8 +1139,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -1220,8 +1203,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -1294,8 +1276,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'

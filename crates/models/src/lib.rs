@@ -55,6 +55,7 @@ mod restore;
 mod schedule;
 mod schema;
 mod schema_fingerprint;
+mod settings;
 mod statement;
 mod timestamp;
 mod udf;
@@ -127,13 +128,13 @@ pub use connector::{
     NatsSubjectSource, OmittedDeadline, OptionChoice, OptionDeclaration, OptionForm,
     OptionPresence, OptionValue, OtelAggregationTemporality, OtelConfigEntry, OtelLogsSink,
     OtelMappings, OtelMetric, OtelMetricKind, OtelMetricsSink, OtelScope, OtelSink, OtelSinkEntity,
-    OtelTracesSink, OtelValueMapping, PositionClass, PostgresConfigEntry, PostgresConflictAction,
-    PostgresSink, PostgresSinkEntity, PostgresTableSink, PostgresValueMapping, PrometheusApiRoot,
-    PrometheusApiRootError, PrometheusClientConfigError, PrometheusClientKey,
-    PrometheusConfigEntry, PrometheusIngestMode, PrometheusIngestorAlteration,
-    PrometheusQuerySource, PrometheusSource, PrometheusSourceEntity, PropertyDeclaration,
-    PulsarConfigEntry, PulsarIngestMode, PulsarIngestorAlteration, PulsarSink, PulsarSinkEntity,
-    PulsarSource, PulsarSourceEntity, PulsarSubscription, PulsarSubscriptionName,
+    OtelTracesSink, OtelValueMapping, PROMETHEUS_DEFAULT_MAX_BODY_SIZE, PositionClass,
+    PostgresConfigEntry, PostgresConflictAction, PostgresSink, PostgresSinkEntity,
+    PostgresTableSink, PostgresValueMapping, PrometheusApiRoot, PrometheusApiRootError,
+    PrometheusClientConfigError, PrometheusClientKey, PrometheusConfigEntry, PrometheusIngestMode,
+    PrometheusIngestorAlteration, PrometheusQuerySource, PrometheusSource, PrometheusSourceEntity,
+    PropertyDeclaration, PulsarConfigEntry, PulsarIngestMode, PulsarIngestorAlteration, PulsarSink,
+    PulsarSinkEntity, PulsarSource, PulsarSourceEntity, PulsarSubscription, PulsarSubscriptionName,
     PulsarSubscriptionOwnership, PulsarTopicName, PulsarTopicSink, PulsarTopicSource,
     RabbitMqConfigEntry, RabbitMqIngestMode, RabbitMqIngestorAlteration, RabbitMqQueueName,
     RabbitMqQueueSink, RabbitMqQueueSource, RabbitMqSink, RabbitMqSinkEntity, RabbitMqSource,
@@ -166,7 +167,7 @@ pub use emitter::{
 };
 pub use emitter_batch::{
     BatchMessageLimit, BatchUnavailability, ByteSizeUnit, EmitterBatchLegality,
-    EmitterBatchLimitError, EmitterBatchPolicy, PayloadSizeLimit,
+    EmitterBatchLimitError, EmitterBatchPolicy, PayloadSizeError, PayloadSizeLimit,
 };
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
@@ -268,6 +269,9 @@ pub use schema::{
     WireSchemaField, WireSchemaStrictness,
 };
 pub use schema_fingerprint::SchemaFingerprint;
+pub use settings::{
+    ClusterParameters, NodeCapabilities, Prerequisites, Setting, SettingClass, SettingDefinition,
+};
 pub use statement::{
     AckWindow, AlterDomain, AlterGenerator, AlterGeneratorError, AlterGeneratorOperation,
     AlterIngestor, AlterIngestorError, AlterIngestorOperation, AlterPlacement, AlterPlacementError,

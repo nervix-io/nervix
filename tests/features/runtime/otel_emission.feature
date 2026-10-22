@@ -52,8 +52,7 @@ Feature: OTEL emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_main
-      TYPE OTEL
+      CREATE OTEL CLIENT otel_main
       CONFIG {
         'endpoint' = '{{otel_collector_grpc_dns_addr}}',
         'protocol' = 'grpc',
@@ -201,16 +200,14 @@ Feature: OTEL emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_http
-      TYPE OTEL
+      CREATE OTEL CLIENT otel_http
       CONFIG {
         'endpoint' = '{{otel_collector_dns_addr}}',
         'protocol' = 'http/protobuf',
         'compression' = 'gzip',
         'timeout_ms' = 5000
       };
-      CREATE CLIENT otel_grpc
-      TYPE OTEL
+      CREATE OTEL CLIENT otel_grpc
       CONFIG {
         'endpoint' = '{{otel_collector_grpc_dns_addr}}',
         'protocol' = 'grpc',
@@ -334,8 +331,7 @@ Feature: OTEL emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_main
-      TYPE OTEL
+      CREATE OTEL CLIENT otel_main
       CONFIG {
         'endpoint' = '{{otel_collector_http_addr}}',
         'protocol' = 'http/protobuf',

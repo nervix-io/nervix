@@ -312,7 +312,7 @@ Feature: Web console visual ingestor creation
       CREATE CODEC visual_http_codec FROM JSON TO SCHEMA visual_http_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
       CREATE RELAY visual_http_relay SCHEMA visual_http_event UNBRANCHED;
-      CREATE CLIENT visual_http_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT visual_http_client CONFIG {
         'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
         'method' = 'GET',
         'timeout_ms' = 5000
@@ -372,7 +372,7 @@ Feature: Web console visual ingestor creation
       CREATE WIRE JSON SCHEMA visual_pulsar_wire MODE STRICT (user_id integer);
       CREATE CODEC visual_pulsar_codec FROM WIRE JSON SCHEMA visual_pulsar_wire TO SCHEMA visual_pulsar_event;
       CREATE RELAY visual_pulsar_relay SCHEMA visual_pulsar_event UNBRANCHED;
-      CREATE CLIENT visual_pulsar_client TYPE PULSAR CONFIG { 'addr' = '{{pulsar_addr}}' };
+      CREATE PULSAR CLIENT visual_pulsar_client CONFIG { 'addr' = '{{pulsar_addr}}' };
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"

@@ -79,7 +79,7 @@ Feature: Graceful shutdown
       CREATE CODEC handoff_codec
         FROM WIRE JSON SCHEMA handoff_wire TO SCHEMA handoff_event;
       CREATE RELAY handoff_records SCHEMA handoff_event UNBRANCHED CAPACITY 1;
-      CREATE CLIENT handoff_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT handoff_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -163,7 +163,7 @@ Feature: Graceful shutdown
       CREATE CODEC flush_codec
         FROM WIRE JSON SCHEMA flush_wire TO SCHEMA flush_event;
       CREATE RELAY flush_records SCHEMA flush_event UNBRANCHED CAPACITY 1;
-      CREATE CLIENT flush_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT flush_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -415,7 +415,7 @@ Feature: Graceful shutdown
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION shutdown_ack_route FROM shutdown_ack_input UNBRANCHED
         TO shutdown_ack_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT shutdown_ack_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT shutdown_ack_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -491,7 +491,7 @@ Feature: Graceful shutdown
         ON GENERAL ERROR LOG;
       CREATE JUNCTION held_route FROM held_ingested UNBRANCHED
         TO held_routed INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-      CREATE CLIENT held_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT held_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -552,7 +552,7 @@ Feature: Graceful shutdown
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT lingering_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT lingering_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'linger.ms' = '120000'
       };
@@ -618,7 +618,7 @@ Feature: Graceful shutdown
       CREATE BRANCH by_shutdown_tenant SCHEMA shutdown_tenant TTL 5m;
       CREATE RELAY shutdown_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
       CREATE RELAY shutdown_unique_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
-      CREATE CLIENT shutdown_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT shutdown_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -643,7 +643,7 @@ Feature: Graceful shutdown
           INHERIT ALL
           FLUSH EACH 1h MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT shutdown_order_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT shutdown_order_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -707,7 +707,7 @@ Feature: Graceful shutdown
       CREATE CODEC confirm_codec
         FROM WIRE JSON SCHEMA confirm_wire TO SCHEMA confirm_event;
       CREATE RELAY confirm_records SCHEMA confirm_event UNBRANCHED;
-      CREATE CLIENT confirm_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT confirm_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -759,7 +759,7 @@ Feature: Graceful shutdown
       CREATE CODEC handoff_confirm_codec
         FROM WIRE JSON SCHEMA handoff_confirm_wire TO SCHEMA handoff_confirm_event;
       CREATE RELAY handoff_confirm_records SCHEMA handoff_confirm_event UNBRANCHED;
-      CREATE CLIENT handoff_confirm_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT handoff_confirm_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -815,7 +815,7 @@ Feature: Graceful shutdown
       CREATE CODEC refused_stop_codec
         FROM WIRE JSON SCHEMA refused_stop_wire TO SCHEMA refused_stop_event;
       CREATE RELAY refused_stop_records SCHEMA refused_stop_event UNBRANCHED;
-      CREATE CLIENT refused_stop_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT refused_stop_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
         'auto.offset.reset' = 'earliest',
         'session.timeout.ms' = '10000'
@@ -902,7 +902,7 @@ Feature: Graceful shutdown
         TO eligible_routed INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       CREATE JUNCTION handoff_route FROM handoff_input UNBRANCHED
         TO handoff_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT eligible_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT eligible_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -960,7 +960,7 @@ Feature: Graceful shutdown
         TO SCHEMA everyone_event;
       CREATE RELAY everyone_ingested SCHEMA everyone_event UNBRANCHED;
       CREATE RELAY everyone_routed SCHEMA everyone_event UNBRANCHED;
-      CREATE CLIENT everyone_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT everyone_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -978,7 +978,7 @@ Feature: Graceful shutdown
         ON GENERAL ERROR LOG;
       CREATE JUNCTION everyone_route FROM everyone_ingested UNBRANCHED
         TO everyone_routed INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-      CREATE CLIENT everyone_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT everyone_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -1036,7 +1036,7 @@ Feature: Graceful shutdown
       CREATE WIRE JSON SCHEMA peer_wire MODE STRICT ( event_id integer );
       CREATE CODEC peer_codec FROM WIRE JSON SCHEMA peer_wire TO SCHEMA peer_event;
       CREATE RELAY peer_records SCHEMA peer_event UNBRANCHED;
-      CREATE CLIENT peer_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT peer_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -1118,7 +1118,7 @@ Feature: Graceful shutdown
       CREATE CODEC unactivated_codec
         FROM WIRE JSON SCHEMA unactivated_wire TO SCHEMA unactivated_event;
       CREATE RELAY unactivated_records SCHEMA unactivated_event UNBRANCHED;
-      CREATE CLIENT unactivated_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT unactivated_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -1246,7 +1246,7 @@ Feature: Graceful shutdown
               total = relay_state.tenant_amounts.amount
           FLUSH EACH 1h MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT generated_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT generated_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -1298,7 +1298,7 @@ Feature: Graceful shutdown
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
-      CREATE CLIENT wait_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT wait_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -1332,7 +1332,7 @@ Feature: Graceful shutdown
           SET source = relay_state.wait_state.source
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT wait_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT wait_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -1387,7 +1387,7 @@ Feature: Graceful shutdown
         FROM WIRE JSON SCHEMA stalled_event_wire
         TO SCHEMA stalled_event;
       CREATE RELAY stalled_events SCHEMA stalled_event UNBRANCHED;
-      CREATE CLIENT stalled_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT stalled_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -1403,7 +1403,7 @@ Feature: Graceful shutdown
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT stalled_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT stalled_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };

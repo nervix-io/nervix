@@ -30,7 +30,7 @@ Feature: Pulsar receipt bounds and finishing accepted records
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT pulsar_sink TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT pulsar_sink CONFIG {
         'addr' = '{{pulsar_stallable_addr}}'
       };
       CREATE EMITTER delivery_output FROM delivery_events
@@ -95,7 +95,7 @@ Feature: Pulsar receipt bounds and finishing accepted records
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT pulsar_sink TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT pulsar_sink CONFIG {
         'addr' = '{{pulsar_stallable_addr}}'
       };
       CREATE EMITTER delivery_output FROM delivery_events

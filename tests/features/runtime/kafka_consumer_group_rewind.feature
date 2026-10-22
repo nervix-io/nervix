@@ -20,7 +20,7 @@ Feature: Kafka consumer-group rewinds across a rebalance
       CREATE WIRE JSON SCHEMA rewind_wire MODE STRICT ( event_id string );
       CREATE CODEC rewind_codec FROM WIRE JSON SCHEMA rewind_wire TO SCHEMA rewind_event;
       CREATE RELAY rewind_records SCHEMA rewind_event UNBRANCHED;
-      CREATE CLIENT rewind_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT rewind_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

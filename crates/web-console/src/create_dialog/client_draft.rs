@@ -35,8 +35,8 @@ use super::{
 
 macro_rules! declare_transports {
     (
-        unpooled { $($variant:ident => $model:ident($ty:ident) [$key:literal],)+ }
-        pooled { $($pooled:ident => $pooled_model:ident($pooled_ty:ident) [$pooled_key:literal],)+ }
+        unpooled { $($variant:ident => $model:ident($ty:ident),)+ }
+        pooled { $($pooled:ident => $pooled_model:ident($pooled_ty:ident),)+ }
     ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub(super) enum ClientTransport {
@@ -52,12 +52,8 @@ macro_rules! declare_transports {
                 Self::Websockets,
             ];
 
-            pub(super) fn key(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $key,)+
-                    $(Self::$pooled => $pooled_key,)+
-                    Self::Websockets => "websockets",
-                }
+            pub(super) fn key(self) -> String {
+                self.label().to_ascii_lowercase().replace(' ', "-")
             }
 
             /// The connector a client of this transport configures.
@@ -69,9 +65,9 @@ macro_rules! declare_transports {
                 }
             }
 
-            /// How Plexus spells the client's type.
-            pub(super) fn label(self) -> &'static str {
-                self.connector().keyword()
+            /// The composed client head Plexus writes after CREATE.
+            pub(super) fn label(self) -> String {
+                format!("{} CLIENT", self.connector().keyword())
             }
 
             pub(super) fn pooled(self) -> bool {
@@ -109,29 +105,29 @@ macro_rules! declare_transports {
 
 declare_transports! {
     unpooled {
-        Kafka => ClientKafka(CreateClientKafka) ["kafka"],
-        Pulsar => ClientPulsar(CreateClientPulsar) ["pulsar"],
-        Http => ClientHttp(CreateClientHttp) ["http"],
-        Sentry => ClientSentry(CreateClientSentry) ["sentry"],
-        Otel => ClientOtel(CreateClientOtel) ["otel"],
-        Prometheus => ClientPrometheus(CreateClientPrometheus) ["prometheus"],
-        Mqtt => ClientMqtt(CreateClientMqtt) ["mqtt"],
-        Nats => ClientNats(CreateClientNats) ["nats"],
-        RabbitMq => ClientRabbitMq(CreateClientRabbitMq) ["rabbitmq"],
-        ZeroMq => ClientZeroMq(CreateClientZeroMq) ["zeromq"],
-        Sqs => ClientSqs(CreateClientSqs) ["sqs"],
-        Syslog => ClientSyslog(CreateClientSyslog) ["syslog"],
-        ClickHouse => ClientClickHouse(CreateClientClickHouse) ["clickhouse"],
-        S3 => ClientS3(CreateClientS3) ["s3"],
-        Gcs => ClientGcs(CreateClientGcs) ["gcs"],
-        AzureBlob => ClientAzureBlob(CreateClientAzureBlob) ["azure-blob"],
-        IcebergRest => ClientIcebergRest(CreateClientIcebergRest) ["iceberg-rest"],
+        Kafka => ClientKafka(CreateClientKafka),
+        Pulsar => ClientPulsar(CreateClientPulsar),
+        Http => ClientHttp(CreateClientHttp),
+        Sentry => ClientSentry(CreateClientSentry),
+        Otel => ClientOtel(CreateClientOtel),
+        Prometheus => ClientPrometheus(CreateClientPrometheus),
+        Mqtt => ClientMqtt(CreateClientMqtt),
+        Nats => ClientNats(CreateClientNats),
+        RabbitMq => ClientRabbitMq(CreateClientRabbitMq),
+        ZeroMq => ClientZeroMq(CreateClientZeroMq),
+        Sqs => ClientSqs(CreateClientSqs),
+        Syslog => ClientSyslog(CreateClientSyslog),
+        ClickHouse => ClientClickHouse(CreateClientClickHouse),
+        S3 => ClientS3(CreateClientS3),
+        Gcs => ClientGcs(CreateClientGcs),
+        AzureBlob => ClientAzureBlob(CreateClientAzureBlob),
+        IcebergRest => ClientIcebergRest(CreateClientIcebergRest),
     }
     pooled {
-        Redis => ClientRedis(CreateClientRedis) ["redis"],
-        Postgres => ClientPostgres(CreateClientPostgres) ["postgres"],
-        MySql => ClientMySql(CreateClientMySql) ["mysql"],
-        MongoDb => ClientMongoDb(CreateClientMongoDb) ["mongodb"],
+        Redis => ClientRedis(CreateClientRedis),
+        Postgres => ClientPostgres(CreateClientPostgres),
+        MySql => ClientMySql(CreateClientMySql),
+        MongoDb => ClientMongoDb(CreateClientMongoDb),
     }
 }
 
@@ -327,7 +323,7 @@ impl ClientDraft {
 pub(super) enum ClientDraftError {
     #[error("Client name is invalid")]
     Name,
-    #[error("Choose a client transport")]
+    #[error("Choose a client connector")]
     Transport,
     #[error("Pool minimum must be a nonnegative whole number")]
     PoolMinimum,
@@ -352,9 +348,10 @@ pub(super) enum ClientDraftError {
 )]
 mod tests {
     use meticulous::ResultExt as _;
+    use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{
-        CreateStatement, ModelKind, ModelName, NodeRef, RequestedResourceVersion, ResourceName,
-        Statement,
+        ClientName, CreateStatement, ModelKind, ModelName, NodeRef, RequestedResourceVersion,
+        ResourceName, Statement,
     };
     use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
@@ -393,12 +390,72 @@ mod tests {
             let statement =
                 Statement::Create(CreateStatement::new(Box::new(completed.actual), false));
             let source = statement.to_canonical_plexus().assured("client renders");
-            assert!(source.contains(&format!("TYPE {}", transport.label())));
+            assert!(source.starts_with(&format!("CREATE {} visual_client", transport.label())));
             assert_eq!(
                 parse_client_statement(&source).assured("canonical client must parse"),
                 ClientStatement::Server(statement),
             );
         }
+    }
+
+    #[test]
+    fn bolero_client_drafts_preserve_complete_models_and_connector_heads() {
+        bolero::check!()
+            .with_iterations(128)
+            .with_max_len(1024)
+            .for_each(|bytes: &[u8]| {
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
+                for transport in ClientTransport::ALL {
+                    let mut draft = ready(transport);
+                    draft.name = arbitrary.name::<ClientName>().as_str().to_string();
+                    if transport.pooled() {
+                        let pool = arbitrary.pool_bounds();
+                        draft.minimum = pool.minimum().to_string();
+                        draft.maximum = pool.maximum().to_string();
+                    }
+                    draft.config[0].value = arbitrary.string();
+                    draft.config[0].secret = arbitrary.entropy().flag();
+                    for entry in 0..arbitrary.entropy().count(3) {
+                        draft.config.push(ClientConfigDraft {
+                            key: format!("option_{entry}"),
+                            value: arbitrary.string(),
+                            secret: arbitrary.entropy().flag(),
+                        });
+                    }
+                    if arbitrary.entropy().flag() {
+                        draft.mount_enabled = true;
+                        draft
+                            .mount
+                            .select_resource(arbitrary.name::<ResourceName>());
+                        draft.mount.select_version(arbitrary.requested_version());
+                    }
+                    if transport.websockets() && arbitrary.entropy().flag() {
+                        draft.select_signaling(&NodeRef::new(
+                            ModelKind::SignalingProtocol,
+                            arbitrary.name::<ModelName>(),
+                        ));
+                    }
+                    let completed = draft.build().assured(
+                        "the draft has a valid name, declared bounds, selected references and \
+                         nonempty configuration",
+                    );
+                    for model in [completed.actual, completed.presentation] {
+                        let statement =
+                            Statement::Create(CreateStatement::new(Box::new(model), false));
+                        let text = statement
+                            .to_canonical_plexus()
+                            .assured("every client Model renders");
+                        let head = format!("CREATE {} ", transport.label());
+                        assert!(text.starts_with(&head), "{text}");
+                        assert_eq!(
+                            parse_client_statement(&text)
+                                .assured("the canonical client head and clauses parse"),
+                            ClientStatement::Server(statement),
+                            "{text}",
+                        );
+                    }
+                }
+            });
     }
 
     #[test]

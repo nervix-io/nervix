@@ -38,8 +38,7 @@ Feature: Domain-paced emitter cadence
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -119,8 +118,7 @@ Feature: Domain-paced emitter cadence
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -190,8 +188,7 @@ Feature: Domain-paced emitter cadence
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -260,8 +257,7 @@ Feature: Domain-paced emitter cadence
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT s3_main
-        TYPE S3
+      CREATE S3 CLIENT s3_main
         CONFIG {
           'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
@@ -269,8 +265,7 @@ Feature: Domain-paced emitter cadence
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-      CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -321,8 +316,7 @@ Feature: Domain-paced emitter cadence
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'

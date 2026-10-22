@@ -46,7 +46,7 @@ Feature: Process shutdown deadline
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT unreachable_sink TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT unreachable_sink CONFIG {
         'protocol' = 'tcp',
         'addr' = '{{syslog_emit_addr}}'
       };

@@ -26,7 +26,7 @@ Feature: Large native restore metadata
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA result BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -181,7 +181,7 @@ Feature: Large native restore metadata
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA result BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

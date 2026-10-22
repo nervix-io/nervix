@@ -53,7 +53,7 @@ Feature: Client ingestors
         order_id string, amount_cents integer, card string
       );
       CREATE CODEC order_body_codec FROM WIRE JSON SCHEMA order_body_wire TO SCHEMA order_body;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders_deduped
@@ -202,7 +202,7 @@ Feature: Client ingestors
           FLUSH IMMEDIATE
           ON MESSAGE ERROR IGNORE
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -311,7 +311,7 @@ Feature: Client ingestors
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -377,7 +377,7 @@ Feature: Client ingestors
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -444,7 +444,7 @@ Feature: Client ingestors
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -547,7 +547,7 @@ Feature: Client ingestors
         TO orders INHERIT ALL BRANCHED BY by_region SET region = message.region
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -684,7 +684,7 @@ Feature: Client ingestors
         TO orders INHERIT ALL BRANCHED BY by_region SET region = message.region
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -806,7 +806,7 @@ Feature: Client ingestors
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -882,7 +882,7 @@ Feature: Client ingestors
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -937,7 +937,7 @@ Feature: Client ingestors
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -995,7 +995,7 @@ Feature: Client ingestors
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -1071,7 +1071,7 @@ Feature: Client ingestors
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -1125,7 +1125,7 @@ Feature: Client ingestors
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -1253,7 +1253,7 @@ Feature: Client ingestors
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders

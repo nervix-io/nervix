@@ -553,6 +553,12 @@ maximum, within its ten-second Collector observation. It keeps the five-second R
 observes the missing-name failure and a DNS question, then requires both exact exports after the
 answer returns. These are the fixture's declared retry bounds.
 
+The SQS connection checks keep each refused literal endpoint bound without listening until its
+request finishes. A unit assertion verifies that another listener cannot claim the address and
+that connections are refused, so a parallel service stand-in cannot answer the refusal check.
+This qualifies fixture ownership; the resolver and the SDK's retry policy keep their existing
+contracts.
+
 | Evidence | Command | What it establishes | What it does not |
 | --- | --- | --- | --- |
 | The resolver's own checks against an in-process DNS authority | `just test-dns` | Literal and hosts-file answers without a question; search completion and fully qualified names; IPv4-first dual-stack answers; positive and negative TTL reuse and expiry; missing names, empty answers, refusals and invalid names as distinct failures; a silent server ended by the budget and, sooner, by the configured `timeout` and `attempts`; lookups beyond 64 waiting and freed by cancellation; a resolver rebuilt and torn down with its runtime; the configuration grammar and its rejections; both Reqwest hooks, the Hyper connector and the Smithy hook dialling a later answer, keeping the URL authority, following a redirect, reconnecting after TTL expiry, being cancelled by a request timeout, and keeping the typed failure and the lookup's whole report as a cause | The authority answers over UDP only, so truncation and DNS over TCP, a name server that cannot be reached, and the order in which several servers are asked are not exercised |

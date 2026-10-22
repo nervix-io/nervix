@@ -75,15 +75,15 @@ Feature: Database emitter batches
       """
 
     Examples:
-      | cluster_size | sink       | tags_type     | client                                                                                                                 | target                          |
-      | 1            | ClickHouse | VEC<VEC<I64>> | CREATE CLIENT db TYPE CLICKHOUSE CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
-      | 3            | ClickHouse | VEC<VEC<I64>> | CREATE CLIENT db TYPE CLICKHOUSE CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
-      | 1            | Postgres   | VEC<VEC<I64>> | CREATE CLIENT db TYPE POSTGRES POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
-      | 3            | Postgres   | VEC<VEC<I64>> | CREATE CLIENT db TYPE POSTGRES POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
-      | 1            | MySQL      | VEC<VEC<I64>> | CREATE CLIENT db TYPE MYSQL POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
-      | 3            | MySQL      | VEC<VEC<I64>> | CREATE CLIENT db TYPE MYSQL POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
-      | 1            | MongoDB    | VEC<VEC<I64>> | CREATE CLIENT db TYPE MONGODB POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
-      | 3            | MongoDB    | VEC<VEC<I64>> | CREATE CLIENT db TYPE MONGODB POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
+      | cluster_size | sink       | tags_type     | client                                                                                                            | target                          |
+      | 1            | ClickHouse | VEC<VEC<I64>> | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
+      | 3            | ClickHouse | VEC<VEC<I64>> | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
+      | 1            | Postgres   | VEC<VEC<I64>> | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
+      | 3            | Postgres   | VEC<VEC<I64>> | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
+      | 1            | MySQL      | VEC<VEC<I64>> | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
+      | 3            | MySQL      | VEC<VEC<I64>> | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
+      | 1            | MongoDB    | VEC<VEC<I64>> | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
+      | 3            | MongoDB    | VEC<VEC<I64>> | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
 
   @emitter_batch_databases @database_batch_size
   Scenario Outline: MAX SIZE bounds the exact bytes of every <sink> write
@@ -147,15 +147,15 @@ Feature: Database emitter batches
       """
 
     Examples:
-      | cluster_size | sink       | three_rows | one_byte_less | client                                                                                                                 | target                          |
-      | 1            | ClickHouse | 69B        | 68B           | CREATE CLIENT db TYPE CLICKHOUSE CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
-      | 3            | ClickHouse | 69B        | 68B           | CREATE CLIENT db TYPE CLICKHOUSE CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
-      | 1            | Postgres   | 242B       | 241B          | CREATE CLIENT db TYPE POSTGRES POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
-      | 3            | Postgres   | 242B       | 241B          | CREATE CLIENT db TYPE POSTGRES POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
-      | 1            | MySQL      | 137B       | 136B          | CREATE CLIENT db TYPE MYSQL POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
-      | 3            | MySQL      | 137B       | 136B          | CREATE CLIENT db TYPE MYSQL POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
-      | 1            | MongoDB    | 147B       | 146B          | CREATE CLIENT db TYPE MONGODB POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
-      | 3            | MongoDB    | 147B       | 146B          | CREATE CLIENT db TYPE MONGODB POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
+      | cluster_size | sink       | three_rows | one_byte_less | client                                                                                                            | target                          |
+      | 1            | ClickHouse | 69B        | 68B           | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
+      | 3            | ClickHouse | 69B        | 68B           | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
+      | 1            | Postgres   | 242B       | 241B          | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
+      | 3            | Postgres   | 242B       | 241B          | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
+      | 1            | MySQL      | 137B       | 136B          | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
+      | 3            | MySQL      | 137B       | 136B          | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
+      | 1            | MongoDB    | 147B       | 146B          | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
+      | 3            | MongoDB    | 147B       | 146B          | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
 
   @emitter_batch_databases @database_batch_rejections
   Scenario Outline: Rows <sink> or MAX SIZE rejects follow ON MESSAGE ERROR and the rest of their batch is written
@@ -222,15 +222,15 @@ Feature: Database emitter batches
     And the relay subscription does not receive a payload within "1s"
 
     Examples:
-      | cluster_size | sink       | client                                                                                                                 | target                          |
-      | 1            | ClickHouse | CREATE CLIENT db TYPE CLICKHOUSE CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
-      | 3            | ClickHouse | CREATE CLIENT db TYPE CLICKHOUSE CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
-      | 1            | Postgres   | CREATE CLIENT db TYPE POSTGRES POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
-      | 3            | Postgres   | CREATE CLIENT db TYPE POSTGRES POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
-      | 1            | MySQL      | CREATE CLIENT db TYPE MYSQL POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
-      | 3            | MySQL      | CREATE CLIENT db TYPE MYSQL POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
-      | 1            | MongoDB    | CREATE CLIENT db TYPE MONGODB POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
-      | 3            | MongoDB    | CREATE CLIENT db TYPE MONGODB POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
+      | cluster_size | sink       | client                                                                                                            | target                          |
+      | 1            | ClickHouse | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
+      | 3            | ClickHouse | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
+      | 1            | Postgres   | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
+      | 3            | Postgres   | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
+      | 1            | MySQL      | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
+      | 3            | MySQL      | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
+      | 1            | MongoDB    | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
+      | 3            | MongoDB    | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
 
   @emitter_batch_databases @database_batch_conflicts
   Scenario Outline: A <sink> conflict policy resolves a key repeated inside one batch
@@ -292,13 +292,13 @@ Feature: Database emitter batches
       """
 
     Examples:
-      | cluster_size | sink     | update_policy                 | keep_policy                    | client                                                                                                             | target                          |
-      | 1            | Postgres | ON CONFLICT ("seq") DO UPDATE | ON CONFLICT ("seq") DO NOTHING | CREATE CLIENT db TYPE POSTGRES POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                      | POSTGRES db INSERT TO TABLE     |
-      | 3            | Postgres | ON CONFLICT ("seq") DO UPDATE | ON CONFLICT ("seq") DO NOTHING | CREATE CLIENT db TYPE POSTGRES POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                      | POSTGRES db INSERT TO TABLE     |
-      | 1            | MySQL    | ON CONFLICT DO UPDATE         | ON CONFLICT DO NOTHING         | CREATE CLIENT db TYPE MYSQL POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                            | MYSQL db INSERT TO TABLE        |
-      | 3            | MySQL    | ON CONFLICT DO UPDATE         | ON CONFLICT DO NOTHING         | CREATE CLIENT db TYPE MYSQL POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                            | MYSQL db INSERT TO TABLE        |
-      | 1            | MongoDB  | ON CONFLICT ("seq") DO UPDATE | ON CONFLICT ("seq") DO NOTHING | CREATE CLIENT db TYPE MONGODB POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' }; | MONGODB db INSERT TO COLLECTION |
-      | 3            | MongoDB  | ON CONFLICT ("seq") DO UPDATE | ON CONFLICT ("seq") DO NOTHING | CREATE CLIENT db TYPE MONGODB POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' }; | MONGODB db INSERT TO COLLECTION |
+      | cluster_size | sink     | update_policy                 | keep_policy                    | client                                                                                                        | target                          |
+      | 1            | Postgres | ON CONFLICT ("seq") DO UPDATE | ON CONFLICT ("seq") DO NOTHING | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                      | POSTGRES db INSERT TO TABLE     |
+      | 3            | Postgres | ON CONFLICT ("seq") DO UPDATE | ON CONFLICT ("seq") DO NOTHING | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                      | POSTGRES db INSERT TO TABLE     |
+      | 1            | MySQL    | ON CONFLICT DO UPDATE         | ON CONFLICT DO NOTHING         | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                            | MYSQL db INSERT TO TABLE        |
+      | 3            | MySQL    | ON CONFLICT DO UPDATE         | ON CONFLICT DO NOTHING         | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                            | MYSQL db INSERT TO TABLE        |
+      | 1            | MongoDB  | ON CONFLICT ("seq") DO UPDATE | ON CONFLICT ("seq") DO NOTHING | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' }; | MONGODB db INSERT TO COLLECTION |
+      | 3            | MongoDB  | ON CONFLICT ("seq") DO UPDATE | ON CONFLICT ("seq") DO NOTHING | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' }; | MONGODB db INSERT TO COLLECTION |
 
   @emitter_batch_databases @database_batch_retries
   Scenario Outline: An ambiguous <sink> write is retried with exactly the rows it carried
@@ -357,15 +357,15 @@ Feature: Database emitter batches
       """
 
     Examples:
-      | cluster_size | sink       | client                                                                                                                 | target                          |
-      | 1            | ClickHouse | CREATE CLIENT db TYPE CLICKHOUSE CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
-      | 3            | ClickHouse | CREATE CLIENT db TYPE CLICKHOUSE CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
-      | 1            | Postgres   | CREATE CLIENT db TYPE POSTGRES POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
-      | 3            | Postgres   | CREATE CLIENT db TYPE POSTGRES POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
-      | 1            | MySQL      | CREATE CLIENT db TYPE MYSQL POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
-      | 3            | MySQL      | CREATE CLIENT db TYPE MYSQL POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
-      | 1            | MongoDB    | CREATE CLIENT db TYPE MONGODB POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
-      | 3            | MongoDB    | CREATE CLIENT db TYPE MONGODB POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
+      | cluster_size | sink       | client                                                                                                            | target                          |
+      | 1            | ClickHouse | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
+      | 3            | ClickHouse | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix' }; | CLICKHOUSE db INSERT TO TABLE   |
+      | 1            | Postgres   | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
+      | 3            | Postgres   | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                          | POSTGRES db INSERT TO TABLE     |
+      | 1            | MySQL      | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
+      | 3            | MySQL      | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                | MYSQL db INSERT TO TABLE        |
+      | 1            | MongoDB    | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
+      | 3            | MongoDB    | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };     | MONGODB db INSERT TO COLLECTION |
 
   @emitter_batch_databases @mysql_batch_placeholders
   Scenario Outline: A MySQL write never binds more placeholders than one statement accepts
@@ -390,7 +390,7 @@ Feature: Database emitter batches
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT db TYPE MYSQL POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };
+      CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };
       CREATE EMITTER batched FROM events
         TO MYSQL db INSERT TO TABLE placeholders_{{test_id}}
         VALUES {
@@ -447,7 +447,7 @@ Feature: Database emitter batches
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT db TYPE MONGODB POOL SIZE MIN 1 MAX 4 CONFIG {
+      CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG {
         'addr' = '{{mongodb_addr}}', 'database' = 'nervix'
       };
       CREATE EMITTER batched FROM events

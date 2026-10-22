@@ -943,9 +943,10 @@ impl SessionServiceImpl {
                 source: SectionSource::Captured(artifact),
             });
         }
-        // The immutable owner stage has not been consumed when admission refuses the opening.
-        // Live materialized readers share this quota, so wait within the opening's one deadline
-        // rather than losing a completed cut to temporary capacity pressure.
+        // The immutable owner stage has not been consumed when admission refuses the opening, so
+        // a refusal for capacity alone waits within the opening's one deadline rather than losing
+        // a completed cut. The fetch takes the bulk pool's shared stream and admission, apart
+        // from the Snapshot subquota that the replica catch-up this cut started fills.
         let opening = async {
             loop {
                 match self

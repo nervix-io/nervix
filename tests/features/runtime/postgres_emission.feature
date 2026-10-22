@@ -26,8 +26,7 @@ Feature: Postgres emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-postgres-{{test_id}}'
@@ -43,8 +42,7 @@ Feature: Postgres emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT postgres_client
-        TYPE POSTGRES
+        CREATE POSTGRES CLIENT postgres_client
         POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{postgres_addr}}'
@@ -108,8 +106,7 @@ Feature: Postgres emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-postgres-conflict-{{test_id}}'
@@ -124,8 +121,7 @@ Feature: Postgres emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT postgres_client
-        TYPE POSTGRES
+        CREATE POSTGRES CLIENT postgres_client
         POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{postgres_addr}}'
@@ -194,8 +190,7 @@ Feature: Postgres emission
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-postgres-poison-{{test_id}}'
@@ -209,8 +204,7 @@ Feature: Postgres emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_client
-      TYPE POSTGRES
+      CREATE POSTGRES CLIENT postgres_client
       POOL SIZE MIN 2 MAX 8
       CONFIG {
         'addr' = '{{postgres_addr}}'
@@ -324,8 +318,7 @@ Feature: Postgres emission
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO second_notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_shared
-        TYPE POSTGRES
+      CREATE POSTGRES CLIENT postgres_shared
         POOL SIZE MIN 1 MAX 1
         CONFIG {
           'addr' = '{{postgres_addr}}'
@@ -443,8 +436,7 @@ Feature: Postgres emission
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-postgres-values-error-{{test_id}}'
@@ -458,8 +450,7 @@ Feature: Postgres emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_client
-      TYPE POSTGRES
+      CREATE POSTGRES CLIENT postgres_client
       POOL SIZE MIN 2 MAX 8
       CONFIG {
         'addr' = '{{postgres_addr}}'
@@ -528,7 +519,7 @@ Feature: Postgres emission
       FROM WIRE JSON SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_ingress TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_ingress CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-postgres-batch-{{test_id}}'
       };
@@ -541,7 +532,7 @@ Feature: Postgres emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_client TYPE POSTGRES POOL SIZE MIN 2 MAX 8 CONFIG {
+      CREATE POSTGRES CLIENT postgres_client POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = '{{postgres_addr}}'
       };
       CREATE EMITTER to_pg

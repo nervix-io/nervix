@@ -31,8 +31,7 @@ Feature: Cordon node
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'

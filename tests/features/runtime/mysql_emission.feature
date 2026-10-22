@@ -26,8 +26,7 @@ Feature: MySQL emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-mysql-{{test_id}}'
@@ -43,8 +42,7 @@ Feature: MySQL emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT mysql_client
-        TYPE MYSQL
+        CREATE MYSQL CLIENT mysql_client
         POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{mysql_addr}}'
@@ -108,8 +106,7 @@ Feature: MySQL emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-mysql-conflict-{{test_id}}'
@@ -124,8 +121,7 @@ Feature: MySQL emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT mysql_client
-        TYPE MYSQL
+        CREATE MYSQL CLIENT mysql_client
         POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{mysql_addr}}'
@@ -203,7 +199,7 @@ Feature: MySQL emission
       FROM WIRE JSON SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_ingress TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_ingress CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-mysql-batch-{{test_id}}'
       };
@@ -216,7 +212,7 @@ Feature: MySQL emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT mysql_client TYPE MYSQL POOL SIZE MIN 2 MAX 8 CONFIG {
+      CREATE MYSQL CLIENT mysql_client POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = '{{mysql_addr}}'
       };
       CREATE EMITTER to_mysql
@@ -290,8 +286,7 @@ Feature: MySQL emission
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO second_notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT mysql_shared
-        TYPE MYSQL
+      CREATE MYSQL CLIENT mysql_shared
         POOL SIZE MIN 1 MAX 1
         CONFIG {
           'addr' = '{{mysql_addr}}'

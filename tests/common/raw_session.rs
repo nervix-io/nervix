@@ -29,6 +29,7 @@ use std::{
 
 use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use bytes::{BufMut as _, Bytes};
+use meticulous::OptionExt as _;
 use nervix_client_wire::{
     AttachDisposition, AttachDomainClockRequest, AttachOutcome, AttachTransactionRequest,
     BackupArchiveStart, BackupDownloadFailed, BackupDownloadMessage, BackupDownloadRequest,
@@ -1373,16 +1374,35 @@ impl TestSession {
         &mut self,
         timeout_duration: Duration,
     ) -> io::Result<Option<TestSubscriptionEvent>> {
-        let deadline = Instant::now() + timeout_duration;
+        self.read_subscription(Some(Instant::now() + timeout_duration))
+            .await
+    }
+
+    /// Read the next row while the caller owns the deadline and cancellation of this borrow.
+    /// A receipt observer keeps this read active across publication, then bounds its completion
+    /// from the assertion step, so the publishing request does not consume the receive budget.
+    pub(crate) async fn next_subscription(&mut self) -> io::Result<TestSubscriptionEvent> {
+        let event = self.read_subscription(None).await?;
+        Ok(event.assured("a read without a deadline ends only with a row or an error"))
+    }
+
+    async fn read_subscription(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> io::Result<Option<TestSubscriptionEvent>> {
         loop {
             nervix_primitives::task::consume_budget().await;
             if let Some(event) = self.pending_subscriptions.pop_front() {
                 return Ok(Some(event));
             }
-            let read = nervix_primitives::time::timeout_at(deadline, self.read_frame()).await;
-            let open = match read {
-                Ok(open) => open?,
-                Err(_) => return Ok(None),
+            let open = match deadline {
+                Some(deadline) => {
+                    match nervix_primitives::time::timeout_at(deadline, self.read_frame()).await {
+                        Ok(open) => open?,
+                        Err(_) => return Ok(None),
+                    }
+                }
+                None => self.read_frame().await?,
             };
             if !open {
                 return Err(io::Error::other(format!(

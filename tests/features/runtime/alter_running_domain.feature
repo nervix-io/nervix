@@ -24,8 +24,7 @@ Feature: Altering schemas on a running domain
 
       CREATE RELAY running_events SCHEMA running_event UNBRANCHED;
 
-      CREATE CLIENT running_event_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT running_event_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
@@ -112,8 +111,7 @@ Feature: Altering schemas on a running domain
         TO SCHEMA timeout_event;
       CREATE RELAY timeout_events SCHEMA timeout_event UNBRANCHED;
 
-      CREATE CLIENT timeout_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT timeout_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
@@ -330,8 +328,7 @@ Feature: Altering schemas on a running domain
 
       CREATE RELAY rollback_events SCHEMA rollback_event UNBRANCHED CAPACITY 3;
 
-      CREATE CLIENT rollback_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT rollback_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'

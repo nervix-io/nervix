@@ -14,8 +14,8 @@ Feature: Web console execution graph
       );
       CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_record;
       CREATE RELAY orders SCHEMA order_record UNBRANCHED;
-      CREATE CLIENT kafka_in TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE CLIENT kafka_out TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
+      CREATE KAFKA CLIENT kafka_in CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE KAFKA CLIENT kafka_out CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
       CREATE KAFKA TOPIC INGESTOR orders_in
         FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING order_codec
@@ -62,8 +62,8 @@ Feature: Web console execution graph
       CREATE RELAY orders SCHEMA order_record UNBRANCHED;
       CREATE RELAY high_value_orders SCHEMA order_record UNBRANCHED;
       CREATE RELAY routine_orders SCHEMA order_record UNBRANCHED;
-      CREATE CLIENT kafka_in TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE CLIENT kafka_out TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
+      CREATE KAFKA CLIENT kafka_in CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE KAFKA CLIENT kafka_out CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
       CREATE KAFKA TOPIC INGESTOR orders_in
         FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING order_codec
@@ -247,7 +247,7 @@ Feature: Web console execution graph
       );
       CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_record;
       CREATE RELAY orders SCHEMA order_record UNBRANCHED;
-      CREATE CLIENT kafka_in TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE KAFKA CLIENT kafka_in CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR orders_in
         FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING order_codec

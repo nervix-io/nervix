@@ -3,8 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The Syslog sender a client's transport configures, DNS-backed UDP, TCP and TLS
-//!   connections opened within the client's `connect_timeout_ms`, RFC 6587 stream framing, and
-//!   the payload limits each transport enforces.
+//!   connections opened within the client's `connect_timeout_ms`, frame writes bounded by its
+//!   `timeout_ms`, RFC 6587 stream framing, and the payload limits each transport enforces.
 //! - **Depends on.** The connector contract, this crate's shared client configuration,
 //!   the node resolver, `error-stack`, Tokio, `rustls` and `tokio-rustls`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -57,6 +57,8 @@ pub struct SyslogSinkConfig {
 pub struct SyslogSink {
     config: SyslogClientConfig,
     sender: SyslogSender,
+    /// The client's `timeout_ms`, which bounds writing and flushing each frame, where it sets one.
+    write_timeout: Option<ConfiguredDeadline>,
 }
 
 enum SyslogSender {
@@ -83,19 +85,22 @@ impl SyslogSink {
     pub async fn new(config: SyslogSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
         let client = Self::client_config(&config.config)?;
         let connect_timeout = Self::connect_timeout(&config.config)?;
+        let write_timeout = Self::write_timeout(&config.config)?;
         let sender = Self::connect(&client, connect_timeout, &config.dns).await?;
         Ok(Self {
             config: client,
             sender,
+            write_timeout,
         })
     }
 
-    /// Checks that `config` declares a usable Syslog transport and connection deadline, loading
-    /// its TLS material when the transport is TLS, so an unusable configuration fails the
-    /// emitter's start instead of every connection attempt.
+    /// Checks that `config` declares a usable Syslog transport and deadlines, loading its TLS
+    /// material when the transport is TLS, so an unusable configuration fails the emitter's start
+    /// instead of every connection attempt.
     pub fn check_client_config(config: &[ClientConfigEntry]) -> SinkStartResult<()> {
         let client = Self::client_config(config)?;
         Self::connect_timeout(config)?;
+        Self::write_timeout(config)?;
         if client.protocol == SyslogProtocol::Tls {
             client.tls_client_config().map_err(Self::config_error)?;
         }
@@ -105,6 +110,13 @@ impl SyslogSink {
     /// The deadline the client's `connect_timeout_ms` sets on opening the sink's connection.
     fn connect_timeout(config: &[ClientConfigEntry]) -> SinkStartResult<ConfiguredDeadline> {
         ConfiguredDeadline::connect(config)
+            .change_context(SinkStartError::InvalidConfiguration { sink: SYSLOG })
+    }
+
+    /// The deadline the client's `timeout_ms` sets on writing and flushing each frame, where it
+    /// sets one.
+    fn write_timeout(config: &[ClientConfigEntry]) -> SinkStartResult<Option<ConfiguredDeadline>> {
+        ConfiguredDeadline::timeout(config)
             .change_context(SinkStartError::InvalidConfiguration { sink: SYSLOG })
     }
 
@@ -291,7 +303,33 @@ impl SyslogSink {
         Ok(())
     }
 
+    /// Writes one frame, and fails the write once it has taken longer than the client's
+    /// `timeout_ms`: a server that stops reading fills the connection's buffers and holds the
+    /// write. The host rebuilds the connection after a failed publish, so the frame a timed-out
+    /// write left partly written is never continued.
     async fn publish_payload(&mut self, payload: &[u8]) -> SinkPublishResult<()> {
+        let write_timeout = self.write_timeout;
+        let write = self.write_frame(payload);
+        let Some(deadline) = write_timeout else {
+            return write.await;
+        };
+        match timeout(deadline.bound(), write).await {
+            Ok(written) => written,
+            Err(_) => Err(Self::write_elapsed(deadline)),
+        }
+    }
+
+    /// The failure of a frame write that ran out of the client's `timeout_ms`, with the elapsed
+    /// deadline beneath it. Its message is attached last, so it leads the report the emitter shows.
+    fn write_elapsed(deadline: ConfiguredDeadline) -> Report<SinkPublishError> {
+        let elapsed = deadline.elapsed("writing a frame to the Syslog server");
+        let message = elapsed.to_string();
+        Report::new(elapsed)
+            .change_context(SinkPublishError::Publish { sink: SYSLOG })
+            .attach_printable(message)
+    }
+
+    async fn write_frame(&mut self, payload: &[u8]) -> SinkPublishResult<()> {
         match &mut self.sender {
             SyslogSender::Udp(socket) => {
                 let written = socket.send(payload).await.map_err(Self::publish_error)?;
@@ -515,6 +553,7 @@ mod tests {
         SyslogSink {
             config,
             sender: SyslogSender::Udp(sender),
+            write_timeout: None,
         }
     }
 
@@ -759,33 +798,176 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_connect_timeout_fails_the_client_check() {
-        for value in ["0", "1s", ""] {
-            let entries = [
-                ClientConfigEntry {
-                    key: "protocol".to_string(),
-                    value: "tcp".to_string(),
-                },
-                ClientConfigEntry {
-                    key: "addr".to_string(),
-                    value: "127.0.0.1:6514".to_string(),
-                },
-                ClientConfigEntry {
-                    key: "connect_timeout_ms".to_string(),
-                    value: value.to_string(),
-                },
-            ];
-            let failure = SyslogSink::check_client_config(&entries)
-                .err()
-                .assured("an invalid deadline fails the check");
-            assert!(
-                matches!(
-                    failure.current_context(),
-                    SinkStartError::InvalidConfiguration { sink: SYSLOG }
-                ),
-                "{value:?}: {failure:?}"
-            );
+    fn an_invalid_deadline_fails_the_client_check() {
+        for key in ["connect_timeout_ms", "timeout_ms"] {
+            for value in ["0", "1s", ""] {
+                let entries = [
+                    ClientConfigEntry {
+                        key: "protocol".to_string(),
+                        value: "tcp".to_string(),
+                    },
+                    ClientConfigEntry {
+                        key: "addr".to_string(),
+                        value: "127.0.0.1:6514".to_string(),
+                    },
+                    ClientConfigEntry {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    },
+                ];
+                let failure = SyslogSink::check_client_config(&entries)
+                    .err()
+                    .assured("an invalid deadline fails the check");
+                assert!(
+                    matches!(
+                        failure.current_context(),
+                        SinkStartError::InvalidConfiguration { sink: SYSLOG }
+                    ),
+                    "{key} {value:?}: {failure:?}"
+                );
+            }
         }
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_server_that_stops_reading_fails_the_frame_write_at_timeout_ms() {
+        let server = nervix_primitives::net::TcpSocket::new_v4()
+            .assured("an IPv4 TCP socket can be created");
+        server
+            .set_recv_buffer_size(4_096)
+            .assured("a TCP socket takes a receive buffer size");
+        server
+            .bind("127.0.0.1:0".parse().assured("literal socket address"))
+            .assured("a loopback TCP port is available");
+        let server = server.listen(1).assured("a bound socket listens");
+        let address = server.local_addr().assured("the listener is bound");
+        let client = nervix_primitives::net::TcpSocket::new_v4()
+            .assured("an IPv4 TCP socket can be created");
+        client
+            .set_send_buffer_size(4_096)
+            .assured("a TCP socket takes a send buffer size");
+        let stream = client
+            .connect(address)
+            .await
+            .assured("the listener accepts connections");
+        // The server accepts the connection and never reads from it.
+        let (_unread, _) = server.accept().await.assured("the connection arrives");
+        let write_timeout = ConfiguredDeadline::timeout(&[ClientConfigEntry {
+            key: "timeout_ms".to_string(),
+            value: "2000".to_string(),
+        }])
+        .assured("two seconds is a valid deadline")
+        .assured("the entry sets timeout_ms");
+        let mut sink = SyslogSink {
+            config: endpoint_config("tcp", &address.to_string()),
+            sender: SyslogSender::Tcp(stream),
+            write_timeout: Some(write_timeout),
+        };
+        let started = Instant::now();
+
+        let failure = sink
+            .publish_payload(&vec![b'x'; 4 * 1024 * 1024])
+            .await
+            .err()
+            .assured("a server that reads nothing never takes the whole frame");
+
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        assert!(matches!(
+            failure.current_context(),
+            SinkPublishError::Publish { sink: SYSLOG }
+        ));
+        let elapsed = failure
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<DeadlineElapsed>())
+            .assured("the elapsed deadline stays beneath the publish failure");
+        assert_eq!(elapsed.key, DeadlineKey::Timeout);
+        assert_eq!(elapsed.bound, Duration::from_secs(2));
+        // The emitter shows the last message a sink attached, and the deadline leads.
+        let leading = failure
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<String>())
+            .assured("the publish failure carries a message");
+        assert_eq!(
+            leading,
+            "writing a frame to the Syslog server did not finish within timeout_ms 2s"
+        );
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_client_without_timeout_ms_waits_for_its_server_to_read() {
+        let listener = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .assured("a loopback TCP port is available");
+        let address = listener.local_addr().assured("the listener is bound");
+        let stream = TcpStream::connect(address)
+            .await
+            .assured("the listener accepts connections");
+        let (mut server, _) = listener.accept().await.assured("the connection arrives");
+        let mut sink = SyslogSink {
+            config: endpoint_config("tcp", &address.to_string()),
+            sender: SyslogSender::Tcp(stream),
+            write_timeout: None,
+        };
+        let frame = vec![b'x'; 4 * 1024 * 1024];
+        let reader = nervix_primitives::task::spawn(async move {
+            // The server reads nothing for an hour, then all of the frame.
+            nervix_primitives::time::sleep(Duration::from_secs(3_600)).await;
+            let mut received = Vec::new();
+            server
+                .read_to_end(&mut received)
+                .await
+                .assured("the server reads the frame");
+            received.len()
+        });
+
+        sink.publish_payload(&frame)
+            .await
+            .assured("a write without a deadline waits for the server");
+        drop(sink);
+
+        let prefix = format!("{} ", frame.len());
+        assert_eq!(
+            reader.await.assured("the server task does not panic"),
+            prefix.len() + frame.len()
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_frame_written_within_timeout_ms_reaches_its_server() {
+        let listener = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .assured("a loopback TCP port is available");
+        let address = listener.local_addr().assured("the listener is bound");
+        let stream = TcpStream::connect(address)
+            .await
+            .assured("the listener accepts connections");
+        let (mut server, _) = listener.accept().await.assured("the connection arrives");
+        let write_timeout = ConfiguredDeadline::timeout(&[ClientConfigEntry {
+            key: "timeout_ms".to_string(),
+            value: "30000".to_string(),
+        }])
+        .assured("thirty seconds is a valid deadline")
+        .assured("the entry sets timeout_ms");
+        let mut sink = SyslogSink {
+            config: endpoint_config("tcp", &address.to_string()),
+            sender: SyslogSender::Tcp(stream),
+            write_timeout: Some(write_timeout),
+        };
+        let payload = b"<13>1 - - - - - - within the deadline";
+
+        sink.publish_payload(payload)
+            .await
+            .assured("a server that reads takes the frame within the deadline");
+        drop(sink);
+
+        let mut received = Vec::new();
+        server
+            .read_to_end(&mut received)
+            .await
+            .assured("the server reads the frame");
+        let mut expected = format!("{} ", payload.len()).into_bytes();
+        expected.extend_from_slice(payload);
+        assert_eq!(received, expected);
     }
 
     #[nervix_primitives::test]

@@ -199,8 +199,7 @@ Feature: Cluster scheduling
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -334,8 +333,7 @@ Feature: Cluster scheduling
 
       CREATE RELAY routed_logs SCHEMA notification BRANCHED BY by_source_logs;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -438,8 +436,7 @@ Feature: Cluster scheduling
 
       CREATE RELAY routed_logs SCHEMA notification BRANCHED BY by_source_logs;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -636,8 +633,7 @@ Feature: Cluster scheduling
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -704,8 +700,7 @@ Feature: Cluster scheduling
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -872,8 +867,7 @@ Feature: Cluster scheduling
 
       CREATE RELAY routed_logs SCHEMA notification BRANCHED BY by_source_logs;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'

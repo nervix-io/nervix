@@ -38,8 +38,7 @@ Feature: Websocket client TLS resource mounts
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
-        CREATE CLIENT ws_tls
-        TYPE WEBSOCKETS
+        CREATE WEBSOCKETS CLIENT ws_tls
         MOUNT dev_tls VERSION 1
         CONFIG {
           'endpoint' = '{{mock_wss_dns_addr}}/ws/{{test_id}}',

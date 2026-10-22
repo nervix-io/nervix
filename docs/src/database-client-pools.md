@@ -11,27 +11,24 @@ the four types listed above.
 
 ## Declaring the bounds
 
-The clause is required, with its two bounds in this order, immediately after the client type and
+The clause is required, with its two bounds in this order, immediately after the client name and
 before an optional resource mount:
 
 ```plexus,ignore
-CREATE [IF NOT EXISTS] CLIENT <name>
-  TYPE POSTGRES|MYSQL|MONGODB|REDIS
+CREATE [IF NOT EXISTS] POSTGRES|MYSQL|MONGODB|REDIS CLIENT <name>
   POOL SIZE MIN <minimum> MAX <maximum>
   [MOUNT <resource> VERSION <n>|LATEST]
   CONFIG { <connector configuration> };
 ```
 
 ```plexus
-CREATE CLIENT postgres_main
-  TYPE POSTGRES
+CREATE POSTGRES CLIENT postgres_main
   POOL SIZE MIN 2 MAX 8
   CONFIG {
     'addr' = 'postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=verify-full'
   };
 
-CREATE CLIENT redis_main
-  TYPE REDIS
+CREATE REDIS CLIENT redis_main
   POOL SIZE MIN 1 MAX 4
   MOUNT dev_tls VERSION 1
   CONFIG {
@@ -144,8 +141,7 @@ Both counts are strongly persisted with the rest of the client definition, and
 `SHOW CREATE CLIENT <name>;` reports them in the declared order:
 
 ```plain
-CREATE CLIENT postgres_main
-  TYPE POSTGRES
+CREATE POSTGRES CLIENT postgres_main
   POOL SIZE MIN 2 MAX 8
   CONFIG {
     'addr' = 'postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=verify-full'
@@ -155,6 +151,6 @@ CREATE CLIENT postgres_main
 ## Changing a bound
 
 There is no `ALTER CLIENT`. Change either bound the same way as any other part of a client
-definition: `DROP CLIENT` and `CREATE CLIENT` in one transaction. A client that runtime entities
+definition: `DROP CLIENT` and `CREATE <CONNECTOR> CLIENT` in one transaction. A client that runtime entities
 reference is replaced together with them, under the existing transactional quiesce contract for
 those entities.

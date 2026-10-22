@@ -11,8 +11,7 @@ Feature: Entity name reuse across kinds
         user_id I64
       );
 
-      CREATE CLIENT shared_name
-        TYPE KAFKA
+      CREATE KAFKA CLIENT shared_name
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };
@@ -33,8 +32,7 @@ Feature: Entity name reuse across kinds
       """
     Then the last command output contains
       """
-      CREATE CLIENT shared_name
-        TYPE KAFKA
+      CREATE KAFKA CLIENT shared_name
         CONFIG {
           'bootstrap.servers' = '127.0.0.1:9092'
         };

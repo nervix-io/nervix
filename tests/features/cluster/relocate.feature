@@ -1363,7 +1363,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE SCHEMA promote_tenant ( tenant STRING );
       CREATE BRANCH promote_by_tenant SCHEMA promote_tenant TTL 5m;
       CREATE RELAY promote_output SCHEMA promote_event BRANCHED BY promote_by_tenant;
-      CREATE CLIENT promote_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT promote_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -1551,7 +1551,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION abort_route FROM abort_input UNBRANCHED
         TO abort_staged INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT abort_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT abort_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -1649,7 +1649,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY untouched_output SCHEMA wait_event UNBRANCHED;
       CREATE RELAY moved_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY moved_output SCHEMA wait_event UNBRANCHED;
-      CREATE CLIENT wait_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT wait_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -1796,7 +1796,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY reader_input SCHEMA state_event BRANCHED BY state_by_tenant;
       CREATE RELAY reader_output SCHEMA state_event BRANCHED BY state_by_tenant;
-      CREATE CLIENT state_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT state_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

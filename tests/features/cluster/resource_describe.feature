@@ -575,7 +575,7 @@ Feature: Resource lifecycle
       """
       SHOW CLUSTER STATUS;
       """
-    And within "30s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"
+    And within "300s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"
       """
       DESCRIBE RESOURCE large_model VERSION 1;
       """

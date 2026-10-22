@@ -25,7 +25,7 @@ Feature: Redis name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 1 MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
@@ -86,7 +86,7 @@ Feature: Redis name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 0 MAX 1 MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 0 MAX 1 MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{redis_tls_dns_addr}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
@@ -127,7 +127,7 @@ Feature: Redis name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 1 CONFIG {
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 CONFIG {
         'addr' = '{{redis_forwarded_addr}}'
       };
       CREATE REDIS PUBSUB INGESTOR redis_in

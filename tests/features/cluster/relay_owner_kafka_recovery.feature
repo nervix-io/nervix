@@ -21,7 +21,7 @@ Feature: Kafka acknowledgements across relay-owner recovery
       CREATE BRANCH relay_handoff_branch SCHEMA relay_handoff_key TTL 5m;
       CREATE RELAY relay_handoff_records SCHEMA relay_handoff_event
         BRANCHED BY relay_handoff_branch CAPACITY 1;
-      CREATE CLIENT relay_handoff_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT relay_handoff_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

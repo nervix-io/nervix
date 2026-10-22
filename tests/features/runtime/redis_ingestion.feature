@@ -21,8 +21,7 @@ Feature: Redis ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_redis_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_redis_notifications;
-        CREATE CLIENT redis_main
-        TYPE REDIS
+        CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{redis_addr}}'
@@ -80,8 +79,7 @@ Feature: Redis ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_redis_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_redis_notifications;
-        CREATE CLIENT redis_main
-        TYPE REDIS
+        CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{redis_addr}}'

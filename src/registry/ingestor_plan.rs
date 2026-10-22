@@ -31,12 +31,12 @@ use nervix_models::{
     IngestSource, IngestSourceKind, IngestTimestampSource, IngestorInput, IngestorName,
     KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource, MessageErrorOperation, Model,
     ModelName, MqttIngestMode, MqttSource, MqttTopicSource, NatsSource, NatsSubjectSource,
-    PrometheusQuerySource, PrometheusSource, PulsarIngestMode, PulsarSource,
-    PulsarSubscriptionOwnership, PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource,
-    RabbitMqSource, RedisPubSubSource, RedisSource, ResolvedBranching, ScheduledNode, SchemaField,
-    SchemaName, SignalingProtocolName, SqsIngestMode, SqsQueueSource, SqsSource,
-    SyslogListenerSource, SyslogSource, WebsocketsConnectionSource, WebsocketsEndpointSource,
-    WebsocketsSource, ZeroMqPullSource, ZeroMqSource, parse_duration_text,
+    PrometheusSource, PulsarIngestMode, PulsarSource, PulsarSubscriptionOwnership,
+    PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource, RabbitMqSource, RedisPubSubSource,
+    RedisSource, ResolvedBranching, ScheduledNode, SchemaField, SchemaName, SignalingProtocolName,
+    SqsIngestMode, SqsQueueSource, SqsSource, SyslogListenerSource, SyslogSource,
+    WebsocketsConnectionSource, WebsocketsEndpointSource, WebsocketsSource, ZeroMqPullSource,
+    ZeroMqSource, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 
@@ -190,6 +190,7 @@ client_plan!(RedisPubSubIngestorStartPlan {
 });
 client_plan!(PrometheusIngestorStartPlan {
     query: String,
+    max_body_size: nervix_models::PayloadSizeLimit,
     every: nervix_models::DomainClockPeriod,
 });
 client_plan!(ZeroMqIngestorStartPlan {
@@ -857,23 +858,19 @@ impl SourceStartPlan {
                 mode: mode.clone(),
             })),
             (
-                IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
-                    client: expected,
-                    query,
-                    every,
-                    ..
-                })),
+                IngestSource::Prometheus(PrometheusSource::Query(source)),
                 Model::ClientPrometheus(resolved),
             ) => Ok(Self::Prometheus(PrometheusIngestorStartPlan {
                 client: IngestorClientSpec::resolved(
                     name,
-                    expected,
+                    &source.client,
                     &resolved.name,
                     resolved.mount.as_ref(),
                     &resolved.config,
                 )?,
-                query: query.clone(),
-                every: *every,
+                query: source.query.clone(),
+                max_body_size: source.max_body_size_in_effect(),
+                every: source.every,
             })),
             (
                 IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
@@ -981,7 +978,7 @@ mod tests {
         CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
         CreateClientSqs, CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq,
         CreateEndpoint, EndpointType, FlushPolicy, GeneralErrorPolicy, IngestorName, MqttQos,
-        MqttSession, NodeRef, OutputBranch, ProcessorOutputs,
+        MqttSession, NodeRef, OutputBranch, ProcessorOutputs, PrometheusQuerySource,
     };
     use nonzero_ext::nonzero;
     use rstest::rstest;
@@ -1276,6 +1273,7 @@ mod tests {
             source: IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
                 client: named("upstream"),
                 query: "up".to_string(),
+                max_body_size: None,
                 every: cadence(),
                 mode: nervix_models::PrometheusIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
@@ -1288,6 +1286,7 @@ mod tests {
             plan: SourceStartPlan::Prometheus(PrometheusIngestorStartPlan {
                 client: client(),
                 query: "up".to_string(),
+                max_body_size: nervix_models::PROMETHEUS_DEFAULT_MAX_BODY_SIZE,
                 every: cadence(),
             }),
             reads_headers: false,

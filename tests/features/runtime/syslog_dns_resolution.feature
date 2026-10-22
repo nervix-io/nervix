@@ -18,11 +18,11 @@ Feature: Syslog name resolution
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
-      CREATE CLIENT syslog_listener TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_listener CONFIG {
         'protocol' = 'udp',
         'addr' = '{{syslog_ingest_addr}}'
       };
-      CREATE CLIENT syslog_forwarder TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_forwarder CONFIG {
         'protocol' = 'udp',
         'addr' = '{{syslog_dns_addr}}'
       };
@@ -76,13 +76,13 @@ Feature: Syslog name resolution
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
       CREATE RELAY input_events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY delivered_events SCHEMA syslog_event UNBRANCHED;
-      CREATE CLIENT syslog_input TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_input CONFIG {
         'protocol' = 'udp', 'addr' = '{{syslog_ingest_addr}}'
       };
-      CREATE CLIENT syslog_output TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_output CONFIG {
         'protocol' = 'tcp', 'addr' = '{{syslog_emit_addr}}'
       };
-      CREATE CLIENT syslog_forwarder TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_forwarder CONFIG {
         'protocol' = 'tcp', 'addr' = '{{syslog_forwarded_addr}}'
       };
       CREATE SYSLOG LISTENER INGESTOR syslog_input_ingestor
@@ -139,13 +139,13 @@ Feature: Syslog name resolution
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
       CREATE RELAY input_events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY delivered_events SCHEMA syslog_event UNBRANCHED;
-      CREATE CLIENT syslog_input TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_input CONFIG {
         'protocol' = 'udp', 'addr' = '{{syslog_ingest_addr}}'
       };
-      CREATE CLIENT syslog_output TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_output CONFIG {
         'protocol' = 'tcp', 'addr' = '{{syslog_emit_addr}}'
       };
-      CREATE CLIENT syslog_forwarder TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_forwarder CONFIG {
         'protocol' = 'tcp', 'addr' = '{{syslog_dns_addr}}', 'framing' = 'octet-counting'
       };
       CREATE SYSLOG LISTENER INGESTOR syslog_input_ingestor
@@ -205,16 +205,16 @@ Feature: Syslog name resolution
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
       CREATE RELAY input_events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY delivered_events SCHEMA syslog_event UNBRANCHED;
-      CREATE CLIENT syslog_input TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_input CONFIG {
         'protocol' = 'udp', 'addr' = '{{syslog_ingest_addr}}'
       };
-      CREATE CLIENT syslog_output TYPE SYSLOG MOUNT syslog_tls VERSION 1 CONFIG {
+      CREATE SYSLOG CLIENT syslog_output MOUNT syslog_tls VERSION 1 CONFIG {
         'protocol' = 'tls', 'addr' = '{{syslog_emit_addr}}',
         'tls_cert_file' = '{{syslog_tls}}/tls.crt',
         'tls_key_file' = '{{syslog_tls}}/tls.key',
         'tls_ca_file' = '{{syslog_tls}}/ca.crt'
       };
-      CREATE CLIENT syslog_forwarder TYPE SYSLOG MOUNT syslog_tls VERSION 1 CONFIG {
+      CREATE SYSLOG CLIENT syslog_forwarder MOUNT syslog_tls VERSION 1 CONFIG {
         'protocol' = 'tls', 'addr' = '{{syslog_dns_addr}}',
         'tls_cert_file' = '{{syslog_tls}}/tls.crt',
         'tls_key_file' = '{{syslog_tls}}/tls.key',

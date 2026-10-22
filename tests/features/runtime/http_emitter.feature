@@ -19,7 +19,7 @@ Feature: HTTP emitter
       );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://127.0.0.1:19080',
         'timeout_ms' = 5000
       };
@@ -152,7 +152,7 @@ Feature: HTTP emitter
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (id STRING);
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT api TYPE HTTP CONFIG {'endpoint' = 'https://api.example.com'};
+      CREATE HTTP CLIENT api CONFIG {'endpoint' = 'https://api.example.com'};
       """
     When these Plexus commands fail with "timeout_ms"
       """
@@ -188,10 +188,10 @@ Feature: HTTP emitter
       CREATE SCHEMA state_snapshot (path STRING);
       CREATE RELAY latest_path SCHEMA state_snapshot UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'https://api.example.com', 'timeout_ms' = 5000
       };
-      CREATE CLIENT other TYPE SENTRY CONFIG {
+      CREATE SENTRY CLIENT other CONFIG {
         'dsn' = 'http://public@127.0.0.1:8000/1'
       };
       """
@@ -321,20 +321,20 @@ Feature: HTTP emitter
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         INVOKE write_header('Authorization', leak_sensitive(input.secret))
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT unsafe_endpoint TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT unsafe_endpoint CONFIG {
         'endpoint' = 'https://key@api.example.com', 'timeout_ms' = 5000
       };
-      CREATE CLIENT zero_timeout TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT zero_timeout CONFIG {
         'endpoint' = 'https://api.example.com', 'timeout_ms' = 0
       };
-      CREATE CLIENT text_timeout TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT text_timeout CONFIG {
         'endpoint' = 'https://api.example.com', 'timeout_ms' = 'invalid'
       };
-      CREATE CLIENT overflow_timeout TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT overflow_timeout CONFIG {
         'endpoint' = 'https://api.example.com',
         'timeout_ms' = '18446744073709551616'
       };
-      CREATE CLIENT incomplete_tls TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT incomplete_tls CONFIG {
         'endpoint' = 'https://api.example.com', 'timeout_ms' = 5000,
         'tls_cert_file' = '/tmp/client.pem'
       };
@@ -432,8 +432,7 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api
-        TYPE HTTP
+      CREATE HTTP CLIENT api
         CONFIG {
           'endpoint' = '{{http_receiver.api}}',
           'timeout_ms' = 5000
@@ -528,8 +527,7 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api
-        TYPE HTTP
+      CREATE HTTP CLIENT api
         CONFIG {
           'endpoint' = '{{http_receiver.api}}',
           'timeout_ms' = 5000
@@ -593,7 +591,7 @@ Feature: HTTP emitter
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER published FROM outgoing
@@ -676,13 +674,13 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT posted_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT posted_api CONFIG {
         'endpoint' = '{{http_receiver.posted}}', 'timeout_ms' = 5000
       };
-      CREATE CLIENT probed_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT probed_api CONFIG {
         'endpoint' = '{{http_receiver.probed}}', 'timeout_ms' = 5000
       };
-      CREATE CLIENT computed_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT computed_api CONFIG {
         'endpoint' = '{{http_receiver.computed}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER post_event FROM outgoing
@@ -812,7 +810,7 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER methods FROM outgoing
@@ -915,7 +913,7 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER shaped FROM outgoing
@@ -1036,7 +1034,7 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER guarded FROM outgoing
@@ -1146,10 +1144,10 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE CLIENT crowded_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT crowded_api CONFIG {
         'endpoint' = '{{http_receiver.crowded}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER headed FROM outgoing WHERE NOT input.crowd
@@ -1418,7 +1416,7 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER targeted FROM outgoing
@@ -1529,7 +1527,7 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER tenant_events FROM outgoing
@@ -1640,7 +1638,7 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER tenant_events
@@ -1769,7 +1767,7 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER stamped FROM outgoing
@@ -1857,7 +1855,7 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER routed FROM outgoing
@@ -1956,7 +1954,7 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER leaked FROM accounts

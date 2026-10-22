@@ -99,8 +99,7 @@ Feature: Branched session subscriptions
         CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_tenant_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-subscription-{{test_id}}'
@@ -174,8 +173,7 @@ Feature: Branched session subscriptions
         SCHEMA notification
         BRANCHED BY by_mqtt_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-subscription-filter-map-{{test_id}}'

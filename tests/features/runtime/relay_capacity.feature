@@ -201,8 +201,7 @@ Feature: Relay capacity
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 3;
 
-      CREATE CLIENT zeromq_capacity_shrink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT zeromq_capacity_shrink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'

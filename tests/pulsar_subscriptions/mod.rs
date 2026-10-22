@@ -26,7 +26,7 @@ async fn given_pulsar_domain_graph(world: &mut ScenarioWorld, addr: String) {
             CREATE WIRE JSON SCHEMA item_wire MODE STRICT (user_id integer);
             CREATE CODEC item_codec FROM WIRE JSON SCHEMA item_wire TO SCHEMA item;
             CREATE RELAY output SCHEMA item UNBRANCHED;
-            CREATE CLIENT broker TYPE PULSAR CONFIG {{ 'addr' = '{addr}' }};
+            CREATE PULSAR CLIENT broker CONFIG {{ 'addr' = '{addr}' }};
             START;
             "#
         ),

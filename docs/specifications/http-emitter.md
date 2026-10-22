@@ -15,7 +15,7 @@ optional query, headers, and body are independently configurable. Method, path, 
 expressions may vary per record. A codec produces the body, or the emitter explicitly sends no
 body. Receipt of complete successful response headers is the external acknowledgement boundary.
 
-HTTP emission uses the existing domain-owned `TYPE HTTP` client and the emitter
+HTTP emission uses the existing domain-owned `HTTP CLIENT` and the emitter
 lifecycle, branch, sensitivity, materialized-state, flush, and error contracts. The endpoint and
 credentials must be provisioned by the operator. Creating or starting the emitter performs no
 provisioning or probe request against the destination.
@@ -72,7 +72,7 @@ CREATE CODEC event_body_codec
   TO SCHEMA event_body;
 CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
 
-CREATE CLIENT api TYPE HTTP CONFIG {
+CREATE HTTP CLIENT api CONFIG {
   'endpoint' = 'https://api.example.com',
   'timeout_ms' = 5000
 };

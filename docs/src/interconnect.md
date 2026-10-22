@@ -477,7 +477,8 @@ The management connection reserves its 64 outbound stream slots as follows:
 The replication pool reserves two of its eight slots for the active ordered consensus-append
 stream and a replacement while the previous generation closes. The other six are shared
 replication slots. The bulk pool reserves two slots for resources, one for snapshots, and one for
-other bulk work. Commands and relay bodies use the shared capacity of their dedicated pools.
+other bulk work, which backup section fetches use. Commands and relay bodies use the shared capacity
+of their dedicated pools.
 
 With the standard node capacity, typed requests also have independent node-wide admission quotas,
 applied separately to incoming and outgoing work across all peers and connections:
@@ -1128,8 +1129,9 @@ state machine to apply that revision, installs its current runtime plan, and rec
 leader before it captures. A closed applied-state authority or a catch-up deadline refuses the
 capture; a follower that is still applying the cut does not produce an archive from earlier state.
 A captured section is fetched over a
-snapshot-subquota bulk response: the inventory declares its path, length, content kind and digest,
-and the leader stages and verifies the stream before adding it to the archive. The owner keeps a
+bulk response on the pool's shared stream and admission: the inventory declares its path, length,
+content kind and digest, and the leader stages and verifies the stream before adding it to the
+archive. The owner keeps a
 staged section only for the coordinator process that requested it, serves it once in 1 MiB reads,
 and releases a stage nobody fetched 600 seconds after staging it. One owner's inventory of a
 domain's capture is one management reply, at most 64 KiB.
@@ -1149,7 +1151,7 @@ transfers an entire container as one bulk response allocation. The leader verifi
 digest before assembly.
 An opening refused solely for request capacity is retried within one 30-second opening deadline;
 other failures end the fetch. The captured stage remains unconsumed on an admission refusal.
-Completed backup and materialized-state response streams release their Snapshot request and
+Completed backup and materialized-state response streams release their request admission and
 connection-stream permits before local file verification or Arrow decoding.
 
 The coordinator streams native lifecycle and Kafka metadata into quota-owned files before
@@ -1176,7 +1178,7 @@ For a stopped domain, owner capture selects materialized checkpoint readers from
 snapshot as the other captured state. Each reader retains its selected namespace and chunks until
 bounded identity conversion and raw Arrow staging finish. Running and paused domains use fresh generation
 capture under their assignment barriers. The capture inventory carries both through the existing
-materialized section kinds and Snapshot stream contract. Stored capture never activates the domain.
+materialized section kinds and the captured-section fetch. Stored capture never activates the domain.
 
 After all checkpoints are staged, the leader sends each target node a publish request with the
 complete checkpoint and byte counts. The receiver reserves a fixed 2 MiB, validates receipts,
@@ -1221,10 +1223,13 @@ archive paths. These properties supply wire and mapping evidence; the transport 
 public scenarios retain the authentication, fencing and recovery evidence described above. See
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md) for their domains and commands.
 
-A backup's capture fetches and a restore's installation requests share the peer connection's one
-reserved snapshot stream slot. A completed fetch releases its stream before the coordinator verifies
-and stages what it received, and every installation action is one request that holds no stream while
-the installer awaits its next snapshot request to that peer.
+A restore's installation requests use the peer connection's one reserved snapshot stream slot. A
+backup's capture fetches use the bulk pool's shared slot instead: a quiesced cut publishes new
+checkpoint revisions, and a replica catching up one above the bulk budget holds the snapshot slot
+toward the owner for as long as its transfer takes, which on a loaded node outlasts the fetch's
+opening deadline. A completed fetch releases its stream before the coordinator verifies and stages
+what it received, and every installation action is one request that holds no stream while the
+installer awaits its next snapshot request to that peer.
 Staging and publication run on the admitted filesystem worker class. Authority is checked inside
 the storage job after admission, so waiting for a worker cannot preserve an expired installation
 right. Durable synchronization does not run on the async reactor.

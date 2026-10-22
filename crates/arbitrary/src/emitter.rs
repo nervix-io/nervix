@@ -158,6 +158,15 @@ impl Arbitrary<'_> {
             .boundary_biased(1..=u64::from(BatchMessageLimit::MAX));
         let max_messages =
             BatchMessageLimit::try_from(messages).verified("the range above is the limit's range");
+        let max_size = self.payload_size_limit();
+        EmitterBatchPolicy {
+            max_messages,
+            max_size,
+        }
+    }
+
+    /// A size limit in any unit, from one of the unit to the most a 64-bit byte count holds.
+    pub fn payload_size_limit(&mut self) -> PayloadSizeLimit {
         let unit = self.entropy.pick([
             ByteSizeUnit::B,
             ByteSizeUnit::KB,
@@ -171,15 +180,11 @@ impl Arbitrary<'_> {
         ]);
         let most = u64::MAX / unit.bytes();
         let count = self.entropy.boundary_biased(1..=most);
-        let max_size = PayloadSizeLimit::new(
+        PayloadSizeLimit::new(
             NonZeroU64::new(count).verified("the range above starts at one"),
             unit,
         )
-        .verified("the count is at most the largest the unit's byte count allows");
-        EmitterBatchPolicy {
-            max_messages,
-            max_size,
-        }
+        .verified("the count is at most the largest the unit's byte count allows")
     }
 
     /// A sink of the requested connector and entity, with every clause it declares.

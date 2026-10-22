@@ -30,7 +30,7 @@ Feature: Fixed-format emitter batch envelopes
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO errors INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT sentry_main TYPE SENTRY CONFIG {
+      CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = '{{sentry_dns_dsn}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER batched_sentry FROM errors
@@ -94,7 +94,7 @@ Feature: Fixed-format emitter batch envelopes
         TO errors INHERIT ALL SET message = repeat(input.message, 1000000)
           UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT sentry_main TYPE SENTRY CONFIG {
+      CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = '{{sentry_dns_dsn}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER batched_sentry FROM errors
@@ -148,7 +148,7 @@ Feature: Fixed-format emitter batch envelopes
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT syslog_main TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_main CONFIG {
         'protocol' = 'udp', 'addr' = '{{syslog_emit_addr}}'
       };
       CREATE EMITTER batched_syslog FROM events
@@ -213,7 +213,7 @@ Feature: Fixed-format emitter batch envelopes
         TO events INHERIT ALL SET message = repeat(input.message, 65500)
           UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT syslog_main TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_main CONFIG {
         'protocol' = 'udp', 'addr' = '{{syslog_emit_addr}}'
       };
       CREATE EMITTER batched_syslog FROM events
@@ -267,7 +267,7 @@ Feature: Fixed-format emitter batch envelopes
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT syslog_listener TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_listener CONFIG {
         'protocol' = 'tcp', 'addr' = '{{syslog_ingest_addr}}',
         'max_message_size' = '4096'
       };
@@ -276,7 +276,7 @@ Feature: Fixed-format emitter batch envelopes
         ON QUIESCE SUSPEND DECODE USING syslog_codec
         TO received_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT syslog_main TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_main CONFIG {
         'protocol' = 'tcp', 'addr' = '{{syslog_ingest_addr}}',
         'framing' = '<framing>'
       };
@@ -343,7 +343,7 @@ Feature: Fixed-format emitter batch envelopes
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT syslog_listener TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         MOUNT syslog_tls VERSION 1
         CONFIG {
           'protocol' = 'tls', 'addr' = '{{syslog_ingest_addr}}',
@@ -356,7 +356,7 @@ Feature: Fixed-format emitter batch envelopes
         ON QUIESCE SUSPEND DECODE USING syslog_codec
         TO received_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT syslog_main TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_main
         MOUNT syslog_tls VERSION 1
         CONFIG {
           'protocol' = 'tls', 'addr' = '{{syslog_ingest_addr}}',
@@ -415,7 +415,7 @@ Feature: Fixed-format emitter batch envelopes
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_main TYPE OTEL CONFIG {
+      CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = '<endpoint>',
         'protocol' = '<protocol>',
         'timeout_ms' = 5000
