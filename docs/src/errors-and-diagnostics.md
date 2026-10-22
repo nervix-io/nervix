@@ -862,7 +862,15 @@ TLS keys on `ws`, and unpaired identity files are typed refusals naming their ke
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a source cannot produce its validated header collection. Rendered client values are
 validated again by the connector before opening transport.
-Planning failures likewise retain the selected entity or placement so an operator can correct the request. A
+An emitter whose sink keeps one value per header name and whose `INVOKE` clause writes one literal
+header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
+emitter, the sink's connector and entity, the header as the sink's
+[header model](./connector-contract.md#header-models) records it, and both `INVOKE` positions, such as
+`emitter 'out' in domain 'shop' writes header 'route' at INVOKE #1 and again at #3, but PULSAR TOPIC
+emitters keep one value per header name, so the later write would replace the earlier one on every
+record`. The header is a name the statement writes, never a value a record carries.
+Planning failures
+likewise retain the selected entity or placement so an operator can correct the request. A
 relocation the graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`:
 a member that does not exist names the domain and the member, a server-listener ingestor names the
 ingestor, a corridor whose `FROM`/`TO` pairs are all disconnected, a hard group whose overrides
@@ -1032,6 +1040,12 @@ and fails with `ExecutionBuildError::StopEmitter` above the stop report, beneath
 `RuntimeError::BuildDomainExecution`. The emitter holds the task's own description of a failed
 drain as a printable attachment, which a rendered chain does not show, so `StopEmitter` carries that
 description and its message ends with it. A later stop can still end the retained task.
+
+The task bounds buffer draining by its deadline, then lets the sink's finish answer within half the
+supervisor's response grace while still passing the original deadline to the sink. A finish that
+reports unsent records at its deadline supplies its own count to the stop report. A buffer drain
+that misses the deadline, or a finish that never answers within that reporting window, reports the
+stop deadline instead.
 
 ### Node Startup
 

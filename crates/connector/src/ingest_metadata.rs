@@ -20,7 +20,10 @@
 use nervix_models::SourceMetadataScope;
 use nervix_primitives::sync::Arc;
 
-/// Transport headers of one source message, visited in arrival order.
+/// Transport headers of one source message, visited in the order its entity's declared header model
+/// keeps them: as the message carries them for `ordered_repeats`, each name's values together for
+/// `repeats_by_name`, one value per name for `last_wins`, and names in ascending byte order for
+/// `sorted_by_name`.
 ///
 /// Connectors implement this over their own borrowed message so a group's header builders
 /// are appended from the source directly, without an owned header vector per message.

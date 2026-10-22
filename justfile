@@ -2787,7 +2787,7 @@ coverage-connector-matrix: connector-declarations
 # Check the shared kache remote of CI jobs and image builds: its configuration, the start of a
 # job's daemon, and the bounded publication of what the job built.
 test-kache-ci:
-    uv run --locked python -m unittest scripts.tests.test_kache_ci
+    uv run --locked python -m unittest scripts.tests.test_kache_ci scripts.tests.test_runner_diagnostics scripts.tests.test_record_runner_load
 
 # Retain the kache remote contract's own measured line coverage beside the other Python tooling.
 coverage-kache-ci:
@@ -2795,7 +2795,7 @@ coverage-kache-ci:
     set -euo pipefail
     mkdir -p "{{ cargo_target_dir }}/kache-ci"
     coverage=(uvx --from coverage==7.11.0 coverage)
-    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" --branch --source=scripts.kache_remote,scripts.tests.test_kache_ci -m unittest scripts.tests.test_kache_ci
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" --branch --source=scripts.kache_remote,scripts.runner_diagnostics,scripts.record_runner_load,scripts.tests.test_kache_ci,scripts.tests.test_runner_diagnostics,scripts.tests.test_record_runner_load -m unittest scripts.tests.test_kache_ci scripts.tests.test_runner_diagnostics scripts.tests.test_record_runner_load
     "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" -o "{{ cargo_target_dir }}/kache-ci/python.lcov"
 
 # Exercise the pinned Go formatter bootstrap and its CI wiring without network access.

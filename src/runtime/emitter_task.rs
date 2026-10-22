@@ -31,7 +31,7 @@ use nervix_connector::{
     SinkTransientErrorStatus, physical_time::actual_utc_now,
 };
 
-use super::*;
+use super::{emitter_publishing::EmitterStopDrainOutcome, *};
 
 pub(in crate::runtime) struct EmitterTask;
 
@@ -1252,27 +1252,17 @@ impl EmitterTaskLoop<'_> {
                         stop_rx: &mut *self.stop_rx,
                         backoff,
                     };
-                    let drained = nervix_primitives::time::timeout_at(deadline, async {
-                        let report = sink
-                            .flush_all(self.plan.sink.label(), self.context, &mut control, buffer)
-                            .await?;
-                        let finished = match sink.finish_transport(deadline).await {
-                            Ok(finished) => finished,
-                            Err(error) => {
-                                // The finish's own description, which names what the client
-                                // still held, is how the stop reports a finish that did not send
-                                // everything.
-                                let description = error.current_context().to_string();
-                                return Err(error
-                                    .change_context(EmitterRuntimeError::FinishTransport)
-                                    .attach_printable(description));
-                            }
-                        };
-                        Ok::<_, Report<EmitterRuntimeError>>((report, finished))
-                    })
-                    .await;
+                    let drained = sink
+                        .drain_for_stop(
+                            self.plan.sink.label(),
+                            self.context,
+                            &mut control,
+                            buffer,
+                            deadline,
+                        )
+                        .await;
                     let result = match drained {
-                        Ok(Ok((report, finished))) => {
+                        EmitterStopDrainOutcome::Finished { report, finished } => {
                             self.state.backoff.reset();
                             self.state.retry.clear();
                             self.context.status.clear();
@@ -1286,7 +1276,7 @@ impl EmitterTaskLoop<'_> {
                             );
                             Ok(())
                         }
-                        Ok(Err(error)) => {
+                        EmitterStopDrainOutcome::Failed(error) => {
                             let reason = emitter_error_message(&error);
                             self.context.record_failure(reason.clone());
                             self.context
@@ -1294,7 +1284,7 @@ impl EmitterTaskLoop<'_> {
                             Err(Report::new(EmitterRuntimeError::FinalFlush)
                                 .attach_printable(format!("emitter final flush failed: {reason}")))
                         }
-                        Err(_) => {
+                        EmitterStopDrainOutcome::DeadlineElapsed => {
                             let reason = format!(
                                 "emitter '{}' did not drain before its configured deadline",
                                 self.context.emitter.as_str()
@@ -2676,6 +2666,100 @@ mod tests {
     struct HoldingSink {
         answer: fn() -> SinkFinishResult,
         finished_by: watch::Sender<Option<Instant>>,
+    }
+
+    struct DeadlineFinishSink {
+        overrun: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl SinkLifecycle for DeadlineFinishSink {
+        async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
+            if self.overrun {
+                nervix_primitives::time::sleep_until(
+                    deadline + PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE + Duration::from_millis(1),
+                )
+                .await;
+            } else {
+                nervix_primitives::time::sleep_until(deadline).await;
+                nervix_primitives::task::yield_now().await;
+            }
+            Err(Report::new(SinkFinishError::Unsent {
+                sink: "test",
+                records: 3,
+            }))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmitterSink for DeadlineFinishSink {
+        fn lifecycle(&self) -> &dyn SinkLifecycle {
+            self
+        }
+
+        fn lifecycle_mut(&mut self) -> &mut dyn SinkLifecycle {
+            self
+        }
+
+        async fn publish_batches(
+            &mut self,
+            _context: &EmitterSinkContext,
+            _publication: EmitterPublication<'_>,
+        ) -> EmitterRuntimeResult<()> {
+            Ok(())
+        }
+    }
+
+    async fn stop_drain_with_sink(
+        sink: &mut EmitterSinkState,
+        deadline: Instant,
+    ) -> EmitterStopDrainOutcome {
+        let fault_injection = ConfiguredFaultInjection::default();
+        let mut backoff = RuntimeReconnectBackoff::default();
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let (_stop_tx, mut stop_rx) = watch::channel(Some(deadline));
+        let mut control = EmitterPublishControl {
+            fault_injection: &fault_injection,
+            shutdown_rx: &mut shutdown_rx,
+            stop_rx: &mut stop_rx,
+            backoff: &mut backoff,
+        };
+        let context = sink_context();
+        let mut buffer = EmitterBatchBuffer::default();
+        sink.drain_for_stop("test", &context, &mut control, &mut buffer, deadline)
+            .await
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_stop_keeps_the_finish_answer_given_on_its_deadline() {
+        let mut sink = EmitterSinkState::opened(Box::new(DeadlineFinishSink { overrun: false }));
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        match stop_drain_with_sink(&mut sink, deadline).await {
+            EmitterStopDrainOutcome::Failed(error) => {
+                assert_eq!(
+                    error.current_context(),
+                    &EmitterRuntimeError::FinishTransport
+                );
+                assert_eq!(
+                    emitter_error_message(&error),
+                    "test sink's transport client still held 3 records when its finish deadline \
+                     passed"
+                );
+            }
+            _ => panic!("the sink's own finish outcome must win the deadline race"),
+        }
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_stop_bounds_a_finish_that_overruns_its_deadline() {
+        let mut sink = EmitterSinkState::opened(Box::new(DeadlineFinishSink { overrun: true }));
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        assert!(matches!(
+            stop_drain_with_sink(&mut sink, deadline).await,
+            EmitterStopDrainOutcome::DeadlineElapsed
+        ));
     }
 
     #[async_trait::async_trait]

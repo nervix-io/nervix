@@ -179,6 +179,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Runner diagnostics before Validate
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: validate
+
       - name: Validate
         run: |
           just toolchains-install
@@ -286,6 +291,11 @@ jobs:
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
+
+      - name: Runner diagnostics before Check diagnostic evidence and report tool coverage
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: check-diagnostic-evidence-and-report-tool-coverage
 
       - name: Check diagnostic evidence and report tool coverage
         run: just coverage-deadlock
@@ -426,10 +436,20 @@ jobs:
       # The bound covers prerequisites, the inventory's separate build and workload budgets,
       # and the coverage export. At its end the collector and the lane each
       # record their attempt as interrupted and end every process they started.
+      - name: Runner diagnostics before Diagnostic lane
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: diagnostic-lane
+
       - name: Diagnostic lane
         run: |
           just toolchains-install
           timeout --signal=TERM --kill-after=60 175m just coverage-native-extras "test-${SELECTION}"
+
+      - name: Runner diagnostics before Supervision qualification
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: supervision-qualification
 
       - name: Supervision qualification
         run: timeout --signal=TERM --kill-after=60 10m just test-deloxide-qualification "${SELECTION}"
@@ -577,6 +597,11 @@ jobs:
         run: |
           python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
+
+      - name: Runner diagnostics before Tests coverage
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: tests-coverage
 
       - name: Tests coverage
         run: |
@@ -774,6 +799,11 @@ jobs:
       - name: Setup uv for Python driver coverage
         uses: astral-sh/setup-uv@v6
 
+      - name: Runner diagnostics before Scenario coverage
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: scenario-coverage
+
       - name: Scenario coverage
         run: |
           just toolchains-install
@@ -915,6 +945,11 @@ jobs:
         run: python3 scripts/kache_remote.py start
 
       # The CRAP report runs the cargo-crap version scripts/cargo_crap.py pins, built through kache.
+      - name: Runner diagnostics before Install the pinned complexity analyzer
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: install-the-pinned-complexity-analyzer
+
       - name: Install the pinned complexity analyzer
         run: just install-cargo-crap
 
@@ -1235,6 +1270,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Runner diagnostics before Client conformance
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: client-conformance
+
       - name: Client conformance
         run: |
           just toolchains-install
@@ -1380,13 +1420,28 @@ jobs:
 
       # Cheapest first, so a workspace that does not build at all is named in seconds rather than
       # after the heavier compilations have run.
+      - name: Runner diagnostics before Capability doctests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: capability-doctests
+
       - name: Capability doctests
         run: |
           just toolchains-install
           just test-capability-docs
 
+      - name: Runner diagnostics before Expiry map Miri
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: expiry-map-miri
+
       - name: Expiry map Miri
         run: just test-expiry-map-miri
+
+      - name: Runner diagnostics before Expiry map mutation tests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: expiry-map-mutation-tests
 
       - name: Expiry map mutation tests
         run: just test-expiry-map-mutants
@@ -1425,8 +1480,18 @@ jobs:
       - name: Native coverage collector
         run: just coverage-model-runner
 
+      - name: Runner diagnostics before Source contracts, compiler diagnostics and paired API doctests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: source-contracts-compiler-diagnostics-and-paired-api-doctests
+
       - name: Source contracts, compiler diagnostics and paired API doctests
         run: just coverage-native-extras test-typed-ratchet
+
+      - name: Runner diagnostics before Compiler cache changes, interruption and runner qualification
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: compiler-cache-changes-interruption-and-runner-qualification
 
       - name: Compiler cache changes, interruption and runner qualification
         run: |
@@ -1439,20 +1504,45 @@ jobs:
       # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
       # without treating noisy shared-runner timings as a performance regression signal. The run is
       # instrumented for source coverage, so its timings are not a measurement either.
+      - name: Runner diagnostics before Benchmark smoke tests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: benchmark-smoke-tests
+
       - name: Benchmark smoke tests
         run: just coverage-native-extras bench-smoke
 
       # The primitive boundary's native conformance collected separately in every execution mode.
+      - name: Runner diagnostics before Primitive boundary conformance
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: primitive-boundary-conformance
+
       - name: Primitive boundary conformance
         run: just coverage-native-extras test-primitives
+
+      - name: Runner diagnostics before Primitive boundary compile and browser checks
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: primitive-boundary-compile-and-browser-checks
 
       - name: Primitive boundary compile and browser checks
         run: just test-primitives-compile
 
       # The walk saturates every core, and its failures are about completion reachability rather
       # than about any one test.
+      - name: Runner diagnostics before Plexus completion walk
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: plexus-completion-walk
+
       - name: NSPL completion walk
         run: just coverage-native-extras nspl-completion-walk
+
+      - name: Runner diagnostics before Plexus connector declaration export
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: plexus-connector-declaration-export
 
       - name: Plexus connector declaration export
         run: just coverage-native-extras validate-connector-matrix
@@ -1604,10 +1694,20 @@ jobs:
 
       # Every registered Shuttle check under its exploration and under the nondeterminism detector,
       # each in its own process, then the proof that a failing schedule persists and replays.
+      - name: Runner diagnostics before Shuttle concurrency checks
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: shuttle-concurrency-checks
+
       - name: Shuttle concurrency checks
         run: |
           just toolchains-install
           just coverage-native-extras test-shuttle
+
+      - name: Runner diagnostics before Shuttle schedule replay
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: shuttle-schedule-replay
 
       - name: Shuttle schedule replay
         run: just test-shuttle-replay-check
@@ -1747,6 +1847,11 @@ jobs:
       # Every registered Loom model of a production owner explored to exhaustion. The proof that
       # each model fails under the ordering weakening it exists to detect runs in the
       # loom-qualification jobs.
+      - name: Runner diagnostics before Loom memory-ordering models
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: loom-memory-ordering-models
+
       - name: Loom memory-ordering models
         run: |
           just toolchains-install
@@ -1898,6 +2003,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Runner diagnostics before Loom ordering qualification
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: loom-ordering-qualification
+
       - name: Loom ordering qualification
         run: |
           just toolchains-install
@@ -2019,10 +2129,20 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Runner diagnostics before Turmoil simulations
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: turmoil-simulations
+
       - name: Turmoil simulations
         run: |
           just toolchains-install
           just coverage-native-extras test-turmoil --output target/turmoil.lcov
+
+      - name: Runner diagnostics before Turmoil failure replay
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: turmoil-failure-replay
 
       - name: Turmoil failure replay
         run: just test-turmoil-replay-check

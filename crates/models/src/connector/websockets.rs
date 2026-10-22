@@ -42,10 +42,10 @@ use super::{
 use crate::{
     AcknowledgementConfirmation, ClientConfigEntry, ClientConfigOwner, ClientDeclaration,
     ClientName, ClientPooling, ClientResourceMount, ConnectorKind, DeclaredDelivery,
-    DeclaredQuiesce, EndpointIngestMode, EndpointName, EndpointType, IngestAcknowledgement,
-    IngestQuiesceMode, IngestSourceCapabilities, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue, PositionClass, SignalingProtocolName, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind,
+    DeclaredQuiesce, EndpointIngestMode, EndpointName, EndpointType, HeaderLayout, HeaderModel,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, PositionClass, SignalingProtocolName, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 #[derive(
@@ -152,7 +152,7 @@ const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for WebsocketsConnectionSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
+        headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
         metadata: SourceMetadataScope::Websockets,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Websockets),
@@ -220,7 +220,9 @@ pub struct WebsocketsEndpointSource {
 
 impl SourceEntity for WebsocketsEndpointSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
+        // The opening HTTP upgrade request's fields, as the server's header map keeps them: names in
+        // lowercase, every value of a repeated field together under its name.
+        headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: true,
         reference: SourceReferenceKind::Endpoint(EndpointType::Websockets),
