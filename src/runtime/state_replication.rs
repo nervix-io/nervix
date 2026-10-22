@@ -712,7 +712,13 @@ impl Runtime {
                 commands
             };
             match commands {
-                Some(commands) => Some(ScheduledNodeTask::checkpoint_via(&commands).await?),
+                Some(commands) => Some(
+                    ScheduledNodeTask::checkpoint_via(
+                        &commands,
+                        ProcessorCheckpointPurpose::OwnershipHandoff,
+                    )
+                    .await?,
+                ),
                 None => None,
             }
         } else {
