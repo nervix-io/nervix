@@ -552,8 +552,17 @@ task that another scenario's synchronous step stalls for longer than that margin
 hold timed on the runner task until the product deadline expires. `tests/common/injected_hold.rs`
 therefore waits for each gate, holds it for its duration and releases it on a task of its own, and
 the step that injects the holds only awaits that task. A stalled runner delays when the step learns
-of a release, never the release itself. The step still watches the controlled operation, and a
-command that ends before its gates were held fails the step with the command's own outcome.
+of a release, never the release itself. When the command is expected to outlast every hold, the
+step still watches it and reports a command that ends early with its own outcome.
+
+The bounded native backup recovery outline instead expects the client's ten-second wait to end
+with typed uncertainty while the admitted backup continues. It uses both a two-second and a
+twelve-second first hold inside the unchanged thirty-second cut budget, on one and three nodes.
+The wait may expire before the second cut is reached. The step observes its twelve-second harness
+bound from dispatch on a runtime worker, waits independently for both controlled cuts, and recovers
+through a fresh client under the original reference. The recovery orchestration also runs off the
+runner, so delayed step polling cannot restart the wait bound or leave the second cut held. The
+archive must retain both quiesced cuts and the measured first hold.
 
 The reorderer sorting fixtures submit their ordering set as one JSON array and unfold it with JAQ
 into one input batch. Each route sorts the rows buffered at its own flush; separate HTTP requests
@@ -2017,12 +2026,12 @@ scenarios in one process, their nodes contended on it and missed startup and req
 that a plain diagnostic build of the same scenarios met.
 [Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
 them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
-owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 96
+owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 98
 lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, the ten endpoint ACK
 examples in their own 15-minute invocation, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
 bounded at 40. `deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
-invocation of 51 capture, restore and checkpoint-transfer runs tagged `@deloxide_stress_restore`,
+invocation of 53 capture, restore and checkpoint-transfer runs tagged `@deloxide_stress_restore`,
 bounded at 70 minutes. Each selection has the inventory's 80-minute budget and its own CI runner.
 
 The split follows from what the disturbance costs. It barely lengthens a scenario, because the
