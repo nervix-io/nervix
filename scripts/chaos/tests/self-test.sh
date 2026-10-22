@@ -28,6 +28,7 @@ fi
 "${script_dir}/image-package-self-test.sh"
 "${script_dir}/startup-status-self-test.sh"
 "${script_dir}/backup-fixture-self-test.sh"
+"${script_dir}/verifier-self-check-self-test.sh"
 
 fail() {
     printf 'self-test failed: %s\n' "$*" >&2

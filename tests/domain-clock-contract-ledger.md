@@ -7,7 +7,7 @@ epic](https://app.clickup.com/t/86bbwcry1). The source audit began in [Domain cl
 that audit are represented by the current-source regressions below. Tasks 02–13 repaired and
 documented their owning product paths; task 14 records the final contract qualification.
 
-The Cucumber scenarios exercise NSPL and runtime behavior through public endpoints and session
+The Cucumber scenarios exercise Plexus and runtime behavior through public endpoints and session
 subscriptions. The clock-contract scenarios and direct arithmetic regressions run in the ordinary
 suite. Explicit tag selections isolate the focused cases; the validation records preserve the
 observed red baselines and subsequent results.
@@ -71,7 +71,7 @@ diagnostic; it cannot reset an anchor or survive behind an invariant claim.
 | F6 | VM contexts, `VALUES`, inference, and subscription expressions can read wall time. | [06](https://app.clickup.com/t/86bbwcrz9) | `Every expression context observes its domain execution time` |
 | F7 | Errors, tokenless WASM, and omitted generated timestamps use wall time. | [06](https://app.clickup.com/t/86bbwcrz9) | `Generated errors WASM timeouts and telemetry timestamps use their assigned clock classes` |
 | F8 | HTTP polling ignores pace; Prometheus polling reuses stale or duplicate due times. | [09](https://app.clickup.com/t/86bbwcrzf) | `Slow external polling coalesces missed cadence with fresh due timestamps` |
-| F9 | Branch activity is sampled before awaiting input. | [10](https://app.clickup.com/t/86bbwcrzh) | `Activity sampled after an awaited record keeps each logical branch alive` |
+| F9 | Branch activity is sampled before awaiting input. | [10](https://app.clickup.com/t/86bbwcrzh) | The production-owner unit `accepted_processor_input_records_branch_activity_at_its_own_domain_time`; public branch retirement and fresh pairings in `Fresh interleaved records correlate after all initial branch state retires` |
 | F10 | Timestamp range and clock arithmetic invariants are unenforced. | [02](https://app.clickup.com/t/86bbwcryd) | `Out-of-range paced starts and projections return typed timestamp diagnostics` |
 
 The cross-cutting physical deadline matrix belongs to [11](https://app.clickup.com/t/86bbwcrzy),
@@ -90,7 +90,7 @@ belongs to [14](https://app.clickup.com/t/86bbwct0e).
 | Missed cadence coalescing and fresh due time | `Slow external polling coalesces missed cadence with fresh due timestamps`, task 09 | One- and three-node random schedules |
 | Logical collection/flush and physical minima | `Paced branch collection and flush follow logical time while Immediate and source idle remain physical`, task 07 | Two interleaved branches on one and three nodes, preserving fields |
 | Logical emitter cadence and physical retry/ACK | `Emitter cadence follows logical time while retry and ACK deadlines remain physical`, task 08 | One- and three-node random schedules with controlled sink failure |
-| Fresh branch activity and logical retention | `Activity sampled after an awaited record keeps each logical branch alive`, task 10 | Two interleaved branches on one and three nodes, preserving fields |
+| Fresh branch activity and logical retention | `Fresh interleaved records correlate after all initial branch state retires`, task 10; `Paced branch expiration follows domain logical time`; the production-owner unit `accepted_processor_input_records_branch_activity_at_its_own_domain_time` | Two interleaved branches on one and three nodes preserve fields and retire initial state before fresh correlations; the expiration outline checks logical retention, and the unit checks that accepted input refreshes domain-clock activity |
 | One snapshot across expression contexts | `Every expression context observes its domain execution time`, task 06 | One- and three-node random schedules through ingestion, a junction, and a subscription, extended by focused generator, inferencer, SQS, database, Iceberg, Sentry, and OTEL scenarios |
 | Failure, guest, generated metadata, and telemetry clock classes | `Generated errors WASM timeouts and telemetry timestamps use their assigned clock classes`, task 06 | One- and three-node random schedules with historical domain time, error routing, WASM lifecycle callbacks, tokenless output, and external telemetry fixtures |
 | Client observation of the committed mapping, generations, and admission window | `A session attaches to a domain clock once and follows every generation` and `A client paces simulated events by the domain clock it is attached to`, [Clock Attach 01](https://app.clickup.com/t/86bc8azgz) | One- and three-node random schedules; the three-node attachment is served by a follower |
@@ -219,7 +219,12 @@ adds `domain_emitter_cadence.feature` for the remainder of F5 at the connector b
 emitter and Iceberg cadence, the physical `FLUSH IMMEDIATE` minimum across sink families, the
 physical retry and acknowledgement keepalive, and force-flush drain. Task 09
 adds the `domain_cadence` cases for recurring HTTP, Prometheus, and generator work. Task 10 adds
-`branch_activity_sampling.feature` for F9's accepted-input activity and logical retention.
+`branch_activity_sampling.feature` for F9's public branch re-creation and exact fresh pairings.
+The production-owner unit `accepted_processor_input_records_branch_activity_at_its_own_domain_time`
+asserts that accepted input refreshes domain-clock activity; `Paced branch expiration follows domain logical
+time` checks logical retention. The fresh-correlation outline observes initial retirement before
+posting new inputs and final retirement after matching, without requiring a pending input to
+survive beyond its TTL or treating a relay's disappearance as another owner's scan-phase witness.
 Task 11 adds `physical_infrastructure_deadlines.feature` for the cross-cutting physical boundary:
 poll cancellation, request timeout versus logical cadence, materialized `REQUIRED WAIT`, delayed
 ACK keepalive, and silent-peer shutdown before and after a clock-generation change.

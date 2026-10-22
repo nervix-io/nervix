@@ -12,20 +12,30 @@ fail() {
 }
 
 if [[ "${selection}" != observations ]]; then
-    preparation_seconds="$(sed -n 's/^run_bounded \([0-9][0-9]*\) .*tests\/self-test\.sh.*$/\1/p' "${chaos_dir}/run-baseline.sh")"
+    # shellcheck source=../verifier-self-check.sh
+    source "${chaos_dir}/verifier-self-check.sh"
+    preparation_seconds="${chaos_verifier_self_check_seconds}"
     [[ "${preparation_seconds}" =~ ^[1-9][0-9]*$ ]] || fail 'the full verifier preparation bound is missing'
+    # A suite executes the full verifier self-check once, before its first run, within the
+    # preparation every shard's step funds, so no entry's own budget pays for it.
+    for suite in $(jq -r '.suites | keys[]' "${chaos_dir}/suites.json"); do
+        "${chaos_dir}/suite.sh" shards "${suite}" | jq -e --argjson preparation "${preparation_seconds}" '
+            length > 0 and all(.[]; (.preparation_minutes | type) == "number"
+                                    and .preparation_minutes * 60 >= $preparation
+                                    and .step_minutes >= .execution_minutes + .preparation_minutes)
+        ' >/dev/null || fail "the ${suite} shards do not fund the full verifier preparation beside their runs"
+    done
     # The baseline execution allowance is three minutes for one node and four for three nodes.
-    # Preparation must fit beside that allowance, rather than consume it before traffic starts.
-    jq -e --argjson preparation "${preparation_seconds}" '
+    jq -e '
         [.suites[].entries[] | select(.run[0] == "baseline")]
         | length > 0 and all(.[];
             (.run | index("--nodes")) as $node_option
             | .run[$node_option + 1] as $nodes
             | (if $nodes == "1" then 180 else 240 end) as $execution
-            | .budget_minutes * 60 >= $preparation + $execution)
+            | .budget_minutes * 60 >= $execution)
     ' "${chaos_dir}/suites.json" >/dev/null \
-        || fail 'the baseline suite budget cannot fund full verifier preparation and baseline execution'
-    printf 'baseline preparation budget controls passed\n'
+        || fail 'a baseline suite budget cannot fund baseline execution'
+    printf 'suite preparation and baseline execution budget controls passed\n'
 fi
 [[ "${selection}" != budgets ]] || exit 0
 
