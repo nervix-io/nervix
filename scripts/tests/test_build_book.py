@@ -13,6 +13,7 @@ from scripts.build_book import (
     cli_subcommands,
     render_cli_reference,
     render_jaq_reference,
+    render_server_reference,
     remove_generated_edit_links,
     resolve_package_version,
     rewrite_external_assets,
@@ -236,6 +237,7 @@ class BookStagingTests(unittest.TestCase):
             with (
                 patch("scripts.build_book.generate_upstream_references") as generate,
                 patch("scripts.build_book.generate_cli_reference"),
+                patch("scripts.build_book.generate_server_reference"),
                 patch("scripts.build_book.SCREENSHOTS_DIR", captured),
             ):
                 stage_book(staged)
@@ -252,7 +254,13 @@ class BookStagingTests(unittest.TestCase):
                 '<a href="https://github.com/nervix-io/nervix/edit/main/docs/src/x.md"'
                 ' title="Suggest an edit" rel="edit">\n  <span>icon</span>\n</a>\n'
             )
-            for name in ("roto-language-reference", "jaq-reference", "nervix-cli-reference", "udfs"):
+            for name in (
+                "roto-language-reference",
+                "jaq-reference",
+                "nervix-cli-reference",
+                "nervix-server-reference",
+                "udfs",
+            ):
                 (book / f"{name}.html").write_text(
                     f"<nav>{edit_link}</nav><p>{name}</p>", encoding="utf-8"
                 )
@@ -262,6 +270,9 @@ class BookStagingTests(unittest.TestCase):
             self.assertNotIn("Suggest an edit", (book / "roto-language-reference.html").read_text())
             self.assertNotIn("Suggest an edit", (book / "jaq-reference.html").read_text())
             self.assertNotIn("Suggest an edit", (book / "nervix-cli-reference.html").read_text())
+            self.assertNotIn(
+                "Suggest an edit", (book / "nervix-server-reference.html").read_text()
+            )
             # authored chapters keep theirs
             self.assertIn("Suggest an edit", (book / "udfs.html").read_text())
 
@@ -280,6 +291,7 @@ class BookStagingTests(unittest.TestCase):
             with (
                 patch("scripts.build_book.generate_upstream_references"),
                 patch("scripts.build_book.generate_cli_reference"),
+                patch("scripts.build_book.generate_server_reference"),
                 patch("scripts.build_book.SCREENSHOTS_DIR", captured),
             ):
                 stage_book(staged)
@@ -293,6 +305,7 @@ class BookStagingTests(unittest.TestCase):
             with (
                 patch("scripts.build_book.generate_upstream_references"),
                 patch("scripts.build_book.generate_cli_reference"),
+                patch("scripts.build_book.generate_server_reference"),
                 patch("scripts.build_book.SCREENSHOTS_DIR", Path(tmp) / "absent"),
                 self.assertRaises(SystemExit),
             ):
@@ -346,6 +359,68 @@ class CliReferenceTests(unittest.TestCase):
         self.assertIn("](client-tools-cli.md)", reference)
         # `help` documents itself in the root section rather than getting its own.
         self.assertNotIn("## nervix-cli help", reference)
+
+
+SAMPLE_SERVER_HELP = """\
+NSPL gRPC server
+
+Usage: nervix-server [OPTIONS] --node-id <NODE_ID> [COMMAND]
+
+Commands:
+  completions  Generate shell completion scripts
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+
+Shutdown:
+      --drain-timeout <DRAIN_TIMEOUT>  Maximum time to wait for drain operations before
+                                       continuing [default: 30s]
+"""
+
+
+class ServerReferenceTests(unittest.TestCase):
+    def test_reference_renders_the_server_help_and_a_section_per_command(self) -> None:
+        captured = []
+
+        def fake_help(arguments: list[str]) -> str:
+            captured.append(arguments)
+            return SAMPLE_SERVER_HELP if not arguments else f"Usage: nervix-server {arguments[0]}"
+
+        with patch("scripts.build_book.capture_server_help", side_effect=fake_help):
+            reference = render_server_reference()
+
+        self.assertEqual(captured, [[], ["completions"]])
+        self.assertIn("# nervix-server Reference", reference)
+        self.assertIn("## nervix-server\n\n```text\nNSPL gRPC server", reference)
+        self.assertIn("--drain-timeout <DRAIN_TIMEOUT>", reference)
+        self.assertIn("## nervix-server completions", reference)
+        self.assertIn("](node-settings.md)", reference)
+        self.assertIn("](quickstart-running.md)", reference)
+        self.assertNotIn("## nervix-server help", reference)
+
+    def test_the_server_help_is_captured_from_the_server_binary(self) -> None:
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="help\n", stderr="")
+        with patch("scripts.build_book.subprocess.run", return_value=completed) as run:
+            from scripts.build_book import capture_server_help
+
+            self.assertEqual(capture_server_help([]), "help")
+
+        invocation = run.call_args.args[0]
+        self.assertEqual(
+            invocation,
+            [
+                "cargo",
+                "run",
+                "--quiet",
+                "--package",
+                "nervix-server",
+                "--bin",
+                "nervix-server",
+                "--",
+                "--help",
+            ],
+        )
 
 
 class PublishedImageTests(unittest.TestCase):
