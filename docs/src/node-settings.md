@@ -148,6 +148,23 @@ without disclosing secrets. Connector-specific values remain in their owning man
 
 ## Verification Boundary
 
+The executor's connector-storage capacity is `Setting<ConnectorStorageWorkers>` with class
+`NodeCapabilities` inside `WorkerCounts`. Its one default is two workers. The semantic value is
+nonzero, and both an explicit local claim and the default are checked against the primitive's
+maximum permit representation before pool construction. Startup resolves it through the local
+executor configuration, and the executor snapshot and worker metrics expose the running value.
+The existing execution-settings adoption owns detection and capability-record publication.
+Filesystem and consensus retain independent admission while a connector call holds its worker.
+
+A Kafka consumer's single control-operation turn is an ordering invariant rather than an
+operator capacity. Its fixed constant states that a cancelled native mutation cannot be
+overtaken by the next operation. The source control-call budget is the external client's
+`socket.timeout.ms`; [Connector Contract](connector-contract.md) owns that per-system value.
+
+`Setting<D>` copies or compares a resolved value when its semantic value supports those
+operations, without imposing value traits on the definition marker. Generic debug formatting
+identifies the declaration; the owning settings renderer controls value exposure and redaction.
+
 The declaration API has value, default and relationship tests plus paired Rustdoc examples.
 The source count has tracked and new-source gate fixtures, pinned exclusions, inactive and
 macro syntax, compiler contract fixtures and the registered bounded `typed-hidden-tunables`
