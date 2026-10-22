@@ -8,7 +8,7 @@
 //!   the progress it publishes to the source, the count of acknowledgements written to the
 //!   connection and whether it polls; and the report of how the connection ended.
 //! - **Depends on.** The source's typed errors and positions, `rumqttc`'s event loop, requests
-//!   and events, and the boundary's task, channel and watch primitives.
+//!   and events, and the boundary's task, channel, watch and timer primitives.
 //! - **Must not know.** The host, its batches or acknowledgement trees, or why a publish is
 //!   acknowledged.
 //!
