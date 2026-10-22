@@ -47,6 +47,17 @@ def worker_line:
 
 def title: "Chaos \(.suite)\(if .shard == null then "" else " shard \(.shard)" end): \(.status)";
 
+# The one verifier self-check a suite executes before its first run, which every run adopts.
+def verifier_line:
+  if .verifier_self_check == null then empty
+  else .verifier_self_check
+       | "Verifier self-check: \(.status)"
+         + (if .duration_seconds != null then " in \(.duration_seconds | duration)" else "" end)
+         + (if .status == "failed" then ", exit \(.exit_code)" else "" end)
+         + (if .status == "passed" then ", once for every run of this suite" else "" end)
+         + (if .output then "; output " + (.output | code) else "" end)
+  end;
+
 def section($heading):
   . as $suite
   | "\($heading) \(title)",
@@ -62,6 +73,7 @@ def section($heading):
      + " · " + (.entries | length | counted("entry"; "entries"))
      + (if .duration_seconds != null then " in \(.duration_seconds | duration)" else "" end)),
     (worker_line | "", .),
+    (verifier_line | "", .),
     (if .error then "", "**\(.error.category | ascii_upcase) failure:** \(.error.message)" else empty end),
     "",
     "| Entry | Verdict | Exit | Category | Final phase | Duration | Expected / observed / duplicates / missing | Seed |",
@@ -108,6 +120,12 @@ def section($heading):
              then "The suite controller still executed at cleanup and finished after its TERM."
              elif .cleanup.controller == "killed"
              then "**The suite controller was killed:** it still executed at cleanup and did not finish within the wait."
+             else empty end),
+            (if .cleanup.verifier_self_check.terminated
+             then "Cleanup passed TERM to the verifier self-check, which outlived its controller."
+             else empty end),
+            (if (.cleanup.verifier_self_check.killed_processes // 0) > 0
+             then "Cleanup killed \(.cleanup.verifier_self_check.killed_processes | counted("process"; "processes")) left by the verifier self-check."
              else empty end),
             (.cleanup.runs[] | select(.terminated)
              | "Cleanup passed TERM to " + (.run_id | code) + ", which outlived its controller."),
