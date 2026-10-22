@@ -92,6 +92,16 @@ owns the allowed paths, immutable event snapshot and retained CI selection recor
 The suite is the `scenarios` test target, `tests/scenarios.rs`, running the features under
 `tests/features`. Its lifecycle owners live in `tests/common`.
 
+The relay-channel turnover scenario posts through an acknowledged HTTP endpoint on a node other
+than the relay owner. Its generated-payload step reuses one HTTP client and requires each request
+to return HTTP 200 with the complete `completed` / `none` outcome before posting the next tenant.
+The client bounds each response, including its body, at 60 seconds; the fixture declares a
+30-second graph acknowledgement timeout and a window of one. This bounds outstanding graph work
+while the two waves of 600 tenants and the warm-up exercise their 1,201 channel incarnations. The
+scenario still observes all 601 first-generation branch expirations and requires every generated
+payload exactly once at the independent broker observer. A failed request fails the step without
+resubmitting an outcome that might already have produced output.
+
 | Element | Where it runs | Owner |
 | --- | --- | --- |
 | Scenario steps and hooks | One runner task: Cucumber polls every running scenario, and the suite watchdog around them, from the task the binary's main thread blocks on | `tests/scenarios.rs` |
