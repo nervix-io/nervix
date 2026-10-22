@@ -54,7 +54,7 @@ const CLICKHOUSE_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SinkEntity for ClickHouseTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::Client(ConnectorKind::ClickHouse),
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },

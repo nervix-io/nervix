@@ -861,6 +861,11 @@ keyspaces' disk allocation; until the first sweep completes they read zero.
 | Tracked locks | The restore storage owner tests and the `@restore_installation` and `@backup_wait` scenarios in the Deloxide selections, with their `stress.` twins in the stress selections; [Data-Plane Concurrency](./data-plane-concurrency.md) records what the detector does and does not see. |
 | Real processes | The external chaos soak entries for backup under load, backup cycles, backup under owner crash, leader crash and partition, a rolling restart during a backup stream, and restore into a fresh cluster; and the [restore faults](./cluster-chaos.md#restore-faults) held in staging through a SIGKILL of the coordinating leader, an isolation of that leader from its peers and the client, a SIGKILL of a state owner, and a SIGKILL of a state owner while a restore whose coordinator and client were lost awaits its failure. Each restore completes under its execution reference or fails with `START` refused and a restore under another name completes; a completed restore equals its archive, a domain resumed after its coordinator's isolation consumes exactly from its archived offset, and staging returns to zero on every node through completed sweeps. The [staging volume](./cluster-chaos.md#restore-staging-volume) entry measures three concurrent restores of guest saves above the bulk budget. [External Cluster Chaos](./cluster-chaos.md) defines them. |
 
+The bounded native recovery outline in `backup_wait.feature` holds the first cut for either two
+or twelve seconds with a ten-second client wait, on one and three nodes. An exhausted wait can
+precede the second cut without cancelling the admitted backup. A fresh client recovers its original
+execution and downloads an archive retaining both quiesced cuts and the first cut's measured hold.
+
 ### Representation Checks
 
 The registered [archive properties](./property-testing-and-fuzzing.md) compare complete current

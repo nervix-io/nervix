@@ -94,7 +94,7 @@ const ZEROMQ_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for ZeroMqPullSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
+        headers: None,
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::ZeroMq),
@@ -167,7 +167,7 @@ pub struct ZeroMqPushSink {
 
 impl SinkEntity for ZeroMqPushSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::Client(ConnectorKind::ZeroMq),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
