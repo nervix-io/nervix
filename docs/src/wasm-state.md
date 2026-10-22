@@ -307,8 +307,9 @@ deadline inside the checkpoint's ninety-second completion budget.
 The state store's durability barrier issues a ticket to every writer after its write is applied. At
 most one writer runs a synchronization at a time; it covers every ticket issued before it started,
 and the writers still waiting elect the next runner when it did not cover them. Branches that
-checkpoint at the same time therefore share one synchronization instead of queuing one each. No lock
-is held across the wait; see [Bounded Synchronization Outside The Open
+checkpoint before a synchronization starts therefore share it, and those that checkpoint while it
+runs share the next one, instead of queuing one each. No lock is held across the wait; see
+[Bounded Synchronization Outside The Open
 Path](./data-plane-concurrency.md#bounded-synchronization-outside-the-open-path).
 
 A failed synchronization is not retried. The operating system may have dropped the writes it failed
