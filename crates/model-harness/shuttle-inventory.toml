@@ -73,6 +73,10 @@ name = "nervix-connector-kafka"
 
 [[package]]
 checks = [
+  "source::driver::shuttle_tests::shuttle_an_acknowledgement_never_waits_on_a_driver_that_holds_a_publish_for_room",
+  "source::driver::shuttle_tests::shuttle_an_acknowledgement_returns_once_the_loop_wrote_every_acknowledgement_it_requested",
+  "source::driver::shuttle_tests::shuttle_an_acknowledgement_waits_on_a_driver_whose_held_publish_the_source_made_room_for",
+  "source::driver::shuttle_tests::shuttle_an_acknowledgement_whose_connection_ends_fails_with_the_loss",
   "source::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_publish_the_broker_delivered",
   "source::shuttle_tests::shuttle_a_read_whose_batch_timeout_races_the_cancellation_hands_over_every_publish",
 ]

@@ -203,7 +203,7 @@ class ConnectorMatrixTests(unittest.TestCase):
             self.assertIn("| `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the "
                           "order it was written; a name matches only itself |",
                           output["docs/src/emitters.md"])
-            policy["confirmation"]["queued"] = "Not declared by this export."
+            policy["confirmation"]["undeclared"] = "Not declared by this export."
             with self.assertRaisesRegex(ValueError, "confirmation"):
                 matrix.documents(root, surface, reasons(), policy)
 

@@ -6,7 +6,7 @@
 //!   exactly once and in order, from the read or from the connection's next read, and a batch
 //!   that is not full ends only because the host cancelled it, unless its batch timeout passed.
 //! - **Depends on.** The source's read and its publish seam, an unbounded channel as the
-//!   client's event loop, the model harness's Shuttle runner, and the task labels and timeout
+//!   connection's read-ahead, the model harness's Shuttle runner, and the task labels and timeout
 //!   triggers of Shuttle's Tokio.
 //! - **Must not know.** The MQTT client, the broker's protocol, or the host loop that cancels a
 //!   read.
@@ -43,10 +43,9 @@ const BATCH_MESSAGES: usize = 3;
 /// clock expires it.
 const BATCH_TIMEOUT: Duration = Duration::from_secs(3_600);
 
-/// A connection a broker task delivers publishes into. The client's event loop queues every
-/// publish it reads before its poll can be dropped, so a read that stops waiting for the next
-/// publish loses nothing the connection's next read would have returned; a channel receive does
-/// the same.
+/// A connection a broker task delivers publishes into through a channel, as the connection's
+/// driver hands them to the source through its read-ahead: a read that stops waiting for the next
+/// publish loses nothing the connection's next read would have returned.
 struct DeliveredPublishes {
     publishes: mpsc::UnboundedReceiver<Publish>,
 }

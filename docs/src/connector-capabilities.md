@@ -124,9 +124,9 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Metadata | Not offered: The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace. |  |
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
-| Acknowledgement confirmation | queued |  |
-| Buffers | each incoming packet, whose bound every CONNECT advertises as its Maximum Packet Size: at most 10240 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>SUBSCRIBE and PUBACK requests for the connection: driver default, 1024 requests; when full, holds back what fills it |  |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |  |
+| Acknowledgement confirmation | written |  |
+| Buffers | each incoming packet, whose bound every CONNECT advertises as its Maximum Packet Size: at most 10240 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>publishes the connection reads ahead of the host: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535, and 64 more publishes, or 64 under NO ACK; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, at least 1024; when full, holds back what fills it |  |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>an acknowledgement's PUBACKs written to the connection: unbounded<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |  |
 | Driver limits | A packet above the advertised Maximum Packet Size that a broker sends anyway ends the connection with DISCONNECT Packet too large. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 

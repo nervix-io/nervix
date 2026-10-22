@@ -714,11 +714,10 @@ other acknowledgement root, within the drain timeout. What a source's confirmati
 acknowledgement confirmation its entity declares; see
 [Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements). An SQS deletion,
 a Kafka offset commit and a Pulsar acknowledgement in an `ACK` mode are answered, and a RabbitMQ
-acknowledgement is written to the connection, before the drain moves on, while an MQTT `PUBACK` is
-only queued by its client, so the drain does not wait for its broker to answer it. A Pulsar
-acknowledgement the broker does not answer within the client's 30-second operation timeout fails,
-and the host rejects the positions, so the drain timeout bounds it as well. A Kafka consumer group
-in `MODE NO ACK` acknowledges nothing: when intake stops, its source commits the positions its
+acknowledgement and an MQTT `PUBACK` are written to the connection, before the drain moves on. A
+Pulsar acknowledgement the broker does not answer within the client's 30-second operation timeout
+fails, and the host rejects the positions, so the drain timeout bounds it as well. A Kafka consumer
+group in `MODE NO ACK` acknowledges nothing: when intake stops, its source commits the positions its
 driver delivered since the driver's last commit, and waits for the answer before the consumer
 leaves the group, and a Pulsar subscription in `MODE NO ACK` only queues its acknowledgements.
 

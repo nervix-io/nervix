@@ -730,7 +730,7 @@ when its transport stays connected with bounded memory while nothing reads it:
 | NATS | Waits for a place | The client's connection task keeps reading and answering the server, and holds at most the subscription's 65,536 messages before it drops the newest as a slow consumer. |
 | ZeroMQ | Waits for a place | `PULL` messages stay in the kernel buffers, and then the pushing peers' sends wait. |
 | Syslog | Waits for a place | The kernel drops UDP datagrams beyond the socket's receive buffer; TCP and TLS connections fill the listener's 64-frame queue and then push back on their senders. |
-| MQTT | Refused and counted | The event loop, which sends the keep-alive, runs only while the loop reads, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
+| MQTT | Refused and counted | The connection's driver task keeps the event loop, and with it the keep-alive, running while the loop is held, but under `NO ACK` reads only 64 publishes ahead of it. Once those fill, the driver stops reading, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
 | Redis Pub/Sub | Refused and counted | The client's connection task reads every message into an unbounded queue. |
 | WebSocket client | Refused and counted | Server pings go unanswered while frames are unread, and a server that pings closes the connection. |
 | `KAFKA TOPIC` in `MODE NO ACK` | Refused and counted | A consumer-group member that does not poll for `max.poll.interval.ms` leaves its group, and a domain-offset instance would keep its partitions through an ownership handoff. |
@@ -841,16 +841,59 @@ in one of these ways:
 | Entities | A cancelled read |
 | --- | --- |
 | `KAFKA TOPIC`, `PULSAR TOPIC` | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
-| `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the client had already read when the read stopped waiting stays with the client, which hands it to the next read first. |
+| `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the connection had already read when the read stopped waiting stays in the connection's read-ahead, which hands it to the next read first. |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `RABBITMQ QUEUE`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
 | `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
 
-An MQTT read stops waiting by dropping its client's poll in flight, as its batch timeout ends a
-gathering. The client queues every packet it reads before it writes a reply, and its next poll
-returns a queued publish first, so a dropped poll loses no publish it read. It can cut short only an
-acknowledgement still waiting for room in a send buffer the broker has stopped draining; a
-persistent session then delivers that publish again when it resumes, as it does any publish whose
-acknowledgement never reached the broker.
+An MQTT read takes its publishes from its connection's read-ahead, which the connection's driver
+task fills while it polls the client's event loop; see
+[MQTT source connections](#mqtt-source-connections). A read that stops waiting, because the host
+cancelled it or its batch timeout passed, drops only its wait on the read-ahead, so it loses no
+publish, and the driver's poll never stops for it.
+
+### MQTT source connections
+
+Once an MQTT source instance has established its subscription, a task the connector owns drives
+its connection until the connection ends or the source drops it. The task is the only owner of the
+client's event loop and polls it without pause, so the client writes the acknowledgements the
+source requests and the keep-alive pings its broker expects whatever the host does meanwhile,
+including waiting on a batch's acknowledgement trees for as long as a downstream emitter holds
+them. The task hands every publish the event loop reads to the source through a bounded
+read-ahead, in the order it read them.
+
+In an `ACK` mode every `CONNECT` advertises the mode's acknowledgement window and 64 more as its
+Receive Maximum: 65 under `ACK SEQUENTIAL`, and `ACK PARALLEL MAX` plus 64 up to MQTT's largest
+Receive Maximum, 65,535. The broker then sends no further publish at QoS 1 while that many wait on
+their acknowledgements, so a batch holds at most that many, and an `ACK PARALLEL MAX` above 65,535
+gathers at most 65,535 of them before its `BATCH TIMEOUT` ends it. A broker that discards a
+publish above the advertised Maximum Packet Size may keep counting it against the Receive Maximum,
+waiting for an acknowledgement the source never sends, as EMQX does; the 64 let the window fill
+around that many such publishes instead of one of them holding back every later publish. The
+broker holds back no publish at QoS 0, which a subscription at QoS 1 receives from a publisher
+that sends at QoS 0, and under `NO ACK`, where the client acknowledges every publish on receipt,
+it holds back none. The read-ahead holds as many publishes as the Receive Maximum admits and 64
+more, or 64 under `NO ACK`. Once it is full, the
+task holds the next publish and polls nothing until the source reads one, so the connection's flow
+control holds the broker back, and the client sends no keep-alive until the host reads again.
+
+Acknowledging a batch requests a `PUBACK` for each of its publishes at QoS 1 and returns once the
+event loop has written all of them to the connection and flushed them. The broker answers none, so
+that is everything the source can confirm. A batch never asks for more acknowledgements than the
+client's request queue holds, so no request waits for room. The acknowledgement never waits on a
+task that stopped polling. While the task holds a publish for room in a full read-ahead, only the
+host's next read, which follows the acknowledgement, could let it write, so the acknowledgement
+fails with `MqttSourceError::ReadAheadFull`. When the connection ended first, it fails with the
+lost connection beneath `MqttSourceError::Acknowledge`. Either failure drops the connection and the
+acknowledgements it never wrote: the host shows the failure as the ingestor's transient status and
+rejects the positions, a rejection fails once its publishes' connection is gone, and the broker
+delivers again every publish the lost connection did not acknowledge once the source resumes; see
+[Confirmed acknowledgements](#confirmed-acknowledgements).
+
+A failed poll ends the connection. The task has handed over every publish it read, so the source
+reads the read-ahead empty, and its next read then reports the lost connection: beneath
+`MqttSourceError::Receive`, or as `MqttSourceError::PacketTooLarge` for a packet above the
+advertised Maximum Packet Size. Suspension, close and every failure drop the connection, which
+aborts its task and closes the broker connection.
 
 ### MQTT session retirement
 
@@ -943,8 +986,7 @@ it did not get:
 | --- | --- | --- |
 | `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `SQS QUEUE` | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
 | `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | The source acknowledges nothing on its transport. |
-| `queued` | `MQTT TOPIC` | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. An MQTT `PUBACK` is written when the client's event loop is next polled. |
-| `written` | `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
+| `written` | `MQTT TOPIC`, `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT does not answer a `PUBACK`, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` the batch asks for to the connection. |
 <!-- connector-matrix:confirmation:end -->
 
 A Kafka consumer group in `MODE NO ACK` leaves its commits to the driver, which commits the
