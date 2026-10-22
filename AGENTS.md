@@ -286,6 +286,11 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   missing value, state variant, required identity, conversion failure, or boundary representation
   is modeled or validated must keep that chapter current in the same change. Interconnect,
   domain-clock, and shutdown details remain in their own authoritative chapters.
+- [Node Settings](docs/src/node-settings.md) is the authoritative architecture reference for
+  prerequisites, cluster parameters and node capabilities. Changes to setting declarations,
+  defaults, derivations, fixed-value contracts, validation, carriers, change procedures,
+  capability sizing or settings enforcement keep that chapter current in the same change.
+  Interconnect, consensus, connector and lifecycle chapters retain their detailed contracts.
 - [Execution Plans](docs/src/execution-plans.md) is the authoritative architecture reference for
   converting a committed schedule into one typed execution revision and installing it as running
   or passive runtime state. Any change to revision construction, typed node, resource, source,
@@ -708,6 +713,41 @@ build and the existing tests, and nothing in it changes behavior.
 - Session subscriptions retain their existing creation, deletion, delivery, sampling, and
   backpressure semantics. They are read-only filtered views and do not support construction,
   inheritance, values, or side effects.
+
+## Node Settings
+
+- A setting exists as a field of a class-typed group. Its `SettingDefinition` declares exactly
+  one sealed class (`Prerequisites`, `ClusterParameters` or `NodeCapabilities`), its semantic
+  value, name, single default, optional derivation and validation. Groups carry `Setting<D>`
+  fields; explicit values and defaults cross the same typed validation boundary.
+- A prerequisite is what a node must bring to reach the live cluster; it travels through gossip
+  and the handshake and is checked at join. [Node Settings](docs/src/node-settings.md) owns the
+  closed list and timing bounds. Nothing needed to reach the cluster depends on what it can
+  learn only after reaching it.
+- A cluster parameter is what the cluster accepts or promises. It has one Raft-committed value,
+  seeded only at first bootstrap and changed by an administrative Plexus statement. A value
+  the registry validates against is never an independent node flag.
+- A node capability is what one node can carry. It is detected or overridden locally and
+  announced through Raft; peers honour its bounds and placement uses its committed record.
+  It changes no cluster acceptance rule or guarantee.
+- Derived values are named methods on their owner, never flags. Defaults are written once in
+  the owning definition. Dependent defaults remain `Option` at the edge until resolved against
+  typed context. Validate operator-supplied relationships before I/O and transitions at commit.
+- A fixed constant declares `nervix::constant(fixed, reason = "...")`, gated with
+  `cfg_attr(nervix_lint, ...)`; the reason names the wire format, RFC, persisted layout, ABI or
+  invariant that fixes it. A convenient literal is not a fixed-value contract.
+- Values depending on the external system are clauses or declared client keys in that
+  connector's Plexus surface, owned by its connector epic; node settings own host policy.
+- Changes remain correct during a rolling restart in any order, take full effect when the
+  last node adopts them, and support the same rollback in reverse. Only prerequisites reject
+  incompatible peers. Mixed operational values within one current shape obey the alpha
+  one-shape rule; they introduce no alternate data representation.
+- Flags use `--<area>-<name>` and `NERVIX_<AREA>_<NAME>`. Resolved settings are observable with
+  secrets redacted, including per-node capabilities and committed-versus-running drift.
+- The temporary `hidden_tunables` source count only decreases while area owners adopt the
+  declarations. It counts governed numeric constants and literal policy calls outside class
+  defaults and reviewed fixed contracts. Its compiler-rule replacement removes the detector
+  and numeric baseline entry together.
 
 ## Runtime and Infrastructure Invariants
 
@@ -1265,7 +1305,8 @@ build and the existing tests, and nothing in it changes behavior.
   complexity 30, which reads no coverage.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual
   Rust cast expressions, struct fields whose presence depends on `cfg(feature = "testing")`, and
-  functions whose cyclomatic complexity exceeds 30.
+  functions whose cyclomatic complexity exceeds 30, and `hidden_tunables`, numeric policy outside
+  class-typed settings and fixed-value contracts as specified in Node Settings.
   The stable source parser sees inactive branches and named or tuple fields; raw identifiers,
   import aliases, qualified paths and conditional documentation attributes are not those facts.
   Complexity is measured by the cargo-crap version `scripts/cargo_crap.py` pins, which
@@ -1295,7 +1336,7 @@ build and the existing tests, and nothing in it changes behavior.
   expectation widened to cover another operation fail. Generated reports are outputs under target,
   never enforcement inputs. Do not infer policy from filenames, sharing traits or method names.
 - [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md) owns the complete
-  fifteen-family contract matrix, source/compiler scope, qualification and review limits. A new
+  sixteen-family contract matrix, source/compiler scope, qualification and review limits. A new
   or changed semantic rule ships with allowed/rejected compiler fixtures distinguished by the
   resolved fact, false-positive and false-negative controls, precise diagnostic/span assertions,
   and invalid, unfulfilled and widened-expectation checks. Source rules also qualify inactive

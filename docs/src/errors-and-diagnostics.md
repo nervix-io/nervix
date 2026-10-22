@@ -1,5 +1,11 @@
 # Errors And Diagnostics
 
+Setting construction preserves the definition owner's typed report. `Setting<D>::new` and
+`resolve` run the same validation for explicit and default values against typed context; an
+invalid default is a failure, and never a replacement value. The vocabulary formats no cause
+into a string. [Node Settings](node-settings.md) owns classes, derivations and relationship
+checks; [Typed States](typed-states.md) owns the construction boundary.
+
 The [architecture rule matrix](architecture-enforcement.md) records the compiler contracts for
 failure signatures, discarded outcomes, canonical panic operations and Option/Result control
 flow. Expanding an error projection into an explicit Result branch preserves its complete report,
