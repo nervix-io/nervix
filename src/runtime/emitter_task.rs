@@ -31,7 +31,7 @@ use nervix_connector::{
     SinkTransientErrorStatus, physical_time::actual_utc_now,
 };
 
-use super::*;
+use super::{emitter_publishing::EmitterStopDrainOutcome, *};
 
 pub(in crate::runtime) struct EmitterTask;
 
@@ -110,57 +110,6 @@ struct ResolvedEmitterInput {
 }
 
 pub(in crate::runtime) type EmitterRuntimeResult<T> = Result<T, Report<EmitterRuntimeError>>;
-
-enum StopFinishOutcome {
-    Finished(SinkFinish),
-    Failed(Report<SinkFinishError>),
-    TimedOut,
-}
-
-async fn finish_sink_for_stop(sink: &mut EmitterSinkState, deadline: Instant) -> StopFinishOutcome {
-    // The task supervisor already waits through this grace for the stop answer. Reserve half
-    // for a sink that used its own deadline to report, and half for the answer to reach the
-    // supervisor. The sink still receives only the original deadline.
-    let finish_bound = deadline + PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE / 2;
-    match nervix_primitives::time::timeout_at(finish_bound, sink.finish_transport(deadline)).await {
-        Ok(Ok(finished)) if Instant::now() <= deadline => StopFinishOutcome::Finished(finished),
-        Ok(Ok(_)) => StopFinishOutcome::TimedOut,
-        Ok(Err(error)) => StopFinishOutcome::Failed(error),
-        Err(_) => StopFinishOutcome::TimedOut,
-    }
-}
-
-/// Drains the buffer by the stop deadline, then receives the sink's own deadline outcome.
-/// The outer error means either phase did not answer within its host bound.
-async fn drain_sink_for_stop(
-    sink: &mut EmitterSinkState,
-    label: &str,
-    context: &EmitterSinkContext,
-    control: &mut EmitterPublishControl<'_>,
-    buffer: &mut EmitterBatchBuffer,
-    deadline: Instant,
-) -> Result<EmitterRuntimeResult<(Option<PublishReport>, SinkFinish)>, ()> {
-    let drained = nervix_primitives::time::timeout_at(
-        deadline,
-        sink.flush_all(label, context, control, buffer),
-    )
-    .await;
-    let report = match drained {
-        Ok(Ok(report)) => report,
-        Ok(Err(error)) => return Ok(Err(error)),
-        Err(_) => return Err(()),
-    };
-    match finish_sink_for_stop(sink, deadline).await {
-        StopFinishOutcome::Finished(finished) => Ok(Ok((report, finished))),
-        StopFinishOutcome::Failed(error) => {
-            let description = error.current_context().to_string();
-            Ok(Err(error
-                .change_context(EmitterRuntimeError::FinishTransport)
-                .attach_printable(description)))
-        }
-        StopFinishOutcome::TimedOut => Err(()),
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(in crate::runtime) enum EmitterRuntimeError {
@@ -1303,17 +1252,17 @@ impl EmitterTaskLoop<'_> {
                         stop_rx: &mut *self.stop_rx,
                         backoff,
                     };
-                    let drained = drain_sink_for_stop(
-                        sink,
-                        self.plan.sink.label(),
-                        self.context,
-                        &mut control,
-                        buffer,
-                        deadline,
-                    )
-                    .await;
+                    let drained = sink
+                        .drain_for_stop(
+                            self.plan.sink.label(),
+                            self.context,
+                            &mut control,
+                            buffer,
+                            deadline,
+                        )
+                        .await;
                     let result = match drained {
-                        Ok(Ok((report, finished))) => {
+                        EmitterStopDrainOutcome::Finished { report, finished } => {
                             self.state.backoff.reset();
                             self.state.retry.clear();
                             self.context.status.clear();
@@ -1327,7 +1276,7 @@ impl EmitterTaskLoop<'_> {
                             );
                             Ok(())
                         }
-                        Ok(Err(error)) => {
+                        EmitterStopDrainOutcome::Failed(error) => {
                             let reason = emitter_error_message(&error);
                             self.context.record_failure(reason.clone());
                             self.context
@@ -1335,7 +1284,7 @@ impl EmitterTaskLoop<'_> {
                             Err(Report::new(EmitterRuntimeError::FinalFlush)
                                 .attach_printable(format!("emitter final flush failed: {reason}")))
                         }
-                        Err(_) => {
+                        EmitterStopDrainOutcome::DeadlineElapsed => {
                             let reason = format!(
                                 "emitter '{}' did not drain before its configured deadline",
                                 self.context.emitter.as_str()
@@ -2764,7 +2713,7 @@ mod tests {
     async fn stop_drain_with_sink(
         sink: &mut EmitterSinkState,
         deadline: Instant,
-    ) -> Result<EmitterRuntimeResult<(Option<PublishReport>, SinkFinish)>, ()> {
+    ) -> EmitterStopDrainOutcome {
         let fault_injection = ConfiguredFaultInjection::default();
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -2777,7 +2726,8 @@ mod tests {
         };
         let context = sink_context();
         let mut buffer = EmitterBatchBuffer::default();
-        drain_sink_for_stop(sink, "test", &context, &mut control, &mut buffer, deadline).await
+        sink.drain_for_stop("test", &context, &mut control, &mut buffer, deadline)
+            .await
     }
 
     #[nervix_primitives::test(start_paused = true)]
@@ -2786,7 +2736,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
 
         match stop_drain_with_sink(&mut sink, deadline).await {
-            Ok(Err(error)) => {
+            EmitterStopDrainOutcome::Failed(error) => {
                 assert_eq!(
                     error.current_context(),
                     &EmitterRuntimeError::FinishTransport
@@ -2808,7 +2758,7 @@ mod tests {
 
         assert!(matches!(
             stop_drain_with_sink(&mut sink, deadline).await,
-            Err(())
+            EmitterStopDrainOutcome::DeadlineElapsed
         ));
     }
 
