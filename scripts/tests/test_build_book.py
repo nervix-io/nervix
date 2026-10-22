@@ -362,7 +362,7 @@ class CliReferenceTests(unittest.TestCase):
 
 
 SAMPLE_SERVER_HELP = """\
-NSPL gRPC server
+Nervix server
 
 Usage: nervix-server [OPTIONS] --node-id <NODE_ID> [COMMAND]
 
@@ -392,7 +392,7 @@ class ServerReferenceTests(unittest.TestCase):
 
         self.assertEqual(captured, [[], ["completions"]])
         self.assertIn("# nervix-server Reference", reference)
-        self.assertIn("## nervix-server\n\n```text\nNSPL gRPC server", reference)
+        self.assertIn("## nervix-server\n\n```text\nNervix server", reference)
         self.assertIn("--drain-timeout <DRAIN_TIMEOUT>", reference)
         self.assertIn("## nervix-server completions", reference)
         self.assertIn("](node-settings.md)", reference)
