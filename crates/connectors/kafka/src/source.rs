@@ -281,7 +281,7 @@ pub enum KafkaSourceError {
     MissingMetadata { topic: String },
     /// Nervix provisions nothing in Kafka, so a consumer reports a topic the broker does not have
     /// rather than letting the broker create it.
-    #[error("Kafka topic '{topic}' does not exist")]
+    #[error("{connector} topic '{topic}' does not exist", connector = ConnectorKind::Kafka)]
     MissingTopic { topic: String },
     #[error("failed to build Kafka timestamp query for topic '{topic}' partition {partition}")]
     BuildTimestampQuery { topic: String, partition: i32 },

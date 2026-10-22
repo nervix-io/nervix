@@ -1374,7 +1374,7 @@ Feature: Kafka ingestion
       """
     Then within "30s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
       """
-      transient error: Kafka topic 'unprovisioned_{{test_id}}' does not exist
+      transient error: KAFKA topic 'unprovisioned_{{test_id}}' does not exist
       """
     And Kafka topic "unprovisioned_{{test_id}}" does not exist
     When the operator provisions Kafka topic "unprovisioned_{{test_id}}" with 1 partitions
