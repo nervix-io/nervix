@@ -354,7 +354,7 @@ Feature: Syslog support
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE CODEC syslog_alternate_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED CAPACITY 4;
-      CREATE CLIENT syslog_listener TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_listener CONFIG {
         'protocol' = 'tcp',
         'addr' = '{{syslog_ingest_addr}}'
       };
@@ -410,7 +410,7 @@ Feature: Syslog support
       CREATE SCHEMA syslog_message (message STRING);
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
-      CREATE CLIENT syslog_listener TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_listener CONFIG {
         'protocol' = 'tcp',
         'addr' = '{{syslog_ingest_addr}}'
       };
