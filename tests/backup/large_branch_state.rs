@@ -1,11 +1,16 @@
 //! Public deduplicator and window workloads whose single-branch state exceeds the bulk budget.
 //!
 //! Layer: test harness.
-//! - **Owns.** The NSPL graph, the HTTP inputs that build one large keyspace and window beside many
-//!   small branches, the summaries a subscription reports for them, and the archive inventory of
-//!   their sections.
+//! - **Owns.** The Plexus graph, the HTTP inputs that build one large keyspace and window beside
+//!   many small branches, the summaries a subscription reports for them, and the archive inventory
+//!   of their sections.
 //! - **Depends on.** Public commands, HTTP intake, Row subscriptions and the public archive reader.
 //! - **Must not know.** Native checkpoint encodings, restore conversion or runtime persistence.
+//!
+//! Payments enter through an acknowledged endpoint. Under `MODE NO ACK` a payment the endpoint
+//! accepted is gone when the deduplicator's node refuses its routed delivery, which a loaded runner
+//! does, so the summaries could never be complete. The window's rows keep `MODE NO ACK`: a window
+//! acknowledges a row only once it steps past it, and its input relay runs beside it.
 
 use nervix_backup::DescribedRuntimeState;
 
@@ -25,6 +30,13 @@ const BULK_BUDGET_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Every large key's transaction identifier and every large window row's note are padded to this.
 const LARGE_VALUE_BYTES: usize = 1024 * 1024;
+
+/// How long one payment may take to be acknowledged, its retries included. The endpoint answers
+/// each attempt within its ACK timeout, so this only bounds a node that keeps refusing it.
+const PAYMENT_ACKNOWLEDGEMENT_WAIT: Duration = Duration::from_secs(300);
+
+/// The payment endpoint's retry delay, used when a refusal does not name one.
+const PAYMENT_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[then("the measured backup admits a stored branch checkpoint above 32 MiB")]
 fn then_stored_branch_capture_is_admitted(world: &mut ScenarioWorld) {
@@ -72,10 +84,10 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
          CREATE VHOST edge {host};
          CREATE ENDPOINT payment_ingress ON edge PATH '/payments' TYPE HTTP;
          CREATE ENDPOINT metric_ingress ON edge PATH '/metrics' TYPE HTTP;
-         CREATE HTTP ENDPOINT INGESTOR payment_source FROM payment_ingress MODE NO ACK ON QUIESCE \
-         BUFFER MAX SIZE 2MiB DECODE USING payment_codec TO payments INHERIT ALL BRANCHED BY \
-         by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
-         ERROR LOG;
+         CREATE HTTP ENDPOINT INGESTOR payment_source FROM payment_ingress MODE ACK MAX 8 ACK \
+         TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING payment_codec TO payments \
+         INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE \
+         ERROR LOG ON GENERAL ERROR LOG;
          CREATE HTTP ENDPOINT INGESTOR metric_source FROM metric_ingress MODE NO ACK ON QUIESCE \
          BUFFER MAX SIZE 2MiB DECODE USING metric_codec TO metrics INHERIT ALL BRANCHED BY \
          by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
@@ -197,6 +209,71 @@ fn posting_node(world: &ScenarioWorld) -> String {
         .clone()
 }
 
+/// Posts one payment to the acknowledged payment endpoint on `node` until the endpoint answers
+/// that the payment's graph acknowledgement completed.
+///
+/// The sender owns the retry of a 503: a full window, a downstream refusal and an expired ACK
+/// timeout are all answered that way. The deduplicator forgets a key whose summary it could not
+/// forward, and drops one it already forwarded as a duplicate, so a retried payment yields its
+/// key's summary exactly once.
+async fn post_acknowledged_payment(world: &ScenarioWorld, node: &str, host: &str, payload: &str) {
+    let uri = world
+        .cluster()
+        .http_uri(node, "/payments")
+        .assured("the posting node is a member of the scenario's cluster");
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + PAYMENT_ACKNOWLEDGEMENT_WAIT;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let response = client
+            .post(&uri)
+            .header(reqwest::header::HOST, host)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(payload.to_owned())
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("the payment endpoint did not answer: {error}"));
+        let status = response.status();
+        let retry_delay = match response.headers().get(reqwest::header::RETRY_AFTER) {
+            Some(value) => {
+                let seconds = value
+                    .to_str()
+                    .assured("the endpoint writes Retry-After as ASCII digits")
+                    .parse::<u64>()
+                    .assured("the endpoint writes Retry-After as whole seconds");
+                Duration::from_secs(seconds)
+            }
+            None => PAYMENT_RETRY_DELAY,
+        };
+        let body = response
+            .bytes()
+            .await
+            .unwrap_or_else(|error| panic!("the payment endpoint's answer did not arrive: {error}"));
+        let outcome: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|error| {
+            panic!("the payment endpoint answered {status} outside its outcome vocabulary: {error}")
+        });
+        if status == reqwest::StatusCode::OK {
+            assert_eq!(
+                outcome,
+                serde_json::json!({ "outcome": "completed", "cause": "none" }),
+                "an acknowledged payment completes"
+            );
+            return;
+        }
+        assert_eq!(
+            status,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "the payment endpoint refused the payment for good: {outcome}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the payment was not acknowledged within {PAYMENT_ACKNOWLEDGEMENT_WAIT:?}; the last \
+             answer was {status} {outcome}"
+        );
+        nervix_primitives::time::sleep(retry_delay).await;
+    }
+}
+
 #[when(expr = "round {int} of {int} large deduplicator keys is posted for tenant {string}")]
 async fn when_large_keys_are_posted(
     world: &mut ScenarioWorld,
@@ -216,11 +293,7 @@ async fn when_large_keys_are_posted(
             "amount": key.amount,
         })
         .to_string();
-        world
-            .cluster()
-            .publish_http(&node, &host, "/payments", &payload)
-            .await
-            .assured("the bounded payment is accepted");
+        post_acknowledged_payment(world, &node, &host, &payload).await;
     }
 }
 
@@ -284,11 +357,7 @@ async fn when_small_branches_are_posted(world: &mut ScenarioWorld, tenants: usiz
             "amount": key.amount,
         })
         .to_string();
-        world
-            .cluster()
-            .publish_http(&node, &host, "/payments", &payment)
-            .await
-            .assured("the small payment is accepted");
+        post_acknowledged_payment(world, &node, &host, &payment).await;
         let metric = serde_json::json!({
             "tenant": &tenant,
             "latency": SMALL_LATENCY,
