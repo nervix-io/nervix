@@ -119,7 +119,7 @@ impl fmt::Display for HumanDuration {
             return formatter.write_str("0s");
         }
         for (suffix, unit) in DURATION_UNITS {
-            if nanos % unit != 0 {
+            if !nanos.is_multiple_of(unit) {
                 continue;
             }
             let Ok(count) = u64::try_from(nanos / unit) else {
@@ -174,7 +174,7 @@ impl fmt::Display for HumanBytes {
         if bytes != 0 {
             for (suffix, unit) in BYTE_UNITS {
                 let unit = unit.as_u64();
-                if bytes % unit == 0 {
+                if bytes.is_multiple_of(unit) {
                     return write!(formatter, "{}{suffix}", bytes / unit);
                 }
             }
