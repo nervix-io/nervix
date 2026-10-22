@@ -116,6 +116,10 @@ pub enum BufferOverflow {
     DropUncounted,
     /// A hand-over that does not fit fails the publish, and the host retries it on its policy.
     FailPublish,
+    /// The connector tells its peer the capacity, and the peer discards what does not fit instead
+    /// of sending it, so it never reaches the connector, which cannot count it: a maximum packet
+    /// size a protocol lets a client advertise when it connects.
+    PeerDiscards,
     /// The request is refused immediately; its sender owns retry.
     RefuseRequest,
 }

@@ -170,6 +170,7 @@ mod deadlock_diagnostics;
 mod deadlock_reports;
 mod domain_clock_attachment;
 mod domain_resume;
+mod emitter_finish;
 mod endpoint_intake;
 mod generated_http_payloads;
 mod iceberg_delivery;
@@ -384,7 +385,8 @@ struct ScenarioWorld {
     /// instant and the arrival together, which is what makes such an assertion hold on a
     /// busy machine where a fixed wall-clock window does not.
     last_publish_at: Option<Instant>,
-    pulsar_stop_timing: Option<pulsar_delivery::StopTiming>,
+    /// When the last STOP run beside a timed endpoint fault completed, and when the fault ended.
+    stop_timing: Option<emitter_finish::StopTiming>,
     /// When the scenario first posted an HTTP payload to a node. An input collector's window
     /// opens no earlier than the first record that reaches it, so a collection-delay assertion
     /// measures its collected output from this instant.
@@ -24332,6 +24334,29 @@ async fn when_mqtt_qos1_message_is_published(
         .publish_mqtt_qos1(&topic, &payload)
         .await
         .expect("failed to publish mqtt QoS 1 message");
+}
+
+/// Publishes one QoS 1 message whose payload is exactly `bytes` long: a JSON object whose one
+/// string field pads it to that size.
+#[when(expr = "an MQTT QoS 1 message of {int} bytes is published to topic {string}")]
+async fn when_sized_mqtt_qos1_message_is_published(
+    world: &mut ScenarioWorld,
+    bytes: usize,
+    topic: String,
+) {
+    const EMPTY_PADDING: &str = r#"{"padding":""}"#;
+    let padding_bytes = bytes
+        .checked_sub(EMPTY_PADDING.len())
+        .unwrap_or_else(|| panic!("a {bytes}-byte MQTT payload cannot hold {EMPTY_PADDING}"));
+    let topic = expand_placeholders(world, &topic);
+    let padding = "x".repeat(padding_bytes);
+    let payload = format!(r#"{{"padding":"{padding}"}}"#);
+    wait_for_mqtt_ingestors_ready(world).await;
+    world
+        .cluster()
+        .publish_mqtt_qos1(&topic, &payload)
+        .await
+        .expect("failed to publish the sized MQTT QoS 1 message");
 }
 
 #[when(expr = "RabbitMQ message is published to queue {string}")]

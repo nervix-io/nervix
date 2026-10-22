@@ -477,9 +477,6 @@ pub enum SinkFinish {
     NothingHeld,
     /// The client held records and sent every one of them before the deadline.
     Flushed,
-    /// The client can still hold records a publish reported delivered, and the sink closes it
-    /// without sending them.
-    Discarded,
 }
 
 /// Why finishing a sink did not send every record its transport client still held.

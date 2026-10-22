@@ -1310,8 +1310,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
 <!-- connector-matrix:emit-mqtt-topic:end -->
 
-QoS 0 acknowledges client acceptance, and QoS 0 publishes still queued in the client when the
-emitter stops are discarded with it, which the node logs at `warn`. QoS 1 waits for `PUBACK`; QoS 2
+QoS 0 acknowledges client acceptance. When the emitter stops, it waits within the stop or shutdown
+deadline for its client to send the publishes it still holds, which a client cut off from its
+broker holds until it connects again; publishes still unsent at that deadline fail the stop and are
+counted in the emitter's transient error. QoS 1 waits for `PUBACK`; QoS 2
 waits for the complete exactly-once handshake. QoS 1 and 2 use a persistent session and the emitter client's stable
 identity so in-flight messages survive reconnects. Reconnect pacing follows the declared retry
 policy. When an answer misses its `ACK TIMEOUT`, or the broker or client fails it for a reason that
@@ -2611,9 +2613,9 @@ resends only records not yet confirmed or definitively rejected. With the
 [batching clause](#batching) the unit is the batch payload: a retry resends exactly the payloads not
 yet confirmed or rejected, with the bytes and members they were first written with. `NO_ACK`, MQTT QoS 0, Core NATS,
 Redis Pub/Sub, and ZeroMQ expose earlier acceptance boundaries and can lose acknowledged records
-after a crash or downstream failure. A stop sends what a Kafka producer still queues and waits
-for accepted Pulsar messages' receipts within the stop's deadline. MQTT QoS 0 discards what its
-client still queues; see
+after a crash or downstream failure. A stop sends what a Kafka producer still queues, waits for
+accepted Pulsar messages' receipts, and waits for an MQTT QoS 0 client to send the publishes it
+still holds, within the stop's deadline; see
 [Finishing a sink](./connector-contract.md#finishing-a-sink). External broker durability and
 idempotence settings remain the user's client and service configuration.
 

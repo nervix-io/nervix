@@ -767,3 +767,65 @@ Feature: MQTT ingestion
       | cluster_size |
       | 1            |
       | 3            |
+
+  # The ingestor's client advertises its declared packet bound as the Maximum Packet Size of every
+  # CONNECT, so the broker discards a larger publish instead of sending it, and the persistent
+  # session never presents it again. The publish behind it reaches the relay.
+  @mqtt_ingest_packet_bound
+  Scenario Outline: The broker discards a publish above an MQTT ingestor's packet bound, and the ingestor keeps consuming
+    Given MQTT is running
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT mqtt_main
+        TYPE MQTT
+        CONFIG {
+          'addr' = '{{mqtt_addr}}',
+          'client_id' = 'nervix-cucumber-ingestor-bounded-{{test_id}}'
+        };
+      CREATE MQTT TOPIC INGESTOR mqtt_bounded
+        FROM mqtt_main TOPIC 'bounded_{{test_id}}' SESSION PERSISTENT QOS 1
+          MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    Then within "10s" DESCRIBE INGESTOR "mqtt_bounded" on the leader node contains
+      """
+      ready: true
+      """
+    When an MQTT QoS 1 message of 20480 bytes is published to topic "bounded_{{test_id}}"
+    And MQTT QoS 1 message is published to topic "bounded_{{test_id}}"
+      """
+      {"user_id":7}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "user_id":7
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -1047,12 +1047,10 @@ Every sink implements `finish`, and no sink inherits a default. A publish report
 delivered at the completion point its mode declares, and for `NO_ACK` on Kafka, Pulsar and MQTT
 QoS 0 that point is the client taking the record, so the client can still hold delivered records
 when the emitter stops. `finish` sends what the client still holds by the deadline the host gives
-it and answers with one of three outcomes:
+it and answers with one of two outcomes:
 
 - **Nothing held.** The client holds no record once a publish returns, so there is nothing to send.
 - **Flushed.** The client held records and sent every one of them before the deadline.
-- **Discarded.** The client can still hold records a publish reported delivered, and the sink
-  closes it without sending them.
 
 A finish that cannot send everything is a `SinkFinishError`: `Unsent` when the deadline passes with
 records still held, counting them, and `Flush` when the client fails while it sends them, with the
@@ -1073,15 +1071,14 @@ records: their acknowledgements end unresolved, so an acknowledged source delive
 a finish that flushes the client also sends the ones the client had already taken, which the
 destination then receives twice.
 
-The host records every outcome on the emitter: a flush at `info`, a discard at `warn`, and a failed
-finish at `warn`, as the emitter's transient error that `DESCRIBE EMITTER` shows and as an error
-event. What a stop leaves to a finish, and what the finish does with it, differs by sink:
+The host records every outcome on the emitter: a flush at `info`, and a failed finish at `warn`, as
+the emitter's transient error that `DESCRIBE EMITTER` shows and as an error event. What a stop leaves to a finish, and what the finish does with it, differs by sink:
 
 | Sink | What the client holds once a publish returns | What finishing does with it |
 | --- | --- | --- |
 | Kafka | `NO_ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
 | Pulsar | `NO_ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
-| MQTT | `QOS 0`: publishes queued for the client's event loop. `QOS 1` and `QOS 2`: nothing | Discards them with the event loop |
+| MQTT | `QOS 0`: publishes the client took and its event loop has not yet written and flushed to the broker connection, which a client cut off from its broker holds until it connects again. `QOS 1` and `QOS 2`: nothing | Waits until the event loop has flushed every publish the client took or the deadline passes; reports a failed flush or the count still unflushed at that deadline |
 | NATS | Nothing: a core publish flushes the connection before it reports its records, and JetStream answers each record | Nothing to send |
 | ZeroMQ | Nothing a publish reported delivered: a completed send has flushed its frame to a peer's socket, and a send that ran out of `timeout_ms` failed its record | Nothing to send |
 | RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
@@ -1107,6 +1104,20 @@ still holds a message whose report its polling thread is serving, after every re
 served, has flushed, since no record is left. Otherwise `Unsent` counts the records still retained.
 Because a record stays retained until its report is served, the producer always asks for every
 record's report and sets `delivery.report.only.error` to `false` after the client's own entries.
+
+The MQTT sink hands each QoS 0 record to its client with a flush notice, which the client's event
+loop ends once it has written the publish and flushed the connection, or fails when that write or
+flush fails, or when a clean session's next connection drops the publishes a lost connection left
+behind. The sink keeps every notice until it ends and drops the ended ones at the start of each
+publish, so it holds one notice for each publish the client still holds: the one request its queue
+takes, and those a lost connection left for the next. A notice that failed before the finish lost
+its record with a connection whose failure the event loop already reported as the emitter's
+transient error. The finish drops the notices that ended before it, answers nothing held when none
+is left, and otherwise waits for the rest in the order the client took them until its deadline.
+Every notice ending in time is a flush, and one that failed fails the finish with the driver's
+cause beneath; `Unsent` counts the notices still open at the deadline. A client that is connecting
+when the finish begins sends what it holds as soon as the broker answers its `CONNECT`; one waiting
+out its reconnect backoff sends it on its next connection.
 
 A brokered record sink in `MODE ACK` awaits its broker's answers through the contract crate's
 `ConfirmationWindow`. The sink hands each record to its driver and gives the window the record's
