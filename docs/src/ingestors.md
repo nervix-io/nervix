@@ -631,6 +631,17 @@ policy; a connection that runs out of `connect_timeout_ms` is reported naming th
 bound. [Connector Capabilities](connector-capabilities.md) lists each entity's network waits and
 what bounds each one, including the waits nothing bounds yet.
 
+For a `KAFKA` client, `socket.timeout.ms` also bounds each admitted source control job, including
+executor queueing, metadata and partition inspection, offset lookups, watermarks and seeks. Its
+native default is 60 seconds, and librdkafka accepts 10 through 300000 milliseconds. The job's
+native waits share its remaining budget rather than restarting the timeout per partition.
+Exhausted executor admission and an expired budget become transient ingestor failures and follow
+its retry policy. Kafka control jobs have their own bounded workers, so a slow broker cannot take
+filesystem or consensus worker permits. This does not bound a consumer-group commit's native
+retry lifetime: the caller waits at most 30 seconds and retains that one commit until its exact
+answer arrives before submitting another. Native subscribe, assign and unsubscribe cannot be
+cancelled; their caller's budget limits waiting while an already-running call keeps its worker.
+
 ## Client Ingestors
 
 The [Client Ingestors And Emitters](./client-io-architecture.md) architecture chapter follows a
@@ -956,9 +967,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
-| Buffers | messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it |
-| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>offset lookups, watermarks and seeks: fixed 5s<br>subscribe, assign and unsubscribe: unbounded |
-| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>receive.message.max.bytes 100000000 |
+| Buffers | messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
+| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded |
+| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).

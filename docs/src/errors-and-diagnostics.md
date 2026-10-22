@@ -679,6 +679,14 @@ the refusal, and the host rejects the batch's positions, which the source reads 
 `MODE NO ACK` consumer makes as it leaves its group fails beneath `SourceError::Suspend` or
 `SourceError::Close`, which the source loop reports as a runtime event. None rejects a record.
 
+Kafka control-call admission keeps `AdmissionError` beneath `KafkaSourceError::ControlAdmission`,
+and a refused queue or failed admitted worker keeps `ExecutionError` beneath
+`KafkaSourceError::ControlExecution`. These are transient failures of resume, rejection or
+acknowledgement, rather than failures to decode a record. A control call that exhausts its native
+`socket.timeout.ms` budget reports `KafkaSourceError::ControlTimeout` with that bound. Metadata,
+watermark, timestamp and seek failures preserve the driver's typed cause beneath the operation
+that failed.
+
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
 cause of its connection error, and the connector finds it there by type and keeps it as the context

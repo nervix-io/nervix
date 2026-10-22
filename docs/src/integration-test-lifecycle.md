@@ -55,6 +55,13 @@ exactly once after recovery. The longer receipt scenario uses the same fault con
 beyond thirty seconds under an explicitly declared forty-five-second `ACK TIMEOUT`. These
 dependency faults do not widen a product deadline or replace a readiness observation with a sleep.
 
+The Kafka control-execution scenario uses librdkafka's mock broker to hold replies after a DOMAIN
+source delivered its first record. A codec alteration resumes that source, and the scenario waits
+for a running connector-storage job before sending a record through another HTTP ingestor. The
+same oracle runs on one and three nodes. The broker's native round-trip control releases replies
+in the scenario and again during teardown before diagnostics or node drain, including after a
+failed assertion. It does not change a product deadline or use a readiness sleep.
+
 The Pulsar fault forwarder decodes broker frames and advertises its own plain-text service URL
 in topic lookup responses, retaining every other command and payload field. The driver's discovered
 producer and consumer connections therefore stay behind the same pause gate as bootstrap traffic.

@@ -1366,6 +1366,7 @@ pub(crate) fn single_worker_executor() -> Executor {
             bulk_cpu: one,
             consensus_storage: one,
             filesystem_storage: one,
+            connector_storage: one,
             pending_jobs: one,
         },
         ..nervix_execution::ExecutionConfig::default()

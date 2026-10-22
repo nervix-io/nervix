@@ -284,6 +284,9 @@ relay. Do not use them to scan across branches.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
+- For Kafka source control-call deadlines and bounded execution, follow `Ingestors` → `Client
+  Deadlines`. Keep `socket.timeout.ms` distinct from the consumer-group commit caller deadline;
+  an unanswered commit is retained before another can start.
 - Kafka `OFFSET BY DOMAIN` commits and start-point resets wait up to the native checkpoint bulk
   operation's thirty-second budget for all assigned state replicas. A missing acknowledgement
   follows the source's existing rejection and retry policy; this mode remains at least once.

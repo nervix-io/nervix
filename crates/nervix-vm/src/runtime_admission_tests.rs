@@ -174,6 +174,7 @@ fn single_worker_executor() -> Executor {
             bulk_cpu: one,
             consensus_storage: one,
             filesystem_storage: one,
+            connector_storage: one,
             pending_jobs: one,
         },
         ..ExecutionConfig::default()

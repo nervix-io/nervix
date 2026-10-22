@@ -382,16 +382,25 @@ accepted.
 
 No driver call that parks its thread runs on an asynchronous worker. A connector runs such a call
 in the executor's storage class with a declared deadline as its bound, or as a declared owner of the
-runtime's blocking pool. The Kafka source's metadata fetches, watermark and offset-for-time lookups,
-seeks, assignment calls and consumer drop still run inline on its worker and are the remaining
-exceptions to this rule.
+runtime's blocking pool. Kafka source control calls use the connector storage class: metadata,
+watermark and timestamp lookups, seeks and assignments run off the async workers. Consumer
+destruction remains an exception: it can wait for librdkafka's threads on the thread that drops
+the last consumer handle.
 
-A driver call that parks its thread while it waits on the network computes nothing, and admitting
-it would hold a worker idle for the whole wait. librdkafka's producer flush, metadata fetch and
-synchronous offset commit are such calls, so the Kafka connector runs them on the runtime's blocking
-pool as declared owners outside the executor, bounded by the host's flush deadline, a per-request
-metadata timeout, and one commit in flight per source instance that the source waits for at most
-thirty seconds.
+Network control calls have their own bounded connector storage admission, separate from filesystem
+and consensus storage. A broker that does not answer therefore cannot consume those classes'
+worker permits. Kafka metadata, watermark, timestamp and seek operations take their control-call
+budget from the effective native `socket.timeout.ms`, including its driver default. The budget
+includes admission and the consumer's serialized control-operation turn. A cancelled running call
+keeps its worker and that turn until the driver returns, so a later assignment or seek cannot
+overtake it. Group commits have their separate one-in-flight owner; a failed commit does not
+prevent attempting unsubscribe.
+Consumer-group commits retain one admitted job per source instance until the coordinator answers,
+including when the waiting caller is cancelled or its thirty-second deadline expires. Admission
+refusals remain transient source failures; they never reject a record as invalid.
+
+librdkafka's producer flush still runs on the runtime's blocking pool as a declared owner outside
+the executor, bounded by the host's physical flush deadline.
 [Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor)
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
@@ -1566,7 +1575,8 @@ sequenceDiagram
   long as the group has no reachable coordinator, so the source waits for an answer at most thirty
   seconds and then fails the acknowledgement the same way. Such a commit stays in flight until
   librdkafka answers it, and the source's next commit waits for it first, so an instance never
-  parks more than one blocking-pool thread on commits. In `MODE NO ACK` the driver commits on its
+  holds more than one connector storage job on commits. Cancelling an awaiting caller retains
+  that same job. In `MODE NO ACK` the driver commits on its
   own cadence, and suspending or closing the source commits what it delivered since.
   A rejection seeks each rejected partition the consumer is still assigned back to its earliest
   unacknowledged record. A consumer-group rebalance can move a partition to another group member

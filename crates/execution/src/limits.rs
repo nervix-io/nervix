@@ -43,8 +43,7 @@ pub enum CpuClass {
     Bulk,
 }
 
-/// A bounded share of admission onto the blocking pool for synchronous filesystem and database
-/// work.
+/// A bounded share of admission onto the blocking pool for synchronous storage and connector I/O.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StorageClass {
     /// Consensus storage, admitted one job at a time. Admission is granted in the order it was
@@ -53,6 +52,9 @@ pub enum StorageClass {
     Consensus,
     /// Every other synchronous filesystem and database operation.
     Filesystem,
+    /// Blocking connector control I/O. A driver may retain a call after its caller stops waiting,
+    /// so these jobs never take filesystem or consensus worker permits.
+    Connector,
 }
 
 /// A reserved transient-memory budget. A class cannot borrow beyond its own ceiling, so a
@@ -100,6 +102,7 @@ impl WorkerClassName {
             Self::Cpu(CpuClass::Bulk) => "bulk_cpu",
             Self::Storage(StorageClass::Consensus) => "consensus_storage",
             Self::Storage(StorageClass::Filesystem) => "filesystem_storage",
+            Self::Storage(StorageClass::Connector) => "connector_storage",
         }
     }
 }
@@ -126,6 +129,7 @@ pub struct WorkerCounts {
     pub bulk_cpu: NonZeroUsize,
     pub consensus_storage: NonZeroUsize,
     pub filesystem_storage: NonZeroUsize,
+    pub connector_storage: NonZeroUsize,
     /// The number of jobs one class may hold waiting for a worker. Beyond it, admission is refused
     /// with typed backpressure rather than growing an unbounded queue in front of the pool.
     pub pending_jobs: NonZeroUsize,
@@ -159,6 +163,7 @@ impl Default for WorkerCounts {
             bulk_cpu: data,
             consensus_storage: NonZeroUsize::MIN,
             filesystem_storage: NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
+            connector_storage: NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
             pending_jobs: NonZeroUsize::new(1024).unwrap_or(NonZeroUsize::MIN),
         }
     }

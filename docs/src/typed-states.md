@@ -646,6 +646,12 @@ their placement. The planner lowers every filter, route and branch construction 
 them, so a bound route always carries its compiled program and a running task has no
 missing-program or undeclared-branch state to check.
 
+The Kafka source's assignment knowledge distinguishes unknown, cleared and installed partitions.
+Moving an assignment operation into an admitted job leaves its source's knowledge unknown until
+the job returns the confirmed state. Cancellation or failure cannot leave a cached assignment
+claiming that a native operation the caller did not observe completed successfully. The next
+operation therefore reinstalls or clears it rather than trusting an unconfirmed cache.
+
 The owner reports a semantic typed error; contextual propagation uses `error-stack`. A
 per-record conversion error is reported at the record boundary without formatting a fresh
 message on every hot-path operation. Diagnostics contain the relevant identity, operation, and

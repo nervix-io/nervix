@@ -7,9 +7,10 @@
 //!   allocations that job performs, the cancellation boundary it checks between bounded units, and
 //!   the incremental writer that fails at its budget boundary instead of growing past it. It is
 //!   the only entry point for variable-size encoding, decoding, validation, hashing, compilation,
-//!   program execution, snapshot construction, and synchronous filesystem or database work. Two
-//!   kinds of work have classes of their own: operator-supplied code the node cannot bound, and
-//!   password hashing, which anyone who reaches a listener can request.
+//!   program execution, snapshot construction, synchronous filesystem or database work and admitted
+//!   connector control I/O. Operator-supplied code, password hashing and connector driver calls
+//!   have isolated admission classes: those operations can retain a worker beyond other work's
+//!   latency or cancellation budget.
 //! - **Depends on.** The primitive boundary for its atomics, semaphores and clock and for the
 //!   mechanisms that run a job: the runtime's blocking pool for storage work, and the boundary's
 //!   CPU-job mechanism, which is the same pool except in the Turmoil build. Also the byte

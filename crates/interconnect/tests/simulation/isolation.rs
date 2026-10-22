@@ -152,6 +152,7 @@ fn executor(pending_jobs: usize) -> Executor {
             bulk_cpu: NonZeroUsize::MIN,
             consensus_storage: NonZeroUsize::MIN,
             filesystem_storage: NonZeroUsize::MIN,
+            connector_storage: NonZeroUsize::MIN,
             pending_jobs: NonZeroUsize::new(pending_jobs).assured("fixture queues are nonzero"),
         },
         ..ExecutionConfig::default()
