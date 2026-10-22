@@ -27,9 +27,9 @@ use super::{
 };
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    EmitterPublishingModeKind, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
-    SinkValueMapping, SinkValueMappings,
+    OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue, SinkBody,
+    SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SinkValueMapping,
+    SinkValueMappings,
 };
 
 configured_client!(Otel: unpooled, config Nervix, CreateClientOtel => OtelConfigEntry);
@@ -71,6 +71,7 @@ pub struct OtelScope {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct OtelLogsSink {
+    pub mode: OtelLogsPublishingMode,
     pub client: ClientName,
     pub mappings: OtelMappings,
 }
@@ -80,6 +81,7 @@ pub struct OtelLogsSink {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct OtelTracesSink {
+    pub mode: OtelTracesPublishingMode,
     pub client: ClientName,
     pub mappings: OtelMappings,
 }
@@ -89,6 +91,7 @@ pub struct OtelTracesSink {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct OtelMetricsSink {
+    pub mode: OtelMetricsPublishingMode,
     pub client: ClientName,
     pub metric: OtelMetric,
     pub mappings: OtelMappings,
@@ -209,31 +212,30 @@ const OTEL_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 /// What every OTEL sink declares: an export is one request the collector answers, and its fields
 /// are mapped directly rather than encoded by a codec.
-const OTEL_SINK_CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-    headers: None,
-    reference: SinkReferenceKind::Client(ConnectorKind::Otel),
-    body: EmitterBodyForm::Values,
-    batch: EmitterBatchLegality::Optional { maximum: None },
-    requires_batch_transformation: false,
-    publishing_modes: &[EmitterPublishingModeKind::RequestAck],
-    locator: None,
-    options: &[ATTRIBUTES, RESOURCE, SCOPE],
-    envelope: &[],
-    properties: &[],
-    bounds: OTEL_BOUNDS,
-};
-
-/// What a metrics sink declares beside every OTEL sink's declaration: the metric it exports.
-const OTEL_METRICS_CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-    options: &[METRIC, ATTRIBUTES, RESOURCE, SCOPE],
-    ..OTEL_SINK_CAPABILITIES
-};
+const fn otel_capabilities(
+    publishing_modes: &'static [crate::EmitterPublishingModeKind],
+    options: &'static [OptionDeclaration],
+) -> EmitSinkCapabilities {
+    EmitSinkCapabilities {
+        headers: None,
+        reference: SinkReferenceKind::Client(ConnectorKind::Otel),
+        body: EmitterBodyForm::Values,
+        batch: EmitterBatchLegality::Optional { maximum: None },
+        requires_batch_transformation: false,
+        publishing_modes,
+        locator: None,
+        options,
+        envelope: &[],
+        properties: &[],
+        bounds: OTEL_BOUNDS,
+    }
+}
 
 macro_rules! otel_sink_declarations {
-    ($($Sink:ident => $capabilities:ident),+ $(,)?) => {
+    ($($Sink:ident($Mode:ident) => $options:expr),+ $(,)?) => {
         $(
             impl SinkEntity for $Sink {
-                const CAPABILITIES: EmitSinkCapabilities = $capabilities;
+                const CAPABILITIES: EmitSinkCapabilities = otel_capabilities($Mode::KINDS, $options);
             }
 
             impl SinkBody for $Sink {
@@ -257,20 +259,22 @@ macro_rules! otel_sink_declarations {
 }
 
 otel_sink_declarations!(
-    OtelLogsSink => OTEL_SINK_CAPABILITIES,
-    OtelTracesSink => OTEL_SINK_CAPABILITIES,
-    OtelMetricsSink => OTEL_METRICS_CAPABILITIES,
+    OtelLogsSink(OtelLogsPublishingMode) => &[ATTRIBUTES, RESOURCE, SCOPE],
+    OtelTracesSink(OtelTracesPublishingMode) => &[ATTRIBUTES, RESOURCE, SCOPE],
+    OtelMetricsSink(OtelMetricsPublishingMode) => &[METRIC, ATTRIBUTES, RESOURCE, SCOPE],
 );
 
 connector_sinks! {
     connector Otel = "OTEL";
     /// What an OTEL sink writes.
     pub enum OtelSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum OtelEmitterMode;
     /// The entities an OTEL sink writes: one per signal.
     pub enum OtelSinkEntity {
-        Logs(OtelLogsSink) = "LOGS";
-        Traces(OtelTracesSink) = "TRACES";
-        Metrics(OtelMetricsSink) = "METRICS";
+        Logs(OtelLogsSink, OtelLogsPublishingMode) = "LOGS";
+        Traces(OtelTracesSink, OtelTracesPublishingMode) = "TRACES";
+        Metrics(OtelMetricsSink, OtelMetricsPublishingMode) = "METRICS";
     }
 }
 
@@ -290,5 +294,23 @@ impl OtelSink {
             Self::Traces(sink) => &sink.mappings,
             Self::Metrics(sink) => &sink.mappings,
         }
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum OtelLogsPublishingMode {
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum OtelTracesPublishingMode {
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum OtelMetricsPublishingMode {
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
     }
 }

@@ -16,7 +16,7 @@ semantics. The state rules here apply to those systems without replacing their d
 [Execution Plans](./execution-plans.md) follows the validated values into a complete installed
 revision.
 
-The Pulsar sink's running publishing choice keeps related state together: the `NO_ACK` variant
+The Pulsar sink's running publishing choice keeps related state together: the `NO ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
 confirmation settings. An empty receipt collection means there are no outstanding receipts,
 and an absent failure means none has been observed. These are task-owned execution values,
@@ -268,6 +268,17 @@ requires batching and which publishing modes it accepts. A client Model names th
 configures as a typed kind, so a source or a sink is matched with its client by comparing kinds
 rather than labels. A session producer's source is no transport, so the transport union holds no
 Model of it; the kind union still names it, because capability decisions ask about every source.
+
+Each emitter destination also owns its closed publishing enum: a Kafka topic can hold its own
+`NO ACK` or acknowledged policy, while an HTTP request can hold only its request acknowledgement
+policy. Capability metadata comes from those enum declarations. Shared inspection borrows the
+policy; it stores no second mode. Plexus parses a complete `SET TO` body using its declared entity,
+and ALTER carries that declared kind. The vocabulary checks the stored kind and every replacement
+before atomically publishing an alteration, including manually constructed Models. Typed failures
+name both entities. External locators preserve case in entity-specific validated types, including
+one SQS queue-name type shared by sources and destinations. An Iceberg storage-client reference
+retains absence of a resolved backend until the decision layer resolves the actual configured
+client; no default backend fills that boundary.
 
 **Endpoint availability.** Gossip publication carries an optional typed interconnect endpoint.
 Parsing a present advertised endpoint checks its host and port syntax. Membership admission

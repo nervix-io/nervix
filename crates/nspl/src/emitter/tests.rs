@@ -12,11 +12,10 @@
 
 use nervix_models::{
     ClickHouseSink, ClickHouseTableSink, FlushPolicy, HttpRequestSink, HttpSink, IcebergSink,
-    IcebergTableSink, KafkaSink, KafkaTopicSink, MongoDbCollectionSink, MongoDbSink, MqttSink,
-    MqttTopicSink, MySqlSink, MySqlTableSink, NatsSink, NatsSubjectSink, OtelLogsSink,
-    OtelMetricsSink, OtelSink, PostgresSink, PostgresTableSink, PulsarSink, PulsarTopicSink,
-    RabbitMqQueueSink, RabbitMqSink, RedisPubSubSink, RedisSink, SqsQueueSink, SqsSink,
-    SyslogCollectorSink, SyslogSink, ZeroMqPushSink, ZeroMqSink,
+    IcebergTableSink, KafkaSink, MongoDbCollectionSink, MongoDbSink, MqttSink, MySqlSink,
+    MySqlTableSink, NatsSink, OtelLogsSink, OtelMetricsSink, OtelSink, PostgresSink,
+    PostgresTableSink, PulsarSink, RabbitMqSink, RedisSink, SqsQueueSink, SqsSink, SyslogSink,
+    ZeroMqSink,
 };
 
 use super::*;
@@ -29,9 +28,9 @@ fn http_emitter_body_modes_roundtrip_with_qualified_request_fields() {
         "WITHOUT BODY INVOKE write_header('X-Request', input.method)",
     ] {
         let source = format!(
-            "CREATE EMITTER send FROM source TO HTTP api METHOD input.method PATH input.path MODE \
-             ACK RETRY POLICY BACKOFF 250ms MAX 30s {body} FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
-             ON GENERAL ERROR LOG;"
+            "CREATE HTTP REQUEST EMITTER send FROM source TO api METHOD input.method PATH \
+             input.path MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s {body} FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         );
         let parsed = parse_create_emitter(&source).expect("HTTP emitter should parse");
         let canonical = parsed
@@ -45,9 +44,9 @@ fn http_emitter_body_modes_roundtrip_with_qualified_request_fields() {
 #[test]
 fn fields_named_like_the_request_clauses_stay_in_the_http_request() {
     let parsed = parse_create_emitter(
-        "CREATE EMITTER send FROM source TO HTTP api METHOD method PATH path MODE ACK RETRY \
-         POLICY BACKOFF 250ms MAX 30s WITHOUT BODY INVOKE write_header('X-Mode', mode) FLUSH \
-         IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        "CREATE HTTP REQUEST EMITTER send FROM source TO api METHOD method PATH path MODE ACK \
+         RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY INVOKE write_header('X-Mode', mode) \
+         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
     )
     .expect("bare method and path fields complete their expressions");
 
@@ -65,10 +64,10 @@ fn fields_named_like_the_request_clauses_stay_in_the_http_request() {
         &crate::parse_expression("path").expect("valid expression")
     );
 
-    let input = "CREATE EMITTER send FROM source TO HTTP api METHOD method ";
+    let input = "CREATE HTTP REQUEST EMITTER send FROM source TO api METHOD method ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(suggestions.contains(&"PATH".to_string()), "{suggestions:?}");
-    let input = "CREATE EMITTER send FROM source TO HTTP api METHOD method PATH path ";
+    let input = "CREATE HTTP REQUEST EMITTER send FROM source TO api METHOD method PATH path ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(suggestions.contains(&"MODE".to_string()), "{suggestions:?}");
 }
@@ -76,8 +75,8 @@ fn fields_named_like_the_request_clauses_stay_in_the_http_request() {
 #[test]
 fn fields_named_like_keywords_stay_in_a_fifo_group_and_values() {
     let parsed = parse_create_emitter(&complete_codec_emitter(
-        "SQS broker QUEUE events.fifo FIFO GROUP concat(input.mode, mode) MODE SINGLE RETRY \
-         POLICY BACKOFF 250ms MAX 30s",
+        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP \
+         concat(input.mode, mode) MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s",
     ))
     .expect("a bare mode completes the group before MODE");
     let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
@@ -96,9 +95,9 @@ fn fields_named_like_keywords_stay_in_a_fifo_group_and_values() {
     );
 
     let parsed = parse_create_emitter(
-        "CREATE EMITTER emit FROM p99 TO CLICKHOUSE db INSERT TO TABLE events VALUES { 'to' = to, \
-         'end' = input.end, 'from' = `from` } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s BATCH \
-         MAX MESSAGES 100 MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        "CREATE CLICKHOUSE TABLE EMITTER emit FROM p99 TO db TABLE 'events' MODE ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s VALUES { 'to' = to, 'end' = input.end, 'from' = `from` } BATCH MAX \
+         MESSAGES 100 MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
     )
     .expect("values named like keywords stay in their entries");
     let EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink { values, .. })) =
@@ -119,9 +118,9 @@ fn fields_named_like_keywords_stay_in_a_fifo_group_and_values() {
 #[test]
 fn a_path_opening_with_a_parenthesis_still_begins_after_the_method() {
     let parsed = parse_create_emitter(
-        "CREATE EMITTER send FROM source TO HTTP api METHOD input.method PATH (input.prefix + \
-         input.tenant) + input.path MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY \
-         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        "CREATE HTTP REQUEST EMITTER send FROM source TO api METHOD input.method PATH \
+         (input.prefix + input.tenant) + input.path MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s \
+         WITHOUT BODY FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
     )
     .expect("PATH takes an expression, so the parenthesis after it opens that expression");
 
@@ -144,35 +143,36 @@ fn a_path_opening_with_a_parenthesis_still_begins_after_the_method() {
 #[test]
 fn http_emitter_requires_ordered_request_and_body_clauses() {
     for sink in [
-        "HTTP api PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY",
-        "HTTP api METHOD 'GET' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY",
-        "HTTP api METHOD 'GET' PATH '/' MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT \
-         BODY",
-        "HTTP api METHOD 'GET' PATH '/' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF \
+        "HTTP REQUEST EMITTER emit FROM p99 TO api PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms \
+         MAX 30s WITHOUT BODY",
+        "HTTP REQUEST EMITTER emit FROM p99 TO api METHOD 'GET' MODE ACK RETRY POLICY BACKOFF \
          250ms MAX 30s WITHOUT BODY",
-        "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY \
-         INHERIT ALL",
-        "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY \
-         SET id = input.id",
-        "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY \
-         VALUES { 'id' = input.id }",
-        "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING \
-         body_codec WITHOUT BODY",
-        "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY \
-         BATCH MAX MESSAGES 2 MAX SIZE 1MiB",
+        "HTTP REQUEST EMITTER emit FROM p99 TO api METHOD 'GET' PATH '/' MODE NO ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s WITHOUT BODY",
+        "HTTP REQUEST EMITTER emit FROM p99 TO api METHOD 'GET' PATH '/' MODE ACK SEQUENTIAL ACK \
+         TIMEOUT 1s RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY",
+        "HTTP REQUEST EMITTER emit FROM p99 TO api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s",
+        "HTTP REQUEST EMITTER emit FROM p99 TO api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s WITHOUT BODY INHERIT ALL",
+        "HTTP REQUEST EMITTER emit FROM p99 TO api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s WITHOUT BODY SET id = input.id",
+        "HTTP REQUEST EMITTER emit FROM p99 TO api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s WITHOUT BODY VALUES { 'id' = input.id }",
+        "HTTP REQUEST EMITTER emit FROM p99 TO api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s ENCODE USING body_codec WITHOUT BODY",
+        "HTTP REQUEST EMITTER emit FROM p99 TO api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s WITHOUT BODY BATCH MAX MESSAGES 2 MAX SIZE 1MiB",
     ] {
-        let source = format!(
-            "CREATE EMITTER send FROM source TO {sink} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
-             GENERAL ERROR LOG;"
-        );
+        let source =
+            format!("CREATE {sink} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;");
         assert!(parse_create_emitter(&source).is_err(), "{source}");
     }
 }
 
 #[test]
 fn http_emitter_completion_follows_clause_order() {
-    let prefix = "CREATE EMITTER send FROM source TO HTTP api ";
+    let prefix = "CREATE HTTP REQUEST EMITTER send FROM source TO api ";
     assert_eq!(suggest_create_emitter(prefix, prefix.len()), vec!["METHOD"]);
     let mode = format!("{prefix}METHOD 'POST' PATH input.path MODE ");
     assert_eq!(suggest_create_emitter(&mode, mode.len()), vec!["ACK"]);
@@ -187,8 +187,8 @@ fn http_emitter_completion_follows_clause_order() {
 fn http_alter_sink_roundtrips_both_explicit_body_selections() {
     for body in ["ENCODE USING body_codec", "WITHOUT BODY"] {
         let source = format!(
-            "ALTER EMITTER send SET TO HTTP api METHOD input.method PATH input.path MODE ACK \
-             RETRY POLICY BACKOFF 250ms MAX 30s {body};"
+            "ALTER HTTP REQUEST EMITTER send SET TO api METHOD input.method PATH input.path MODE \
+             ACK RETRY POLICY BACKOFF 250ms MAX 30s {body};"
         );
         let parsed = parse_alter_emitter(&source).expect("HTTP replacement should parse");
         let canonical = parsed
@@ -201,7 +201,7 @@ fn http_alter_sink_roundtrips_both_explicit_body_selections() {
 
 #[test]
 fn http_request_expressions_keep_clause_words_inside_qualified_fields_and_groups() {
-    let source = "CREATE EMITTER send FROM source TO HTTP api METHOD input.path PATH \
+    let source = "CREATE HTTP REQUEST EMITTER send FROM source TO api METHOD input.path PATH \
                   coalesce(input.mode, 'MODE ACK') MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s \
                   WITHOUT BODY WHERE input.path = '/ready' INVOKE write_header('X-Method', \
                   input.method) FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
@@ -221,9 +221,13 @@ fn to_tokens(input: &str) -> Vec<Token> {
 }
 
 fn otel_emitter(signal: &str, values: &str, tail: &str) -> String {
+    let (entity, option) = match signal {
+        "LOGS" | "TRACES" => (signal, ""),
+        _ => ("METRICS", signal),
+    };
     format!(
-        "CREATE EMITTER telemetry FROM telemetry_relay TO OTEL otel_main {signal} VALUES \
-         {{{values}}} {tail} MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s FLUSH IMMEDIATE ON \
+        "CREATE OTEL {entity} EMITTER telemetry FROM telemetry_relay TO otel_main {option} MODE \
+         ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {{{values}}} {tail} FLUSH IMMEDIATE ON \
          MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
     )
 }
@@ -321,7 +325,7 @@ fn parses_otel_logs_traces_and_metric_shapes() {
 fn rejects_invalid_otel_sink_clause_surfaces() {
     assert!(
         parse_create_emitter(
-            "CREATE EMITTER telemetry FROM telemetry_relay TO OTEL otel_main LOGS MODE ACK RETRY \
+            "CREATE OTEL LOGS EMITTER telemetry FROM telemetry_relay TO otel_main  MODE ACK RETRY \
              POLICY BACKOFF 250ms MAX 30s FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR \
              LOG;"
         )
@@ -337,18 +341,18 @@ fn rejects_invalid_otel_sink_clause_surfaces() {
     );
     assert!(
         parse_create_emitter(
-            "CREATE EMITTER telemetry FROM telemetry_relay TO OTEL otel_main LOGS VALUES {'time' \
-             = input.event_ts, 'body' = input.message} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX \
-             30s FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+            "CREATE OTEL LOGS EMITTER telemetry FROM telemetry_relay TO otel_main  MODE NO ACK \
+             RETRY POLICY BACKOFF 250ms MAX 30s VALUES {'time' = input.event_ts, 'body' = \
+             input.message} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         )
         .is_err()
     );
     assert!(
         parse_create_emitter(
-            "CREATE EMITTER telemetry FROM telemetry_relay TO OTEL otel_main LOGS VALUES {'time' \
-             = input.event_ts, 'body' = input.message} MODE ACK RETRY POLICY BACKOFF 250ms MAX \
-             30s ENCODE USING telemetry_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
-             ERROR LOG;"
+            "CREATE OTEL LOGS EMITTER telemetry FROM telemetry_relay TO otel_main  MODE ACK RETRY \
+             POLICY BACKOFF 250ms MAX 30s VALUES {'time' = input.event_ts, 'body' = \
+             input.message} ENCODE USING telemetry_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
+             GENERAL ERROR LOG;"
         )
         .is_err()
     );
@@ -356,33 +360,28 @@ fn rejects_invalid_otel_sink_clause_surfaces() {
 
 #[test]
 fn otel_completion_stays_within_the_selected_signal_grammar() {
-    let signal = "CREATE EMITTER telemetry FROM telemetry_relay TO OTEL otel_main ";
-    let signal_suggestions = suggest_create_emitter(signal, signal.len());
-    assert!(signal_suggestions.contains(&"LOGS".to_string()));
-    assert!(signal_suggestions.contains(&"TRACES".to_string()));
-    assert!(signal_suggestions.contains(&"METRIC".to_string()));
-    assert!(!signal_suggestions.contains(&"TOPIC".to_string()));
-
-    let after_values = "CREATE EMITTER telemetry FROM telemetry_relay TO OTEL otel_main LOGS \
-                        VALUES {'time' = input.event_ts, 'body' = input.message} ";
-    let route_suggestions = suggest_create_emitter(after_values, after_values.len());
-    assert!(route_suggestions.contains(&"ATTRIBUTES".to_string()));
-    assert!(route_suggestions.contains(&"RESOURCE".to_string()));
-    assert!(route_suggestions.contains(&"SCOPE".to_string()));
-    assert!(route_suggestions.contains(&"MODE".to_string()));
-    assert!(!route_suggestions.contains(&"ENCODE USING".to_string()));
+    let logs = "CREATE OTEL LOGS EMITTER telemetry FROM events TO collector ";
+    assert_eq!(suggest_create_emitter(logs, logs.len()), vec!["MODE"]);
+    let metric = "CREATE OTEL METRICS EMITTER telemetry FROM events TO collector ";
+    assert_eq!(suggest_create_emitter(metric, metric.len()), vec!["METRIC"]);
+    let values = "CREATE OTEL LOGS EMITTER telemetry FROM events TO collector MODE ACK RETRY \
+                  POLICY BACKOFF 1s MAX 2s VALUES {'body' = input.body} ";
+    let suggestions = suggest_create_emitter(values, values.len());
+    for clause in ["ATTRIBUTES", "RESOURCE", "SCOPE"] {
+        assert!(suggestions.contains(&clause.to_string()), "{suggestions:?}");
+    }
 }
 
 #[test]
 fn parses_alter_emitter_operations_in_written_order() {
     let parsed = parse_alter_emitter(
-        "ALTER EMITTER event_sink ADD FROM backup WHERE input.kind = 'backup', ALTER FROM backup \
-         SET WHERE input.kind = 'current', ALTER FROM backup DROP WHERE, DROP FROM backup, SET TO \
-         ZEROMQ sink_b MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s, SET CLIENT sink_c, SET \
-         ENCODE USING event_codec, DROP ENCODE, SET COLLECT FOR 10ms MAX BATCH SIZE 1MiB, DROP \
-         COLLECT, SET DETACHED, SET FLUSH IMMEDIATE;",
+        "ALTER ZEROMQ PUSH EMITTER event_sink ADD FROM backup WHERE input.kind = 'backup', ALTER \
+         FROM backup SET WHERE input.kind = 'current', ALTER FROM backup DROP WHERE, DROP FROM \
+         backup, SET TO sink_b MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING \
+         event_codec, SET CLIENT sink_c, SET ENCODE USING event_codec, DROP ENCODE, SET COLLECT \
+         FOR 10ms MAX BATCH SIZE 1MiB, DROP COLLECT, SET DETACHED, SET FLUSH IMMEDIATE;",
     )
-    .expect("ALTER EMITTER should parse");
+    .expect("kinded ALTER should parse");
 
     assert_eq!(parsed.operations.len(), 12);
     assert!(matches!(
@@ -403,10 +402,10 @@ fn parses_alter_emitter_operations_in_written_order() {
     ));
     assert!(matches!(
         parsed.operations[4],
-        AlterEmitterOperation::SetSink {
-            ref sink,
+        AlterEmitterOperation::SetTo {
+            ref destination,
             ..
-        } if matches!(sink.as_ref(), EmitSink::ZeroMq(_))
+        } if matches!(destination.as_ref(), EmitSink::ZeroMq(_))
     ));
     assert!(matches!(
         parsed.operations[5],
@@ -439,17 +438,18 @@ fn parses_alter_emitter_operations_in_written_order() {
 #[test]
 fn parses_alter_emitter_direct_sink_values_and_iceberg_commit_policy() {
     let direct = parse_alter_emitter(
-        "ALTER EMITTER event_sink SET TO POSTGRES postgres_main INSERT TO TABLE events VALUES { \
-         'seq' = concat(input.kind, ','), 'value' = input.value } MODE ACK RETRY POLICY BACKOFF \
-         250ms MAX 30s, SET BATCH MAX MESSAGES 100 MAX SIZE 1MiB, SET FLUSH EACH 1s MAX BATCH \
+        "ALTER POSTGRES TABLE EMITTER event_sink SET TO postgres_main TABLE 'events' MODE ACK \
+         RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'seq' = concat(input.kind, ','), 'value' = \
+         input.value } , SET BATCH MAX MESSAGES 100 MAX SIZE 1MiB, SET FLUSH EACH 1s MAX BATCH \
          SIZE 1MiB;",
     )
     .expect("direct sink expressions should preserve internal commas");
     assert_eq!(direct.operations.len(), 3);
 
-    let iceberg =
-        parse_alter_emitter("ALTER EMITTER event_sink SET COMMIT EACH 30s MAX SIZE 64MiB;")
-            .expect("Iceberg commit policy should parse");
+    let iceberg = parse_alter_emitter(
+        "ALTER ICEBERG TABLE EMITTER event_sink SET COMMIT EACH 30s MAX SIZE 64MiB;",
+    )
+    .expect("Iceberg commit policy should parse");
     assert_eq!(
         iceberg.operations,
         vec![AlterEmitterOperation::SetCommit {
@@ -459,18 +459,18 @@ fn parses_alter_emitter_direct_sink_values_and_iceberg_commit_policy() {
     );
 
     let replace_iceberg = parse_alter_emitter(
-        "ALTER EMITTER event_sink SET TO ICEBERG ON S3 s3_main TABLE events VALUES { 'value' = \
-         input.value } LOCATION 's3://warehouse/events' CATALOG iceberg_catalog COMMIT EACH 1m \
-         MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s;",
+        "ALTER ICEBERG TABLE EMITTER event_sink SET TO s3_main TABLE 'events' LOCATION \
+         's3://warehouse/events' CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK \
+         RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'value' = input.value } ;",
     )
     .expect("SET TO Iceberg should require and retain its complete commit contract");
     assert!(matches!(
         replace_iceberg.operations.as_slice(),
-        [AlterEmitterOperation::SetSink {
-            sink,
+        [AlterEmitterOperation::SetTo {
+            destination,
             ..
         }] if matches!(
-            sink.as_ref(),
+            destination.as_ref(),
             EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
                 commit_each,
                 max_commit_size,
@@ -482,14 +482,16 @@ fn parses_alter_emitter_direct_sink_values_and_iceberg_commit_policy() {
 
 #[test]
 fn rejects_alter_emitter_without_operations_or_complete_flush_policy() {
-    assert!(parse_alter_emitter("ALTER EMITTER event_sink;").is_err());
-    assert!(parse_alter_emitter("ALTER EMITTER event_sink SET FLUSH EACH 1s;").is_err());
+    assert!(parse_alter_emitter("ALTER ZEROMQ PUSH EMITTER event_sink;").is_err());
+    assert!(
+        parse_alter_emitter("ALTER ZEROMQ PUSH EMITTER event_sink SET FLUSH EACH 1s;").is_err()
+    );
 }
 
 #[test]
 fn alter_emitter_completion_comes_from_its_operation_grammar() {
-    let suggestions = suggest_alter_emitter("ALTER EMITTER event_sink ", usize::MAX);
-    for expected in ["ADD", "ALTER", "SET", "DROP"] {
+    let suggestions = suggest_alter_emitter("ALTER ZEROMQ PUSH EMITTER event_sink ", usize::MAX);
+    for expected in ["ADD FROM", "ALTER FROM", "SET TO", "DROP FROM"] {
         assert!(
             suggestions.contains(&expected.to_string()),
             "missing {expected}: {suggestions:?}"
@@ -514,8 +516,8 @@ fn batch_policy(max_messages: u64, max_size: &str) -> EmitterBatchPolicy {
 
 fn complete_codec_emitter(sink: &str) -> String {
     format!(
-        "CREATE EMITTER emit FROM p99 TO {sink} ENCODE USING my_codec FLUSH IMMEDIATE ON MESSAGE \
-         ERROR LOG ON GENERAL ERROR LOG;"
+        "CREATE {sink} ENCODE USING my_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
+         ERROR LOG;"
     )
 }
 
@@ -533,9 +535,9 @@ fn assert_canonical_emitter_roundtrip(source: &str, mode: &str) {
 
 #[test]
 fn native_client_emitter_constructs_output_and_round_trips() {
-    let source = "CREATE EMITTER app_output FROM orders TO CLIENT SCHEMA outgoing MODE ACK \
-                  PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s INHERIT id SET \
-                  cents = input.amount * 100 WHERE output.cents > 0 BATCH MAX MESSAGES 16 MAX \
+    let source = "CREATE CLIENT CONSUMER EMITTER app_output FROM orders TO SCHEMA outgoing MODE \
+                  ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s INHERIT id \
+                  SET cents = input.amount * 100 WHERE output.cents > 0 BATCH MAX MESSAGES 16 MAX \
                   SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
     assert_canonical_emitter_roundtrip(source, "CLIENT ACK");
     let parsed = parse_create_emitter(source).expect("native client output parses");
@@ -546,10 +548,10 @@ fn native_client_emitter_constructs_output_and_round_trips() {
 
 #[test]
 fn native_client_emitter_requires_ack_mode_and_batch_limits() {
-    let prefix = "CREATE EMITTER app_output FROM orders TO CLIENT SCHEMA outgoing ";
+    let prefix = "CREATE CLIENT CONSUMER EMITTER app_output FROM orders TO SCHEMA outgoing ";
     let tail = " FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
     for body in [
-        "MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s BATCH MAX MESSAGES 16 MAX SIZE 1MiB",
+        "MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s BATCH MAX MESSAGES 16 MAX SIZE 1MiB",
         "MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s",
         "MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s BATCH MAX MESSAGES \
          0 MAX SIZE 1MiB",
@@ -565,70 +567,78 @@ fn native_client_emitter_requires_ack_mode_and_batch_limits() {
 
 #[test]
 fn native_client_emitter_completion_stays_on_its_grammar_branch() {
-    let source = "CREATE EMITTER app_output FROM orders TO CLIENT ";
+    let source = "CREATE CLIENT CONSUMER EMITTER app_output FROM orders TO ";
     let suggestions = suggest_create_emitter(source, source.len());
     assert!(suggestions.contains(&"SCHEMA".to_string()));
     assert!(!suggestions.contains(&"TOPIC".to_string()));
-    let source = "CREATE EMITTER app_output FROM orders TO CLIENT SCHEMA outgoing MODE ACK ";
+    let source =
+        "CREATE CLIENT CONSUMER EMITTER app_output FROM orders TO SCHEMA outgoing MODE ACK ";
     let suggestions = suggest_create_emitter(source, source.len());
     assert!(suggestions.contains(&"SEQUENTIAL".to_string()));
     assert!(suggestions.contains(&"PARALLEL".to_string()));
-    assert!(!suggestions.contains(&"NO_ACK".to_string()));
+    assert!(!suggestions.contains(&"NO ACK".to_string()));
 }
 
 #[test]
 fn every_publishing_mode_body_parses_and_canonical_round_trips() {
     for sink in [
-        "KAFKA broker TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "KAFKA broker TOPIC events MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms \
-         MAX 30s",
-        "PULSAR broker TOPIC events MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF \
-         250ms MAX 30s",
-        "RABBITMQ broker QUEUE events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "MQTT broker TOPIC events MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s",
-        "MQTT broker TOPIC events MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF \
-         250ms MAX 30s",
-        "MQTT broker TOPIC events MODE QOS 2 ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY \
+        "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s",
-        "NATS broker SUBJECT events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "NATS broker SUBJECT events MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY \
+        "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE ACK SEQUENTIAL ACK \
+         TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
+        "PULSAR TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE ACK PARALLEL MAX 16 ACK \
+         TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
+        "RABBITMQ QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' MODE NO ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s",
-        "REDIS PUBSUB broker CHANNEL events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "ZEROMQ broker MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "SQS broker QUEUE events MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s",
-        "SQS broker QUEUE events MODE BATCH RETRY POLICY BACKOFF 250ms MAX 30s",
-        "SENTRY broker MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+        "MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE QOS 0 RETRY POLICY \
+         BACKOFF 250ms MAX 30s",
+        "MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE QOS 1 ACK SEQUENTIAL ACK \
+         TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
+        "MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE QOS 2 ACK PARALLEL MAX 8 \
+         ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
+        "NATS SUBJECT EMITTER emit FROM p99 TO broker SUBJECT 'events' MODE NO ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s",
+        "NATS SUBJECT EMITTER emit FROM p99 TO broker SUBJECT 'events' MODE JETSTREAM ACK \
+         SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
+        "REDIS PUBSUB EMITTER emit FROM p99 TO broker CHANNEL 'events' MODE NO ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s",
+        "ZEROMQ PUSH EMITTER emit FROM p99 TO broker MODE NO ACK RETRY POLICY BACKOFF 250ms MAX \
+         30s",
+        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' MODE SINGLE RETRY POLICY \
+         BACKOFF 250ms MAX 30s",
+        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' MODE BATCH RETRY POLICY BACKOFF \
+         250ms MAX 30s",
+        "SENTRY EVENT EMITTER emit FROM p99 TO broker MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
     ] {
         assert_canonical_emitter_roundtrip(&complete_codec_emitter(sink), sink);
     }
 
     for sink in [
-        "CLICKHOUSE db INSERT TO TABLE events VALUES { 'id' = input.id } MODE ACK RETRY POLICY \
-         BACKOFF 250ms MAX 30s BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
-        "POSTGRES db INSERT TO TABLE events VALUES { 'id' = input.id } MODE ACK RETRY POLICY \
-         BACKOFF 250ms MAX 30s BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
-        "MYSQL db INSERT TO TABLE events VALUES { 'id' = input.id } MODE ACK RETRY POLICY BACKOFF \
-         250ms MAX 30s BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
-        "MONGODB db INSERT TO COLLECTION events VALUES { 'id' = input.id } MODE ACK RETRY POLICY \
-         BACKOFF 250ms MAX 30s BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
-        "ICEBERG ON S3 store TABLE events VALUES { 'id' = input.id } LOCATION \
+        "CLICKHOUSE TABLE EMITTER emit FROM p99 TO db TABLE 'events' MODE ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
+        "POSTGRES TABLE EMITTER emit FROM p99 TO db TABLE 'events' MODE ACK RETRY POLICY BACKOFF \
+         250ms MAX 30s VALUES { 'id' = input.id } BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
+        "MYSQL TABLE EMITTER emit FROM p99 TO db TABLE 'events' MODE ACK RETRY POLICY BACKOFF \
+         250ms MAX 30s VALUES { 'id' = input.id } BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
+        "MONGODB COLLECTION EMITTER emit FROM p99 TO db COLLECTION 'events' MODE ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
+        "ICEBERG TABLE EMITTER emit FROM p99 TO store TABLE 'events' LOCATION \
          's3://bucket/events' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY POLICY \
-         BACKOFF 250ms MAX 30s",
-        "OTEL otel_main LOGS VALUES { 'time' = input.time, 'body' = input.body } ATTRIBUTES { \
+         BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } ",
+        "OTEL LOGS EMITTER emit FROM p99 TO otel_main  MODE ACK RETRY POLICY BACKOFF 250ms MAX \
+         30s VALUES { 'time' = input.time, 'body' = input.body } ATTRIBUTES { \
          'service.instance.id' = input.instance_id } RESOURCE { 'service.name' = 'checkout' } \
-         SCOPE 'nervix/logs' VERSION '1.0' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "OTEL otel_main TRACES VALUES { 'trace_id' = input.trace_id, 'span_id' = input.span_id, \
-         'name' = input.name, 'start_time' = input.start_time, 'end_time' = input.end_time } MODE \
-         ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "OTEL otel_main METRIC 'request.duration' UNIT 'ms' DESCRIPTION 'Request duration' \
-         HISTOGRAM CUMULATIVE VALUES { 'time' = input.time, 'count' = input.count, \
-         'bucket_counts' = input.bucket_counts, 'explicit_bounds' = input.explicit_bounds } MODE \
-         ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+         SCOPE 'nervix/logs' VERSION '1.0' ",
+        "OTEL TRACES EMITTER emit FROM p99 TO otel_main  MODE ACK RETRY POLICY BACKOFF 250ms MAX \
+         30s VALUES { 'trace_id' = input.trace_id, 'span_id' = input.span_id, 'name' = \
+         input.name, 'start_time' = input.start_time, 'end_time' = input.end_time } ",
+        "OTEL METRICS EMITTER emit FROM p99 TO otel_main METRIC 'request.duration' UNIT 'ms' \
+         DESCRIPTION 'Request duration' HISTOGRAM CUMULATIVE MODE ACK RETRY POLICY BACKOFF 250ms \
+         MAX 30s VALUES { 'time' = input.time, 'count' = input.count, 'bucket_counts' = \
+         input.bucket_counts, 'explicit_bounds' = input.explicit_bounds } ",
     ] {
-        let source = format!(
-            "CREATE EMITTER emit FROM p99 TO {sink} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
-             GENERAL ERROR LOG;"
-        );
+        let source =
+            format!("CREATE {sink} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;");
         assert_canonical_emitter_roundtrip(&source, sink);
     }
 }
@@ -636,22 +646,25 @@ fn every_publishing_mode_body_parses_and_canonical_round_trips() {
 #[test]
 fn rejects_missing_incomplete_or_foreign_publishing_modes() {
     for source in [
-        complete_codec_emitter("KAFKA broker TOPIC events"),
-        complete_codec_emitter("KAFKA broker TOPIC events MODE NO_ACK"),
+        complete_codec_emitter("KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events'"),
         complete_codec_emitter(
-            "KAFKA broker TOPIC events MODE ACK SEQUENTIAL RETRY POLICY BACKOFF 250ms MAX 30s",
+            "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK",
         ),
         complete_codec_emitter(
-            "KAFKA broker TOPIC events MODE ACK PARALLEL MAX 0 ACK TIMEOUT 30s RETRY POLICY \
-             BACKOFF 250ms MAX 30s",
+            "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE ACK SEQUENTIAL RETRY \
+             POLICY BACKOFF 250ms MAX 30s",
         ),
         complete_codec_emitter(
-            "KAFKA broker TOPIC events MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY \
-             BACKOFF 250ms MAX 30s",
+            "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE ACK PARALLEL MAX 0 \
+             ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
         ),
-        "CREATE EMITTER emit FROM p99 TO CLICKHOUSE db INSERT TO TABLE events VALUES { 'id' = \
-         input.id } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s FLUSH IMMEDIATE ON MESSAGE ERROR \
-         LOG ON GENERAL ERROR LOG;"
+        complete_codec_emitter(
+            "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE QOS 1 ACK SEQUENTIAL \
+             ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
+        ),
+        "CREATE CLICKHOUSE TABLE EMITTER emit FROM p99 TO db TABLE 'events' MODE ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
+         GENERAL ERROR LOG;"
             .to_string(),
     ] {
         assert!(
@@ -663,14 +676,14 @@ fn rejects_missing_incomplete_or_foreign_publishing_modes() {
 
 #[test]
 fn publishing_mode_completion_stays_within_the_selected_sink() {
-    let before_mode = "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events ";
+    let before_mode = "CREATE KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' ";
     let suggestions = suggest_create_emitter(before_mode, before_mode.len());
     assert_eq!(suggestions, vec!["MODE".to_string()]);
 
     let kafka_mode = format!("{before_mode}MODE ");
     let suggestions = suggest_create_emitter(&kafka_mode, kafka_mode.len());
     assert!(suggestions.contains(&"ACK".to_string()));
-    assert!(suggestions.contains(&"NO_ACK".to_string()));
+    assert!(suggestions.contains(&"NO ACK".to_string()));
     assert!(!suggestions.contains(&"QOS".to_string()));
     assert!(!suggestions.contains(&"JETSTREAM".to_string()));
     assert!(!suggestions.contains(&"SINGLE".to_string()));
@@ -678,10 +691,10 @@ fn publishing_mode_completion_stays_within_the_selected_sink() {
 
 #[test]
 fn nats_jetstream_completion_uses_the_complete_mode_phrase() {
-    let input = "CREATE EMITTER emit FROM p99 TO NATS broker SUBJECT events MODE ";
+    let input = "CREATE NATS SUBJECT EMITTER emit FROM p99 TO broker SUBJECT 'events' MODE ";
     let suggestions = suggest_create_emitter(input, input.len());
 
-    assert!(suggestions.contains(&"NO_ACK".to_string()));
+    assert!(suggestions.contains(&"NO ACK".to_string()));
     assert!(suggestions.contains(&"JETSTREAM ACK".to_string()));
     assert!(!suggestions.contains(&"JETSTREAM".to_string()));
     assert!(!suggestions.contains(&"QOS".to_string()));
@@ -690,29 +703,32 @@ fn nats_jetstream_completion_uses_the_complete_mode_phrase() {
 
 #[test]
 fn mqtt_mode_completion_requires_qos_before_the_level() {
-    let input = "CREATE EMITTER emit FROM p99 TO MQTT broker TOPIC events MODE ";
+    let input = "CREATE MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE ";
     let suggestions = suggest_create_emitter(input, input.len());
 
     assert!(suggestions.contains(&"QOS".to_string()));
     assert!(!suggestions.contains(&"mqtt_qos".to_string()));
 
-    let input = "CREATE EMITTER emit FROM p99 TO MQTT broker TOPIC events MODE QOS ";
+    let input = "CREATE MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE QOS ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert_eq!(suggestions, vec!["mqtt_qos".to_string()]);
 }
 
 #[test]
-fn sqs_fifo_queue_suffix_has_a_completable_keyword() {
-    let input = "ALTER EMITTER emit SET TO SQS broker QUEUE events . ";
+fn sqs_quoted_fifo_queue_completes_its_group_and_policy() {
+    let input = "ALTER SQS QUEUE EMITTER outgoing SET TO broker QUEUE 'orders.fifo' ";
     let suggestions = suggest_alter_emitter(input, input.len());
-
-    assert_eq!(suggestions, vec!["FIFO".to_string()]);
+    assert!(
+        suggestions.contains(&"FIFO GROUP".to_string()),
+        "{suggestions:?}"
+    );
+    assert!(suggestions.contains(&"MODE".to_string()), "{suggestions:?}");
 }
 
 #[test]
 fn direct_emitter_completion_only_offers_where_construction() {
-    let input = "CREATE EMITTER emit FROM p99 TO CLICKHOUSE db INSERT TO TABLE events VALUES { \
-                 'id' = input.id } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ";
+    let input = "CREATE CLICKHOUSE TABLE EMITTER emit FROM p99 TO db TABLE 'events' MODE ACK \
+                 RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } ";
     let suggestions = suggest_create_emitter(input, input.len());
 
     assert!(suggestions.contains(&"WHERE".to_string()));
@@ -728,8 +744,8 @@ fn direct_emitter_completion_only_offers_where_construction() {
 #[test]
 fn parses_sqs_fifo_group_forms() {
     let from_branch = parse_create_emitter(&complete_codec_emitter(
-        "SQS broker QUEUE events.fifo FIFO GROUP FROM BRANCH MODE SINGLE RETRY POLICY BACKOFF \
-         250ms MAX 30s",
+        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP FROM BRANCH \
+         MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s",
     ))
     .expect("SQS FIFO FROM BRANCH mode should parse");
     assert!(matches!(
@@ -738,7 +754,7 @@ fn parses_sqs_fifo_group_forms() {
             queue,
             fifo_group: Some(nervix_models::SqsFifoGroup::FromBranch),
             ..
-        })) if queue == "events.fifo"
+        })) if queue.as_str() == "events.fifo"
     ));
     let canonical = from_branch
         .to_canonical_nspl()
@@ -748,8 +764,8 @@ fn parses_sqs_fifo_group_forms() {
     assert_eq!(round_tripped, from_branch);
 
     let expression = parse_create_emitter(&complete_codec_emitter(
-        "SQS broker QUEUE events.fifo FIFO GROUP concat(input.tenant, '-', input.region) MODE \
-         BATCH RETRY POLICY BACKOFF 250ms MAX 30s",
+        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events.fifo' FIFO GROUP \
+         concat(input.tenant, '-', input.region) MODE BATCH RETRY POLICY BACKOFF 250ms MAX 30s",
     ))
     .expect("SQS FIFO expression mode should parse");
     assert!(matches!(
@@ -764,8 +780,8 @@ fn parses_sqs_fifo_group_forms() {
 #[test]
 fn rejects_fifo_group_on_non_sqs_sink() {
     let source = complete_codec_emitter(
-        "KAFKA broker TOPIC events FIFO GROUP FROM BRANCH MODE NO_ACK RETRY POLICY BACKOFF 250ms \
-         MAX 30s",
+        "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' FIFO GROUP FROM BRANCH MODE \
+         NO ACK RETRY POLICY BACKOFF 250ms MAX 30s",
     );
     assert!(parse_create_emitter(&source).is_err());
 }
@@ -773,16 +789,18 @@ fn rejects_fifo_group_on_non_sqs_sink() {
 #[test]
 fn parses_alter_emitter_publishing_and_attachment_modes() {
     let parsed = parse_alter_emitter(
-        "ALTER EMITTER event_sink SET MODE ACK PARALLEL MAX 32 ACK TIMEOUT 10s RETRY POLICY \
-         BACKOFF 250ms MAX 30s, SET DETACHED, SET TO ZEROMQ sink_b MODE NO_ACK RETRY POLICY \
-         BACKOFF 1s MAX 1m;",
+        "ALTER KAFKA TOPIC EMITTER event_sink SET MODE ACK PARALLEL MAX 32 ACK TIMEOUT 10s RETRY \
+         POLICY BACKOFF 250ms MAX 30s, SET DETACHED, SET TO sink_b TOPIC 'events' MODE NO ACK \
+         RETRY POLICY BACKOFF 1s MAX 1m ENCODE USING event_codec;",
     )
-    .expect("ALTER EMITTER mode operations should parse");
+    .expect("kinded ALTER mode operations should parse");
 
     assert!(matches!(
         parsed.operations[0],
         AlterEmitterOperation::SetPublishingMode {
-            mode: nervix_models::EmitterPublishingMode::BrokerAck { .. }
+            mode: EmitterModeChange::Kafka(KafkaEmitterMode::Topic(
+                KafkaTopicPublishingMode::Ack { .. }
+            ))
         }
     ));
     assert!(matches!(
@@ -793,20 +811,23 @@ fn parses_alter_emitter_publishing_and_attachment_modes() {
     ));
     assert!(matches!(
         parsed.operations[2],
-        AlterEmitterOperation::SetSink {
-            publishing_mode: nervix_models::EmitterPublishingMode::NoAck { .. },
+        AlterEmitterOperation::SetTo {
+            ref destination,
             ..
-        }
+        } if matches!(destination.publishing(), EmitterPublishing::NoAck { .. })
     ));
 
     let request_ack = parse_alter_emitter(
-        "ALTER EMITTER database_sink SET MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s;",
+        "ALTER POSTGRES TABLE EMITTER database_sink SET MODE ACK RETRY POLICY BACKOFF 250ms MAX \
+         30s;",
     )
     .expect("request/response ACK mode should parse without a confirmation window");
     assert!(matches!(
         request_ack.operations.as_slice(),
         [AlterEmitterOperation::SetPublishingMode {
-            mode: nervix_models::EmitterPublishingMode::RequestAck { .. }
+            mode: EmitterModeChange::Postgres(PostgresEmitterMode::Table(
+                PostgresTablePublishingMode::Ack { .. }
+            ))
         }]
     ));
 }
@@ -814,8 +835,8 @@ fn parses_alter_emitter_publishing_and_attachment_modes() {
 #[test]
 fn direct_database_emitters_reject_codecs() {
     let source = complete_codec_emitter(
-        "POSTGRES database INSERT TO TABLE events VALUES { 'value' = input.value } WITH MAX BATCH \
-         100 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+        "POSTGRES TABLE EMITTER emit FROM p99 TO database TABLE 'events' MODE ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s VALUES { 'value' = input.value } ",
     );
     assert!(parse_create_emitter(&source).is_err());
 }
@@ -823,9 +844,9 @@ fn direct_database_emitters_reject_codecs() {
 #[test]
 fn parses_create_emitter_kafka() {
     let input = r#"
-        CREATE EMITTER emit
+        CREATE KAFKA TOPIC EMITTER emit
             FROM p99
-            TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO broker1 TOPIC 'topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -845,13 +866,16 @@ fn parses_create_emitter_kafka() {
         parsed.body.body.codec().map(|codec| codec.as_str()),
         Some("my_codec")
     );
+    let EmitSink::Kafka(KafkaSink::Topic(destination)) = parsed.sink.as_ref() else {
+        panic!("expected Kafka Topic");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
-            client: nervix_models::ClientName::try_from("broker1")
-                .expect("valid client identifier"),
-            topic: nervix_models::TopicName::try_from("topic").expect("valid topic identifier"),
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("broker1").expect("valid client identifier")
+    );
+    assert_eq!(
+        destination.topic,
+        nervix_models::KafkaTopicName::try_from("topic").expect("valid topic identifier")
     );
     assert_eq!(parsed.mode, AckMode::Attached);
 }
@@ -859,8 +883,8 @@ fn parses_create_emitter_kafka() {
 #[test]
 fn parses_emitter_input_collection() {
     let parsed = parse_create_emitter(
-        "CREATE EMITTER emit FROM p99 COLLECT FOR 1s MAX BATCH SIZE 10MiB TO KAFKA broker1 TOPIC \
-         topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec FLUSH \
+        "CREATE KAFKA TOPIC EMITTER emit FROM p99 COLLECT FOR 1s MAX BATCH SIZE 10MiB TO broker1 \
+         TOPIC 'topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec FLUSH \
          IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
     )
     .expect("emitter input collection must parse");
@@ -875,7 +899,7 @@ fn parses_emitter_input_collection() {
 
 #[test]
 fn suggests_input_collection_after_emitter_source() {
-    let input = "CREATE EMITTER emit FROM p99 COL";
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM p99 COL";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(suggestions.contains(&"COLLECT FOR".to_string()));
 }
@@ -883,10 +907,10 @@ fn suggests_input_collection_after_emitter_source() {
 #[test]
 fn parses_multiple_emitter_inputs_with_source_where() {
     let parsed = parse_create_emitter(
-        "CREATE EMITTER emit FROM source_a WHERE input.kind = 'a', source_b WHERE input.kind = \
-         'b' COLLECT FOR 10ms MAX BATCH SIZE 1MiB TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF \
-         250ms MAX 30s ENCODE USING my_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
-         ERROR LOG;",
+        "CREATE ZEROMQ PUSH EMITTER emit FROM source_a WHERE input.kind = 'a', source_b WHERE \
+         input.kind = 'b' COLLECT FOR 10ms MAX BATCH SIZE 1MiB TO sink MODE NO ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s ENCODE USING my_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
+         GENERAL ERROR LOG;",
     )
     .expect("multiple emitter inputs should parse");
 
@@ -907,14 +931,14 @@ fn parses_multiple_emitter_inputs_with_source_where() {
 fn rejects_incomplete_multiple_emitter_inputs() {
     assert!(
         parse_create_emitter(
-            "CREATE EMITTER emit FROM source_a, TO ZEROMQ sink ENCODE USING my_codec FLUSH \
+            "CREATE ZEROMQ PUSH EMITTER emit FROM source_a, TO sink ENCODE USING my_codec FLUSH \
              IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         )
         .is_err()
     );
     assert!(
         parse_create_emitter(
-            "CREATE EMITTER emit FROM source_a WHERE, source_b TO ZEROMQ sink ENCODE USING \
+            "CREATE ZEROMQ PUSH EMITTER emit FROM source_a WHERE, source_b TO sink ENCODE USING \
              my_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         )
         .is_err()
@@ -923,7 +947,7 @@ fn rejects_incomplete_multiple_emitter_inputs() {
 
 #[test]
 fn emitter_input_completion_does_not_leak_unrelated_grammar() {
-    let input = "CREATE EMITTER emit FROM source_a WHE";
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM source_a WHE";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(suggestions.contains(&"WHERE".to_string()));
     assert!(!suggestions.contains(&"SCHEMA".to_string()));
@@ -932,9 +956,9 @@ fn emitter_input_completion_does_not_leak_unrelated_grammar() {
 #[test]
 fn parses_create_emitter_sentry() {
     let input = r#"
-        CREATE EMITTER emit
+        CREATE SENTRY EVENT EMITTER emit
             FROM errors
-            TO SENTRY sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING error_event_codec
             INHERIT ALL
             FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -944,7 +968,7 @@ fn parses_create_emitter_sentry() {
 
     let parsed = parse_create_emitter(input).expect("parse should succeed");
 
-    assert_eq!(parsed.sink.transport_label(), "SENTRY");
+    assert_eq!(parsed.sink.transport_label(), "SENTRY EVENT");
     assert_eq!(
         parsed.sink.client().map(|client| client.as_str()),
         Some("sentry_main")
@@ -954,9 +978,9 @@ fn parses_create_emitter_sentry() {
 #[test]
 fn rejects_sentry_emitter_without_codec() {
     let input = r#"
-        CREATE EMITTER emit
+        CREATE SENTRY EVENT EMITTER emit
             FROM errors
-            TO SENTRY sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
             INHERIT ALL
             FLUSH EACH 100ms MAX BATCH SIZE 1MiB
             ON MESSAGE ERROR LOG
@@ -978,16 +1002,14 @@ fn rejects_sentry_emitter_without_codec() {
 #[test]
 fn parses_create_emitter_clickhouse() {
     let input = r#"
-        CREATE EMITTER to_ch
+        CREATE CLICKHOUSE TABLE EMITTER to_ch
             FROM notifications
-            TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
-            VALUES {
+            TO clickhouse_client TABLE 'my_table'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "clickhouse_user_id" = input.user_id,
                 "clickhouse_now" = NOW(),
                 "clickhouse_action" = LOWER(input.action)
-            }
-            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-            BATCH MAX MESSAGES 100 MAX SIZE 1MiB
+            } BATCH MAX MESSAGES 100 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -995,27 +1017,33 @@ fn parses_create_emitter_clickhouse() {
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
     assert_eq!(parsed.body.body, EmitterBody::Values);
+    let EmitSink::ClickHouse(ClickHouseSink::Table(destination)) = parsed.sink.as_ref() else {
+        panic!("expected ClickHouse Table");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
-            client: nervix_models::ClientName::try_from("clickhouse_client")
-                .expect("valid client identifier"),
-            table: nervix_models::TableName::try_from("my_table").expect("valid table identifier"),
-            values: vec![
-                ClickHouseValueMapping {
-                    column: "clickhouse_user_id".to_string(),
-                    expression: expression("input.user_id"),
-                },
-                ClickHouseValueMapping {
-                    column: "clickhouse_now".to_string(),
-                    expression: expression("NOW ( )"),
-                },
-                ClickHouseValueMapping {
-                    column: "clickhouse_action".to_string(),
-                    expression: expression("LOWER ( input.action )"),
-                },
-            ],
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("clickhouse_client").expect("valid client identifier")
+    );
+    assert_eq!(
+        destination.table,
+        nervix_models::ClickHouseTableName::try_from("my_table").expect("valid table identifier")
+    );
+    assert_eq!(
+        destination.values,
+        vec![
+            ClickHouseValueMapping {
+                column: "clickhouse_user_id".to_string(),
+                expression: expression("input.user_id"),
+            },
+            ClickHouseValueMapping {
+                column: "clickhouse_now".to_string(),
+                expression: expression("NOW ( )"),
+            },
+            ClickHouseValueMapping {
+                column: "clickhouse_action".to_string(),
+                expression: expression("LOWER ( input.action )"),
+            },
+        ]
     );
     assert_eq!(parsed.batch, Some(batch_policy(100, "1MiB")));
 }
@@ -1024,11 +1052,9 @@ fn parses_create_emitter_clickhouse() {
 fn rejects_clickhouse_emitter_without_flush_policy() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_ch FROM notifications
-        TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
-        VALUES { "user_id" = input.user_id }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 100 MAX SIZE 1MiB
+        CREATE CLICKHOUSE TABLE EMITTER to_ch FROM notifications
+        TO clickhouse_client TABLE 'my_table'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "user_id" = input.user_id } BATCH MAX MESSAGES 100 MAX SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
     );
@@ -1044,11 +1070,9 @@ fn rejects_clickhouse_emitter_without_flush_policy() {
 fn clickhouse_values_keep_an_array_value_whole() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_ch FROM notifications
-        TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
-        VALUES { "tags" = [input.first_tag, input.second_tag], "id" = input.id }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 100 MAX SIZE 1MiB
+        CREATE CLICKHOUSE TABLE EMITTER to_ch FROM notifications
+        TO clickhouse_client TABLE 'my_table'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "tags" = [input.first_tag, input.second_tag], "id" = input.id } BATCH MAX MESSAGES 100 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
     );
@@ -1079,11 +1103,9 @@ fn clickhouse_values_keep_an_array_value_whole() {
 fn rejects_clickhouse_values_with_an_unclosed_array() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_ch FROM notifications
-        TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
-        VALUES { "tags" = [input.first_tag, input.second_tag }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 100 MAX SIZE 1MiB
+        CREATE CLICKHOUSE TABLE EMITTER to_ch FROM notifications
+        TO clickhouse_client TABLE 'my_table'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "tags" = [input.first_tag, input.second_tag } BATCH MAX MESSAGES 100 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
     );
@@ -1093,8 +1115,8 @@ fn rejects_clickhouse_values_with_an_unclosed_array() {
 
 #[test]
 fn clickhouse_completion_after_values_holding_an_array_offers_the_mode() {
-    let input = "CREATE EMITTER to_ch FROM notifications TO CLICKHOUSE clickhouse_client INSERT \
-                 TO TABLE my_table VALUES { 'tags' = [input.first_tag, input.second_tag], 'id' = \
+    let input = "CREATE CLICKHOUSE TABLE EMITTER to_ch FROM notifications TO clickhouse_client \
+                 TABLE 'my_table' VALUES { 'tags' = [input.first_tag, input.second_tag], 'id' = \
                  input.id } ";
     let suggestions = suggest_create_emitter(input, input.len());
 
@@ -1109,17 +1131,14 @@ fn clickhouse_completion_after_values_holding_an_array_offers_the_mode() {
 #[test]
 fn parses_create_emitter_iceberg() {
     let input = r#"
-        CREATE DETACHED EMITTER to_iceberg
+        CREATE DETACHED ICEBERG TABLE EMITTER to_iceberg
             FROM notifications
-            TO ICEBERG ON S3 s3_client TABLE notifications
-            VALUES {
+            TO s3_client TABLE 'notifications'
+            LOCATION 's3://nervix-iceberg/tables/notifications'
+            CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "user_id" = input.user_id,
                 "action" = input.action
-            }
-            LOCATION 's3://nervix-iceberg/tables/notifications'
-            CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB
-            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-            FLUSH EACH 10s MAX BATCH SIZE 64MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+            } FLUSH EACH 10s MAX BATCH SIZE 64MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
     let tokens = to_tokens(input);
@@ -1127,176 +1146,183 @@ fn parses_create_emitter_iceberg() {
 
     assert_eq!(parsed.body.body, EmitterBody::Values);
     assert_eq!(parsed.mode, AckMode::Detached);
+    let EmitSink::Iceberg(IcebergSink::Table(destination)) = parsed.sink.as_ref() else {
+        panic!("expected Iceberg Table");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
-            backend: IcebergStorageBackend::S3,
-            client: nervix_models::ClientName::try_from("s3_client")
-                .expect("valid client identifier"),
-            table: nervix_models::TableName::try_from("notifications")
-                .expect("valid table identifier"),
-            values: vec![
-                ClickHouseValueMapping {
-                    column: "user_id".to_string(),
-                    expression: expression("input.user_id"),
-                },
-                ClickHouseValueMapping {
-                    column: "action".to_string(),
-                    expression: expression("input.action"),
-                },
-            ],
-            location: "s3://nervix-iceberg/tables/notifications".to_string(),
-            catalog: IcebergCatalog::Rest {
-                client: nervix_models::ClientName::try_from("iceberg_catalog")
-                    .expect("valid catalog client identifier"),
-            },
-            commit_each: "1m".to_string(),
-            max_commit_size: "512MiB".to_string(),
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("s3_client").expect("valid client identifier")
     );
+    assert_eq!(
+        destination.table,
+        nervix_models::IcebergTableName::try_from("notifications").expect("valid table identifier")
+    );
+    assert_eq!(
+        destination.values,
+        vec![
+            ClickHouseValueMapping {
+                column: "user_id".to_string(),
+                expression: expression("input.user_id"),
+            },
+            ClickHouseValueMapping {
+                column: "action".to_string(),
+                expression: expression("input.action"),
+            },
+        ]
+    );
+    assert_eq!(
+        destination.location,
+        "s3://nervix-iceberg/tables/notifications".to_string()
+    );
+    assert_eq!(
+        destination.catalog,
+        IcebergCatalog::Rest {
+            client: nervix_models::ClientName::try_from("iceberg_catalog")
+                .expect("valid catalog client identifier"),
+        }
+    );
+    assert_eq!(destination.commit_each, "1m".to_string());
+    assert_eq!(destination.max_commit_size, "512MiB".to_string());
 }
 
 #[test]
 fn parses_create_emitter_iceberg_gcs() {
     let input = r#"
-        CREATE EMITTER to_iceberg
+        CREATE ICEBERG TABLE EMITTER to_iceberg
             FROM notifications
-            TO ICEBERG ON GCS gcs_client TABLE notifications
-            VALUES {
+            TO gcs_client TABLE 'notifications'
+            LOCATION 'gs://nervix-iceberg/tables/notifications'
+            CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "user_id" = input.user_id,
                 "action" = input.action
-            }
-            LOCATION 'gs://nervix-iceberg/tables/notifications'
-            CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB
-            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-            FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+            } FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
+    let EmitSink::Iceberg(IcebergSink::Table(destination)) = parsed.sink.as_ref() else {
+        panic!("expected Iceberg Table");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
-            backend: IcebergStorageBackend::Gcs,
-            client: nervix_models::ClientName::try_from("gcs_client")
-                .expect("valid client identifier"),
-            table: nervix_models::TableName::try_from("notifications")
-                .expect("valid table identifier"),
-            values: vec![
-                ClickHouseValueMapping {
-                    column: "user_id".to_string(),
-                    expression: expression("input.user_id"),
-                },
-                ClickHouseValueMapping {
-                    column: "action".to_string(),
-                    expression: expression("input.action"),
-                },
-            ],
-            location: "gs://nervix-iceberg/tables/notifications".to_string(),
-            catalog: IcebergCatalog::Rest {
-                client: nervix_models::ClientName::try_from("iceberg_catalog")
-                    .expect("valid catalog client identifier"),
-            },
-            commit_each: "1m".to_string(),
-            max_commit_size: "512MiB".to_string(),
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("gcs_client").expect("valid client identifier")
     );
+    assert_eq!(
+        destination.table,
+        nervix_models::IcebergTableName::try_from("notifications").expect("valid table identifier")
+    );
+    assert_eq!(
+        destination.values,
+        vec![
+            ClickHouseValueMapping {
+                column: "user_id".to_string(),
+                expression: expression("input.user_id"),
+            },
+            ClickHouseValueMapping {
+                column: "action".to_string(),
+                expression: expression("input.action"),
+            },
+        ]
+    );
+    assert_eq!(
+        destination.location,
+        "gs://nervix-iceberg/tables/notifications".to_string()
+    );
+    assert_eq!(
+        destination.catalog,
+        IcebergCatalog::Rest {
+            client: nervix_models::ClientName::try_from("iceberg_catalog")
+                .expect("valid catalog client identifier"),
+        }
+    );
+    assert_eq!(destination.commit_each, "1m".to_string());
+    assert_eq!(destination.max_commit_size, "512MiB".to_string());
 }
 
 #[test]
 fn parses_create_emitter_iceberg_azure_blob() {
     let input = r#"
-        CREATE EMITTER to_iceberg
+        CREATE ICEBERG TABLE EMITTER to_iceberg
             FROM notifications
-            TO ICEBERG ON AZURE_BLOB azure_client TABLE notifications
-            VALUES {
+            TO azure_client TABLE 'notifications'
+            LOCATION 'wasb://nervix-iceberg@devstoreaccount1.blob.core.windows.net/tables/notifications'
+            CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "user_id" = input.user_id,
                 "action" = input.action
-            }
-            LOCATION 'wasb://nervix-iceberg@devstoreaccount1.blob.core.windows.net/tables/notifications'
-            CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB
-            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-            FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+            } FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
+    let EmitSink::Iceberg(IcebergSink::Table(destination)) = parsed.sink.as_ref() else {
+        panic!("expected Iceberg Table");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
-            backend: IcebergStorageBackend::AzureBlob,
-            client: nervix_models::ClientName::try_from("azure_client")
-                .expect("valid client identifier"),
-            table: nervix_models::TableName::try_from("notifications")
-                .expect("valid table identifier"),
-            values: vec![
-                ClickHouseValueMapping {
-                    column: "user_id".to_string(),
-                    expression: expression("input.user_id"),
-                },
-                ClickHouseValueMapping {
-                    column: "action".to_string(),
-                    expression: expression("input.action"),
-                },
-            ],
-            location: "wasb://nervix-iceberg@devstoreaccount1.blob.core.windows.net/tables/\
-                       notifications"
-                .to_string(),
-            catalog: IcebergCatalog::Rest {
-                client: nervix_models::ClientName::try_from("iceberg_catalog")
-                    .expect("valid catalog client identifier"),
-            },
-            commit_each: "1m".to_string(),
-            max_commit_size: "512MiB".to_string(),
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("azure_client").expect("valid client identifier")
     );
+    assert_eq!(
+        destination.table,
+        nervix_models::IcebergTableName::try_from("notifications").expect("valid table identifier")
+    );
+    assert_eq!(
+        destination.values,
+        vec![
+            ClickHouseValueMapping {
+                column: "user_id".to_string(),
+                expression: expression("input.user_id"),
+            },
+            ClickHouseValueMapping {
+                column: "action".to_string(),
+                expression: expression("input.action"),
+            },
+        ]
+    );
+    assert_eq!(
+        destination.location,
+        "wasb://nervix-iceberg@devstoreaccount1.blob.core.windows.net/tables/notifications"
+            .to_string()
+    );
+    assert_eq!(
+        destination.catalog,
+        IcebergCatalog::Rest {
+            client: nervix_models::ClientName::try_from("iceberg_catalog")
+                .expect("valid catalog client identifier"),
+        }
+    );
+    assert_eq!(destination.commit_each, "1m".to_string());
+    assert_eq!(destination.max_commit_size, "512MiB".to_string());
 }
 
 #[test]
 fn rejects_iceberg_emitter_without_flush_policy() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_iceberg FROM notifications
-        TO ICEBERG ON S3 s3_client TABLE notifications
-        VALUES { "user_id" = input.user_id }
+        CREATE ICEBERG TABLE EMITTER to_iceberg FROM notifications
+        TO s3_client TABLE 'notifications'
         LOCATION 's3://nervix-iceberg/tables/notifications'
         CATALOG iceberg_catalog
+        COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY POLICY BACKOFF 1s MAX 2s
+        VALUES { "user_id" = input.user_id }
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
     );
 
     let errs = parse_create_emitter_tokens(&tokens).expect_err("parse must fail");
     assert!(
-        errs.iter()
-            .any(|err| format!("{err:?}").contains("expected COMMIT EACH")),
-        "Iceberg requires a commit cadence in its sink clause: {errs:?}"
+        errs.iter().any(|err| format!("{err:?}").contains("FLUSH")),
+        "Iceberg requires a flush policy: {errs:?}"
     );
-}
-
-#[test]
-fn rejects_iceberg_emitter_without_storage_backend() {
-    let tokens = to_tokens(
-        r#"
-        CREATE EMITTER to_iceberg FROM notifications
-        TO ICEBERG ON s3_client TABLE notifications
-        LOCATION 's3://nervix-iceberg/tables/notifications'
-        CATALOG iceberg_catalog
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#,
-    );
-
-    let errs = parse_create_emitter_tokens(&tokens).expect_err("parse must fail");
-    assert!(!errs.is_empty());
 }
 
 #[test]
 fn rejects_iceberg_emitter_with_encode_using() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_iceberg FROM notifications ENCODE USING json_codec
-        TO ICEBERG ON S3 s3_client TABLE notifications
+        CREATE ICEBERG TABLE EMITTER to_iceberg FROM notifications ENCODE USING json_codec
+        TO s3_client TABLE 'notifications'
         VALUES { "user_id" = input.user_id }
         LOCATION 's3://nervix-iceberg/tables/notifications'
         CATALOG iceberg_catalog
@@ -1316,10 +1342,11 @@ fn rejects_iceberg_emitter_with_encode_using() {
 fn rejects_iceberg_emitter_without_values_mapping() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_iceberg FROM notifications
-        TO ICEBERG ON S3 s3_client TABLE notifications
+        CREATE ICEBERG TABLE EMITTER to_iceberg FROM notifications
+        TO s3_client TABLE 'notifications'
         LOCATION 's3://nervix-iceberg/tables/notifications'
         CATALOG iceberg_catalog
+        COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY POLICY BACKOFF 1s MAX 2s
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
     );
@@ -1335,9 +1362,8 @@ fn rejects_iceberg_emitter_without_values_mapping() {
 fn rejects_iceberg_emitter_without_commit_policy() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_iceberg FROM notifications
-        TO ICEBERG ON S3 s3_client TABLE notifications
-        VALUES { "user_id" = input.user_id }
+        CREATE ICEBERG TABLE EMITTER to_iceberg FROM notifications
+        TO s3_client TABLE 'notifications'
         LOCATION 's3://nervix-iceberg/tables/notifications'
         CATALOG iceberg_catalog
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -1356,11 +1382,9 @@ fn rejects_iceberg_emitter_without_commit_policy() {
 fn rejects_non_iceberg_emitter_with_commit_policy() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_ch FROM notifications
-        TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
-        VALUES { "user_id" = input.user_id }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 100 MAX SIZE 1MiB
+        CREATE CLICKHOUSE TABLE EMITTER to_ch FROM notifications
+        TO clickhouse_client TABLE 'my_table'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "user_id" = input.user_id } BATCH MAX MESSAGES 100 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB COMMIT EACH 1m MAX SIZE 512MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
     );
@@ -1377,8 +1401,8 @@ fn rejects_non_iceberg_emitter_with_commit_policy() {
 fn rejects_iceberg_same_client_catalog_syntax() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_iceberg FROM notifications
-        TO ICEBERG ON S3 s3_client TABLE notifications
+        CREATE ICEBERG TABLE EMITTER to_iceberg FROM notifications
+        TO s3_client TABLE 'notifications'
         VALUES { "user_id" = input.user_id }
         LOCATION 's3://nervix-iceberg/tables/notifications'
         CATALOG SAME COMMIT EACH 1m MAX SIZE 512MiB CLIENT LOCATION 's3://nervix-iceberg/catalogs/input.catalog.json' FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -1391,9 +1415,8 @@ fn rejects_iceberg_same_client_catalog_syntax() {
 
 #[test]
 fn iceberg_catalog_context_suggestions_do_not_leak_sink_keywords() {
-    let input = "CREATE EMITTER to_iceberg FROM notifications TO ICEBERG ON S3 s3_client TABLE \
-                 notifications VALUES { \"user_id\" = input.user_id } LOCATION \
-                 's3://bucket/table' CATALOG ";
+    let input = "CREATE ICEBERG TABLE EMITTER to_iceberg FROM notifications TO s3_client TABLE \
+                 'notifications' LOCATION 's3://bucket/table' CATALOG ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(suggestions.contains(&"ref:client".to_string()));
     assert!(!suggestions.contains(&"SAME".to_string()));
@@ -1402,75 +1425,22 @@ fn iceberg_catalog_context_suggestions_do_not_leak_sink_keywords() {
 }
 
 #[test]
-fn iceberg_table_context_suggests_values_before_location() {
-    let input =
-        "CREATE EMITTER to_iceberg FROM notifications TO ICEBERG ON S3 s3_client TABLE tbl ";
-    let suggestions = suggest_create_emitter(input, input.len());
-    assert!(suggestions.contains(&"VALUES".to_string()));
-    assert!(!suggestions.contains(&"LOCATION".to_string()));
-}
-
-#[test]
-fn iceberg_backend_context_suggestions_do_not_leak_sink_keywords() {
-    let input = "CREATE EMITTER to_iceberg FROM notifications TO ICEBERG ON ";
-    let suggestions = suggest_create_emitter(input, input.len());
-    assert!(suggestions.contains(&"S3".to_string()));
-    assert!(suggestions.contains(&"GCS".to_string()));
-    assert!(suggestions.contains(&"AZURE_BLOB".to_string()));
-    assert!(!suggestions.contains(&"KAFKA".to_string()));
-    assert!(!suggestions.contains(&"CLICKHOUSE".to_string()));
-}
-
-#[test]
-fn rejects_database_emitters_without_insert_action() {
-    for input in [
-        r#"
-        CREATE EMITTER to_ch FROM notifications
-        TO CLICKHOUSE clickhouse_client TABLE my_table
-        VALUES { "user_id" = input.user_id }
-        FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#,
-        r#"
-        CREATE EMITTER to_pg FROM notifications
-        TO POSTGRES postgres_client TABLE my_table
-        VALUES { "user_id" = input.user_id }
-        BATCH MAX MESSAGES 25 MAX SIZE 1MiB
-        FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#,
-        r#"
-        CREATE EMITTER to_mysql FROM notifications
-        TO MYSQL mysql_client TABLE my_table
-        VALUES { "user_id" = input.user_id }
-        BATCH MAX MESSAGES 25 MAX SIZE 1MiB
-        FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#,
-        r#"
-        CREATE EMITTER to_mongodb FROM notifications
-        TO MONGODB mongodb_client COLLECTION my_collection
-        VALUES { "user_id" = input.user_id }
-        BATCH MAX MESSAGES 25 MAX SIZE 1MiB
-        FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#,
-    ] {
-        let tokens = to_tokens(input);
-        let errs = parse_create_emitter_tokens(&tokens).expect_err("old syntax must fail");
-        assert!(!errs.is_empty());
-    }
+fn iceberg_options_precede_the_policy_and_values() {
+    let input = "CREATE ICEBERG TABLE EMITTER lake FROM events TO store TABLE 'Orders' ";
+    assert_eq!(suggest_create_emitter(input, input.len()), vec!["LOCATION"]);
 }
 
 #[test]
 fn parses_create_emitter_postgres() {
     let input = r#"
-        CREATE EMITTER to_pg
+        CREATE POSTGRES TABLE EMITTER to_pg
             FROM notifications
-            TO POSTGRES postgres_client INSERT TO TABLE my_table
-            VALUES {
+            TO postgres_client TABLE 'my_table'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "postgres_user_id" = input.user_id,
                 "postgres_now" = NOW() AS STRING,
                 "postgres_action" = LOWER(input.action)
-            }
-            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
+            } BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -1478,45 +1448,49 @@ fn parses_create_emitter_postgres() {
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
     assert_eq!(parsed.body.body, EmitterBody::Values);
+    let EmitSink::Postgres(PostgresSink::Table(destination)) = parsed.sink.as_ref() else {
+        panic!("expected Postgres Table");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
-            client: nervix_models::ClientName::try_from("postgres_client")
-                .expect("valid client identifier"),
-            table: nervix_models::TableName::try_from("my_table").expect("valid table identifier"),
-            values: vec![
-                ClickHouseValueMapping {
-                    column: "postgres_user_id".to_string(),
-                    expression: expression("input.user_id"),
-                },
-                ClickHouseValueMapping {
-                    column: "postgres_now".to_string(),
-                    expression: expression("NOW ( ) AS STRING"),
-                },
-                ClickHouseValueMapping {
-                    column: "postgres_action".to_string(),
-                    expression: expression("LOWER ( input.action )"),
-                },
-            ],
-            conflict_action: PostgresConflictAction::None,
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("postgres_client").expect("valid client identifier")
     );
+    assert_eq!(
+        destination.table,
+        nervix_models::PostgresTableName::try_from("my_table").expect("valid table identifier")
+    );
+    assert_eq!(
+        destination.values,
+        vec![
+            ClickHouseValueMapping {
+                column: "postgres_user_id".to_string(),
+                expression: expression("input.user_id"),
+            },
+            ClickHouseValueMapping {
+                column: "postgres_now".to_string(),
+                expression: expression("NOW ( ) AS STRING"),
+            },
+            ClickHouseValueMapping {
+                column: "postgres_action".to_string(),
+                expression: expression("LOWER ( input.action )"),
+            },
+        ]
+    );
+    assert_eq!(destination.conflict_action, PostgresConflictAction::None);
     assert_eq!(parsed.batch, Some(batch_policy(25, "1MiB")));
 }
 
 #[test]
 fn parses_postgres_emitter_on_conflict_do_update() {
     let input = r#"
-        CREATE EMITTER to_pg
+        CREATE POSTGRES TABLE EMITTER to_pg
             FROM notifications
-            TO POSTGRES postgres_client INSERT TO TABLE my_table
-            VALUES {
+            TO postgres_client TABLE 'my_table'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "postgres_user_id" = input.user_id,
                 "postgres_action" = LOWER(input.action)
             }
-            ON CONFLICT ("postgres_user_id") DO UPDATE
-            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
+            ON CONFLICT ("postgres_user_id") DO UPDATE BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -1538,16 +1512,14 @@ fn parses_postgres_emitter_on_conflict_do_update() {
 #[test]
 fn parses_postgres_emitter_on_conflict_do_nothing_without_target() {
     let input = r#"
-        CREATE EMITTER to_pg
+        CREATE POSTGRES TABLE EMITTER to_pg
             FROM notifications
-            TO POSTGRES postgres_client INSERT TO TABLE my_table
-            VALUES {
+            TO postgres_client TABLE 'my_table'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "postgres_user_id" = input.user_id,
                 "postgres_action" = LOWER(input.action)
             }
-            ON CONFLICT DO NOTHING
-            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
+            ON CONFLICT DO NOTHING BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -1567,10 +1539,10 @@ fn parses_postgres_emitter_on_conflict_do_nothing_without_target() {
 #[test]
 fn rejects_postgres_emitter_on_conflict_do_update_without_target() {
     let input = r#"
-        CREATE EMITTER to_pg
+        CREATE POSTGRES TABLE EMITTER to_pg
             FROM notifications
-            TO POSTGRES postgres_client INSERT TO TABLE my_table
-            VALUES {
+            TO postgres_client TABLE 'my_table'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "postgres_user_id" = input.user_id,
                 "postgres_action" = LOWER(input.action)
             }
@@ -1594,22 +1566,24 @@ fn rejects_postgres_emitter_on_conflict_do_update_without_target() {
 }
 
 #[test]
-fn suggests_postgres_conflict_clause_before_mode() {
-    let input = "CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client INSERT TO \
-                 TABLE my_table VALUES { \"postgres_user_id\" = input.user_id } ";
+fn suggests_postgres_conflict_clause_after_values() {
+    let input = "CREATE POSTGRES TABLE EMITTER to_pg FROM notifications TO postgres_client TABLE \
+                 'my_table' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { \
+                 \"postgres_user_id\" = input.user_id } ";
     let suggestions = suggest_create_emitter(input, input.len());
 
     // The whole phrase, not a bare `ON`: `ON` alone cannot be continued from here.
     assert!(suggestions.contains(&"ON CONFLICT".to_string()));
     assert!(!suggestions.contains(&"ON".to_string()));
-    assert!(suggestions.contains(&"MODE".to_string()));
+    assert!(suggestions.contains(&"BATCH MAX MESSAGES".to_string()));
 }
 
 #[test]
 fn suggests_postgres_conflict_actions_after_do() {
-    let input = "CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client INSERT TO \
-                 TABLE my_table VALUES { \"postgres_user_id\" = input.user_id, \
-                 \"postgres_action\" = input.action } ON CONFLICT (\"postgres_user_id\") DO ";
+    let input = "CREATE POSTGRES TABLE EMITTER to_pg FROM notifications TO postgres_client TABLE \
+                 'my_table' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { \
+                 \"postgres_user_id\" = input.user_id, \"postgres_action\" = input.action } ON \
+                 CONFLICT (\"postgres_user_id\") DO ";
     let suggestions = suggest_create_emitter(input, input.len());
 
     assert!(suggestions.contains(&"UPDATE".to_string()));
@@ -1620,11 +1594,9 @@ fn suggests_postgres_conflict_actions_after_do() {
 fn rejects_postgres_emitter_without_batch_clause() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_pg FROM notifications
-        TO POSTGRES postgres_client INSERT TO TABLE my_table
-        VALUES { "user_id" = input.user_id }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        CREATE POSTGRES TABLE EMITTER to_pg FROM notifications
+        TO postgres_client TABLE 'my_table'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "user_id" = input.user_id } FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
     );
 
@@ -1640,11 +1612,9 @@ fn rejects_postgres_emitter_without_batch_clause() {
 fn rejects_postgres_emitter_without_flush_policy() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_pg FROM notifications
-        TO POSTGRES postgres_client INSERT TO TABLE my_table
-        VALUES { "user_id" = input.user_id }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 25 MAX SIZE 1MiB
+        CREATE POSTGRES TABLE EMITTER to_pg FROM notifications
+        TO postgres_client TABLE 'my_table'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "user_id" = input.user_id } BATCH MAX MESSAGES 25 MAX SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
     );
@@ -1681,10 +1651,10 @@ fn rejects_batch_limits_outside_their_range() {
         ),
     ] {
         let source = format!(
-            "CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client INSERT TO TABLE \
-             my_table VALUES {{ 'user_id' = input.user_id }} MODE ACK RETRY POLICY BACKOFF 250ms \
-             MAX 30s {clause} FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL \
-             ERROR LOG;"
+            "CREATE POSTGRES TABLE EMITTER to_pg FROM notifications TO postgres_client TABLE \
+             'my_table' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {{ 'user_id' = \
+             input.user_id }} {clause} FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON \
+             GENERAL ERROR LOG;"
         );
         let error = parse_create_emitter(&source).expect_err("the limit must be rejected");
 
@@ -1698,16 +1668,14 @@ fn rejects_batch_limits_outside_their_range() {
 #[test]
 fn parses_create_emitter_mysql() {
     let input = r#"
-        CREATE EMITTER to_mysql
+        CREATE MYSQL TABLE EMITTER to_mysql
             FROM notifications
-            TO MYSQL mysql_client INSERT TO TABLE my_table
-            VALUES {
+            TO mysql_client TABLE 'my_table'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "mysql_user_id" = input.user_id,
                 "mysql_now" = NOW() AS STRING,
                 "mysql_action" = LOWER(input.action)
-            }
-            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
+            } BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -1715,45 +1683,49 @@ fn parses_create_emitter_mysql() {
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
     assert_eq!(parsed.body.body, EmitterBody::Values);
+    let EmitSink::MySql(MySqlSink::Table(destination)) = parsed.sink.as_ref() else {
+        panic!("expected MySql Table");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
-            client: nervix_models::ClientName::try_from("mysql_client")
-                .expect("valid client identifier"),
-            table: nervix_models::TableName::try_from("my_table").expect("valid table identifier"),
-            values: vec![
-                ClickHouseValueMapping {
-                    column: "mysql_user_id".to_string(),
-                    expression: expression("input.user_id"),
-                },
-                ClickHouseValueMapping {
-                    column: "mysql_now".to_string(),
-                    expression: expression("NOW ( ) AS STRING"),
-                },
-                ClickHouseValueMapping {
-                    column: "mysql_action".to_string(),
-                    expression: expression("LOWER ( input.action )"),
-                },
-            ],
-            conflict_action: MySqlConflictAction::None,
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("mysql_client").expect("valid client identifier")
     );
+    assert_eq!(
+        destination.table,
+        nervix_models::MySqlTableName::try_from("my_table").expect("valid table identifier")
+    );
+    assert_eq!(
+        destination.values,
+        vec![
+            ClickHouseValueMapping {
+                column: "mysql_user_id".to_string(),
+                expression: expression("input.user_id"),
+            },
+            ClickHouseValueMapping {
+                column: "mysql_now".to_string(),
+                expression: expression("NOW ( ) AS STRING"),
+            },
+            ClickHouseValueMapping {
+                column: "mysql_action".to_string(),
+                expression: expression("LOWER ( input.action )"),
+            },
+        ]
+    );
+    assert_eq!(destination.conflict_action, MySqlConflictAction::None);
     assert_eq!(parsed.batch, Some(batch_policy(25, "1MiB")));
 }
 
 #[test]
 fn parses_mysql_emitter_on_conflict_do_update() {
     let input = r#"
-        CREATE EMITTER to_mysql
+        CREATE MYSQL TABLE EMITTER to_mysql
             FROM notifications
-            TO MYSQL mysql_client INSERT TO TABLE my_table
-            VALUES {
+            TO mysql_client TABLE 'my_table'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "mysql_user_id" = input.user_id,
                 "mysql_action" = LOWER(input.action)
             }
-            ON CONFLICT DO UPDATE
-            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
+            ON CONFLICT DO UPDATE BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -1770,16 +1742,14 @@ fn parses_mysql_emitter_on_conflict_do_update() {
 #[test]
 fn parses_mysql_emitter_on_conflict_do_nothing() {
     let input = r#"
-        CREATE EMITTER to_mysql
+        CREATE MYSQL TABLE EMITTER to_mysql
             FROM notifications
-            TO MYSQL mysql_client INSERT TO TABLE my_table
-            VALUES {
+            TO mysql_client TABLE 'my_table'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "mysql_user_id" = input.user_id,
                 "mysql_action" = LOWER(input.action)
             }
-            ON CONFLICT DO NOTHING
-            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
+            ON CONFLICT DO NOTHING BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -1796,10 +1766,10 @@ fn parses_mysql_emitter_on_conflict_do_nothing() {
 #[test]
 fn rejects_mysql_emitter_on_conflict_target() {
     let input = r#"
-        CREATE EMITTER to_mysql
+        CREATE MYSQL TABLE EMITTER to_mysql
             FROM notifications
-            TO MYSQL mysql_client INSERT TO TABLE my_table
-            VALUES { "mysql_user_id" = input.user_id }
+            TO mysql_client TABLE 'my_table'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mysql_user_id" = input.user_id }
             ON CONFLICT ("mysql_user_id") DO UPDATE
             BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -1812,21 +1782,23 @@ fn rejects_mysql_emitter_on_conflict_target() {
 }
 
 #[test]
-fn suggests_mysql_conflict_clause_before_mode() {
-    let input = "CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE \
-                 my_table VALUES { \"mysql_user_id\" = input.user_id } ";
+fn suggests_mysql_conflict_clause_after_values() {
+    let input = "CREATE MYSQL TABLE EMITTER to_mysql FROM notifications TO mysql_client TABLE \
+                 'my_table' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { \
+                 \"mysql_user_id\" = input.user_id } ";
     let suggestions = suggest_create_emitter(input, input.len());
 
     // The whole phrase, not a bare `ON`: `ON` alone cannot be continued from here.
     assert!(suggestions.contains(&"ON CONFLICT".to_string()));
     assert!(!suggestions.contains(&"ON".to_string()));
-    assert!(suggestions.contains(&"MODE".to_string()));
+    assert!(suggestions.contains(&"BATCH MAX MESSAGES".to_string()));
 }
 
 #[test]
 fn suggests_mysql_conflict_actions_after_do() {
-    let input = "CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE \
-                 my_table VALUES { \"mysql_user_id\" = input.user_id } ON CONFLICT DO ";
+    let input = "CREATE MYSQL TABLE EMITTER to_mysql FROM notifications TO mysql_client TABLE \
+                 'my_table' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { \
+                 \"mysql_user_id\" = input.user_id } ON CONFLICT DO ";
     let suggestions = suggest_create_emitter(input, input.len());
 
     assert!(suggestions.contains(&"UPDATE".to_string()));
@@ -1837,11 +1809,9 @@ fn suggests_mysql_conflict_actions_after_do() {
 fn rejects_mysql_emitter_without_batch_clause() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_mysql FROM notifications
-        TO MYSQL mysql_client INSERT TO TABLE my_table
-        VALUES { "user_id" = input.user_id }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        CREATE MYSQL TABLE EMITTER to_mysql FROM notifications
+        TO mysql_client TABLE 'my_table'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "user_id" = input.user_id } FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
     );
 
@@ -1857,11 +1827,9 @@ fn rejects_mysql_emitter_without_batch_clause() {
 fn rejects_mysql_emitter_without_flush_policy() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_mysql FROM notifications
-        TO MYSQL mysql_client INSERT TO TABLE my_table
-        VALUES { "user_id" = input.user_id }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 25 MAX SIZE 1MiB
+        CREATE MYSQL TABLE EMITTER to_mysql FROM notifications
+        TO mysql_client TABLE 'my_table'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "user_id" = input.user_id } BATCH MAX MESSAGES 25 MAX SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
     );
@@ -1876,16 +1844,14 @@ fn rejects_mysql_emitter_without_flush_policy() {
 #[test]
 fn parses_create_emitter_mongodb() {
     let input = r#"
-        CREATE EMITTER to_mongodb
+        CREATE MONGODB COLLECTION EMITTER to_mongodb
             FROM notifications
-            TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
-            VALUES {
+            TO mongodb_client COLLECTION 'my_collection'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "mongodb_user_id" = input.user_id,
                 "mongodb_now" = NOW() AS STRING,
                 "mongodb_action" = LOWER(input.action)
-            }
-            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
+            } BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -1893,46 +1859,50 @@ fn parses_create_emitter_mongodb() {
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
     assert_eq!(parsed.body.body, EmitterBody::Values);
+    let EmitSink::MongoDb(MongoDbSink::Collection(destination)) = parsed.sink.as_ref() else {
+        panic!("expected MongoDb Collection");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
-            client: nervix_models::ClientName::try_from("mongodb_client")
-                .expect("valid client identifier"),
-            collection: nervix_models::CollectionName::try_from("my_collection")
-                .expect("valid collection identifier"),
-            values: vec![
-                ClickHouseValueMapping {
-                    column: "mongodb_user_id".to_string(),
-                    expression: expression("input.user_id"),
-                },
-                ClickHouseValueMapping {
-                    column: "mongodb_now".to_string(),
-                    expression: expression("NOW ( ) AS STRING"),
-                },
-                ClickHouseValueMapping {
-                    column: "mongodb_action".to_string(),
-                    expression: expression("LOWER ( input.action )"),
-                },
-            ],
-            conflict_action: MongoDbConflictAction::None,
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("mongodb_client").expect("valid client identifier")
     );
+    assert_eq!(
+        destination.collection,
+        nervix_models::MongoDbCollectionName::try_from("my_collection")
+            .expect("valid collection identifier")
+    );
+    assert_eq!(
+        destination.values,
+        vec![
+            ClickHouseValueMapping {
+                column: "mongodb_user_id".to_string(),
+                expression: expression("input.user_id"),
+            },
+            ClickHouseValueMapping {
+                column: "mongodb_now".to_string(),
+                expression: expression("NOW ( ) AS STRING"),
+            },
+            ClickHouseValueMapping {
+                column: "mongodb_action".to_string(),
+                expression: expression("LOWER ( input.action )"),
+            },
+        ]
+    );
+    assert_eq!(destination.conflict_action, MongoDbConflictAction::None);
     assert_eq!(parsed.batch, Some(batch_policy(25, "1MiB")));
 }
 
 #[test]
 fn parses_mongodb_emitter_on_conflict_do_update() {
     let input = r#"
-        CREATE EMITTER to_mongodb
+        CREATE MONGODB COLLECTION EMITTER to_mongodb
             FROM notifications
-            TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
-            VALUES {
+            TO mongodb_client COLLECTION 'my_collection'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "mongodb_user_id" = input.user_id,
                 "mongodb_action" = LOWER(input.action)
             }
-            ON CONFLICT ("mongodb_user_id") DO UPDATE
-            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
+            ON CONFLICT ("mongodb_user_id") DO UPDATE BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -1954,16 +1924,14 @@ fn parses_mongodb_emitter_on_conflict_do_update() {
 #[test]
 fn parses_mongodb_emitter_on_conflict_do_nothing() {
     let input = r#"
-        CREATE EMITTER to_mongodb
+        CREATE MONGODB COLLECTION EMITTER to_mongodb
             FROM notifications
-            TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
-            VALUES {
+            TO mongodb_client COLLECTION 'my_collection'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "mongodb_user_id" = input.user_id,
                 "mongodb_action" = LOWER(input.action)
             }
-            ON CONFLICT ("mongodb_user_id") DO NOTHING
-            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
+            ON CONFLICT ("mongodb_user_id") DO NOTHING BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -1985,10 +1953,10 @@ fn parses_mongodb_emitter_on_conflict_do_nothing() {
 #[test]
 fn rejects_mongodb_emitter_on_conflict_do_update_without_target() {
     let input = r#"
-        CREATE EMITTER to_mongodb
+        CREATE MONGODB COLLECTION EMITTER to_mongodb
             FROM notifications
-            TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
-            VALUES {
+            TO mongodb_client COLLECTION 'my_collection'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "mongodb_user_id" = input.user_id,
                 "mongodb_action" = LOWER(input.action)
             }
@@ -2006,10 +1974,10 @@ fn rejects_mongodb_emitter_on_conflict_do_update_without_target() {
 #[test]
 fn rejects_mongodb_emitter_on_conflict_target_not_mapped() {
     let input = r#"
-        CREATE EMITTER to_mongodb
+        CREATE MONGODB COLLECTION EMITTER to_mongodb
             FROM notifications
-            TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
-            VALUES {
+            TO mongodb_client COLLECTION 'my_collection'
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "mongodb_action" = LOWER(input.action)
             }
             ON CONFLICT ("mongodb_user_id") DO UPDATE
@@ -2032,22 +2000,24 @@ fn rejects_mongodb_emitter_on_conflict_target_not_mapped() {
 }
 
 #[test]
-fn suggests_mongodb_conflict_clause_before_mode() {
-    let input = "CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO \
-                 COLLECTION my_collection VALUES { \"mongodb_user_id\" = input.user_id } ";
+fn suggests_mongodb_conflict_clause_after_values() {
+    let input = "CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications TO \
+                 mongodb_client COLLECTION 'my_collection' MODE ACK RETRY POLICY BACKOFF 250ms \
+                 MAX 30s VALUES { \"mongodb_user_id\" = input.user_id } ";
     let suggestions = suggest_create_emitter(input, input.len());
 
     // The whole phrase, not a bare `ON`: `ON` alone cannot be continued from here.
     assert!(suggestions.contains(&"ON CONFLICT".to_string()));
     assert!(!suggestions.contains(&"ON".to_string()));
-    assert!(suggestions.contains(&"MODE".to_string()));
+    assert!(suggestions.contains(&"BATCH MAX MESSAGES".to_string()));
 }
 
 #[test]
 fn suggests_mongodb_conflict_actions_after_do() {
-    let input = "CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO \
-                 COLLECTION my_collection VALUES { \"mongodb_user_id\" = input.user_id, \
-                 \"mongodb_action\" = input.action } ON CONFLICT (\"mongodb_user_id\") DO ";
+    let input = "CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications TO \
+                 mongodb_client COLLECTION 'my_collection' MODE ACK RETRY POLICY BACKOFF 250ms \
+                 MAX 30s VALUES { \"mongodb_user_id\" = input.user_id, \"mongodb_action\" = \
+                 input.action } ON CONFLICT (\"mongodb_user_id\") DO ";
     let suggestions = suggest_create_emitter(input, input.len());
 
     assert!(suggestions.contains(&"UPDATE".to_string()));
@@ -2058,11 +2028,9 @@ fn suggests_mongodb_conflict_actions_after_do() {
 fn rejects_mongodb_emitter_without_flush_policy() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_mongodb FROM notifications
-        TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
-        VALUES { "user_id" = input.user_id }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 25 MAX SIZE 1MiB
+        CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications
+        TO mongodb_client COLLECTION 'my_collection'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "user_id" = input.user_id } BATCH MAX MESSAGES 25 MAX SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
     );
@@ -2078,11 +2046,9 @@ fn rejects_mongodb_emitter_without_flush_policy() {
 fn rejects_mongodb_emitter_without_batch_clause() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER to_mongodb FROM notifications
-        TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
-        VALUES { "user_id" = input.user_id }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications
+        TO mongodb_client COLLECTION 'my_collection'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "user_id" = input.user_id } FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
     );
 
@@ -2095,69 +2061,54 @@ fn rejects_mongodb_emitter_without_batch_clause() {
 }
 
 #[test]
-fn suggests_clickhouse_after_to_without_schema_leakage() {
-    let input = "CREATE EMITTER to_ch FROM notifications TO ";
+fn emitter_heads_complete_the_declared_connector_and_entity() {
+    let input = "CREATE ";
     let suggestions = suggest_create_emitter(input, input.len());
-
-    assert!(suggestions.contains(&"CLICKHOUSE".to_string()));
-    assert!(suggestions.contains(&"POSTGRES".to_string()));
-    assert!(suggestions.contains(&"MYSQL".to_string()));
-    assert!(suggestions.contains(&"MONGODB".to_string()));
-    assert!(!suggestions.contains(&"SCHEMA".to_string()));
+    for kind in EmitSinkKind::all() {
+        assert!(
+            suggestions.contains(&format!("{} EMITTER", kind.phrase())),
+            "{kind}: {suggestions:?}"
+        );
+    }
 }
 
 #[test]
-fn suggests_database_insert_action_after_client() {
-    let input = "CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client ";
-    let suggestions = suggest_create_emitter(input, input.len());
-
-    assert!(suggestions.contains(&"INSERT TO".to_string()));
-    assert!(!suggestions.contains(&"TABLE".to_string()));
-}
-
-#[test]
-fn suggests_database_target_after_insert_action() {
-    let postgres_input =
-        "CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client INSERT TO ";
-    let postgres_suggestions = suggest_create_emitter(postgres_input, postgres_input.len());
-    assert!(postgres_suggestions.contains(&"TABLE".to_string()));
-    assert!(!postgres_suggestions.contains(&"COLLECTION".to_string()));
-
-    let mongodb_input =
-        "CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO ";
-    let mongodb_suggestions = suggest_create_emitter(mongodb_input, mongodb_input.len());
-    assert!(mongodb_suggestions.contains(&"COLLECTION".to_string()));
-    assert!(!mongodb_suggestions.contains(&"TABLE".to_string()));
+fn a_table_emitter_completes_its_locator_after_the_client() {
+    let input = "CREATE POSTGRES TABLE EMITTER to_pg FROM events TO database ";
+    assert_eq!(suggest_create_emitter(input, input.len()), vec!["TABLE"]);
 }
 
 #[test]
 fn parses_create_emitter_pulsar() {
     let input = r#"
-        CREATE EMITTER emit
+        CREATE PULSAR TOPIC EMITTER emit
             FROM p99
-            TO PULSAR pulsar1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO pulsar1 TOPIC 'topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
+    let EmitSink::Pulsar(PulsarSink::Topic(destination)) = parsed.sink.as_ref() else {
+        panic!("expected Pulsar Topic");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
-            client: nervix_models::ClientName::try_from("pulsar1")
-                .expect("valid client identifier"),
-            topic: nervix_models::TopicName::try_from("topic").expect("valid topic identifier"),
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("pulsar1").expect("valid client identifier")
+    );
+    assert_eq!(
+        destination.topic,
+        nervix_models::PulsarTopicName::try_from("topic").expect("valid topic identifier")
     );
 }
 
 #[test]
 fn parses_create_emitter_detached() {
     let input = r#"
-        CREATE DETACHED EMITTER emit
+        CREATE DETACHED KAFKA TOPIC EMITTER emit
             FROM p99
-            TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO broker1 TOPIC 'topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -2169,14 +2120,15 @@ fn parses_create_emitter_detached() {
 
 #[test]
 fn fails_without_to_clause() {
-    let tokens = to_tokens("CREATE ATTACHED EMITTER emit FROM p99 ENCODE USING my_codec;");
+    let tokens =
+        to_tokens("CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 ENCODE USING my_codec;");
     let errs = parse_create_emitter_tokens(&tokens).expect_err("must fail");
     assert!(!errs.is_empty());
 }
 
 #[test]
 fn rejects_pulsar_emitter_without_topic() {
-    let tokens = to_tokens("CREATE ATTACHED EMITTER emit FROM p99 TO PULSAR pulsar1;");
+    let tokens = to_tokens("CREATE ATTACHED PULSAR TOPIC EMITTER emit FROM p99 TO pulsar1;");
     let errs = parse_create_emitter_tokens(&tokens).expect_err("must fail");
     assert!(!errs.is_empty());
 }
@@ -2185,10 +2137,10 @@ fn rejects_pulsar_emitter_without_topic() {
 fn rejects_encoded_emitter_without_codec() {
     let tokens = to_tokens(
         r#"
-        CREATE EMITTER emit
+        CREATE KAFKA TOPIC EMITTER emit
             FROM p99
-            TO KAFKA broker1 TOPIC topic
-            MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO broker1 TOPIC 'topic'
+            MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
     );
@@ -2212,45 +2164,34 @@ fn suggests_mode_after_create() {
 #[test]
 fn suggests_encode_using_as_compound_keyword() {
     // The codec follows the sink it encodes for, so it is offered once the sink is named.
-    let input = "CREATE ATTACHED EMITTER emit FROM p99 TO KAFKA broker1 TOPIC topic MODE NO_ACK \
-                 RETRY POLICY BACKOFF 250ms MAX 30s ";
+    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
+                 NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(suggestions.contains(&"ENCODE USING".to_string()));
 
-    let before_sink = "CREATE ATTACHED EMITTER emit FROM p99 ";
+    let before_sink = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 ";
     let suggestions = suggest_create_emitter(before_sink, before_sink.len());
     assert!(!suggestions.contains(&"ENCODE USING".to_string()));
 }
 
 #[test]
-fn suggests_sink_after_to() {
-    let input = "CREATE ATTACHED EMITTER emit FROM p99 TO ";
-    let suggestions = suggest_create_emitter(input, input.len());
-    assert!(suggestions.contains(&"KAFKA".to_string()));
-    assert!(suggestions.contains(&"PULSAR".to_string()));
-    assert!(suggestions.contains(&"RABBITMQ".to_string()));
-    assert!(suggestions.contains(&"REDIS".to_string()));
-    assert!(suggestions.contains(&"MQTT".to_string()));
-    assert!(suggestions.contains(&"NATS".to_string()));
-    assert!(suggestions.contains(&"ZEROMQ".to_string()));
-    assert!(suggestions.contains(&"SYSLOG".to_string()));
-    assert!(suggestions.contains(&"SQS".to_string()));
-    assert!(suggestions.contains(&"CLICKHOUSE".to_string()));
-    assert!(suggestions.contains(&"POSTGRES".to_string()));
-    assert!(suggestions.contains(&"MYSQL".to_string()));
-    assert!(suggestions.contains(&"MONGODB".to_string()));
-    assert!(suggestions.contains(&"SENTRY".to_string()));
+fn a_kinded_emitter_completes_its_client_reference() {
+    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM events TO ";
+    assert_eq!(
+        suggest_create_emitter(input, input.len()),
+        vec!["ref:client"]
+    );
 }
 
 #[test]
 fn sentry_sink_completion_context_does_not_leak_transport_qualifiers() {
-    let client_input = "CREATE EMITTER emit FROM errors TO SENTRY ";
+    let client_input = "CREATE SENTRY EVENT EMITTER emit FROM errors TO ";
     let client_suggestions = suggest_create_emitter(client_input, client_input.len());
     assert!(client_suggestions.contains(&"ref:client".to_string()));
     assert!(!client_suggestions.contains(&"TOPIC".to_string()));
     assert!(!client_suggestions.contains(&"QUEUE".to_string()));
 
-    let route_input = "CREATE EMITTER emit FROM errors TO SENTRY sentry_main MODE ACK RETRY \
+    let route_input = "CREATE SENTRY EVENT EMITTER emit FROM errors TO sentry_main MODE ACK RETRY \
                        POLICY BACKOFF 250ms MAX 30s ENCODE USING error_event_codec ";
     let route_suggestions = suggest_create_emitter(route_input, route_input.len());
     assert!(route_suggestions.contains(&"INHERIT".to_string()));
@@ -2262,9 +2203,9 @@ fn sentry_sink_completion_context_does_not_leak_transport_qualifiers() {
 
 #[test]
 fn suggests_flush_after_emitter_error_policies() {
-    let input = "CREATE ATTACHED EMITTER emit FROM p99 TO KAFKA broker1 TOPIC topic MODE NO_ACK \
-                 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ON MESSAGE ERROR LOG ON \
-                 GENERAL ERROR LOG ";
+    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
+                 NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ON MESSAGE ERROR \
+                 LOG ON GENERAL ERROR LOG ";
     let suggestions = suggest_create_emitter(input, input.len());
 
     assert!(suggestions.contains(&"FLUSH EACH".to_string()));
@@ -2275,158 +2216,146 @@ fn suggests_flush_after_emitter_error_policies() {
 #[test]
 fn parses_create_emitter_mqtt() {
     let input = r#"
-        CREATE ATTACHED EMITTER emit
+        CREATE ATTACHED MQTT TOPIC EMITTER emit
             FROM p99
-            TO MQTT broker1 TOPIC topic MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s
+            TO broker1 TOPIC 'topic' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
+    let EmitSink::Mqtt(MqttSink::Topic(destination)) = parsed.sink.as_ref() else {
+        panic!("expected Mqtt Topic");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink {
-            client: nervix_models::ClientName::try_from("broker1")
-                .expect("valid client identifier"),
-            topic: nervix_models::TopicName::try_from("topic").expect("valid topic identifier"),
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("broker1").expect("valid client identifier")
+    );
+    assert_eq!(
+        destination.topic,
+        nervix_models::MqttTopicName::try_from("topic").expect("valid topic identifier")
     );
 }
 
 #[test]
 fn parses_create_emitter_nats() {
     let input = r#"
-        CREATE ATTACHED EMITTER emit
+        CREATE ATTACHED NATS SUBJECT EMITTER emit
             FROM p99
-            TO NATS nats_main SUBJECT notifications MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO nats_main SUBJECT 'notifications' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
+    let EmitSink::Nats(NatsSink::Subject(destination)) = parsed.sink.as_ref() else {
+        panic!("expected Nats Subject");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
-            client: nervix_models::ClientName::try_from("nats_main")
-                .expect("valid client identifier"),
-            subject: nervix_models::SubjectName::try_from("notifications")
-                .expect("valid subject identifier"),
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("nats_main").expect("valid client identifier")
+    );
+    assert_eq!(
+        destination.subject,
+        nervix_models::NatsPublishSubjectName::try_from("notifications")
+            .expect("valid subject identifier")
     );
 }
 
 #[test]
 fn parses_create_emitter_rabbitmq() {
     let input = r#"
-        CREATE ATTACHED EMITTER emit
+        CREATE ATTACHED RABBITMQ QUEUE EMITTER emit
             FROM p99
-            TO RABBITMQ broker1 QUEUE queue1 MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO broker1 QUEUE 'queue1' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
+    let EmitSink::RabbitMq(RabbitMqSink::Queue(destination)) = parsed.sink.as_ref() else {
+        panic!("expected RabbitMq Queue");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink {
-            client: nervix_models::ClientName::try_from("broker1")
-                .expect("valid client identifier"),
-            queue: nervix_models::QueueName::try_from("queue1").expect("valid queue identifier"),
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("broker1").expect("valid client identifier")
+    );
+    assert_eq!(
+        destination.queue,
+        nervix_models::RabbitMqQueueName::try_from("queue1").expect("valid queue identifier")
     );
 }
 
 #[test]
 fn parses_create_emitter_redis() {
     let input = r#"
-        CREATE ATTACHED EMITTER emit
+        CREATE ATTACHED REDIS PUBSUB EMITTER emit
             FROM p99
-            TO REDIS PUBSUB broker1 CHANNEL out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO broker1 CHANNEL 'out' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
+    let EmitSink::Redis(RedisSink::PubSub(destination)) = parsed.sink.as_ref() else {
+        panic!("expected Redis PubSub");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink {
-            client: nervix_models::ClientName::try_from("broker1")
-                .expect("valid client identifier"),
-            channel: nervix_models::ChannelName::try_from("out").expect("valid channel identifier"),
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("broker1").expect("valid client identifier")
     );
-}
-
-#[test]
-fn rejects_redis_emitter_without_pubsub_action() {
-    let tokens = to_tokens(
-        r#"
-        CREATE ATTACHED EMITTER emit
-            FROM p99
-            ENCODE USING my_codec
-            TO REDIS broker1 CHANNEL out FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-        "#,
+    assert_eq!(
+        destination.channel,
+        nervix_models::RedisChannelName::try_from("out").expect("valid channel identifier")
     );
-
-    let errs = parse_create_emitter_tokens(&tokens).expect_err("old syntax must fail");
-    assert!(!errs.is_empty());
-}
-
-#[test]
-fn suggests_pubsub_action_after_redis_sink() {
-    let input = "CREATE ATTACHED EMITTER emit FROM p99 TO REDIS ";
-    let suggestions = suggest_create_emitter(input, input.len());
-
-    assert!(suggestions.contains(&"PUBSUB".to_string()));
-    assert!(!suggestions.contains(&"CHANNEL".to_string()));
 }
 
 #[test]
 fn parses_create_emitter_zeromq() {
     let input = r#"
-        CREATE ATTACHED EMITTER emit
+        CREATE ATTACHED ZEROMQ PUSH EMITTER emit
             FROM p99
-            TO ZEROMQ zmq_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO zmq_out MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
+    let EmitSink::ZeroMq(ZeroMqSink::Push(destination)) = parsed.sink.as_ref() else {
+        panic!("expected ZeroMq Push");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-            client: nervix_models::ClientName::try_from("zmq_out")
-                .expect("valid client identifier"),
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("zmq_out").expect("valid client identifier")
     );
 }
 
 #[test]
 fn parses_create_emitter_syslog_with_only_no_ack() {
     let input = r#"
-        CREATE EMITTER forward_syslog
+        CREATE SYSLOG COLLECTOR EMITTER forward_syslog
             FROM events
-            TO SYSLOG syslog_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO syslog_out MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING syslog_codec INHERIT ALL
             FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
     let parsed = parse_create_emitter(input).expect("parse should succeed");
+    let EmitSink::Syslog(SyslogSink::Collector(destination)) = parsed.sink.as_ref() else {
+        panic!("expected Syslog Collector");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink {
-            client: nervix_models::ClientName::try_from("syslog_out")
-                .expect("valid client identifier"),
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("syslog_out").expect("valid client identifier")
     );
     assert!(matches!(
-        parsed.publishing_mode,
-        EmitterPublishingMode::NoAck { .. }
+        parsed.sink.publishing(),
+        EmitterPublishing::NoAck { .. }
     ));
 }
 
@@ -2434,9 +2363,9 @@ fn parses_create_emitter_syslog_with_only_no_ack() {
 fn rejects_syslog_ack_mode_and_header_invocations() {
     assert!(
         parse_create_emitter(
-            "CREATE EMITTER e FROM events TO SYSLOG c MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY \
-             POLICY BACKOFF 1s MAX 30s ENCODE USING codec INHERIT ALL FLUSH IMMEDIATE ON MESSAGE \
-             ERROR LOG ON GENERAL ERROR LOG;",
+            "CREATE SYSLOG COLLECTOR EMITTER e FROM events TO c MODE ACK SEQUENTIAL ACK TIMEOUT \
+             1s RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING codec INHERIT ALL FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         )
         .is_err()
     );
@@ -2444,9 +2373,9 @@ fn rejects_syslog_ack_mode_and_header_invocations() {
     // Header capability is rejected semantically because route construction is shared by all
     // encoded sinks; the parser still preserves the structured invocation for validation.
     let parsed = parse_create_emitter(
-        "CREATE EMITTER e FROM events TO SYSLOG c MODE NO_ACK RETRY POLICY BACKOFF 1s MAX 30s \
-         ENCODE USING codec INHERIT ALL INVOKE write_header('x', 'y') FLUSH IMMEDIATE ON MESSAGE \
-         ERROR LOG ON GENERAL ERROR LOG;",
+        "CREATE SYSLOG COLLECTOR EMITTER e FROM events TO c MODE NO ACK RETRY POLICY BACKOFF 1s \
+         MAX 30s ENCODE USING codec INHERIT ALL INVOKE write_header('x', 'y') FLUSH IMMEDIATE ON \
+         MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
     )
     .expect("shared route syntax should parse for semantic capability validation");
     assert_eq!(parsed.construction.invocations.len(), 1);
@@ -2454,9 +2383,9 @@ fn rejects_syslog_ack_mode_and_header_invocations() {
 
 #[test]
 fn syslog_completion_stays_on_no_ack_mode() {
-    let input = "CREATE EMITTER e FROM events TO SYSLOG c MODE ";
+    let input = "CREATE SYSLOG COLLECTOR EMITTER e FROM events TO c MODE ";
     let suggestions = suggest_create_emitter(input, input.len());
-    assert!(suggestions.contains(&"NO_ACK".to_string()));
+    assert!(suggestions.contains(&"NO ACK".to_string()));
     assert!(!suggestions.contains(&"ACK".to_string()));
     assert!(!suggestions.contains(&"QOS".to_string()));
 }
@@ -2464,32 +2393,32 @@ fn syslog_completion_stays_on_no_ack_mode() {
 #[test]
 fn parses_create_emitter_sqs() {
     let input = r#"
-        CREATE ATTACHED EMITTER emit
+        CREATE ATTACHED SQS QUEUE EMITTER emit
             FROM p99
-            TO SQS sqs_main QUEUE queue1 MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s
+            TO sqs_main QUEUE 'queue1' MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
+    let EmitSink::Sqs(SqsSink::Queue(destination)) = parsed.sink.as_ref() else {
+        panic!("expected Sqs Queue");
+    };
     assert_eq!(
-        parsed.sink.as_ref(),
-        &EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
-            client: nervix_models::ClientName::try_from("sqs_main")
-                .expect("valid client identifier"),
-            queue: "queue1".to_string(),
-            fifo_group: None,
-        }))
+        destination.client,
+        nervix_models::ClientName::try_from("sqs_main").expect("valid client identifier")
     );
+    assert_eq!(destination.queue.as_str(), "queue1");
+    assert_eq!(destination.fifo_group, None);
 }
 
 #[test]
 fn parses_codec_emitter_route_construction() {
     let input = r#"
-        CREATE EMITTER emit
+        CREATE KAFKA TOPIC EMITTER emit
             FROM p99
-            TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO broker1 TOPIC 'topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec
             INHERIT ALL EXCEPT raw
             SET normalized = lower(input.name), score = input.score AS FLOAT64
@@ -2511,9 +2440,9 @@ fn parses_codec_emitter_route_construction() {
 #[test]
 fn parses_emitter_with_invoke_only_route() {
     let input = r#"
-        CREATE EMITTER emit
+        CREATE KAFKA TOPIC EMITTER emit
             FROM p99
-            TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO broker1 TOPIC 'topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec
             INVOKE write_header("route", input.route)
             FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -2526,9 +2455,9 @@ fn parses_emitter_with_invoke_only_route() {
 #[test]
 fn rejects_invalid_emitter_route_construction() {
     let input = r#"
-        CREATE EMITTER emit
+        CREATE KAFKA TOPIC EMITTER emit
             FROM p99
-            TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            TO broker1 TOPIC 'topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec
             SET normalized = FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
@@ -2544,8 +2473,8 @@ fn rejects_invalid_emitter_route_construction() {
 
 #[test]
 fn does_not_leak_sink_suggestions_inside_filter_map_program() {
-    let input = "CREATE ATTACHED EMITTER emit FROM p99 TO KAFKA broker1 TOPIC topic MODE NO_ACK \
-                 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec WHERE ";
+    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
+                 NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec WHERE ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(!suggestions.contains(&"MQTT".to_string()));
     assert!(!suggestions.contains(&"NATS".to_string()));
@@ -2553,8 +2482,8 @@ fn does_not_leak_sink_suggestions_inside_filter_map_program() {
 
 #[test]
 fn emitter_filter_map_context_suggests_invoke_without_sink_leakage() {
-    let input = "CREATE ATTACHED EMITTER emit FROM p99 TO KAFKA broker1 TOPIC topic MODE NO_ACK \
-                 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ";
+    let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
+                 NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ";
     let suggestions = suggest_create_emitter(input, input.len());
 
     assert!(suggestions.contains(&"INVOKE".to_string()));
@@ -2564,7 +2493,7 @@ fn emitter_filter_map_context_suggests_invoke_without_sink_leakage() {
 
 #[test]
 fn pulsar_sink_context_does_not_offer_other_transport_keywords() {
-    let input = "CREATE ATTACHED EMITTER emit FROM p99 TO PULSAR pulsar1 ";
+    let input = "CREATE ATTACHED PULSAR TOPIC EMITTER emit FROM p99 TO pulsar1 ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(suggestions.contains(&"TOPIC".to_string()));
     assert!(!suggestions.contains(&"QUEUE".to_string()));
@@ -2575,17 +2504,25 @@ fn pulsar_sink_context_does_not_offer_other_transport_keywords() {
 #[test]
 fn every_sink_family_accepts_an_optional_batch_clause_and_round_trips_it() {
     let codec_sinks = [
-        "KAFKA broker TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "PULSAR broker TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "RABBITMQ broker QUEUE events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "REDIS PUBSUB broker CHANNEL events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "MQTT broker TOPIC events MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF \
+        "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s",
+        "PULSAR TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s",
+        "RABBITMQ QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' MODE NO ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s",
+        "REDIS PUBSUB EMITTER emit FROM p99 TO broker CHANNEL 'events' MODE NO ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s",
+        "MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE QOS 1 ACK SEQUENTIAL ACK \
+         TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
+        "NATS SUBJECT EMITTER emit FROM p99 TO broker SUBJECT 'events' MODE NO ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s",
+        "ZEROMQ PUSH EMITTER emit FROM p99 TO broker MODE NO ACK RETRY POLICY BACKOFF 250ms MAX \
+         30s",
+        "SYSLOG COLLECTOR EMITTER emit FROM p99 TO broker MODE NO ACK RETRY POLICY BACKOFF 250ms \
+         MAX 30s",
+        "SQS QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' MODE BATCH RETRY POLICY BACKOFF \
          250ms MAX 30s",
-        "NATS broker SUBJECT events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "ZEROMQ broker MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "SYSLOG broker MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-        "SQS broker QUEUE events MODE BATCH RETRY POLICY BACKOFF 250ms MAX 30s",
-        "SENTRY broker MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+        "SENTRY EVENT EMITTER emit FROM p99 TO broker MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
     ];
     for sink in codec_sinks {
         let omitted = complete_codec_emitter(sink);
@@ -2594,8 +2531,8 @@ fn every_sink_family_accepts_an_optional_batch_clause_and_round_trips_it() {
         assert_canonical_emitter_roundtrip(&omitted, sink);
 
         let batched = format!(
-            "CREATE EMITTER emit FROM p99 TO {sink} ENCODE USING my_codec BATCH MAX MESSAGES 500 \
-             MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+            "CREATE {sink} ENCODE USING my_codec BATCH MAX MESSAGES 500 MAX SIZE 1MiB FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         );
         let parsed = parse_create_emitter(&batched).expect("an emitter with BATCH parses");
         assert_eq!(
@@ -2607,17 +2544,16 @@ fn every_sink_family_accepts_an_optional_batch_clause_and_round_trips_it() {
     }
 
     let direct_sinks = [
-        "OTEL otel_main LOGS VALUES { 'time' = input.time, 'body' = input.body } MODE ACK RETRY \
-         POLICY BACKOFF 250ms MAX 30s",
-        "ICEBERG ON S3 store TABLE events VALUES { 'id' = input.id } LOCATION \
+        "OTEL LOGS EMITTER emit FROM p99 TO otel_main  MODE ACK RETRY POLICY BACKOFF 250ms MAX \
+         30s VALUES { 'time' = input.time, 'body' = input.body } ",
+        "ICEBERG TABLE EMITTER emit FROM p99 TO store TABLE 'events' LOCATION \
          's3://bucket/events' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY POLICY \
-         BACKOFF 250ms MAX 30s",
+         BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } ",
     ];
     for sink in direct_sinks {
         for batch in ["", " BATCH MAX MESSAGES 1000 MAX SIZE 3MiB"] {
             let source = format!(
-                "CREATE EMITTER emit FROM p99 TO {sink}{batch} FLUSH IMMEDIATE ON MESSAGE ERROR \
-                 LOG ON GENERAL ERROR LOG;"
+                "CREATE {sink}{batch} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
             );
             let parsed = parse_create_emitter(&source).expect("the direct emitter parses");
             assert_eq!(parsed.batch.is_some(), !batch.is_empty(), "`{source}`");
@@ -2629,9 +2565,9 @@ fn every_sink_family_accepts_an_optional_batch_clause_and_round_trips_it() {
 #[test]
 fn batch_clause_follows_route_construction() {
     let encoded = parse_create_emitter(
-        "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events MODE NO_ACK RETRY POLICY \
-         BACKOFF 250ms MAX 30s ENCODE USING my_codec INHERIT ALL WHERE input.id > 0 BATCH MAX \
-         MESSAGES 10 MAX SIZE 64KiB FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON \
+        "CREATE KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK RETRY \
+         POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec INHERIT ALL WHERE input.id > 0 BATCH \
+         MAX MESSAGES 10 MAX SIZE 64KiB FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON \
          GENERAL ERROR LOG;",
     )
     .expect("BATCH follows the route construction of an encoded sink");
@@ -2639,10 +2575,10 @@ fn batch_clause_follows_route_construction() {
     assert!(encoded.construction.where_clause.is_some());
 
     let direct = parse_create_emitter(
-        "CREATE EMITTER emit FROM p99 TO POSTGRES db INSERT TO TABLE events VALUES { 'id' = \
-         input.id } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WHERE input.id > 0 BATCH MAX \
-         MESSAGES 500 MAX SIZE 8MiB FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON \
-         GENERAL ERROR LOG;",
+        "CREATE POSTGRES TABLE EMITTER emit FROM p99 TO db TABLE 'events' MODE ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } WHERE input.id > 0 BATCH MAX MESSAGES \
+         500 MAX SIZE 8MiB FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL \
+         ERROR LOG;",
     )
     .expect("BATCH follows the WHERE clause of a direct sink");
     assert_eq!(direct.batch, Some(batch_policy(500, "8MiB")));
@@ -2652,9 +2588,9 @@ fn batch_clause_follows_route_construction() {
 #[test]
 fn batch_clause_is_written_before_the_flush_policy() {
     let error = parse_create_emitter(
-        "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events MODE NO_ACK RETRY POLICY \
-         BACKOFF 250ms MAX 30s ENCODE USING my_codec FLUSH IMMEDIATE BATCH MAX MESSAGES 10 MAX \
-         SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        "CREATE KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK RETRY \
+         POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec FLUSH IMMEDIATE BATCH MAX MESSAGES 10 \
+         MAX SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
     );
 
     assert!(error.is_err(), "BATCH after FLUSH must not parse");
@@ -2668,9 +2604,9 @@ fn batch_clause_requires_both_limits() {
         "BATCH MAX SIZE 1MiB MAX MESSAGES 10",
     ] {
         let source = format!(
-            "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events MODE NO_ACK RETRY POLICY \
-             BACKOFF 250ms MAX 30s ENCODE USING my_codec {clause} FLUSH IMMEDIATE ON MESSAGE \
-             ERROR LOG ON GENERAL ERROR LOG;"
+            "CREATE KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK RETRY \
+             POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec {clause} FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         );
 
         assert!(
@@ -2683,7 +2619,8 @@ fn batch_clause_requires_both_limits() {
 #[test]
 fn parses_and_renders_alter_emitter_batch_operations() {
     let alter = parse_alter_emitter(
-        "ALTER EMITTER event_sink SET BATCH MAX MESSAGES 250 MAX SIZE 512KiB, DROP BATCH;",
+        "ALTER ZEROMQ PUSH EMITTER event_sink SET BATCH MAX MESSAGES 250 MAX SIZE 512KiB, DROP \
+         BATCH;",
     )
     .expect("batch operations parse");
 
@@ -2699,7 +2636,8 @@ fn parses_and_renders_alter_emitter_batch_operations() {
     let canonical = alter.to_canonical_nspl().expect("batch operations render");
     assert_eq!(
         canonical,
-        "ALTER EMITTER event_sink SET BATCH MAX MESSAGES 250 MAX SIZE 512KiB, DROP BATCH;"
+        "ALTER ZEROMQ PUSH EMITTER event_sink SET BATCH MAX MESSAGES 250 MAX SIZE 512KiB, DROP \
+         BATCH;"
     );
     assert_eq!(
         parse_alter_emitter(&canonical).expect("the rendering reparses"),
@@ -2710,10 +2648,10 @@ fn parses_and_renders_alter_emitter_batch_operations() {
 #[test]
 fn rejects_malformed_alter_emitter_batch_operations() {
     for source in [
-        "ALTER EMITTER event_sink SET BATCH;",
-        "ALTER EMITTER event_sink SET BATCH MAX MESSAGES 0 MAX SIZE 1MiB;",
-        "ALTER EMITTER event_sink SET BATCH MAX MESSAGES 10;",
-        "ALTER EMITTER event_sink DROP BATCH MAX MESSAGES 10 MAX SIZE 1MiB;",
+        "ALTER ZEROMQ PUSH EMITTER event_sink SET BATCH;",
+        "ALTER ZEROMQ PUSH EMITTER event_sink SET BATCH MAX MESSAGES 0 MAX SIZE 1MiB;",
+        "ALTER ZEROMQ PUSH EMITTER event_sink SET BATCH MAX MESSAGES 10;",
+        "ALTER ZEROMQ PUSH EMITTER event_sink DROP BATCH MAX MESSAGES 10 MAX SIZE 1MiB;",
     ] {
         assert!(
             parse_alter_emitter(source).is_err(),
@@ -2724,8 +2662,8 @@ fn rejects_malformed_alter_emitter_batch_operations() {
 
 #[test]
 fn completes_the_optional_batch_clause_beside_the_flush_policy() {
-    let input = "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events MODE NO_ACK RETRY \
-                 POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ";
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK \
+                 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ";
     let suggestions = suggest_create_emitter(input, input.len());
 
     assert!(suggestions.contains(&"BATCH MAX MESSAGES".to_string()));
@@ -2736,8 +2674,8 @@ fn completes_the_optional_batch_clause_beside_the_flush_policy() {
 
 #[test]
 fn completes_the_batch_size_after_the_message_limit() {
-    let input = "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events MODE NO_ACK RETRY \
-                 POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec BATCH MAX MESSAGES 10 ";
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK \
+                 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec BATCH MAX MESSAGES 10 ";
     let suggestions = suggest_create_emitter(input, input.len());
 
     assert_eq!(suggestions, vec!["MAX SIZE".to_string()]);
@@ -2745,9 +2683,9 @@ fn completes_the_batch_size_after_the_message_limit() {
 
 #[test]
 fn completes_the_flush_policy_after_the_batch_clause() {
-    let input = "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events MODE NO_ACK RETRY \
-                 POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec BATCH MAX MESSAGES 10 MAX \
-                 SIZE 1MiB ";
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK \
+                 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec BATCH MAX MESSAGES 10 \
+                 MAX SIZE 1MiB ";
     let suggestions = suggest_create_emitter(input, input.len());
 
     assert!(suggestions.contains(&"FLUSH EACH".to_string()));
@@ -2758,12 +2696,12 @@ fn completes_the_flush_policy_after_the_batch_clause() {
 
 #[test]
 fn completes_alter_emitter_batch_operations() {
-    let set = "ALTER EMITTER event_sink SET ";
+    let set = "ALTER ZEROMQ PUSH EMITTER event_sink SET ";
     let set_suggestions = suggest_alter_emitter(set, set.len());
     assert!(set_suggestions.contains(&"BATCH MAX MESSAGES".to_string()));
     assert!(set_suggestions.contains(&"FLUSH EACH".to_string()));
 
-    let drop = "ALTER EMITTER event_sink DROP ";
+    let drop = "ALTER ZEROMQ PUSH EMITTER event_sink DROP ";
     let drop_suggestions = suggest_alter_emitter(drop, drop.len());
     assert!(drop_suggestions.contains(&"BATCH".to_string()));
     assert!(drop_suggestions.contains(&"ENCODE".to_string()));

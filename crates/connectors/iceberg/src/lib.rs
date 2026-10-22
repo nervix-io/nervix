@@ -83,7 +83,7 @@ use nervix_dns::DnsResolver;
 use nervix_execution::{
     AdmissionError, Executor, MemoryClass, QueueAdmission, Reservation, StorageClass,
 };
-use nervix_models::{ClientConfigEntry, IcebergStorageBackend, TableName, Timestamp};
+use nervix_models::{ClientConfigEntry, IcebergStorageBackend, IcebergTableName, Timestamp};
 use nervix_primitives::{sync::StdArc, time::Instant};
 use parquet::file::properties::WriterProperties;
 use storage::DnsStorageFactory;
@@ -125,7 +125,7 @@ pub struct IcebergSinkConfig {
     pub catalog_config: Vec<ClientConfigEntry>,
     /// The catalog namespace this emitter's table lives in.
     pub namespace: String,
-    pub table: TableName,
+    pub table: IcebergTableName,
     pub location: String,
     /// The mapped columns every staged batch carries, as the host projects them.
     pub mapped_schema: StdArc<arrow_schema::Schema>,

@@ -518,9 +518,19 @@ fails them. They cover the three statement families:
 - Clients. `POOL SIZE` is written exactly where the client declares a pool, and only the declared
   options parse.
 
-An emitter's head does not name its entity yet, so the words that open its destination after `TO`
-come from the test generator; the locator, the options and everything after them come from the
-declaration.
+Emitter conformance derives each connector/entity head, reference, quoted locator, required
+options, policy and payload from the declaration. Each concrete destination Model owns a closed
+publishing-policy enum; that enum supplies its capability kinds. There is no separately stored
+publishing policy or registry/planner admission table. Grammar modules construct only that entity's
+policies, and planning matches its enum exhaustively when delivery has alternatives. Shared
+rendering and duration validation borrow the policy without retaining another representation.
+External names retain their entity-specific validated types through the plan and connector
+configuration. SQS uses one queue-name type on both ingest and emit boundaries.
+
+Iceberg retains a storage-client reference in its destination Model. Validation admits the declared
+object-store client kinds; planning resolves the actual S3, GCS or Azure Blob client into the
+connector's storage-backend setting. The destination statement does not select that backend.
+The host receives the completed plan and performs no Model lookup to choose it.
 
 ### Capability inventory
 
@@ -1012,7 +1022,7 @@ consumer edges from the new plan; it does not reconstruct the emitter from a Mod
 The host resolves resource mounts and binds the lowered VM programs to installed schemas and UDFs
 when it starts the task. A retry reopens the sink with the same typed configuration.
 
-A `TO CLIENT SCHEMA` emitter is a native sink plan, not an external connector plan. Its typed
+A `CLIENT CONSUMER EMITTER ... TO SCHEMA` is a native sink plan, not an external connector plan. Its typed
 plan carries the exact output schema, declared `BATCH` limit and required ACK window, timeout and
 retry pacing, with no client object or codec. The host constructs Arrow IPC from the projected
 columns, retains each payload's bytes and source member positions through the common prepared
@@ -1094,7 +1104,7 @@ transient failure its pending work is still waiting out.
 ### Finishing a sink
 
 Every sink implements `finish`, and no sink inherits a default. A publish reports a record
-delivered at the completion point its mode declares, and for `NO_ACK` on Kafka, Pulsar and MQTT
+delivered at the completion point its mode declares, and for `NO ACK` on Kafka, Pulsar and MQTT
 QoS 0 that point is the client taking the record, so the client can still hold delivered records
 when the emitter stops. `finish` sends what the client still holds by the deadline the host gives
 it and answers with one of two outcomes:
@@ -1131,8 +1141,8 @@ the emitter's transient error that `DESCRIBE EMITTER` shows and as an error even
 
 | Sink | What the client holds once a publish returns | What finishing does with it |
 | --- | --- | --- |
-| Kafka | `NO_ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
-| Pulsar | `NO_ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
+| Kafka | `NO ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
+| Pulsar | `NO ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
 | MQTT | `QOS 0`: publishes the client took and its event loop has not yet written and flushed to the broker connection, which a client cut off from its broker holds until it connects again. `QOS 1` and `QOS 2`: nothing | Waits until the event loop has flushed every publish the client took or the deadline passes; reports a failed flush or the count still unflushed at that deadline |
 | NATS | Nothing: a core publish flushes the connection before it reports its records, and JetStream answers each record | Nothing to send |
 | ZeroMQ | Nothing a publish reported delivered: a completed send has flushed its frame to a peer's socket, and a send that ran out of `timeout_ms` failed its record | Nothing to send |
@@ -1254,7 +1264,7 @@ declared `ACK TIMEOUT`, so the driver's thirty-second default cannot end a longe
 Driver retries remain disabled; the host's declared retry policy owns another attempt. RabbitMQ
 settles its records when it loses a channel instead.
 
-Under Pulsar `NO_ACK`, accepting a record still delivers it. The sink retains its receipt until
+Under Pulsar `NO ACK`, accepting a record still delivers it. The sink retains its receipt until
 it resolves, without retaining the payload or its upstream acknowledgement. Completed receipts
 are collected during subsequent publishes, and the first driver failure is retained for finish.
 The receipt set and the driver's outbound channel each hold at most 100 entries, from one shared
@@ -1646,7 +1656,7 @@ sequenceDiagram
   began, so the retry of a failed append commits files staged since then in a commit of their own
   instead of acknowledging them unwritten.
   [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate limits.
-- **RabbitMQ sink.** The broker answers no `NO_ACK` message itself, so the sink ends a `NO_ACK`
+- **RabbitMQ sink.** The broker answers no `NO ACK` message itself, so the sink ends a `NO ACK`
   write with one round trip on its channel, which the broker answers only after it has taken every
   message written before it, and the answer delivers the write; a write costs that one round trip,
   not one per message. When the client sets `timeout_ms`, a round trip the broker does not answer

@@ -1,9 +1,9 @@
-//! Sentry emitter grammar in Plexus.
+//! SENTRY emitter grammar in Plexus.
 //!
 //! Layer: language.
-//! - **Owns.** The destination body and connector-specific clauses of Sentry emitters.
-//! - **Depends on.** Shared emitter grammar, lexical primitives and the connector vocabulary.
-//! - **Must not know.** Connector drivers, graph planning or runtime publication.
+//! - **Owns.** The destination body and typed publication grammar of SENTRY emitters.
+//! - **Depends on.** Shared emitter clauses and this connector's declared entity Models.
+//! - **Must not know.** Connector drivers, execution planning or runtime publication.
 
 #![cfg_attr(
     nervix_lint,
@@ -12,9 +12,21 @@
 
 use super::*;
 
-pub(super) fn sentry_emit_sink_parser<'src>()
--> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Sentry)
-        .ignore_then(client_ref())
-        .map(|client| EmitSink::Sentry(SentrySink::Event(SentryEventSink { client })))
+pub(super) fn mode<'src>()
+-> impl Parser<'src, &'src [Token], SentryEventPublishingMode, extra::Err<ParseError<'src>>> + Clone
+{
+    request_mode!(SentryEventPublishingMode)
+}
+
+pub(super) fn event_body<'src>(
+    context: EmitterContext,
+) -> impl Parser<'src, &'src [Token], ParsedDestination<SentryEventSink>, extra::Err<ParseError<'src>>>
++ Clone {
+    encoded_destination(
+        context,
+        client_ref()
+            .then_ignore(kw(Identifier::Mode))
+            .then(mode())
+            .map(|(client, mode)| SentryEventSink { client, mode }),
+    )
 }

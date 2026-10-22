@@ -88,9 +88,9 @@ CREATE DETACHED WINDOW PROCESSOR chaos_paced_window_processor
         closed_at = now()
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED EMITTER chaos_paced_emitter
+CREATE ATTACHED KAFKA TOPIC EMITTER chaos_paced_emitter
   FROM chaos_paced_windows
-  TO KAFKA chaos_paced_kafka TOPIC chaos_paced_output
+  TO chaos_paced_kafka TOPIC 'chaos_paced_output'
     MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
     ENCODE USING chaos_paced_window_json
   INHERIT ALL

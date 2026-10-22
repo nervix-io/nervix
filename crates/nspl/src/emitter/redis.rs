@@ -1,9 +1,9 @@
-//! Redis emitter grammar in Plexus.
+//! REDIS emitter grammar in Plexus.
 //!
 //! Layer: language.
-//! - **Owns.** The destination body and connector-specific clauses of Redis emitters.
-//! - **Depends on.** Shared emitter grammar, lexical primitives and the connector vocabulary.
-//! - **Must not know.** Connector drivers, graph planning or runtime publication.
+//! - **Owns.** The destination body and typed publication grammar of REDIS emitters.
+//! - **Depends on.** Shared emitter clauses and this connector's declared entity Models.
+//! - **Must not know.** Connector drivers, execution planning or runtime publication.
 
 #![cfg_attr(
     nervix_lint,
@@ -12,14 +12,27 @@
 
 use super::*;
 
-pub(super) fn redis_emit_sink_parser<'src>()
--> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Redis)
-        .ignore_then(kw(Identifier::Pubsub))
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Channel))
-        .then(channel_ref())
-        .map(|(client, channel)| {
-            EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink { client, channel }))
-        })
+pub(super) fn mode<'src>()
+-> impl Parser<'src, &'src [Token], RedisPubSubPublishingMode, extra::Err<ParseError<'src>>> + Clone
+{
+    unconfirmed_mode!(RedisPubSubPublishingMode)
+}
+
+pub(super) fn pubsub_body<'src>(
+    context: EmitterContext,
+) -> impl Parser<'src, &'src [Token], ParsedDestination<RedisPubSubSink>, extra::Err<ParseError<'src>>>
++ Clone {
+    encoded_destination(
+        context,
+        client_ref()
+            .then_ignore(kw(Identifier::Channel))
+            .then(external_name::<RedisChannelName>())
+            .then_ignore(kw(Identifier::Mode))
+            .then(mode())
+            .map(|((client, channel), mode)| RedisPubSubSink {
+                client,
+                channel,
+                mode,
+            }),
+    )
 }

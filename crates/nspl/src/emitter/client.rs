@@ -1,9 +1,9 @@
-//! Client emitter grammar in Plexus.
+//! CLIENT CONSUMER emitter grammar in Plexus.
 //!
 //! Layer: language.
-//! - **Owns.** The destination body and connector-specific clauses of Client emitters.
-//! - **Depends on.** Shared emitter grammar, lexical primitives and the connector vocabulary.
-//! - **Must not know.** Connector drivers, graph planning or runtime publication.
+//! - **Owns.** The destination body and typed publication grammar of CLIENT CONSUMER emitters.
+//! - **Depends on.** Shared emitter clauses and this connector's declared entity Models.
+//! - **Must not know.** Connector drivers, execution planning or runtime publication.
 
 #![cfg_attr(
     nervix_lint,
@@ -12,22 +12,27 @@
 
 use super::*;
 
-pub(super) fn client_emit_sink_parser<'src>()
--> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Client)
-        .ignore_then(kw(Identifier::Schema))
-        .ignore_then(schema_ref())
-        .map(|schema| EmitSink::Client(ClientSink::Consumer(ClientConsumerSink { schema })))
+pub(super) fn mode<'src>()
+-> impl Parser<'src, &'src [Token], ClientConsumerPublishingMode, extra::Err<ParseError<'src>>> + Clone
+{
+    consumer_mode!(ClientConsumerPublishingMode)
 }
 
-/// Native client output is constructed against its declared schema without a codec or VALUES.
-pub(super) fn native_client_sink<'src>()
--> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
-    sink_with_publishing_mode(client_emit_sink_parser(), client_ack_publishing_mode())
-        .then(route_construction().or_not())
-        .map(|(sink, construction)| ParsedSink {
-            sink: sink.sink,
-            publishing_mode: sink.publishing_mode,
+pub(super) fn consumer_body<'src>(
+    context: EmitterContext,
+) -> impl Parser<
+    'src,
+    &'src [Token],
+    ParsedDestination<ClientConsumerSink>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
+    kw(Identifier::Schema)
+        .ignore_then(schema_ref())
+        .then_ignore(kw(Identifier::Mode))
+        .then(mode())
+        .then(context.construction().or_not())
+        .map(|((schema, mode), construction)| ParsedDestination {
+            destination: ClientConsumerSink { schema, mode },
             body: EmitterBody::Client,
             construction,
             batch: None,

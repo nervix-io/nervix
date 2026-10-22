@@ -1,9 +1,9 @@
-//! Mongodb emitter grammar in Plexus.
+//! MONGODB emitter grammar in Plexus.
 //!
 //! Layer: language.
-//! - **Owns.** The destination body and connector-specific clauses of Mongodb emitters.
-//! - **Depends on.** Shared emitter grammar, lexical primitives and the connector vocabulary.
-//! - **Must not know.** Connector drivers, graph planning or runtime publication.
+//! - **Owns.** The destination body and typed publication grammar of MONGODB emitters.
+//! - **Depends on.** Shared emitter clauses and this connector's declared entity Models.
+//! - **Must not know.** Connector drivers, execution planning or runtime publication.
 
 #![cfg_attr(
     nervix_lint,
@@ -28,7 +28,6 @@ pub(super) fn mongodb_conflict_action<'src>()
         .or_not()
         .map(|action| action.unwrap_or(MongoDbConflictAction::None))
 }
-
 pub(super) fn validate_mongodb_conflict_action<'src>(
     values: &[ClickHouseValueMapping],
     conflict_action: &MongoDbConflictAction,
@@ -66,26 +65,37 @@ pub(super) fn validate_mongodb_conflict_action<'src>(
     }
     Ok(())
 }
-
-pub(super) fn mongodb_emit_sink_parser<'src>()
--> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Mongodb)
-        .ignore_then(client_ref())
-        .then_ignore(kw_phrase2(Identifier::Insert, Identifier::To))
-        .then_ignore(kw(Identifier::Collection))
-        .then(collection_ref())
-        .then_ignore(kw(Identifier::Values))
-        .then(clickhouse_values())
-        .then(mongodb_conflict_action())
-        .try_map(|(((client, collection), values), conflict_action), span| {
-            validate_mongodb_conflict_action(&values, &conflict_action, span)?;
-            Ok(EmitSink::MongoDb(MongoDbSink::Collection(
-                MongoDbCollectionSink {
-                    client,
-                    collection,
-                    values,
-                    conflict_action,
+pub(super) fn mode<'src>()
+-> impl Parser<'src, &'src [Token], MongoDbCollectionPublishingMode, extra::Err<ParseError<'src>>>
++ Clone {
+    request_mode!(MongoDbCollectionPublishingMode)
+}
+pub(super) fn collection_body<'src>() -> impl Parser<
+    'src,
+    &'src [Token],
+    ParsedDestination<MongoDbCollectionSink>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
+    values_destination(
+        client_ref()
+            .then_ignore(kw(Identifier::Collection))
+            .then(external_name::<MongoDbCollectionName>())
+            .then_ignore(kw(Identifier::Mode))
+            .then(mode())
+            .then_ignore(kw(Identifier::Values))
+            .then(clickhouse_values())
+            .then(mongodb_conflict_action())
+            .try_map(
+                |((((client, collection), mode), values), conflict_action), span| {
+                    validate_mongodb_conflict_action(&values, &conflict_action, span)?;
+                    Ok(MongoDbCollectionSink {
+                        client,
+                        collection,
+                        mode,
+                        values,
+                        conflict_action,
+                    })
                 },
-            )))
-        })
+            ),
+    )
 }

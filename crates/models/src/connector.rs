@@ -43,6 +43,7 @@ mod nats;
 mod otel;
 mod postgres;
 mod prometheus;
+mod publishing;
 mod pulsar;
 mod rabbitmq;
 mod redis;

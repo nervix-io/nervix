@@ -32,10 +32,8 @@ mod syslog;
 mod websockets;
 mod zeromq;
 
-use std::str::FromStr as _;
-
 use chumsky::prelude::*;
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_models::{
     AlterIngestor, AlterIngestorOperation, AlterTransportIngestorOperation, ClientProducerSource,
     CreateIngestor, CreateStatement, GeneralErrorPolicy, IngestSource, IngestSourceKind,
@@ -49,7 +47,7 @@ use crate::{
         LexedInput, ParseError, ParseFromSourceError, alter_ingestor_route_body,
         alter_op_separator, boxed_choice, codec_ref, field_ref, filter_where_clause,
         flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
-        into_parse_error, kw, kw_phrase, kw_phrase2, lex_input, relay_ref, suggest_from, tok,
+        into_parse_error, kw, kw_phrase2, lex_input, relay_ref, suggest_from, tok,
         where_expression,
     },
 };
@@ -63,24 +61,16 @@ pub fn show_ingestors_parser<'src>()
         .then_ignore(tok(Token::Semicolon).or_not())
 }
 
-/// The keyword that spells one word of a phrase the vocabulary declares.
-fn keyword(word: &'static str) -> Identifier {
-    Identifier::from_str(word).assured(
-        "every connector and entity keyword of a source pair is an NSPL keyword, as the \
-         every_pair_keyword_is_an_nspl_keyword test checks for every pair",
-    )
-}
-
 /// `<CONNECTOR> <ENTITY> INGESTOR`: the head that names the pair an ingestor reads, one composed
 /// phrase so completion offers it as one item.
 fn head<'src>(
     kind: IngestSourceKind,
 ) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
-    kw_phrase([
-        keyword(kind.connector().keyword()),
-        keyword(kind.entity_keyword()),
+    crate::parser_support::connector_entity_head(
+        kind.connector(),
+        kind.entity_keyword(),
         Identifier::Ingestor,
-    ])
+    )
 }
 
 /// The connector and entity a statement's head names, for completion that reads the head before
@@ -428,6 +418,9 @@ mod conformance_tests;
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr as _;
+
+    use meticulous::ResultExt as _;
     use nervix_models::{
         ClientIngestMode, ClientIngestorAlteration, ClientProducerSource, CodecName,
         EndpointIngestMode, FlushPolicy, HttpEndpointSource, HttpIngestorAlteration,

@@ -706,7 +706,7 @@ feature = "tests/features/runtime/mqtt_emission.feature"
 id = "scenario.mqtt-finish-at-stop"
 invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
 invocation = "scenarios"
-scenario = "STOP waits for the publish a QOS 0 MQTT emitter's client holds"
+scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1829,7 +1829,7 @@ feature = "tests/features/runtime/mqtt_emission.feature"
 id = "stress.mqtt-finish-at-stop"
 invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
 invocation = "stress-scenarios"
-scenario = "STOP waits for the publish a QOS 0 MQTT emitter's client holds"
+scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds"
 selections = ["deloxide-stress"]
 
 [[workload]]

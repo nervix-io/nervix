@@ -1,9 +1,9 @@
-//! Kafka emitter grammar in Plexus.
+//! KAFKA emitter grammar in Plexus.
 //!
 //! Layer: language.
-//! - **Owns.** The destination body and connector-specific clauses of Kafka emitters.
-//! - **Depends on.** Shared emitter grammar, lexical primitives and the connector vocabulary.
-//! - **Must not know.** Connector drivers, graph planning or runtime publication.
+//! - **Owns.** The destination body and typed publication grammar of KAFKA emitters.
+//! - **Depends on.** Shared emitter clauses and this connector's declared entity Models.
+//! - **Must not know.** Connector drivers, execution planning or runtime publication.
 
 #![cfg_attr(
     nervix_lint,
@@ -12,11 +12,27 @@
 
 use super::*;
 
-pub(super) fn kafka_emit_sink_parser<'src>()
--> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Kafka)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Topic))
-        .then(topic_ref())
-        .map(|(client, topic)| EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink { client, topic })))
+pub(super) fn mode<'src>()
+-> impl Parser<'src, &'src [Token], KafkaTopicPublishingMode, extra::Err<ParseError<'src>>> + Clone
+{
+    broker_mode!(KafkaTopicPublishingMode)
+}
+
+pub(super) fn topic_body<'src>(
+    context: EmitterContext,
+) -> impl Parser<'src, &'src [Token], ParsedDestination<KafkaTopicSink>, extra::Err<ParseError<'src>>>
++ Clone {
+    encoded_destination(
+        context,
+        client_ref()
+            .then_ignore(kw(Identifier::Topic))
+            .then(external_name::<KafkaTopicName>())
+            .then_ignore(kw(Identifier::Mode))
+            .then(mode())
+            .map(|((client, topic), mode)| KafkaTopicSink {
+                client,
+                topic,
+                mode,
+            }),
+    )
 }

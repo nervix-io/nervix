@@ -99,10 +99,10 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER kafka_forward
+      CREATE ATTACHED KAFKA TOPIC EMITTER kafka_forward
         FROM forwarding_events
-        TO KAFKA kafka_main TOPIC forwarding_output_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        TO kafka_main TOPIC 'forwarding_output_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING forwarding_event_codec
         INHERIT ALL
         FLUSH EACH 500ms MAX BATCH SIZE 1MiB
@@ -119,7 +119,7 @@ Feature: Kafka ingestion
       | 3            |
 
   @ingestor_group_programs
-  Scenario Outline: Kafka NO_ACK executes ingestor programs once for a collected ingest group
+  Scenario Outline: Kafka NO ACK executes ingestor programs once for a collected ingest group
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -175,7 +175,7 @@ Feature: Kafka ingestion
       | 1            |
       | 3            |
 
-  Scenario Outline: Kafka NO_ACK keeps the rest of a collected ingest group when one message fails to decode
+  Scenario Outline: Kafka NO ACK keeps the rest of a collected ingest group when one message fails to decode
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -239,7 +239,7 @@ Feature: Kafka ingestion
       | 1            |
       | 3            |
 
-  Scenario Outline: Kafka NO_ACK keeps the nested lists of a collected ingest group exact when a <wire_format> message is refused inside one
+  Scenario Outline: Kafka NO ACK keeps the nested lists of a collected ingest group exact when a <wire_format> message is refused inside one
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -859,7 +859,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -919,7 +919,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -980,7 +980,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1094,7 +1094,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE DETACHED EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE DETACHED KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1154,7 +1154,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1226,7 +1226,7 @@ Feature: Kafka ingestion
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM forwarded_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM forwarded_notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1299,7 +1299,7 @@ Feature: Kafka ingestion
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM forwarded_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM forwarded_notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

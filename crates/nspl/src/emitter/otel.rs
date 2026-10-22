@@ -1,9 +1,9 @@
 //! OTEL emitter grammar in Plexus.
 //!
 //! Layer: language.
-//! - **Owns.** The destination body and connector-specific clauses of OTEL emitters.
-//! - **Depends on.** Shared emitter grammar, lexical primitives and the connector vocabulary.
-//! - **Must not know.** Connector drivers, graph planning or runtime publication.
+//! - **Owns.** The destination body and typed publication grammar of OTEL emitters.
+//! - **Depends on.** Shared emitter clauses and this connector's declared entity Models.
+//! - **Must not know.** Connector drivers, execution planning or runtime publication.
 
 #![cfg_attr(
     nervix_lint,
@@ -35,40 +35,6 @@ pub(super) fn otel_metric_kind_parser<'src>()
         kw(Identifier::Histogram)
             .ignore_then(otel_temporality_parser())
             .map(|temporality| OtelMetricKind::Histogram { temporality }),
-    ))
-}
-
-/// The signal an OTEL sink body spells after its client, which decides the entity the sink is.
-#[derive(Debug, Clone)]
-pub(super) enum OtelSignal {
-    Logs,
-    Traces,
-    Metric(OtelMetric),
-}
-
-pub(super) fn otel_signal_parser<'src>()
--> impl Parser<'src, &'src [Token], OtelSignal, extra::Err<ParseError<'src>>> + Clone {
-    choice((
-        kw(Identifier::Logs).to(OtelSignal::Logs),
-        kw(Identifier::Traces).to(OtelSignal::Traces),
-        kw(Identifier::Metric)
-            .ignore_then(string_lit().labelled("otel_metric_name"))
-            .then_ignore(kw(Identifier::Unit))
-            .then(string_lit().labelled("otel_metric_unit"))
-            .then(
-                kw(Identifier::Description)
-                    .ignore_then(string_lit().labelled("otel_metric_description"))
-                    .or_not(),
-            )
-            .then(otel_metric_kind_parser())
-            .map(|(((name, unit), description), kind)| {
-                OtelSignal::Metric(OtelMetric {
-                    name,
-                    unit,
-                    description,
-                    kind,
-                })
-            }),
     ))
 }
 
@@ -122,14 +88,30 @@ pub(super) fn otel_scope_parser<'src>()
         )
         .map(|(name, version)| OtelScope { name, version })
 }
-
-pub(super) fn otel_emit_sink_parser<'src>()
--> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Otel)
-        .ignore_then(client_ref())
-        .then(otel_signal_parser())
-        .then_ignore(kw(Identifier::Values))
-        .then(clickhouse_values())
+fn metric_locator<'src>()
+-> impl Parser<'src, &'src [Token], OtelMetric, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Metric)
+        .ignore_then(string_lit().labelled("otel_metric_name"))
+        .then_ignore(kw(Identifier::Unit))
+        .then(string_lit().labelled("otel_metric_unit"))
+        .then(
+            kw(Identifier::Description)
+                .ignore_then(string_lit().labelled("otel_metric_description"))
+                .or_not(),
+        )
+        .then(otel_metric_kind_parser())
+        .map(|(((name, unit), description), kind)| OtelMetric {
+            name,
+            unit,
+            description,
+            kind,
+        })
+        .boxed()
+}
+fn mappings<'src>()
+-> impl Parser<'src, &'src [Token], OtelMappings, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Values)
+        .ignore_then(clickhouse_values())
         .then(
             kw(Identifier::Attributes)
                 .ignore_then(clickhouse_values())
@@ -141,23 +123,72 @@ pub(super) fn otel_emit_sink_parser<'src>()
                 .or_not(),
         )
         .then(otel_scope_parser().or_not())
-        .map(
-            |(((((client, signal), values), attributes), resource), scope)| {
-                let mappings = OtelMappings {
-                    values,
-                    attributes: attributes.unwrap_or_default(),
-                    resource: resource.unwrap_or_default(),
-                    scope,
-                };
-                match signal {
-                    OtelSignal::Logs => EmitSink::from(OtelLogsSink { client, mappings }),
-                    OtelSignal::Traces => EmitSink::from(OtelTracesSink { client, mappings }),
-                    OtelSignal::Metric(metric) => EmitSink::from(OtelMetricsSink {
-                        client,
-                        metric,
-                        mappings,
-                    }),
-                }
-            },
-        )
+        .map(|(((values, attributes), resource), scope)| OtelMappings {
+            values,
+            attributes: attributes.unwrap_or_default(),
+            resource: resource.unwrap_or_default(),
+            scope,
+        })
+        .boxed()
+}
+pub(super) fn logs_mode<'src>()
+-> impl Parser<'src, &'src [Token], OtelLogsPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    request_mode!(OtelLogsPublishingMode)
+}
+pub(super) fn logs_body<'src>()
+-> impl Parser<'src, &'src [Token], ParsedDestination<OtelLogsSink>, extra::Err<ParseError<'src>>>
++ Clone {
+    values_destination(
+        client_ref()
+            .then_ignore(kw(Identifier::Mode))
+            .then(logs_mode())
+            .then(mappings())
+            .map(|((client, mode), mappings)| OtelLogsSink {
+                client,
+                mode,
+                mappings,
+            }),
+    )
+}
+pub(super) fn traces_mode<'src>()
+-> impl Parser<'src, &'src [Token], OtelTracesPublishingMode, extra::Err<ParseError<'src>>> + Clone
+{
+    request_mode!(OtelTracesPublishingMode)
+}
+pub(super) fn traces_body<'src>()
+-> impl Parser<'src, &'src [Token], ParsedDestination<OtelTracesSink>, extra::Err<ParseError<'src>>>
++ Clone {
+    values_destination(
+        client_ref()
+            .then_ignore(kw(Identifier::Mode))
+            .then(traces_mode())
+            .then(mappings())
+            .map(|((client, mode), mappings)| OtelTracesSink {
+                client,
+                mode,
+                mappings,
+            }),
+    )
+}
+pub(super) fn metrics_mode<'src>()
+-> impl Parser<'src, &'src [Token], OtelMetricsPublishingMode, extra::Err<ParseError<'src>>> + Clone
+{
+    request_mode!(OtelMetricsPublishingMode)
+}
+pub(super) fn metrics_body<'src>()
+-> impl Parser<'src, &'src [Token], ParsedDestination<OtelMetricsSink>, extra::Err<ParseError<'src>>>
++ Clone {
+    values_destination(
+        client_ref()
+            .then(metric_locator())
+            .then_ignore(kw(Identifier::Mode))
+            .then(metrics_mode())
+            .then(mappings())
+            .map(|(((client, metric), mode), mappings)| OtelMetricsSink {
+                client,
+                metric,
+                mode,
+                mappings,
+            }),
+    )
 }

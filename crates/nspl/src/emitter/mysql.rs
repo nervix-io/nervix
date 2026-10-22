@@ -1,9 +1,9 @@
-//! Mysql emitter grammar in Plexus.
+//! MYSQL emitter grammar in Plexus.
 //!
 //! Layer: language.
-//! - **Owns.** The destination body and connector-specific clauses of Mysql emitters.
-//! - **Depends on.** Shared emitter grammar, lexical primitives and the connector vocabulary.
-//! - **Must not know.** Connector drivers, graph planning or runtime publication.
+//! - **Owns.** The destination body and typed publication grammar of MYSQL emitters.
+//! - **Depends on.** Shared emitter clauses and this connector's declared entity Models.
+//! - **Must not know.** Connector drivers, execution planning or runtime publication.
 
 #![cfg_attr(
     nervix_lint,
@@ -23,23 +23,34 @@ pub(super) fn mysql_conflict_action<'src>()
         .or_not()
         .map(|action| action.unwrap_or(MySqlConflictAction::None))
 }
-
-pub(super) fn mysql_emit_sink_parser<'src>()
--> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Mysql)
-        .ignore_then(client_ref())
-        .then_ignore(kw_phrase2(Identifier::Insert, Identifier::To))
-        .then_ignore(kw(Identifier::Table))
-        .then(table_ref())
-        .then_ignore(kw(Identifier::Values))
-        .then(clickhouse_values())
-        .then(mysql_conflict_action())
-        .map(|(((client, table), values), conflict_action)| {
-            EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
-                client,
-                table,
-                values,
-                conflict_action,
-            }))
-        })
+pub(super) fn mode<'src>()
+-> impl Parser<'src, &'src [Token], MySqlTablePublishingMode, extra::Err<ParseError<'src>>> + Clone
+{
+    request_mode!(MySqlTablePublishingMode)
+}
+pub(super) fn table_body<'src>()
+-> impl Parser<'src, &'src [Token], ParsedDestination<MySqlTableSink>, extra::Err<ParseError<'src>>>
++ Clone {
+    values_destination(
+        client_ref()
+            .then_ignore(kw(Identifier::Table))
+            .then(external_name::<MySqlTableName>())
+            .then_ignore(kw(Identifier::Mode))
+            .then(mode())
+            .then_ignore(kw(Identifier::Values))
+            .then(clickhouse_values())
+            .then(mysql_conflict_action())
+            .try_map(
+                |((((client, table), mode), values), conflict_action), span| {
+                    let _ = span;
+                    Ok(MySqlTableSink {
+                        client,
+                        table,
+                        mode,
+                        values,
+                        conflict_action,
+                    })
+                },
+            ),
+    )
 }

@@ -1,9 +1,9 @@
-//! Rabbitmq emitter grammar in Plexus.
+//! RABBITMQ emitter grammar in Plexus.
 //!
 //! Layer: language.
-//! - **Owns.** The destination body and connector-specific clauses of Rabbitmq emitters.
-//! - **Depends on.** Shared emitter grammar, lexical primitives and the connector vocabulary.
-//! - **Must not know.** Connector drivers, graph planning or runtime publication.
+//! - **Owns.** The destination body and typed publication grammar of RABBITMQ emitters.
+//! - **Depends on.** Shared emitter clauses and this connector's declared entity Models.
+//! - **Must not know.** Connector drivers, execution planning or runtime publication.
 
 #![cfg_attr(
     nervix_lint,
@@ -12,13 +12,27 @@
 
 use super::*;
 
-pub(super) fn rabbitmq_emit_sink_parser<'src>()
--> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Rabbitmq)
-        .ignore_then(client_ref())
-        .then_ignore(kw(Identifier::Queue))
-        .then(queue_ref())
-        .map(|(client, queue)| {
-            EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink { client, queue }))
-        })
+pub(super) fn mode<'src>()
+-> impl Parser<'src, &'src [Token], RabbitMqQueuePublishingMode, extra::Err<ParseError<'src>>> + Clone
+{
+    broker_mode!(RabbitMqQueuePublishingMode)
+}
+
+pub(super) fn queue_body<'src>(
+    context: EmitterContext,
+) -> impl Parser<'src, &'src [Token], ParsedDestination<RabbitMqQueueSink>, extra::Err<ParseError<'src>>>
++ Clone {
+    encoded_destination(
+        context,
+        client_ref()
+            .then_ignore(kw(Identifier::Queue))
+            .then(external_name::<RabbitMqQueueName>())
+            .then_ignore(kw(Identifier::Mode))
+            .then(mode())
+            .map(|((client, queue), mode)| RabbitMqQueueSink {
+                client,
+                queue,
+                mode,
+            }),
+    )
 }

@@ -34,9 +34,9 @@ Feature: Kafka acknowledgements across relay-owner recovery
           BRANCHED BY relay_handoff_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER relay_handoff_sink
+      CREATE ATTACHED KAFKA TOPIC EMITTER relay_handoff_sink
         FROM relay_handoff_records
-        TO KAFKA relay_handoff_kafka TOPIC relay_handoff_out_{{test_id}}
+        TO relay_handoff_kafka TOPIC 'relay_handoff_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING relay_handoff_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

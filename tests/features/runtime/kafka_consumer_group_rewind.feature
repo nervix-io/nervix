@@ -32,9 +32,9 @@ Feature: Kafka consumer-group rewinds across a rebalance
           ON QUIESCE SUSPEND DECODE USING rewind_codec
         TO rewind_records INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER rewind_sink
+      CREATE ATTACHED KAFKA TOPIC EMITTER rewind_sink
         FROM rewind_records
-        TO KAFKA rewind_kafka TOPIC rewind_out_{{test_id}}
+        TO rewind_kafka TOPIC 'rewind_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING rewind_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

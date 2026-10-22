@@ -26,10 +26,10 @@ use super::{
 };
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SinkBody,
-    SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, IngestAcknowledgement,
+    IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SinkBody, SinkClientReference,
+    SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope,
+    SourceReference, SourceReferenceKind,
 };
 
 configured_client!(ZeroMq: unpooled, config Nervix, CreateClientZeroMq => ZeroMqConfigEntry);
@@ -162,6 +162,7 @@ connector_sources! {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct ZeroMqPushSink {
+    pub mode: ZeroMqPushPublishingMode,
     pub client: ClientName,
 }
 
@@ -172,7 +173,7 @@ impl SinkEntity for ZeroMqPushSink {
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[EmitterPublishingModeKind::NoAck],
+        publishing_modes: ZeroMqPushPublishingMode::KINDS,
         locator: None,
         options: &[],
         envelope: &[],
@@ -198,8 +199,16 @@ connector_sinks! {
     connector ZeroMq = "ZEROMQ";
     /// What a ZeroMQ sink writes.
     pub enum ZeroMqSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum ZeroMqEmitterMode;
     /// The entities a ZeroMQ sink writes.
     pub enum ZeroMqSinkEntity {
-        Push(ZeroMqPushSink) = "PUSH";
+        Push(ZeroMqPushSink, ZeroMqPushPublishingMode) = "PUSH";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum ZeroMqPushPublishingMode {
+        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
     }
 }

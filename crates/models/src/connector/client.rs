@@ -37,11 +37,10 @@ use super::{
 use crate::{
     AckWindow, AcknowledgementConfirmation, AlterIngestorError, AlterIngestorOperation,
     CanonicalNsplError, ClientName, CreateIngestor, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    IngestDeliveryKind, IngestQuiesceMode, IngestSourceCapabilities, IngestorAlteration,
-    IngestorEntityModel, IngestorInput, PositionClass, RetryPolicy, SchemaName, SinkBody,
-    SinkEntity, SinkReference, SinkReferenceKind, SourceEntity, SourceMetadataScope,
-    SourceReferenceKind,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, IngestDeliveryKind,
+    IngestQuiesceMode, IngestSourceCapabilities, IngestorAlteration, IngestorEntityModel,
+    IngestorInput, PositionClass, RetryPolicy, SchemaName, SinkBody, SinkEntity, SinkReference,
+    SinkReferenceKind, SourceEntity, SourceMetadataScope, SourceReferenceKind,
 };
 
 /// Application producers submitting native Arrow batches of one internal schema.
@@ -232,6 +231,7 @@ impl AlteredIngestorSource for ClientProducerSource {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct ClientConsumerSink {
+    pub mode: ClientConsumerPublishingMode,
     pub schema: SchemaName,
 }
 
@@ -242,7 +242,7 @@ impl SinkEntity for ClientConsumerSink {
         body: EmitterBodyForm::Native,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[EmitterPublishingModeKind::ClientAck],
+        publishing_modes: ClientConsumerPublishingMode::KINDS,
         locator: None,
         options: &[],
         envelope: &[],
@@ -265,8 +265,16 @@ connector_sinks! {
     connector Client = "CLIENT";
     /// What a client sink writes.
     pub enum ClientSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum ClientEmitterMode;
     /// The entities a client sink writes.
     pub enum ClientSinkEntity {
-        Consumer(ClientConsumerSink) = "CONSUMER";
+        Consumer(ClientConsumerSink, ClientConsumerPublishingMode) = "CONSUMER";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum ClientConsumerPublishingMode {
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => ClientAck,
     }
 }

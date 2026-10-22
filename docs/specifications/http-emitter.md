@@ -18,12 +18,12 @@ lifecycle, branch, sensitivity, materialized-state, flush, and error contracts. 
 credentials must be provisioned by the operator. Creating or starting the emitter performs no
 provisioning or probe request against the destination.
 
-## NSPL surface
+## Plexus surface
 
 The HTTP sink has this form:
 
 ```nspl,ignore
-TO HTTP <client>
+CREATE HTTP REQUEST EMITTER <name> FROM <relays> TO <client>
   METHOD <string_expression>
   PATH <string_expression>
   MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>
@@ -32,7 +32,7 @@ TO HTTP <client>
 
 `METHOD`, `PATH`, `MODE`, the complete retry policy, and exactly one body selection are required,
 in that order. `MODE ACK` is the request/response mode: it takes no acknowledgement window or
-`ACK TIMEOUT`. HTTP emission supports neither `NO_ACK` nor a parallel publishing mode. The
+`ACK TIMEOUT`. HTTP emission supports neither `NO ACK` nor a parallel publishing mode. The
 referenced client's `timeout_ms` bounds each attempt.
 
 The ordinary emitter clauses surround this sink: source relays and their predicates, optional
@@ -75,9 +75,9 @@ CREATE HTTP CLIENT api CONFIG {
   'timeout_ms' = 5000
 };
 
-CREATE ATTACHED EMITTER deliver_event
+CREATE ATTACHED HTTP REQUEST EMITTER deliver_event
   FROM outgoing
-  TO HTTP api
+  TO api
     METHOD input.request_method
     PATH input.request_path
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -100,9 +100,9 @@ object containing only `event_id` and `payload`. Transport fields need not appea
 An alternative emitter definition, using the domain, client, and relay from the first example:
 
 ```nspl,ignore
-CREATE EMITTER delete_event
+CREATE HTTP REQUEST EMITTER delete_event
   FROM outgoing WHERE input.request_method = 'DELETE'
-  TO HTTP api
+  TO api
     METHOD 'DELETE'
     PATH input.request_path
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -360,7 +360,7 @@ semantics govern initialization failures and work abandoned when execution canno
 ### Configuration changes
 
 Changing the method or path uses a complete
-`ALTER EMITTER ... SET TO HTTP ... MODE ...` sink replacement and uses `ENTITY_PAUSE`. For this
+`ALTER HTTP REQUEST EMITTER ... SET TO ... MODE ...` sink replacement and uses `ENTITY_PAUSE`. For this
 HTTP form, `SET TO` includes exactly one of `ENCODE USING` and `WITHOUT BODY`, so a replacement
 never inherits an ambiguous body selection. `SET CLIENT` and `SET ENCODE USING` retain their
 existing meanings; `SET ENCODE USING` selects codec-body mode, and `DROP ENCODE` is rejected for
@@ -372,8 +372,8 @@ the ordinary configuration-entity lifecycle.
 For example, this replacement makes the JSON emitter above use a fixed method and path:
 
 ```nspl,ignore
-ALTER EMITTER deliver_event
-  SET TO HTTP api
+ALTER HTTP REQUEST EMITTER deliver_event
+  SET TO api
     METHOD 'POST'
     PATH '/v1/events'
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -425,7 +425,7 @@ An HTTP emitter publishes exactly one request per eligible record, so it has no 
 The optional `BATCH MAX MESSAGES <n> MAX SIZE <bytes>` clause of
 [optional emitter batching](./emitter-batching.md) is not part of the HTTP sink: a statement that
 declares it on an HTTP emitter is rejected with a validation error naming the emitter, completion
-does not offer it after an HTTP sink, and `ALTER EMITTER ... SET BATCH` on an HTTP emitter fails
+does not offer it after an HTTP sink, and `ALTER HTTP REQUEST EMITTER ... SET BATCH` on an HTTP emitter fails
 the same way. `DESCRIBE EMITTER` reports `batch: none` for every HTTP emitter.
 
 This leaves the batching contract unchanged. Its sink matrix, its validation list, and its

@@ -1,9 +1,9 @@
-//! Postgres emitter grammar in Plexus.
+//! POSTGRES emitter grammar in Plexus.
 //!
 //! Layer: language.
-//! - **Owns.** The destination body and connector-specific clauses of Postgres emitters.
-//! - **Depends on.** Shared emitter grammar, lexical primitives and the connector vocabulary.
-//! - **Must not know.** Connector drivers, graph planning or runtime publication.
+//! - **Owns.** The destination body and typed publication grammar of POSTGRES emitters.
+//! - **Depends on.** Shared emitter clauses and this connector's declared entity Models.
+//! - **Must not know.** Connector drivers, execution planning or runtime publication.
 
 #![cfg_attr(
     nervix_lint,
@@ -36,35 +36,44 @@ pub(super) fn postgres_conflict_action<'src>()
         .or_not()
         .map(|action| action.unwrap_or(PostgresConflictAction::None))
 }
-
-pub(super) fn postgres_emit_sink_parser<'src>()
--> impl Parser<'src, &'src [Token], EmitSink, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Postgres)
-        .ignore_then(client_ref())
-        .then_ignore(kw_phrase2(Identifier::Insert, Identifier::To))
-        .then_ignore(kw(Identifier::Table))
-        .then(table_ref())
-        .then_ignore(kw(Identifier::Values))
-        .then(clickhouse_values())
-        .then(postgres_conflict_action())
-        .try_map(|(((client, table), values), conflict_action), span| {
-            if let PostgresConflictAction::DoUpdate { target } = &conflict_action {
-                let has_update_column = values
-                    .iter()
-                    .any(|mapping| !target.contains(&mapping.column));
-                if !has_update_column {
-                    return Err(Rich::custom(
-                        span,
-                        "Postgres ON CONFLICT DO UPDATE requires at least one non-conflict VALUES \
-                         column to update",
-                    ));
-                }
-            }
-            Ok(EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
-                client,
-                table,
-                values,
-                conflict_action,
-            })))
-        })
+pub(super) fn mode<'src>()
+-> impl Parser<'src, &'src [Token], PostgresTablePublishingMode, extra::Err<ParseError<'src>>> + Clone
+{
+    request_mode!(PostgresTablePublishingMode)
+}
+pub(super) fn table_body<'src>()
+-> impl Parser<'src, &'src [Token], ParsedDestination<PostgresTableSink>, extra::Err<ParseError<'src>>>
++ Clone {
+    values_destination(
+        client_ref()
+            .then_ignore(kw(Identifier::Table))
+            .then(external_name::<PostgresTableName>())
+            .then_ignore(kw(Identifier::Mode))
+            .then(mode())
+            .then_ignore(kw(Identifier::Values))
+            .then(clickhouse_values())
+            .then(postgres_conflict_action())
+            .try_map(
+                |((((client, table), mode), values), conflict_action), span| {
+                    if let PostgresConflictAction::DoUpdate { target } = &conflict_action
+                        && !values
+                            .iter()
+                            .any(|mapping| !target.contains(&mapping.column))
+                    {
+                        return Err(Rich::custom(
+                            span,
+                            "Postgres ON CONFLICT DO UPDATE requires at least one non-conflict \
+                             VALUES column to update",
+                        ));
+                    }
+                    Ok(PostgresTableSink {
+                        client,
+                        table,
+                        mode,
+                        values,
+                        conflict_action,
+                    })
+                },
+            ),
+    )
 }
