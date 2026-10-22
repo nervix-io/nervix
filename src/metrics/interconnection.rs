@@ -802,6 +802,10 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
             class: "filesystem_storage",
             workers: executor.filesystem_storage,
         },
+        WorkerClassSample {
+            class: "connector_storage",
+            workers: executor.connector_storage,
+        },
     ];
 
     let mut capacity = families.open("nervix_execution_memory_capacity_bytes");

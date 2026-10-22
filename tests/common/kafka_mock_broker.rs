@@ -17,7 +17,7 @@
 //! `GROUP_AUTHORIZATION_FAILED`, an answer a consumer does not retry, and a group's committed offset
 //! stays where it was.
 
-use std::{fmt, io};
+use std::{fmt, io, time::Duration};
 
 use nervix_connector_kafka::testing_rdkafka::{
     config::ClientConfig,
@@ -128,6 +128,20 @@ impl KafkaMockBroker {
         self.cluster()?
             .clear_request_errors(RDKafkaApiKey::OffsetCommit);
         Ok(())
+    }
+
+    /// Holds every answer while the scenario checks progress independent of this broker.
+    pub(crate) fn hold_answers(&self) -> io::Result<()> {
+        self.cluster()?
+            .broker_round_trip_time(1, Duration::from_secs(3600))
+            .map_err(io::Error::other)
+    }
+
+    /// Releases the broker's answers before the scenario drains its sources.
+    pub(crate) fn release_answers(&self) -> io::Result<()> {
+        self.cluster()?
+            .broker_round_trip_time(1, Duration::ZERO)
+            .map_err(io::Error::other)
     }
 }
 

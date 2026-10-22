@@ -55,6 +55,13 @@ exactly once after recovery. The longer receipt scenario uses the same fault con
 beyond thirty seconds under an explicitly declared forty-five-second `ACK TIMEOUT`. These
 dependency faults do not widen a product deadline or replace a readiness observation with a sleep.
 
+The Kafka control-execution scenario uses librdkafka's mock broker to hold replies after a DOMAIN
+source delivered its first record. A codec alteration resumes that source, and the scenario waits
+for a running connector-storage job before sending a record through another HTTP ingestor. The
+same oracle runs on one and three nodes. The broker's native round-trip control releases replies
+in the scenario and again during teardown before diagnostics or node drain, including after a
+failed assertion. It does not change a product deadline or use a readiness sleep.
+
 The Pulsar fault forwarder decodes broker frames and advertises its own plain-text service URL
 in topic lookup responses, retaining every other command and payload field. The driver's discovered
 producer and consumer connections therefore stay behind the same pause gate as bootstrap traffic.
@@ -91,6 +98,16 @@ owns the allowed paths, immutable event snapshot and retained CI selection recor
 
 The suite is the `scenarios` test target, `tests/scenarios.rs`, running the features under
 `tests/features`. Its lifecycle owners live in `tests/common`.
+
+The relay-channel turnover scenario posts through an acknowledged HTTP endpoint on a node other
+than the relay owner. Its generated-payload step reuses one HTTP client and requires each request
+to return HTTP 200 with the complete `completed` / `none` outcome before posting the next tenant.
+The client bounds each response, including its body, at 60 seconds; the fixture declares a
+30-second graph acknowledgement timeout and a window of one. This bounds outstanding graph work
+while the two waves of 600 tenants and the warm-up exercise their 1,201 channel incarnations. The
+scenario still observes all 601 first-generation branch expirations and requires every generated
+payload exactly once at the independent broker observer. A failed request fails the step without
+resubmitting an outcome that might already have produced output.
 
 | Element | Where it runs | Owner |
 | --- | --- | --- |
@@ -195,6 +212,18 @@ replica checkpoints beside the other diagnostic workloads. The full active diagn
 reached 77 of 80 inputs at the former 30-second bound, while the exact same binary reached all
 inputs and preserved every branch in the focused four-case replay. This condition ends as soon as
 the exact expected count is observed; it retains the complete output, state and branch assertions.
+
+The deduplicator keyspace and window fixture above the bulk budget posts its payments through an
+acknowledged HTTP endpoint, `MODE ACK MAX 8 ACK TIMEOUT 60s` with `ON QUIESCE REJECT RETRY AFTER
+1s`, and repeats a payment the endpoint answers with 503 until it answers 200 with a completed
+outcome, for at most 300 seconds per payment. Under `MODE NO ACK` the endpoint answers 202 before
+the payment reaches the deduplicator. Under load, the routed delivery of a one-mebibyte payment to
+the deduplicator's node failed when its relay body transfer did not complete or its send timed out,
+and the payment was lost without a trace, so the exact summary oracle waited for a key that never
+arrived. The deduplicator forgets a key whose summary it could not forward and
+drops one it already forwarded, so a repeated payment yields its summary exactly once. The window's
+rows keep `MODE NO ACK`: a window acknowledges a row only when it steps past it, so an acknowledged
+post of one row would wait for the rows after it.
 
 The large materialized restore fixture prepares its rows through an acknowledged client producer.
 One round has a 120-second budget and one in-flight batch, including explicit replays of reported
@@ -578,6 +607,15 @@ A late subscription read can lengthen the observed delay. The production-owner r
 two retained rows immediately before and at the duration boundary, and three rows meeting the
 message threshold before that deadline.
 
+The two scenarios that install a 48 MiB resource on a restarted node wait five minutes for its
+ready replica, and the native client waits ten minutes for the `UPLOAD RESOURCE` before it. The
+leader answers an upload only once every live node has fetched, verified and installed the
+archive, and the restarted node records its pending replica and opens its transfer within about
+seven seconds of starting. Both waits are then the pace of a 48 MiB transfer under the suite's
+storage and CPU load, which canonical producers on 21 October 2026 measured at 7 to 59 seconds for
+the same archive, and 24 such scenarios beside each other on a disk-backed host at 25 to 53
+seconds. The former 30-second catch-up bound held only on a lightly loaded runner.
+
 The boundary between them is kept in four places.
 
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
@@ -737,6 +775,7 @@ second module runs the operation, it is named after the owner.
 | A gRPC receiver wait: captured calls | `grpc_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A server process's startup, its exit, or a log line | `server_process.rs`, reading the executable through `server_executable.rs` | 120 seconds from the launch for reading the executable, spawning the process and waiting until it accepts commands; 120 and 60 seconds | The step fails, quoting the last 80 lines of the process log. A failed startup also says how reading the executable went, which kinds of answer the readiness probes got and when, and, when its deadline passed, what the still-running process and its host were doing |
 | Convergence of a started or restarted real-process cluster, or of one restarted member | `process_cluster_convergence.rs`, run by `server_process_cluster.rs` | 120 seconds for the running members to report the targets they observe a killed member through before it is relaunched, then 120 seconds for convergence after the start or relaunch, with each status request capped at 10 seconds | The step fails naming the first condition the members' latest answers did not meet in the last round that ended before the deadline, with every member's latest status and any later failed request; a status line the wait cannot read fails it at once |
+| An `UPLOAD RESOURCE` a step runs through the native client, every attempt and redirect included | `cluster.rs`, run by `tests/scenarios.rs` | 10 minutes for the client's request and retry windows, instead of its 120-second defaults; the client's other commands keep the defaults | The step fails with the client's typed outcome: an uncertain upload or the expired retry deadline |
 | A one-shot CLI command or a streaming output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for a subscription line, the duration the step names for a clock line, between 10 and 60 seconds, and 10 seconds for clock-process exit after Ctrl-C | The step fails with the process result or retained output lines |
 | Text the interactive CLI is expected to display, its startup banner included | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds, pressing Enter every 250 milliseconds so the REPL draws a prompt and prints the events it queued; a row expected from repeated HTTP posts gets 2 seconds after each post within the same 60 | The step fails quoting the newest 40 lines the terminal displayed, with control sequences removed and repeated lines collapsed |
 | The interactive CLI's exit after the scenario types `exit` | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds | The step fails with the exit status or the elapsed wait, quoting the same transcript |
@@ -793,7 +832,9 @@ ordering fails to build rather than producing a harness that outwaits itself.
 | Startup attempt, 36 seconds | A policy input | The slowest healthy node startup, 24.2 seconds, fits in one attempt; the same 3,465 startups had a 2.0-second median and a 4.3-second 99th percentile |
 | Node startup, 84 seconds | Two budgeted attempts, each funding 36 seconds of readiness, 5 seconds of cleanup and a 1-second pause; cleanup and later attempts share the remaining total | Stays under a 90-second ceiling |
 | Cluster cleanup, 60 seconds | The slowest healthy cluster stop, rounded up to 15 seconds, times a headroom of 4 | 12.2 seconds at the slowest over 163 cleanups, with a 0.15-second median and 1.6 seconds at the 90th percentile |
+| Upload command, 10 minutes | The slowest healthy upload of a 48 MiB archive, rounded up to 120 seconds, times a headroom of 5, and shorter than the suite budget | With 48 such uploads on one shared, disk-backed host, those that completed did so inside the client's 120-second window and 35 others expired it; 72 on an idle host took at most 52 seconds |
 | Suite, 75 minutes | The 120-minute scenario job limit, less 30 minutes for pre-suite work and a 15-minute reserve after it | Run 39569675589 completed 3,336 attempts in 34m28s; twice the rounded 35-minute healthy ceiling plus five minutes of slack fits the budget. Run 39656928785's partial progress projects about 55 minutes |
+| CLI backup or restore, 900 seconds | The slowest healthy three-node restore, rounded up to 300 seconds, times three installations: a leader change while a restore installs its state makes the next leader install it again once the CLI sends the archive again | The three-node restores that completed in the scenarios jobs of Check runs 39683355582 and 39683521277, both on slow runners, took 291 seconds at the slowest for a 42 MB archive and 260 seconds for the 84 MB keyspace and window archives; restores that took longer ended at the former 300-second budget. Six concurrent local copies of the keyspace and window scenario saw a restore start installing its state three times |
 
 The assertions keep these orderings, among others:
 
@@ -806,6 +847,7 @@ The assertions keep these orderings, among others:
   test shutdown timeout lies between the default shutdown phases and that watchdog.
 - The suite watchdog's cleanup window fits inside the reserve, and so do the dependency stop and the
   runtime shutdown together.
+- A CLI backup or restore ends inside the suite budget, so its scenario fails with its own reason.
 
 The suite funds a runner at half the measured healthy throughput, with five further minutes for
 retries and the final active attempts. Slow-run variation multiplies the whole workload, so the

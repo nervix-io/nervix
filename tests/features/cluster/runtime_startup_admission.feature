@@ -56,8 +56,7 @@ Feature: Runtime startup admission
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'

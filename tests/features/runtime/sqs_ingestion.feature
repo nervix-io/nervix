@@ -22,8 +22,7 @@ Feature: SQS ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_sqs_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_sqs_notifications;
-        CREATE CLIENT sqs_main
-        TYPE SQS
+        CREATE SQS CLIENT sqs_main
         CONFIG {
           'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
@@ -84,8 +83,7 @@ Feature: SQS ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_sqs_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_sqs_notifications;
-        CREATE CLIENT sqs_main
-        TYPE SQS
+        CREATE SQS CLIENT sqs_main
         CONFIG {
           'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
@@ -144,7 +142,7 @@ Feature: SQS ingestion
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+      CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_forwarded_endpoint}}',
         'region' = 'us-east-1'
       };
@@ -197,7 +195,7 @@ Feature: SQS ingestion
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+      CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
@@ -243,7 +241,7 @@ Feature: SQS ingestion
       CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
       CREATE CODEC held_event_codec_v2 FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
-      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+      CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_held_endpoint}}',
         'region' = 'us-east-1'
       };

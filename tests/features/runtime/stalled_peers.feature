@@ -18,7 +18,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 1 CONFIG {
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 CONFIG {
         'addr' = 'redis://{{redis_peer}}',
         'connect_timeout_ms' = '1000'
       };
@@ -64,7 +64,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 0 MAX 1 CONFIG {
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 0 MAX 1 CONFIG {
         'addr' = 'redis://{{redis_peer}}',
         'connect_timeout_ms' = '1000'
       };
@@ -104,7 +104,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqps://{{rabbitmq_peer}}/%2f',
         'connect_timeout_ms' = '1000'
       };
@@ -142,7 +142,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqps://{{rabbitmq_peer}}/%2f',
         'connect_timeout_ms' = '1000'
       };
@@ -179,7 +179,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqp://{{rabbitmq_peer}}/%2f',
         'connect_timeout_ms' = '1000'
       };
@@ -217,7 +217,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqp://{{rabbitmq_peer}}/%2f',
         'connect_timeout_ms' = '1000'
       };
@@ -265,7 +265,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = '{{rabbitmq_stallable_addr}}',
         'timeout_ms' = '1000'
       };
@@ -328,7 +328,7 @@ Feature: Stalled peers
       CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
-      CREATE CLIENT syslog_forwarder TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_forwarder CONFIG {
         'protocol' = 'tls',
         'addr' = '{{syslog_peer}}',
         'connect_timeout_ms' = '1000'
@@ -350,6 +350,60 @@ Feature: Stalled peers
       | 1            |
       | 3            |
 
+  Scenario Outline: A Syslog collector whose server stops reading is reported within timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "syslog_peer" is listening
+    # One frame larger than both TCP buffers between the collector and a server that reads
+    # nothing keeps the collector's write waiting.
+    And a repeated text placeholder "bulk_message" of 8000000 bytes is prepared
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
+      CREATE WIRE JSON SCHEMA syslog_event_wire MODE STRICT (
+        facility integer, severity integer, message string
+      );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA syslog_event_wire TO SCHEMA syslog_event;
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
+      CREATE VHOST edge stalled-syslog-{{test_id}}.example.com;
+      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SYSLOG CLIENT syslog_forwarder CONFIG {
+        'protocol' = 'tcp',
+        'addr' = '{{syslog_peer}}',
+        'timeout_ms' = '1000'
+      };
+      CREATE EMITTER syslog_forward FROM events
+        TO SYSLOG syslog_forwarder MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        ENCODE USING syslog_codec INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "stalled-syslog-{{test_id}}.example.com" path "/events"
+      """
+      {"facility":1,"severity":5,"message":"{{bulk_message}}"}
+      """
+    Then within "30s" DESCRIBE EMITTER "syslog_forward" on the leader node contains
+      """
+      within timeout_ms 1s
+      """
+    And the silent endpoint "syslog_peer" eventually accepts 2 connections
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: A WebSocket connection whose server never answers its upgrade is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "websocket_peer" is listening
@@ -363,7 +417,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT ws_main TYPE WEBSOCKETS CONFIG {
+      CREATE WEBSOCKETS CLIENT ws_main CONFIG {
         'endpoint' = 'ws://{{websocket_peer}}/stalled',
         'connect_timeout_ms' = '1000'
       };
@@ -400,7 +454,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT poll_source TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT poll_source CONFIG {
         'endpoint' = 'http://{{http_peer}}/notifications',
         'method' = 'GET',
         'timeout_ms' = 1000
@@ -438,7 +492,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (value number);
       CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
-      CREATE CLIENT prom_main TYPE PROMETHEUS CONFIG {
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = 'http://{{prometheus_peer}}',
         'timeout_ms' = 1000
       };
@@ -484,7 +538,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sentry_main TYPE SENTRY CONFIG {
+      CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = 'http://public@{{sentry_peer}}/1',
         'timeout_ms' = 1000
       };
@@ -532,7 +586,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_main TYPE OTEL CONFIG {
+      CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = 'http://{{otel_peer}}',
         'protocol' = '<protocol>',
         'timeout_ms' = 1000
@@ -586,7 +640,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT clickhouse_main TYPE CLICKHOUSE CONFIG {
+      CREATE CLICKHOUSE CLIENT clickhouse_main CONFIG {
         'addr' = 'http://{{clickhouse_peer}}',
         'timeout_ms' = 1000
       };
@@ -639,7 +693,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+      CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_peer}}',
         'region' = 'us-east-1',
         'timeout_ms' = 1000
@@ -688,7 +742,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT zeromq_main CONFIG {
         'addr' = 'tcp://{{zeromq_peer}}',
         'connect_timeout_ms' = '1000'
       };
@@ -737,7 +791,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT zeromq_main CONFIG {
         'addr' = '{{zeromq_peer}}',
         'timeout_ms' = '1000'
       };

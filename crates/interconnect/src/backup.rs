@@ -158,7 +158,11 @@ pub struct FetchCapturedSection {
 impl InterconnectStreamRequest for FetchCapturedSection {
     const NAME: &'static str = "backup_fetch_captured_section";
     const CLASS: PoolClass = PoolClass::Bulk;
-    const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
+    /// The bulk pool's shared stream and admission rather than the Snapshot subquota. A quiesced
+    /// cut publishes new checkpoint revisions, and a replica catching up one above the bulk budget
+    /// holds the peer connection's one Snapshot stream for as long as its transfer takes, which
+    /// would otherwise keep the coordinator from opening a completed cut's sections.
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
     const TIMEOUT: Duration = Duration::from_secs(30);
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
