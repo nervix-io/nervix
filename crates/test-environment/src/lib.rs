@@ -808,6 +808,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                     .with_exposed_port(27017.tcp())
                     .with_entrypoint("bash")
                     .with_wait_for(WaitFor::message_on_either_std("Waiting for connections"))
+                    .with_env_var("GLIBC_TUNABLES", "glibc.pthread.rseq=1")
                     .with_env_var("MONGO_INITDB_ROOT_USERNAME", "root")
                     .with_env_var("MONGO_INITDB_ROOT_PASSWORD", "nervix")
                     .with_copy_to("/certs/ca.pem", tls.ca_pem.clone())
@@ -853,6 +854,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                     GenericImage::new("mongo", "8.2")
                         .with_exposed_port(27017.tcp())
                         .with_wait_for(WaitFor::message_on_either_std("Waiting for connections"))
+                        .with_env_var("GLIBC_TUNABLES", "glibc.pthread.rseq=1")
                         .with_cmd(["mongod", "--bind_ip_all", "--replSet", "nervix"])
                         .with_startup_timeout(STARTUP_TIMEOUT)
                 },

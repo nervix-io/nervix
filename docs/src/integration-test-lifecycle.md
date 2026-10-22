@@ -1551,6 +1551,12 @@ sharing the server keep running. Each scenario provisions its own collection and
 server kind with that collection for later assertions; standalone and TLS collections keep their
 own server kinds.
 
+Both MongoDB test servers set `GLIBC_TUNABLES=glibc.pthread.rseq=1`, enabling glibc's restartable
+sequence registration. This avoids the MongoDB/TCMalloc crash on affected Linux kernels when the
+image's default disables that registration; the [image maintainers document the setting and kernel
+issue](https://github.com/docker-library/mongo/discussions/748). The fixed container environment is
+shared by ordinary and diagnostic runs and participates in the fixture's configuration hash.
+
 A scenario that needs a Kafka broker to refuse what the shared broker accepts for every other
 scenario starts a broker of its own: librdkafka's in-process mock cluster of one broker, which the
 scenario keeps until it ends, across its cluster's restarts. While the scenario asks it to, that
