@@ -57,7 +57,9 @@ records each conversion, its exact oracle and the limits of its claim.
 A normal backup holds a quiesced cut for each running domain. Once intake and acknowledged work
 drain, each owner applies the selected cut revision and its runtime plan, then requests a fresh
 branch lifecycle checkpoint from its active supervisors before
-reading durable WASM saves together with its other state from one database snapshot.
+reading durable WASM saves together with its other state from one database snapshot. The cut asks no
+guest to save: the checkpoint that completed each branch's last callback is the save it archives,
+so a cut never waits for a new save to reach the replicas.
 The archive stores a typed descriptor for each saved branch: processor, schema fingerprint, typed
 branch key and its fingerprint, generation, and checkpoint revision. Raw guest bytes occupy a
 separate section with a measured length and digest. `WITHOUT PAUSE` exports the latest published

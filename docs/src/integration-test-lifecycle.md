@@ -231,6 +231,22 @@ drops one it already forwarded, so a repeated payment yields its summary exactly
 rows keep `MODE NO ACK`: a window acknowledges a row only when it steps past it, so an acknowledged
 post of one row would wait for the rows after it.
 
+The fixture of guest saves above the bulk budget feeds its WASM processor from a Kafka ingestor in
+`MODE ACK SEQUENTIAL`, and every input ends with a 40 MiB guest checkpoint that the processor's
+replica confirms before the ingestor reads the next input. Every wait that follows published input
+covers at least one such checkpoint, and a wait for a sent-message total up to two in sequence. The
+product gives each checkpoint ninety seconds to reach its replica, so these waits are bounded at 300
+seconds. On a loaded runner, two checkpoints that each stayed within their budget outlasted the
+former 120-second bound of a sent-message total. A sent total counts the inputs the ingestor sent,
+not the ones the guest has saved, so before its first cut the fixture waits until both branches have
+committed the save of their third input, every replica has confirmed it and no checkpoint has
+failed. No cut then drains an input still on its way, whose checkpoint could fail under load and
+redeliver the input between the cuts the fixture compares. It then holds the next guest checkpoint
+before its save across the source domain's three cuts. A cut that asked a guest to save again would
+stall on that checkpoint, so the fixture shows that every cut archives the saves the branches
+committed. A checkpoint that misses its ninety seconds still ends the attempt, because the
+redelivered input would no longer match the exact sent totals and archives the fixture compares.
+
 The large materialized restore fixture prepares its rows through an acknowledged client producer.
 One round has a 120-second budget and one in-flight batch, including explicit replays of reported
 processing failures. Each replay replaces the same materialized keys with the same complete values,
