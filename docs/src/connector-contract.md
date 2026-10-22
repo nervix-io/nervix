@@ -1476,7 +1476,10 @@ work the node still holds until they resolve. The retained payloads live with th
 than the connector, so reopening a connector between attempts keeps them; only a failure that ends
 the attempt for good releases them, and their members then follow the error policy with every other
 unresolved row. A row sink names every member itself, so its retry writes only the rows it left
-unresolved; MongoDB's per-document results shrink a retried bulk write this way.
+unresolved; MongoDB's per-document results shrink a retried bulk write this way. That includes a
+MongoDB write whose write concern failed: the server applied every document it did not refuse and
+reports the write concern error beside them, so the documents it applied are delivered, a document
+it refused for good is rejected, and the failure leaves only the rest of the write unresolved.
 
 A row sink divides its own writes, because only the connector can measure what it sends. The
 host projects each buffered carrier once and hands the sink every run of successive carriers of
@@ -1513,8 +1516,9 @@ shrink with a candidate: `connector-row-request-division` the division rule and 
 `emitter-batch-subdivision` and `emitter-batch-packing` the candidates, seals, relay, branch and
 envelope grouping and the exact container bytes, `codec-bounded-encodings` and
 `bounded-write-limits` the exact sizes under `MAX SIZE`, `emitter-row-preparations` and
-`emitter-retained-payloads` the membership and byte-for-byte retry, and `sqs-batch-requests`,
+`emitter-retained-payloads` the membership and byte-for-byte retry, `sqs-batch-requests`,
 `mqtt-publish-packets` and `postgres-insert-measures` the connector-specific measures.
+`mongodb-write-answers` checks the rows a failed MongoDB write delivers, rejects and leaves unresolved.
 `sentry-prepared-envelopes` checks complete event preservation, defaults, framing and attempt
 bytes; the one- and three-node Sentry scenarios qualify those bytes through a reopened connector
 after a mock endpoint's `503` response. See

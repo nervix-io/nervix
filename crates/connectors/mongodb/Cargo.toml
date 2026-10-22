@@ -13,7 +13,6 @@ default = []
 shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 
 [dependencies]
-ahash = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = { workspace = true }
@@ -24,5 +23,9 @@ mongodb = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
+strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+bolero = { workspace = true }
