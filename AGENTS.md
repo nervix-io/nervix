@@ -375,15 +375,30 @@ source contract, the sink contract, or both, from `nervix-connector` in `crates/
   required public scenarios or concurrency evidence.
 - Every buffer a connector holds between its transport and the host is declared in its entity's
   `DeclaredBounds` with its capacity and overflow, and every network wait with what ends it,
-  unbounded ones included. `timeout_ms` and `connect_timeout_ms` keep the one meaning the
-  contract gives them and are read through `ConfiguredDeadline`; no driver call that parks its thread
-  runs on an asynchronous worker; and every deadline key an entity's waits name has its
-  `STALLED PEER` scenario in the capability inventory.
+  unbounded ones included. A change adds no unbounded buffer and no wait that only the host's stop
+  ends; one that already exists stays declared unbounded until its connector bounds it.
+  `timeout_ms` and `connect_timeout_ms` keep the one meaning the contract gives them and are read
+  through `ConfiguredDeadline`; no driver call that parks its thread runs on an asynchronous
+  worker; and every deadline key an entity's waits name has its `STALLED PEER` scenario in the
+  capability inventory.
   [Bounds and deadlines](docs/src/connector-contract.md#bounds-and-deadlines) owns the rule and
   its review checklist.
-- The [connector hygiene standard](docs/src/connector-contract.md#connector-hygiene-standard)
-  owns the detailed requirements. Before closing a connector epic, review landed parallel work
-  against it and record evidence and compliance tasks on ClickUp. Keep the contract chapter,
+- A connector loses, duplicates or stalls nothing beyond what its declarations state. Every source
+  entity declares the position class and acknowledgement confirmation its transport actually
+  gives, and `acknowledge` returns only once that confirmation arrives, so progress, a drain and a
+  handoff wait for the transport. A read the host cancels returns every message it already took. A
+  payload its codec refuses is consumed as a decode rejection through the ingestor's general error
+  policy, never presented again. Every sink implements `finish` for what its client still holds,
+  by the host's deadline, and a brokered sink in `MODE ACK` awaits its broker through the shared
+  `ConfirmationWindow`, so a retry never resends a confirmed record. A connector delivery defect
+  is fixed red first, from a public scenario through the connector's real transport and, where the
+  defect is an interleaving, a Shuttle check over its production owner. The
+  [connector delivery standard](docs/src/connector-contract.md#connector-delivery-standard) owns
+  these rules and their review.
+- The [connector hygiene standard](docs/src/connector-contract.md#connector-hygiene-standard) and
+  the [connector delivery standard](docs/src/connector-contract.md#connector-delivery-standard)
+  own the detailed requirements. Before closing a connector epic, review landed parallel work
+  against both and record evidence and compliance tasks on ClickUp. Keep the contract chapter,
   relevant manuals and the ratchet current in the same change.
 
 `just ratchet` and the clock-boundary check treat the connector crates as data plane, so code that
