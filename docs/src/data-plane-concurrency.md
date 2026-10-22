@@ -57,7 +57,13 @@ step's tracked impact recorder to recover an engaged domain pause before retaini
 outcome. The public pause-release regression controls two leadership transfers and is registered
 in the active, order and stressed lifecycle selections. The detector observes the surrounding
 tracked acquisitions; asynchronous proposal waits and the test barriers remain outside its scope.
-No new synchronization protocol or hot-path map access is introduced.
+No new synchronization protocol or hot-path map access is introduced. A coordinator that adopts its
+transaction's pause records it on the same tracked impact recorder before anything can end the
+step, then drains and releases it on the existing paths. The public outline whose leader refuses a
+model publication and the pause release after it, as a leader whose lease lapsed, joins the same
+three selections on one and three nodes. Its saturated-log counterpart, which keeps an ordinary
+command applying while its transaction commits, adds no tracked acquisition and stays outside
+them; its owner test and public scenario cover it.
 
 ## Remote ACK And Admission Owners
 
@@ -1974,8 +1980,9 @@ exercise suspension and close without claiming those socket waits are tracked lo
 
 The native backup-wait workloads reach the client's pending-reply locks during multi-domain
 capture, bounded wait expiry and recovery under the same execution reference. They run on one-
-and three-node clusters in both selections and name the client request and exchange owners in
-the inventory. The detector observes their blocking reply-registration and cancellation locks.
+and three-node clusters, including expiry before the second cut, in both selections and name the
+client request and exchange owners in the inventory. The detector observes their blocking
+reply-registration and cancellation locks.
 Async command and reconnect mutexes, physical deadlines and network scheduling remain outside
 its observation; the public scenarios and client-session regressions assert their wait, expiry,
 leader-change and recovery outcomes directly. The bounded native-client case runs inside the

@@ -715,3 +715,87 @@ Feature: Kafka emission
       | cluster_size |
       | 1            |
       | 3            |
+
+  # Replacing the emitter stops its task without tearing the domain down. The failed swap must
+  # carry the finish's count through the transaction failure on both cluster sizes.
+  @emitter_unsent_at_swap
+  Scenario Outline: A Kafka emitter swap reports the records its producer still holds
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And schema change drain timeout is configured as "5s"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And a mock Kafka broker serves topic "swap_out_{{test_id}}"
+    And the mock Kafka broker refuses every write
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA swap_event ( sequence I64 );
+      CREATE WIRE JSON SCHEMA swap_wire MODE STRICT ( sequence integer );
+      CREATE CODEC swap_codec FROM WIRE JSON SCHEMA swap_wire TO SCHEMA swap_event;
+      CREATE RELAY swap_events SCHEMA swap_event UNBRANCHED;
+      CREATE VHOST edge swap-{{test_id}}.example.com;
+      CREATE ENDPOINT swap_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR swap_source
+        FROM swap_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING swap_codec
+        TIMESTAMP NOW
+        TO swap_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT refusing_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}'
+      };
+      CREATE CLIENT replacement_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}'
+      };
+      CREATE EMITTER swap_output FROM swap_events
+        TO KAFKA refusing_kafka TOPIC swap_out_{{test_id}} MODE NO_ACK
+          RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING swap_codec INHERIT ALL
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "swap_leader"
+    When these Plexus statements are executed on the leader node
+      """
+      RELOCATE EMITTER swap_output ONTO NODE {{swap_leader}} IGNORE PREFERENCES;
+      """
+    And http payload is posted to node "node-1" with host "swap-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":1}
+      """
+    And http payload is posted to node "node-1" with host "swap-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":2}
+      """
+    And http payload is posted to node "node-1" with host "swap-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":3}
+      """
+    Then within "30s" DESCRIBE EMITTER "swap_output" on the leader node contains
+      """
+      messages_total sent relay=swap_events
+      """
+    And within "30s" DESCRIBE EMITTER "swap_output" on the leader node contains
+      """
+      messages_total sent relay=swap_events physical_node={{swap_leader}} total=3
+      """
+    Given client "owner" is connected to the leader node
+    When client "owner" executes these Plexus statements
+      """
+      BEGIN;
+      ALTER EMITTER swap_output
+        SET CLIENT replacement_kafka, SET DETACHED;
+      """
+    Then client "owner" transaction id is saved as placeholder "swap_transaction"
+    When client "owner" attempts to commit its transaction
+    Then the last command error contains
+      """
+      kafka sink's transport client still held 3 records when its finish deadline passed
+      """
+    And transaction "{{swap_transaction}}" eventually has state "FAILED"
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

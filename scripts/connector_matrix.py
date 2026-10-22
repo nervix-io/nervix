@@ -133,12 +133,20 @@ def bounds_rows(bounds):
     ]
 
 
+def header_model(model):
+    """A declared header model as the manuals state it: its layout and names, then their meaning."""
+    return (f"`{model['layout']}`, {model['names']} names: {model['layout_meaning']}; "
+            f"{model['names_meaning']}")
+
+
 def entity_rows(row, side, notes):
     location = row["locator"]
     if location is None:
         location = absent(notes, row, f"{side}_locator")
-    headers = "`read_header`, `read_headers`" if side == "ingest" else "`write_header`"
-    if not row["headers"]:
+    functions = "`read_header`, `read_headers`" if side == "ingest" else "`write_header`"
+    if row["headers"]:
+        headers = f"{functions}; {header_model(row['headers'])}"
+    else:
         headers = absent(notes, row, f"{side}_headers")
     rows = [("Reference", row["reference"]), ("Locator and validation rule", location),
             ("Modes (complete bodies after MODE)", "\n".join(row["modes"])),
@@ -217,6 +225,48 @@ def classified_table(surface, field, explanations):
                   for key, entities in sorted(groups.items())], (label, "Entities", "Meaning"))
 
 
+def header_models_table(surface):
+    """Every declared header model with the entities that declare it on each side."""
+    groups = {}
+    for side in ("ingest", "emit"):
+        for row in surface[side]:
+            model = row["headers"]
+            if not model:
+                continue
+            key = (model["layout"], model["names"])
+            group = groups.setdefault(key, {"ingest": [], "emit": [], "meaning": model})
+            group[side].append(f"`{row['entity']}`")
+    rows = []
+    for (layout, names), group in sorted(groups.items()):
+        model = group["meaning"]
+        rows.append((f"`{layout}`, {names} names", ", ".join(group["ingest"]) or "None",
+                     ", ".join(group["emit"]) or "None",
+                     f"{model['layout_meaning']}; {model['names_meaning']}"))
+    return table(rows, ("Header model", "Ingest", "Emit", "Meaning"))
+
+
+def side_headers(surface, side):
+    """One side's header models entity by entity, and the entities of that side that carry none."""
+    rows = []
+    without = []
+    for row in surface[side]:
+        model = row["headers"]
+        if not model:
+            without.append(f"`{row['entity']}`")
+            continue
+        rows.append((f"`{row['entity']}`", f"`{model['layout']}`, {model['names']} names",
+                     f"{model['layout_meaning']}; {model['names_meaning']}"))
+    if side == "ingest":
+        text = table(rows, ("Ingestor", "Header model", "What `read_header` and `read_headers` find"))
+        closing = "carry no transport headers and refuse `read_header` and `read_headers`"
+    else:
+        text = table(rows, ("Emitter", "Header model", "What a record's `write_header` calls become"))
+        closing = "write no transport headers and refuse `write_header`"
+    if without:
+        text += f"\n{', '.join(without)} {closing}.\n"
+    return text
+
+
 def documents(root, surface, notes, policy):
     output = {"docs/src/connector-capabilities.md": render_matrix(surface, notes)}
     for side, path in (("ingest", "docs/src/ingestors.md"), ("emit", "docs/src/emitters.md")):
@@ -230,11 +280,13 @@ def documents(root, surface, notes, policy):
                     if option["keywords"] == "INSTANCES":
                         rows.append((row["entity"], option["presence"]))
             text = region(text, "instancing", table(rows, ("Entity", "INSTANCES")))
+        text = region(text, f"{side}-headers", side_headers(surface, side))
         output[path] = text
     path = "docs/src/connector-contract.md"
     text = (root / path).read_text()
     for field in ("position", "confirmation"):
         text = region(text, field, classified_table(surface, field, policy[field]))
+    text = region(text, "headers", header_models_table(surface))
     output[path] = text
     return output
 

@@ -1268,6 +1268,36 @@ mod tests {
         assignment
     }
 
+    /// Both KAFKA TOPIC sides declare ordered repeats with exact names: the record headers a
+    /// sink writes keep every write in the order written, and a reader of the produced record
+    /// visits them in that order, a repeated name once for each of its values.
+    #[test]
+    fn written_headers_read_back_in_write_order_with_every_repeat() {
+        let mut written = Vec::new();
+        for (name, value) in [
+            ("trace", "a"),
+            ("Tenant", "x"),
+            ("trace", "b"),
+            ("tenant", "y"),
+        ] {
+            written.push((name.to_string(), value.to_string()));
+        }
+        let message = rdkafka::message::OwnedMessage::new(
+            Some(b"{}".to_vec()),
+            None,
+            "events".to_string(),
+            rdkafka::Timestamp::NotAvailable,
+            0,
+            0,
+            Some(crate::KafkaSink::owned_headers(&written)),
+        );
+        let message =
+            KafkaSourceMessage::from_message(message).assured("offset zero has a next offset");
+        let mut visited = Vec::new();
+        message.visit(&mut |name, value| visited.push(format!("{name}={value}")));
+        assert_eq!(visited, ["trace=a", "Tenant=x", "trace=b", "tenant=y"]);
+    }
+
     #[test]
     fn kafka_assignment_state_suppresses_only_identical_requests() {
         let assignment = assignment_at(10);

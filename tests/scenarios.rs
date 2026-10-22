@@ -74,7 +74,7 @@ use nervix_primitives::{
 };
 use nervix_recovery::Discarded as _;
 use nervix_server::{
-    FaultInjection, SchedulerMode, WasmStateResetRequestError,
+    FaultInjection, ModelPublicationRefusalKind, SchedulerMode, WasmStateResetRequestError,
     application::{InternalTransportMode, ShutdownPhaseOutcome},
     memory_pressure::MemoryPressureConfig,
 };
@@ -134,10 +134,11 @@ use crate::common::{
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{
-        SessionScope, TestUpload, TestUploadPart, WireOutcome as _, command_output,
-        fresh_execution_reference, outcome_awaits_leader,
+        SessionScope, TestSubscriptionEvent, TestUpload, TestUploadPart, WireOutcome as _,
+        command_output, fresh_execution_reference, outcome_awaits_leader,
     },
     runner_lag::RunnerLagObserver,
+    runner_observation::ArrivalObservation,
     scenario_phase::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         begin_suite_measurement, suite_summary,
@@ -314,6 +315,12 @@ struct CliClockProcess {
     _reader: AbortOnDropHandle<()>,
 }
 
+/// The next row and the subscription session returned by its independent receipt observer.
+struct SubscriptionReceipt {
+    session: TestSession,
+    event: TestSubscriptionEvent,
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
     mqtt_fixture_publication: Option<mqtt_fixtures::Publication>,
@@ -325,6 +332,8 @@ struct ScenarioWorld {
     active_scenario: Option<ActiveScenarioRegistration>,
     cluster: Option<Cluster>,
     active_session: Option<TestSession>,
+    /// A bounded next-row reader installed before the publication whose delay it measures.
+    subscription_arrival: Option<ArrivalObservation<SubscriptionReceipt>>,
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
@@ -8919,6 +8928,42 @@ async fn then_relocation_commit_refusal_was_delivered(world: &mut ScenarioWorld,
     );
 }
 
+#[given(
+    expr = "the leader refuses the next model publication in domain {string} and the pause \
+            release after it with {string}"
+)]
+async fn given_leader_refuses_next_model_publication(
+    world: &mut ScenarioWorld,
+    domain: String,
+    refusal: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    let refusal = ModelPublicationRefusalKind::from_str(&refusal)
+        .expect("the scenario names a model publication refusal the fault harness declares");
+    world
+        .fault_injection
+        .refuse_next_model_publication(domain, refusal);
+}
+
+#[then(
+    expr = "the refusal of the model publication in domain {string} and of its pause release was \
+            delivered"
+)]
+async fn then_model_publication_refusal_was_delivered(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    assert!(
+        world
+            .fault_injection
+            .model_publication_refusal_delivered(&domain),
+        "no model publication in domain {domain} met the armed leader refusal of both its \
+         publication and its pause release"
+    );
+}
+
 #[given(expr = "the next domain drain in domain {string} is forced to time out")]
 async fn given_next_domain_drain_is_forced_to_time_out(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -15090,6 +15135,7 @@ async fn when_named_client_closes_cleanly(world: &mut ScenarioWorld, name: Strin
 }
 
 #[when(expr = "client {string} executes these NSPL commands")]
+#[when(expr = "client {string} executes these Plexus statements")]
 async fn when_named_client_executes_commands(
     world: &mut ScenarioWorld,
     name: String,
@@ -31050,6 +31096,79 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
     }
 }
 
+#[when("the next relay subscription payload is timed")]
+async fn when_the_next_subscription_payload_is_timed(world: &mut ScenarioWorld) {
+    assert!(
+        world.subscription_arrival.is_none(),
+        "a receipt observation is already active"
+    );
+    let mut session = world
+        .active_session
+        .take()
+        .assured("the scenario opened its subscription");
+    // Only the following publication can supply this observation's origin.
+    world.last_publish_at = None;
+    let observation = ArrivalObservation::start(async move {
+        let event = session
+            .next_subscription()
+            .await
+            .expect("the receipt observer must read its subscription");
+        SubscriptionReceipt { session, event }
+    })
+    .await;
+    world.subscription_arrival = Some(observation);
+}
+
+#[then(
+    expr = "within {string} the timed relay subscription payload arrives no sooner than {string} \
+            after publication and contains all fragments"
+)]
+async fn then_the_timed_subscription_payload_arrives_after_publication(
+    world: &mut ScenarioWorld,
+    within: String,
+    delay: String,
+    #[step] step: &Step,
+) {
+    let within = parse_duration_text(&within).assured("the receipt budget is a valid duration");
+    let delay = parse_duration_text(&delay).assured("the receipt lower bound is a valid duration");
+    let published_at = world
+        .last_publish_at
+        .assured("the timed observation is followed by publication");
+    let expected = docstring_fragment_sets(world, step);
+    assert_eq!(
+        expected.len(),
+        1,
+        "one next-row observation expects exactly one fragment set"
+    );
+    let observation = world
+        .subscription_arrival
+        .take()
+        .assured("the receipt observer was installed before publication");
+    let arrival = nervix_primitives::time::timeout(within, observation.finish())
+        .await
+        .expect("the next subscription payload must arrive within the receipt budget");
+    let on_time = arrival.arrived_no_sooner_than(published_at, delay);
+    let received_at = arrival.received_at;
+    let SubscriptionReceipt { session, event } = arrival.value;
+    world.active_session = Some(session);
+    world.last_subscription_payload = Some(event.payload.clone());
+    assert!(
+        expected[0]
+            .iter()
+            .all(|fragment| event.payload.contains(fragment)),
+        "next subscription payload {:?} does not match all expected fragments {:?}",
+        event.payload,
+        expected[0]
+    );
+    assert!(
+        on_time,
+        "subscription payload {:?} arrived {:?} after publication, before its {delay:?} lower \
+         bound",
+        event.payload,
+        received_at.checked_duration_since(published_at)
+    );
+}
+
 async fn try_capture_any_subscription_payload(
     world: &mut ScenarioWorld,
     duration: Duration,
@@ -31417,6 +31536,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 stop_receivers(world).await;
                 close_browser(world).await;
                 world.active_session = None;
+                world.subscription_arrival = None;
                 world.active_session_node = None;
                 world.active_session_has_subscription = false;
                 world.last_server_error = None;

@@ -152,7 +152,7 @@ const ICEBERG_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SinkEntity for IcebergTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::StorageClient(&[
             ConnectorKind::S3,
             ConnectorKind::Gcs,
