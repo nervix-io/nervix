@@ -264,20 +264,33 @@ reach the scenario directly.
 
 The Postgres image starts a temporary Unix-socket server to initialize its database, then starts
 the final TCP/TLS server. The fixture waits for both readiness messages before publishing either
-endpoint. Its plaintext and certificate-verified TLS observation clients belong to that same
-suite environment. Each transport shares one SQLx pool with a maximum of two connections for short
-setup and observation queries across all scenarios. A deliberate table-lock controller detaches
-its physical SQLx connection before waiting for release, returning the observation permit. Its
-scenario release handle owns that connection's lifetime, so concurrent lock holders cannot consume
-the permits their own observation queries need. The environment closes both observation pools before
-stopping their container, including when scenarios still retain client handles. The existing suite
-teardown budget bounds that cleanup.
+endpoint. Initialization stores the password's SCRAM-SHA-256 verifier with one key-derivation
+round instead of the image's 4096. A SQLx client derives its key in as many rounds as the verifier
+names and yields to the scheduler after every fifth, so 4096 rounds hand an establishing connection
+back to the scheduler more than 800 times. On the suite's busy runtime each of those returns waits
+for a worker's whole run queue. Establishing one connection that way took longer than the 30-second
+pool wait, while queries on connections already established were unaffected. With one round, every
+connection the suite establishes, the product's included, still authenticates with SCRAM-SHA-256
+and completes in a few polls.
+
+The fixture's plaintext and certificate-verified TLS observation clients belong to that same suite
+environment. Each transport shares one SQLx pool of two connections for short setup and observation
+queries across all scenarios. The pool establishes both connections when the environment opens it
+and keeps them until it closes, with no idle or lifetime retirement, so an observer waits only for
+another observer's query and never for a connection to be established. A deliberate table-lock
+controller connects on its own with the same transport's options, instead of taking one of the
+pool's connections. Its scenario release handle owns that connection's lifetime, so a held lock
+takes neither an observation permit nor an established observation connection. The environment
+closes both observation pools before stopping their container, including when scenarios still
+retain client handles. The existing suite teardown budget bounds that cleanup.
 
 The Postgres fixture scenarios exercise 48 concurrent observers retaining three client handles
 each over plaintext and TLS, and compare every returned text, byte sequence and observer number.
 Every query also checks its actual transport through Postgres's connection statistics. Two further
 examples hold locks through the existing fixture controller while another observer queries, once
-over each transport.
+over each transport, and require the observer's connection to have been established before both
+lock holders connected. Two more establish a connection with each transport's observation options
+and require it to complete within 32 polls of its future.
 The database batch scenarios retain their one- and three-node row, field, write-size, conflict,
 rejection and ambiguous-write assertions. Fixture concurrency adds no scenario admission limit.
 
