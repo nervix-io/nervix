@@ -16343,6 +16343,38 @@ async fn then_only_transaction_id_is_saved_as_placeholder(
     world.placeholders.insert(placeholder, ids[0].to_string());
 }
 
+#[then(
+    expr = "the transaction targeted by execution reference {string} is saved as placeholder \
+            {string}"
+)]
+async fn then_execution_transaction_is_saved(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    placeholder: String,
+) {
+    let reference = command_execution_reference(world, &execution_reference);
+    let reference = nervix_models::CommandExecutionReference::parse(reference)
+        .assured("scenario command references are valid UUIDv7 values");
+    let leader = current_leader_node(world).await;
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
+    let execution = observer
+        .current_command_execution(&reference)
+        .await
+        .verified("the preceding finalization pause holds an admitted execution");
+    let transaction_id = match execution.effect() {
+        Some(nervix_consensus::CommandExecutionEffect::Transaction { transaction_id, .. }) => {
+            transaction_id.clone()
+        }
+        Some(nervix_consensus::CommandExecutionEffect::TransactionRequest(request)) => {
+            request.target.id().to_string()
+        }
+        _ => panic!("execution '{reference}' must target a transaction"),
+    };
+    world.placeholders.insert(placeholder, transaction_id);
+}
+
 #[then(expr = "transaction {string} eventually has state {string}")]
 async fn then_transaction_eventually_has_state(
     world: &mut ScenarioWorld,
