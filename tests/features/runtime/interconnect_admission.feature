@@ -336,20 +336,22 @@ Feature: Interconnect relay admission
   # tenants' branches expire, and then the same tenants return with new branches, so 1,201 channels
   # from node-3 reach node-1 within the ten minutes the receiver retains a channel's watermark,
   # more than the incoming queue capacity of 1,024 that bounds the work a peer has in flight.
+  # Each acknowledged request completes before the next tenant posts, so channel history grows
+  # independently of the active work the receiver admits.
   @relay_channel_turnover @long_running
   Scenario: A node keeps delivering to another node's relay owner after more than 1,024 of its branch channels turn over
     Given branched relay expiration scan interval is configured as "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus statements are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       CREATE UNPACED DOMAIN turnover_{{test_id}};
       """
     Given the active domain is "turnover_{{test_id}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus statements are executed on the leader node
       """
       CREATE SCHEMA event (
         tenant STRING,
@@ -370,8 +372,8 @@ Feature: Interconnect relay admission
       CREATE VHOST edge turnover-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE HTTP ENDPOINT INGESTOR source
-        FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        FROM ingress MODE ACK MAX 1 ACK TIMEOUT 30s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE
@@ -382,16 +384,21 @@ Feature: Interconnect relay admission
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus statements are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
-    Then node "node-3" eventually forwards http traffic for host "turnover-{{test_id}}.example.com" path "/events" to the observed broker
+    When endpoint request "warmup" is posted on node "node-3" host "turnover-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"warmup","seq":0}
       """
-    When 600 http payloads with distinct tenants and sequence 1 are posted to node "node-3" with host "turnover-{{test_id}}.example.com" path "/events"
+    Then endpoint request "warmup" answers HTTP 200 with "completed" cause "none"
+    And within "15s" the observed broker receives payloads
+      """
+      {"tenant":"warmup","seq":0}
+      """
+    When 600 http payloads with distinct tenants and sequence 1 are acknowledged by node "node-3" with host "turnover-{{test_id}}.example.com" path "/events"
     Then within "120s" the observed broker receives every generated payload exactly once
     And within "120s" node "node-3" observability metric "nervix_branch_evictions_total" with labels eventually equals 601
       """
@@ -400,5 +407,5 @@ Feature: Interconnect relay admission
       physical_node_id="node-3"
       reason="ttl"
       """
-    When 600 http payloads with distinct tenants and sequence 2 are posted to node "node-3" with host "turnover-{{test_id}}.example.com" path "/events"
+    When 600 http payloads with distinct tenants and sequence 2 are acknowledged by node "node-3" with host "turnover-{{test_id}}.example.com" path "/events"
     Then within "120s" the observed broker receives every generated payload exactly once
