@@ -1,10 +1,10 @@
-//! Generated distinct-tenant HTTP payloads posted to one node, and their delivery to the observed
-//! broker.
+//! Generated distinct-tenant HTTP payloads acknowledged by one node, and their delivery to the
+//! observed broker.
 //!
 //! Layer: test harness.
-//! - **Owns.** Generating one payload per tenant, posting them through a node's public HTTP
-//!   endpoint, and asserting that each of them reaches the observed broker exactly once.
-//! - **Depends on.** The scenario cluster's HTTP publishing and the broker observer.
+//! - **Owns.** Generating one payload per tenant, waiting for its public HTTP completion before
+//!   posting the next, and asserting that each reaches the observed broker exactly once.
+//! - **Depends on.** The cluster's public HTTP addresses, endpoint outcomes and broker observer.
 //! - **Must not know.** Branches, relay channels, or the transport that carries them.
 
 use cucumber::{then, when};
@@ -14,6 +14,9 @@ use super::*;
 
 /// How many missing payloads a failure names; the rest are counted.
 const MISSING_PAYLOADS_SHOWN: usize = 8;
+
+/// The same response bound as the harness's named endpoint requests, including the response body.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The tenant names every generating step draws from. A payload whose tenant lacks this prefix,
 /// such as a warm-up an earlier step posted more than once, is outside every generation.
@@ -36,6 +39,36 @@ impl GeneratedPayload {
 
     fn text(&self) -> String {
         serde_json::json!({ "tenant": self.tenant, "seq": self.sequence }).to_string()
+    }
+
+    /// Complete this payload's graph acknowledgement before another tenant can add work.
+    async fn post_acknowledged(&self, client: &reqwest::Client, uri: &str, host: &str) {
+        let response = client
+            .post(uri)
+            .header(reqwest::header::HOST, host)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(self.text())
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("failed to post generated payload {self:?}: {error}"));
+        let status = response.status();
+        let body = response.bytes().await.unwrap_or_else(|error| {
+            panic!("failed to read generated payload {self:?} response: {error}")
+        });
+        assert_eq!(
+            status,
+            reqwest::StatusCode::OK,
+            "generated payload {self:?} did not complete: {}",
+            String::from_utf8_lossy(&body),
+        );
+        let outcome: Value = serde_json::from_slice(&body).unwrap_or_else(|error| {
+            panic!("generated payload {self:?} has an invalid endpoint outcome: {error}")
+        });
+        assert_eq!(
+            outcome,
+            serde_json::json!({ "outcome": "completed", "cause": "none" }),
+            "generated payload {self:?} must complete its graph acknowledgement",
+        );
     }
 
     /// The generated payload `message` carries, or `None` when it carries one no generating step
@@ -65,10 +98,10 @@ pub(super) struct GeneratedPayloads {
 }
 
 #[when(
-    expr = "{int} http payloads with distinct tenants and sequence {int} are posted to node \
+    expr = "{int} http payloads with distinct tenants and sequence {int} are acknowledged by node \
             {string} with host {string} path {string}"
 )]
-async fn when_distinct_tenant_payloads_are_posted(
+async fn when_distinct_tenant_payloads_are_acknowledged(
     world: &mut ScenarioWorld,
     count: usize,
     sequence: i64,
@@ -79,6 +112,14 @@ async fn when_distinct_tenant_payloads_are_posted(
     let node_id = expand_placeholders(world, &node_id);
     let host = expand_placeholders(world, &host);
     let path = expand_placeholders(world, &path);
+    let uri = world
+        .cluster()
+        .http_uri(&node_id, &path)
+        .unwrap_or_else(|error| panic!("generated payload endpoint is unavailable: {error}"));
+    let client = reqwest::Client::builder()
+        .timeout(RESPONSE_TIMEOUT)
+        .build()
+        .unwrap_or_else(|error| panic!("failed to build generated payload client: {error}"));
     let mut generated = BTreeSet::new();
     for tenant_index in 0..count {
         generated.insert(GeneratedPayload::new(tenant_index, sequence));
@@ -87,17 +128,11 @@ async fn when_distinct_tenant_payloads_are_posted(
         "http publish generated: node={node_id} host={host} path={path} tenants={count} \
          sequence={sequence}"
     ));
-    // The node answers each post before its branch's batch is delivered. Posting one at a time
-    // keeps the deliveries it starts from piling up behind the receiver's relay admission.
+    // Reuse the connection while the completed response bounds outstanding graph work. The
+    // broker assertion still checks delivery independently of the endpoint's acknowledgement.
     for payload in &generated {
         nervix_primitives::task::consume_budget().await;
-        world
-            .cluster()
-            .publish_http(&node_id, &host, &path, &payload.text())
-            .await
-            .unwrap_or_else(|error| {
-                panic!("failed to post generated payload {payload:?}: {error}")
-            });
+        payload.post_acknowledged(&client, &uri, &host).await;
     }
     world.last_publish_at = Some(Instant::now());
     world.generated_payloads = GeneratedPayloads { pending: generated };
