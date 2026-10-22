@@ -123,12 +123,20 @@ sink resolves each request's target host itself, as its [request transport](#sin
 describes. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object
 storage uses OpenDAL 0.57 with a Reqwest 0.13 client that the connector builds with the node
 resolver and installs through `HttpClientLayer`; the layer also supplies HTTP calls made by
-OpenDAL's credential providers through its accessor info. That client takes no `timeout_ms`, CA file
-or client identity from the client's configuration; OpenDAL's own timeout layer bounds each storage
-operation. The Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled
+OpenDAL's credential providers through its accessor info. The object-store client's optional
+`timeout_ms`, read through `ConfiguredDeadline`, sets both the operation and I/O timeout of the
+OpenDAL operator, including credential HTTP calls, name resolution, connection and TLS. Without
+the key, metadata and delete operations allow 60 seconds and reads and writes allow 10 seconds.
+That HTTP client takes no CA file or client identity from the client's configuration. The
+Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled
 trust roots, including in an isolated Iceberg connector build. The three Iceberg backends keep their
-S3, GCS, and Azure property mappings, URL-derived bucket or container, timeout and retry layers, and
-commit boundary. The standalone OpenDAL S3 `detect_region` helper constructs its own client, but
+S3, GCS, and Azure property mappings and commit boundary. One operator is initialized from the
+emitter's location and the initial table's effective storage properties. Table metadata refreshes
+retain that table's `FileIO` and its initialized storage, so later object calls reuse the operator;
+an object URL for a different storage root is refused. OpenDAL's credential providers keep their
+own credential refresh. Storage calls make one attempt: the emitter host owns retry pacing, and
+neither an OpenDAL retry layer nor the HTTP client's retry policy multiplies that attempt.
+The standalone OpenDAL S3 `detect_region` helper constructs its own client, but
 Nervix does not call it; S3 operator construction requires its configured region or the driver's
 environment policy.
 
@@ -139,7 +147,7 @@ startup, while a lookup failure reaches the existing source or sink failure path
 authority, proxy behavior, TLS verification, custom trust and identity, and connection pools remain
 with the HTTP client. A client's `timeout_ms` includes DNS resolution, connection setup, TLS and
 response handling; the resolver's own 30 second ceiling only bounds clients without a shorter
-request timeout, which includes both Iceberg clients. DNS failures use the host's existing retry
+request timeout, which includes the Iceberg REST client. DNS failures use the host's existing retry
 policy and do not create application-level probes or acknowledgements.
 
 ### DNS for RabbitMQ
@@ -149,13 +157,16 @@ The connector reads the client's `addr` as an AMQP URI and takes its host from t
 because Lapin's own grammar substitutes `localhost` for an IPv6 literal host. Every connection resolves that host again through the node resolver: a sink's start, its
 reopening after a failed publish, and each source instance's resume. A literal IPv4 or IPv6 address
 is its own answer. The connector tries the answers in resolution order, each within an equal share
-of what remains of a 30 second budget, and for `amqps` completes the TLS handshake within what is
-left. The handshake verifies the broker certificate against the host `addr` names, whichever of its
+of what remains of the client's `connect_timeout_ms`, 30 seconds by default, and for `amqps`
+completes the TLS handshake within what is left. The handshake verifies the broker certificate against the host `addr` names, whichever of its
 addresses was dialled, trusting the platform roots and the client's `tls_ca_file`. The connector
 then hands the established transport to Lapin through `Connection::connector`. Lapin's own
 reconnection stays off, so it asks that hook for a transport exactly once and runs the AMQP
-handshake over it. The AMQP handshake still has no deadline of its own, and the URI's
-`connection_timeout` query parameter has no effect.
+handshake over it, within what remains of the same budget. The source then opens its channel, sets
+its prefetch window and starts its consumer, and the sink opens its channel, selects publisher
+confirms under `ACK` and checks its queue, within the rest. `connect_timeout_ms` therefore bounds
+every step before the entity is ready, and a step that runs out of it is reported naming the key
+and its bound. The URI's `connection_timeout` query parameter has no effect.
 
 Lapin's `hickory-dns` feature is deliberately not selected. It resolves through one process-wide
 async-rs resolver built on first use from the host's `/etc/resolv.conf`, which ignores the node's
@@ -166,15 +177,25 @@ the feature off in the isolated RabbitMQ connector and in the server, and checks
 stays on AWS-LC.
 
 A failed connection is a `RabbitMqConnectError`. A lookup failure keeps its `DnsLookupFailure`, and
-unreachable addresses, a failed or overdue TLS handshake, and a failed AMQP handshake are their own
-variants, as is a Lapin runtime that could not be created. A source reports the failure as a resume
-failure and retries on its declared `RETRY POLICY`. A sink reports an invalid address or CA file as
-a configuration failure and every other connection failure as an initialization failure, and the
-emitter host reopens it on its backoff. Neither path acknowledges undelivered data: a source that
-cannot connect holds no delivery, and a sink that cannot connect confirms nothing, so the input
-stays unacknowledged until a later connection delivers it. A connection that fails before its AMQP
-handshake has started no Lapin thread, and a failed handshake ends that thread and closes the
-socket. An established connection is not closed because its host's answer changed or expired; the
+unreachable addresses, a failed or overdue TLS handshake, and a failed or overdue AMQP handshake are
+their own variants, as are a Lapin runtime that could not be created and a socket the node could not
+hold a second handle on. A channel step that fails or runs out of the budget is reported beneath the
+source's or sink's own context for that step, with the elapsed deadline as its typed cause. A source
+reports the failure as a resume failure and retries on its declared `RETRY POLICY`. A sink reports
+an invalid address, CA file or deadline key as a configuration failure and every other connection
+failure as an initialization failure, and the emitter host reopens it on its backoff. Neither path
+acknowledges undelivered data: a source that cannot connect holds no delivery, and a sink that
+cannot connect confirms nothing, so the input stays unacknowledged until a later connection
+delivers it.
+
+Lapin runs a connection's IO on a thread of its own from the start of the AMQP handshake, and that
+thread ends only once its socket fails or the broker closes the connection. Before it hands the
+transport over, the connector therefore takes a second handle on the connection's TCP socket. Until
+the entity's channel is open, dropping that handle shuts the socket down, whether the budget ran
+out, a step failed or the caller stopped waiting, as a stopped resume or sink start does; Lapin's
+loop then fails every read and write, ends with its thread, and closes the socket. A connection that
+opened lets the handle go. A connection that fails before its AMQP handshake has started no Lapin
+thread. An established connection is not closed because its host's answer changed or expired; the
 next connection uses the new answer.
 
 ### DNS for Redis
@@ -188,7 +209,8 @@ socket may remain open past an answer's TTL. A replacement socket resolves the h
 The driver's Pub/Sub convenience connection does not accept that DNS hook. A source instead
 resolves the configured `redis://` or `rediss://` hostname through the node resolver on every
 initial subscribe and resume, and opens a dedicated TCP or TLS stream. It tries the returned
-addresses in order inside a 30-second budget shared by DNS, TCP, TLS, Redis setup, and subscribe.
+addresses in order inside the client's `connect_timeout_ms`, 30 seconds by default, shared by DNS,
+TCP, TLS, Redis setup, and subscribe.
 It hands the stream and the original client's settings to Redis's `PubSub::new`, so the driver
 still performs its authentication, database selection and protocol setup before `SUBSCRIBE`. A Unix socket remains
 a direct Unix connection with no DNS query. The dedicated subscription never occupies a pooled
@@ -200,8 +222,10 @@ client. Without a CA file both paths use native roots; a configured `tls_ca_file
 roots in both paths. The shared TLS configuration helper exposes that replacement policy
 explicitly because other connectors add a configured CA to their default roots.
 
-The Redis hook gives a lookup at most 30 seconds, inside the 30-second connection timeout the pool
-sets on the driver for the whole connection. Pub/Sub connection attempts have one 30-second budget.
+The Redis hook gives a lookup at most 30 seconds, inside the connection timeout the pool sets on
+the driver for the whole connection, which is the client's `connect_timeout_ms`, 30 seconds by
+default. The pool waits no longer than that for a connection to check out. Pub/Sub connection
+attempts share one budget of the same key.
 Missing names, empty answers, silence and transport failures are connection outcomes. They do not
 reject a record or confirm a publish; the host resumes the source and retries failed sink work
 according to its existing policy. A Pub/Sub connection broken by the broker or network is dropped
@@ -346,8 +370,21 @@ itself, such as writing or reading a local file, goes through the node's bounded
 sink host hands a connector as `SinkHost::executor`. The connector chooses the storage or CPU class
 of its work and the memory it charges; the executor admits that work beside the rest of the node's,
 and a refusal is the connector's own typed failure. The Iceberg sink writes and reads its staged
-Arrow IPC files on the filesystem storage workers, so a node that cannot take the job now fails the
-publish or the commit, which the host retries as it retries any other.
+Arrow IPC files on the filesystem storage workers. A staging write the node cannot take now fails
+the publish, which the host retries as it retries any other. A commit charges the bulk memory class
+for every staged byte it reads back before it reads them, or the whole class for a single staged
+file larger than the class, and takes that charge only when the class has room now, because a
+place in the class's queue would take every byte the class frees and hold the node's other bulk
+work behind the commit. A refusal fails the commit, which keeps its staged files and
+acknowledgements while the host retries it. The read itself waits for a place among the filesystem
+workers instead of being refused, because nothing could present again the rows the sink already
+accepted.
+
+No driver call that parks its thread runs on an asynchronous worker. A connector runs such a call
+in the executor's storage class with a declared deadline as its bound, or as a declared owner of the
+runtime's blocking pool. The Kafka source's metadata fetches, watermark and offset-for-time lookups,
+seeks, assignment calls and consumer drop still run inline on its worker and are the remaining
+exceptions to this rule.
 
 A driver call that parks its thread while it waits on the network computes nothing, and admitting
 it would hold a worker idle for the whole wait. librdkafka's producer flush, metadata fetch and
@@ -368,6 +405,66 @@ These annotations describe this chapter's existing lifecycle; they supply no run
 ownership proof. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns their
 syntax, inheritance, diagnostics and operation-specific repair expectations.
 
+### Bounds and deadlines
+
+Every entity declares, beside the rest of its declaration, what its connector holds and how long
+it waits: each buffer between its transport and the host with its capacity and what happens when it
+is full, each network wait with what ends it, and the limits its driver imposes that no Nervix key
+changes. The [Connector Capabilities](connector-capabilities.md) reference and each entity's manual
+render these bounds from the declaration, so a reader sees the same facts a reviewer checks.
+
+A buffer is bounded by a capacity Nervix fixes, a statement clause or client key sets, or a driver
+default declares. When it is full, a protocol with flow control is held back: the connector stops
+reading, and the transport's own window or prefetch keeps the peer from sending more, or a publish
+waits for the buffer to drain. A protocol without flow control drops what does not fit and counts
+it. A buffer that drops without counting, or whose overflow fails the publish for the host to retry,
+is declared as it behaves, and a buffer that nothing bounds yet is declared unbounded, so the matrix
+shows each gap until its connector closes it.
+
+A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a fixed bound Nervix
+sets, or the driver's own default. A wait that only the host's stop ends is declared unbounded. The
+deadline keys mean the same thing for every connector:
+
+| Key | What it bounds |
+| --- | --- |
+| `timeout_ms` | The whole of one request or operation: name resolution, connection setup, TLS and the answer. |
+| `connect_timeout_ms` | Establishing a connection: name resolution, the address attempts, TLS and the protocol's own handshake. |
+
+A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or a
+declared idle key, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
+number of milliseconds no longer than about 146 years, the vocabulary's `ClientDeadline` rule, and
+the connector contract's `ConfiguredDeadline` reads both keys once, so no connector parses its own. A
+connector that dials for itself and reads `connect_timeout_ms` allows 30 seconds where the client
+leaves the key out, and a connection that runs out of its deadline is reported naming the key and
+its bound.
+
+A connector that dials for itself spends one `OperationBudget` from `nervix-dns` on an operation. The
+caller declares how much of it the name lookup may take: whatever is left for an operation that is
+only a connection, or at most a fixed share for one that sends a request after connecting, as the
+HTTP request sink gives its lookup at most half of `timeout_ms`. Each answer is then tried in
+resolution order within an equal share of what is left when its attempt starts, and what remains
+bounds the handshake and the request that follow.
+
+#### Stalled peers
+
+Each deadline key an entity's waits name is a runtime capability, `STALLED PEER <key>`, and the
+capability inventory names a scenario that observes it: a peer that stops answering during a wait
+the key bounds surfaces as the entity's transient status within that bound, and the connector
+retries on its policy. A silent endpoint accepts connections and never answers, a stallable endpoint
+in front of a dependency stops carrying bytes in both directions while its connections stay open,
+and the HTTP and gRPC receivers can hold a response; scenarios stand them where the stall belongs.
+
+#### Review checklist
+
+A change that adds or alters a connector's buffers or network waits checks that:
+
+- every buffer between the transport and the host is declared with its capacity and overflow;
+- every network wait is bounded by a declared key, clause, fixed bound or driver default, or is
+  declared unbounded;
+- every deadline key it reads keeps the meaning above and is read through `ConfiguredDeadline`;
+- no driver call parks an asynchronous worker;
+- every deadline key its declaration names has its stalled-peer scenario in the inventory.
+
 ## Entity declarations
 
 Every connector entity declares, once in the vocabulary, everything a statement can say about it
@@ -379,8 +476,8 @@ clause the grammar accepts, so documentation can show it and generated statement
 
 | Side | What the entity declares |
 | --- | --- |
-| Ingestor | Header reads, the typed metadata scope, every-node execution, the reference its body names, its position class and acknowledgement confirmation; the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
-| Emitter | Header writes; the reference its body names (a client of one connector, the object store an Iceberg sink writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
+| Ingestor | Header reads, the typed metadata scope, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
+| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg sink writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. A Prometheus client also declares every key its `CONFIG` may set and the rule each value follows; the registry holds a client to them when it is created, and the source holds its rendered configuration to them again when it opens. |
 
 A mode or a quiesce mode that needs an option choice declares it: an MQTT topic's `ACK` modes and its
@@ -390,6 +487,11 @@ a sink accepts a publishing mode, whether its body needs a codec, and the batchi
 maximum and its refusal for an emitter that cannot batch are all read from the declaration. The
 registry, the planner and the console keep their own copies of some of these facts until the work
 that owns those layers reads the declaration instead.
+
+Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
+endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
+declare every-node execution. Scheduling and placement-reference completion read that capability,
+so each listener stays outside placement rules.
 
 ### Generated conformance tests
 
@@ -430,7 +532,8 @@ compares every generated region and rejects drift while preserving the surroundi
 `tests/connector-capability-inventory.toml` registers, for every entity and every capability it
 declares, the scenarios that observe that capability at run time. The capabilities are each delivery
 or publishing mode, each option and each choice of an option, each typed metadata field, batching
-where it is available, and each envelope clause and property. `just validate-connector-capabilities`,
+where it is available, each envelope clause and property, and a stalled-peer check, `STALLED PEER
+<key>`, for each deadline key the entity's waits name. `just validate-connector-capabilities`,
 which `just validate` runs, fails when a declared capability names no scenario, when an entry names a
 capability its entity does not declare or names it twice, and when a named scenario does not exist
 in its feature file. A scenario is identified by its feature file and its name exactly as the
@@ -599,10 +702,10 @@ waits for its ACK tree; `Parallel` requests up to the declared in-flight limit w
 timeout. The host takes in an acknowledged batch as one batch acknowledgement and waits for every
 accepted message's ACK outcome before acknowledging the batch's transport positions; a message a
 quiesce buffer or drop policy took over adds nothing to wait for. A failed or timed-out ACK rejects
-the positions and retries according to the source's delivery policy. What the host does when
-rejection itself fails depends on the position class each source entity declares, which states what
-its positions still mean once the connection that delivered them is gone. The host handles each
-class once:
+the positions and retries according to the source's delivery policy. A successful rejection lets
+the host read again after its retry delay. A failed rejection becomes a transient source error;
+whether the host retains and retries those positions depends on the position class each source
+entity declares, which states what its positions still mean once their connection is gone:
 
 <!-- connector-matrix:position:start -->
 | Position class | Entities | Meaning |
@@ -692,9 +795,16 @@ in one of these ways:
 | Entities | A cancelled read |
 | --- | --- |
 | `KAFKA TOPIC`, `PULSAR TOPIC` | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
-| `MQTT TOPIC` | Ends at once while it waits for a batch's first publish. Once it has one, it gathers until the batch is full or its batch timeout passes, and then returns every publish it gathered. |
+| `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the client had already read when the read stopped waiting stays with the client, which hands it to the next read first. |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `RABBITMQ QUEUE`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
-| `SQS QUEUE` | Abandons the `ReceiveMessage` in flight. A message the service was returning through it stays invisible until its visibility timeout. |
+| `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
+
+An MQTT read stops waiting by dropping its client's poll in flight, as its batch timeout ends a
+gathering. The client queues every packet it reads before it writes a reply, and its next poll
+returns a queued publish first, so a dropped poll loses no publish it read. It can cut short only an
+acknowledgement still waiting for room in a send buffer the broker has stopped draining; a
+persistent session then delivers that publish again when it resumes, as it does any publish whose
+acknowledgement never reached the broker.
 
 ### MQTT session retirement
 
@@ -731,14 +841,19 @@ The [ingestor manual](./ingestors.md#mqtt) owns the public behavior.
 ### Pulsar subscription ownership
 
 A Pulsar source's Model declares who owns its subscription, and its plan carries the declaration.
-The plan of an input whose subscription its ingestor owns requires retirement only when no
-replacement reads in its place: the same retirement step as MQTT's removes it after `DROP
-INGESTOR` or the domain's drop withdraws the input, on the node the installed revision assigned the
-ingestor to, once that ingestor's exact source tasks stopped, a stopped domain's passive plan
-included. A replacement keeps the subscription, whatever it reads, and a provisioned subscription is
-never retired.
+The plan of an input whose subscription its ingestor owns requires retirement when that source
+changes or disappears. The same retirement step as MQTT's runs on the node the installed revision
+assigned the ingestor to, once that ingestor's exact source tasks stopped, before its replacement
+starts; a stopped domain's passive plan participates too. The composition root resolves both
+clients through their pinned mounts. The connector compares service URL scheme, host and effective
+port, the topic qualified through the client's namespace, and subscription name, without connecting
+or resolving DNS. Implicit ports mean 6650 for `pulsar` and 6651 for `pulsar+ssl`; different host
+names remain distinct endpoints. The comparison ignores consumer names, acknowledgement policy
+and subscription ownership. A replacement reading the same subscription keeps it and its backlog,
+including an ownership handoff to `PROVISIONED`. Routes and codecs alone create no retirement.
+A preceding provisioned subscription is never retired.
 
-The Pulsar composition root resolves the dropped input's client entries through its pinned mounts
+The Pulsar composition root resolves the preceding input's client entries through its pinned mounts
 and keeps their lease through the removal. The connector connects a client, joins the subscription
 with a durable shared consumer registered under `<domain>~<ingestor>-removal` and unsubscribes it,
 and the broker removes the subscription with its backlog. An absent subscription is created by the
@@ -746,7 +861,9 @@ join and removed again. The broker refuses while another consumer is connected, 
 then closes its own consumer so that it does not keep the subscription busy. The driver's
 ten-second connection timeout encloses the whole removal: connecting, joining and unsubscribing.
 Every failure, whether of resolution, connection, join, unsubscribe or the deadline, is rendered
-once into runtime error events and never fails the drop. A node removes the subscriptions a
+once into runtime error events and never fails the drop or replacement. If resolving or comparing
+the replacement fails, removal is skipped and the uncertainty is reported; normal replacement
+startup still owns validation of its client. A node removes the subscriptions a
 revision retires one at a time, within its application of that revision, so the command that
 dropped them completes once every removal has ended, and an unreachable broker delays it by up to
 the timeout for each subscription.
@@ -762,6 +879,11 @@ broker opens the non-durable cursor, which the instance closes again before repo
 subscription missing; while the cursor is open, the broker refuses to create a subscription of
 that name as a conflict. Each instance's consumer registers under `<domain>~<ingestor>-<instance>`.
 The [ingestor manual](./ingestors.md#pulsar) owns the public behavior.
+
+When an endpoint has multiple ingestor bindings, its host dispatches them concurrently and waits
+for all acknowledged bindings before completing the response. Each binding keeps its own declared
+window and deadline. A partial admission reports a processing failure rather than claiming that
+no input was admitted.
 
 ### Confirmed acknowledgements
 
@@ -812,9 +934,12 @@ be acknowledged until it resolves.
 A confirmation that fails is the ingestor's transient status, which `DESCRIBE INGESTOR` shows until
 a later acknowledgement is confirmed, and the host rejects the positions for their position class to
 handle. A rejection that fails is the ingestor's transient status as well, whether the host rejects
-a batch whose confirmation or acknowledgement roots failed or retries a rejection it holds, so a
-source whose transport can neither confirm a batch nor take it back shows why it holds the batch
-until a later acknowledgement is confirmed. A stop that reaches the source loop once a batch's
+a batch whose confirmation or acknowledgement roots failed or retries a rejection it holds. Only
+a `replayable` source retries that same rejection after resuming, before reading another batch.
+A `broker_redelivered` source such as RabbitMQ instead discards and counts the pending positions
+once resume succeeds, then reads the deliveries the broker presents again; a source of class `none`
+retains no pending positions. The status reports the settlement failure while recovery follows
+that class's contract. A stop that reaches the source loop once a batch's
 acknowledgement roots have resolved does not abandon the batch: the loop takes the resolved outcome
 before the stop and confirms the batch first. A batch whose roots had not all resolved when its
 source stopped is left unconfirmed; the source instance logs `source instance stopped before its
@@ -920,12 +1045,10 @@ Every sink implements `finish`, and no sink inherits a default. A publish report
 delivered at the completion point its mode declares, and for `NO_ACK` on Kafka, Pulsar and MQTT
 QoS 0 that point is the client taking the record, so the client can still hold delivered records
 when the emitter stops. `finish` sends what the client still holds by the deadline the host gives
-it and answers with one of three outcomes:
+it and answers with one of two outcomes:
 
 - **Nothing held.** The client holds no record once a publish returns, so there is nothing to send.
 - **Flushed.** The client held records and sent every one of them before the deadline.
-- **Discarded.** The client can still hold records a publish reported delivered, and the sink
-  closes it without sending them.
 
 A finish that cannot send everything is a `SinkFinishError`: `Unsent` when the deadline passes with
 records still held, counting them, and `Flush` when the client fails while it sends them, with the
@@ -946,17 +1069,16 @@ records: their acknowledgements end unresolved, so an acknowledged source delive
 a finish that flushes the client also sends the ones the client had already taken, which the
 destination then receives twice.
 
-The host records every outcome on the emitter: a flush at `info`, a discard at `warn`, and a failed
-finish at `warn`, as the emitter's transient error that `DESCRIBE EMITTER` shows and as an error
-event. What a stop leaves to a finish, and what the finish does with it, differs by sink:
+The host records every outcome on the emitter: a flush at `info`, and a failed finish at `warn`, as
+the emitter's transient error that `DESCRIBE EMITTER` shows and as an error event. What a stop leaves to a finish, and what the finish does with it, differs by sink:
 
 | Sink | What the client holds once a publish returns | What finishing does with it |
 | --- | --- | --- |
 | Kafka | `NO_ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
 | Pulsar | `NO_ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
-| MQTT | `QOS 0`: publishes queued for the client's event loop. `QOS 1` and `QOS 2`: nothing | Discards them with the event loop |
+| MQTT | `QOS 0`: publishes the client took and its event loop has not yet written and flushed to the broker connection, which a client cut off from its broker holds until it connects again. `QOS 1` and `QOS 2`: nothing | Waits until the event loop has flushed every publish the client took or the deadline passes; reports a failed flush or the count still unflushed at that deadline |
 | NATS | Nothing: a core publish flushes the connection before it reports its records, and JetStream answers each record | Nothing to send |
-| ZeroMQ | Nothing: each send writes and flushes its frame to a peer's socket | Nothing to send |
+| ZeroMQ | Nothing a publish reported delivered: a completed send has flushed its frame to a peer's socket, and a send that ran out of `timeout_ms` failed its record | Nothing to send |
 | RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
 | Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#sinks) describes |
 
@@ -981,6 +1103,20 @@ served, has flushed, since no record is left. Otherwise `Unsent` counts the reco
 Because a record stays retained until its report is served, the producer always asks for every
 record's report and sets `delivery.report.only.error` to `false` after the client's own entries.
 
+The MQTT sink hands each QoS 0 record to its client with a flush notice, which the client's event
+loop ends once it has written the publish and flushed the connection, or fails when that write or
+flush fails, or when a clean session's next connection drops the publishes a lost connection left
+behind. The sink keeps every notice until it ends and drops the ended ones at the start of each
+publish, so it holds one notice for each publish the client still holds: the one request its queue
+takes, and those a lost connection left for the next. A notice that failed before the finish lost
+its record with a connection whose failure the event loop already reported as the emitter's
+transient error. The finish drops the notices that ended before it, answers nothing held when none
+is left, and otherwise waits for the rest in the order the client took them until its deadline.
+Every notice ending in time is a flush, and one that failed fails the finish with the driver's
+cause beneath; `Unsent` counts the notices still open at the deadline. A client that is connecting
+when the finish begins sends what it holds as soon as the broker answers its `CONNECT`; one waiting
+out its reconnect backoff sends it on its next connection.
+
 A brokered record sink in `MODE ACK` awaits its broker's answers through the contract crate's
 `ConfirmationWindow`. The sink hands each record to its driver and gives the window the record's
 identity, its execution time and the future through which the broker answers for it: a
@@ -991,7 +1127,10 @@ hand-over. While the window holds `MAX` records it waits for the oldest answer u
 deadline and no longer before the sink hands over another record, so at most `MAX` records await
 answers at once and `ACK SEQUENTIAL` is a window of one. Once every record was handed over, the
 window waits for each remaining answer, oldest first and each until its own deadline. An answer
-given at the instant of its deadline is an answer. A failure ends the publish at once: the driver
+given at the instant of its deadline is an answer. A connector whose driver queue fills before
+`MAX` can call `settle_next` to wait for and settle the oldest answer on demand. It returns that
+record's identity, or no identity when the window is empty, and uses the same per-record deadline
+and failure settlement as ordinary window admission. A failure ends the publish at once: the driver
 could not take a record for a reason that is not the record's own, the oldest answer failed or
 missed its deadline, or a deadline is past the monotonic clock's range. The window describes a
 failure of its own, a missed deadline or one past the clock's range, in a printable attachment,
@@ -1021,10 +1160,20 @@ requests, before the broker answered any record of the publish.
 The Kafka sink awaits through the window the delivery report librdkafka produces for each record it
 hands the producer. A delivered record is confirmed, a delivery error about the record itself (an
 invalid or oversized message, timestamp or record) refuses it, and every other report leaves it
-unresolved, including a producer that drops the record without one. When the producer refuses to
-take a record for a reason that is not the record's own, such as a full producer queue, the publish
-ends through the window, so every record the broker already confirmed is delivered first and is not
-sent again. The sink also hands librdkafka the window's bound. Under `MODE ACK` it sets the
+unresolved, including a producer that drops the record without one. A temporary `QueueFull` in a
+confirmed publish waits through `settle_next` for the oldest outstanding answer and then tries the
+same refused record again. The effective window is the smaller of `MAX` and the native queue's
+record and byte capacities. librdkafka releases a queue place after its delivery callback returns,
+so a report can arrive before that place is free. When no current-window answer remains, the
+publish checks admission again at one-millisecond intervals, with an `ACK TIMEOUT` bound starting
+at that empty-window wait; it never spins or changes an admitted record's confirmation deadline.
+A missed queue-admission bound or another producer failure ends through the window, preserving
+every answer already given. The sink reads the effective `queue.buffering.max.kbytes` from
+librdkafka's validated native configuration once at startup. In both modes a payload larger than
+that entire byte capacity is a record rejection naming its size and the capacity, since no retry
+can admit it. Native queue accounting charges payload bytes alone, independently of the Kafka
+record's wire-size limit. A temporary full queue in `NO ACK` remains an infrastructure failure
+paced by the host's retry policy. The sink also hands librdkafka the window's bound. Under `MODE ACK` it sets the
 producer's `message.timeout.ms` to `ACK TIMEOUT`, rounded up to the millisecond, after the client's
 own entries, and drops `delivery.timeout.ms`, the other name librdkafka reads that bound from. A
 producer left at librdkafka's five-minute default would keep retrying a record after the publish
@@ -1269,14 +1418,22 @@ may already hold. One connector publish call awaits at most one request across t
 execution's served sources and branches. It sends them in their handed-over order, each on a
 fresh HTTP/1.1 connection using the node resolver and the shared rustls trust and client-identity
 configuration. The connection closes after final headers; no unread body can be reused. Its one
-physical `timeout_ms` spans DNS, connect, TLS, send, interim headers and complete final headers.
-The connector resolves the target's host through the node resolver within that timeout and tries
-the answers in order without dividing it among them. The connector sends no startup probe, follows no redirect, stores no response cookie, answers no
-authentication challenge with another request, and has no independent retry policy. The host
-alone schedules another application attempt.
+physical `timeout_ms` spans DNS, connect, TLS, send, interim headers and complete final headers,
+and one `OperationBudget` divides it: resolving the target's host through the node resolver takes
+at most half of it, each answer is then dialled in resolution order within an equal share of what
+is left when its attempt starts, so an answer whose handshake never completes leaves the next one
+time to connect, and what remains bounds TLS, the send and the final headers. A lookup that runs out
+of its half fails the attempt as a DNS timeout, and an answer that runs out of its share fails it as
+a connection that was not accepted in time when no later answer connects. The connector sends no
+startup probe, follows no redirect, stores no response cookie, answers no authentication challenge
+with another request, and has no independent retry policy. The host alone schedules another
+application attempt.
 
-The transport generates `Host`, `Connection: close` and, for a present body,
-`Content-Length`. It does not add `Accept-Encoding` or `Content-Type`. Application header writes
+The transport generates `Host`, `Connection: close` and `Content-Length`: the length of a present
+body, and `0` for a bodyless request whose method defines request content, `POST`, `PUT` or
+`PATCH` in any ASCII case, as RFC 9110 asks of a client so that a server requiring a length accepts
+it. Another bodyless request declares no length. It does not add `Accept-Encoding` or
+`Content-Type`. Application header writes
 can supply `Accept`, content type, authorization and cookie values. Without an application
 `Accept`, the transport adds `Accept: */*`.
 
@@ -1425,17 +1582,25 @@ sequenceDiagram
   mapped column names and Iceberg types against the loaded table, after recursively narrowing UTC
   nanosecond datetimes to microseconds in the staged schema. Staging does not complete an ACK;
   successful catalog commit does. The sink retains ACKs and its client while a failed commit is
-  retried. [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate
-  limits.
+  retried. A commit reads its staged files back in groups the bulk memory class can hold at once,
+  and a single file larger than the class alone, charged with the whole class. It charges each
+  group before reading it, returns the charge once the group's rows are in data files, and appends
+  the data files of every group in one catalog commit. It covers the staged files it found when it
+  began, so the retry of a failed append commits files staged since then in a commit of their own
+  instead of acknowledging them unwritten.
+  [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate limits.
 - **RabbitMQ sink.** The broker answers no `NO_ACK` message itself, so the sink ends a `NO_ACK`
   write with one round trip on its channel, which the broker answers only after it has taken every
   message written before it, and the answer delivers the write; a write costs that one round trip,
-  not one per message. A broker that closes the channel names its reason, and Lapin hands it only
-  to what was waiting on the channel at that moment, so the sink reads the reason from its
-  connection's events, once for every channel it loses. The size refusal leaves the connection
-  open, and the sink opens its next channel on it; a message the broker had not confirmed ahead of
-  the refused one may be in its queue, so the attempt then fails for the host's retry. Any other
-  loss is an infrastructure failure, and the host reopens the sink. [RabbitMQ
+  not one per message. When the client sets `timeout_ms`, a round trip the broker does not answer
+  within it fails the write with that bound as its typed cause, the write's messages stay
+  unresolved for the host's retry, and the host reopens the sink; without the key the round trip
+  waits as long as the connection lives. A broker that closes the channel names its reason, and
+  Lapin hands it only to what was waiting on the channel at that moment, so the sink reads the
+  reason from its connection's events, once for every channel it loses. The size refusal leaves the
+  connection open, and the sink opens its next channel on it; a message the broker had not
+  confirmed ahead of the refused one may be in its queue, so the attempt then fails for the host's
+  retry. Any other loss is an infrastructure failure, and the host reopens the sink. [RabbitMQ
   emission](./emitters.md#rabbitmq) defines the public behavior.
 - **Client source.** Each client ingestor a node executes has one endpoint task that outlives
   a single execution of the ingestor. It owns the attached producers, the batches each queued,
@@ -1466,7 +1631,7 @@ sequenceDiagram
   `ws` and `wss` sources resolve through the node's asynchronous resolver for each new connection
   attempt. The node resolver owns DNS cache and TTL policy; the connectors keep their framing,
   upgrade, TLS, signaling and retry behavior. DNS and ordered address attempts share a physical
-  connection budget. Syslog UDP binds a socket in each attempted address's IP family and sends to
+  connection budget: the client's `connect_timeout_ms`, 30 seconds by default. Syslog UDP binds a socket in each attempted address's IP family and sends to
   the first address whose socket setup succeeds. TCP and TLS senders and WebSocket clients try
   successive answers within that budget.
   TLS verifies the configured name, and a WebSocket upgrade retains its original URL authority,
@@ -1530,6 +1695,21 @@ sequenceDiagram
   Domain teardown removes only that domain's definitions and ends its bound lifetimes, preserving
   other domains publishing the same host and path. The host continues to own quiesce, buffering,
   decoding, routing, flush cadence, and error reporting.
+  `MODE ACK MAX <n> ACK TIMEOUT <duration>` gives each node's intake an explicit 1–65,535-response
+  window. Immediate permit admission holds one response through the payload's existing ACK root;
+  codec or local route refusal yields HTTP 400, successful graph completion 200, and downstream
+  NACK, timeout, full capacity or intake ending 503 with the declared `RETRY AFTER`. ACK requires
+  reject-only quiesce. Intake stop observes the quiesce owner's publication; exact source ending
+  cancels the lifetime before publishing absence. A resumable quiesce preserves admitted work.
+  The host projects only the existing client outcome class and cause into the public object;
+  diagnostics retain their ordinary error owner. WebSocket ACK requires an explicit signaling
+  protocol whose outbound encoder can represent every fixed outcome. Its optional data-sink reply
+  also sends the frame during `ACCEPT DATA`. The request policy is a typed decision plan; it is
+  separate from broker positions, broker commits and the source loop's acknowledgement cadence.
+  Shared YAML encoding uses JSON-compatible flow syntax with quoted strings, preserving their
+  complete contents through signaling and codec round trips.
+  The source remains request-scoped. HTTP body reads and the driver's frame limits retain their
+  separate bounds. `MODE NO ACK` still confirms admission with 202.
 
 ## Failure and observation
 
@@ -1606,9 +1786,15 @@ rejection keeps the destination's safe SQLSTATE, error code, or named rejection 
 context changes do not alter request grouping, successful delivery, retries, or ACK ownership.
 
 The host owns ingestor and emitter metric updates, transient status, and runtime events.
-Source and sink tasks retain one immutable error/retry publication, so successful operations read
-and clear only an actual failure. DESCRIBE observes error and retry together; retry state still
-counts toward a drain when the payload buffer is empty. Pooled Redis and SQL sinks retain one wait
+Source and sink tasks retain an immutable failure publication. An emitter's task and its retained
+connector background task report and clear their own failures independently within that atomic
+publication. SinkHost transient-status callbacks own the connector failure; publish and commit
+outcomes own the task failure. Connection progress therefore preserves a pending publish or commit
+failure, and task success preserves a connector failure awaiting recovery. DESCRIBE renders every
+retained error from one coherent publication, labeling simultaneous failures as `task` and
+`connector`. Its retry is selected from that same publication: an active task retry first, then an
+active connector retry, and then a task error without a retry. Retry state still counts toward a
+drain when the payload buffer is empty. Pooled Redis and SQL sinks retain one wait
 slot per sink and publish it only after a connection borrow returns Pending. Its guard clears on
 completion, error or cancellation; sink teardown removes its own registration. Confirmation
 attempts retain the emitter's startup counter. Quiesced payload and client outcome metrics use

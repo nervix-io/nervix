@@ -10,20 +10,29 @@ workspace = true
 
 [features]
 default = []
-shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
+shuttle = [
+  "dep:shuttle",
+  "nervix-connector/shuttle",
+  "nervix-execution/shuttle",
+  "nervix-model-harness/shuttle",
+  "nervix-primitives/shuttle",
+]
 
 [dependencies]
 arch-into = { workspace = true }
 async-trait = { workspace = true }
 error-stack = { workspace = true }
+futures-util = { workspace = true }
 humantime = { workspace = true }
 meticulous = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
+nervix-recovery = { workspace = true }
 rumqttc = { workspace = true }
 rumqttc-core = { workspace = true }
+shuttle = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
@@ -34,6 +43,9 @@ bolero = { workspace = true }
 bytes = { workspace = true }
 # The test hosts hand a sink the node's executor, as the server's host does.
 nervix-execution = { workspace = true }
+nervix-model-harness = { workspace = true }
+# The read checks pass a batch timeout on a paused clock.
+nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-test-environment = { workspace = true }
 nonzero_ext = { workspace = true }
 tempfile = { workspace = true }

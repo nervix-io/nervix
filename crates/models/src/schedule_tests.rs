@@ -4,9 +4,9 @@ use crate::{
     AckMode, BranchSelection, ClusterNodeName, ClusterSchedule, CreateIngestor, CreateJunction,
     CreateSchema, DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy, GeneralErrorPolicy,
     HttpEndpointSource, HttpSource, IngestQuiesceMode, IngestSource, KafkaPartitionSchedule, Model,
-    ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, ResolvedBranching,
-    ScheduledNode, SchemaField, SchemaFingerprint, SyslogIngestMode, SyslogListenerSource,
-    SyslogSource,
+    OwnershipStateComponent, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SyslogIngestMode,
+    SyslogListenerSource, SyslogSource,
 };
 
 fn named<N>(raw: &str) -> N
@@ -248,4 +248,55 @@ fn kafka_partition_schedule_assigns_partitions_round_robin_by_instance() {
     assert_eq!(schedule.observed_partitions, vec![0, 1, 2, 3]);
     assert_eq!(schedule.rebalance_epoch, 7);
     assert_eq!(schedule.instance_assignments, vec![vec![0, 2], vec![1, 3]]);
+}
+
+fn placed_schema(raw: &str, primary: &str, assigned: &[&str]) -> ScheduledNode {
+    let assigned = assigned
+        .iter()
+        .map(|node| named::<ClusterNodeName>(node))
+        .collect();
+    ScheduledNode::new(
+        Model::Schema(CreateSchema {
+            name: named(raw),
+            fields: Vec::new(),
+        }),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .placed_on(Some(named(primary)), assigned)
+}
+
+#[test]
+fn a_domain_schedule_names_the_entities_a_node_is_the_primary_of_in_schedule_order() {
+    let schedule = DomainSchedule::new(
+        domain("alpha"),
+        vec![
+            placed_schema("orders", "node-b", &["node-b", "node-a"]),
+            placed_schema("payments", "node-a", &["node-a", "node-b"]),
+            placed_schema("refunds", "node-b", &["node-b"]),
+        ],
+        Vec::new(),
+    );
+
+    let primaries = schedule.primary_entities_on(&named("node-b"));
+    let names = primaries
+        .iter()
+        .map(|entity| entity.identifier.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["orders", "refunds"]);
+    assert!(schedule.primary_entities_on(&named("node-c")).is_empty());
+}
+
+#[test]
+fn every_ownership_component_but_branch_aggregated_metrics_is_archived() {
+    assert!(!OwnershipStateComponent::BranchAggregated.is_archived());
+    for component in [
+        OwnershipStateComponent::BranchLifecycle,
+        OwnershipStateComponent::Deduplicator,
+        OwnershipStateComponent::KafkaOffsets,
+        OwnershipStateComponent::MaterializedRelay,
+        OwnershipStateComponent::WasmProcessor,
+        OwnershipStateComponent::WindowProcessor,
+    ] {
+        assert!(component.is_archived(), "{component:?}");
+    }
 }

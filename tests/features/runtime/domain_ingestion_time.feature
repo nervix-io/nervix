@@ -126,7 +126,7 @@ Feature: Logical ingestion time and admission
   @logical_ingestion_time
   Scenario Outline: Logical ingestion timestamps feed isolated duration windows at different rates
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus statements
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 1s;
       CREATE SCHEMA event ( tenant STRING, value I64, occurred_at DATETIME );

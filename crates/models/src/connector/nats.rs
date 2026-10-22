@@ -20,6 +20,10 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
     external_name::{ExternalNameError, external_names, require_length},
@@ -101,6 +105,68 @@ pub struct NatsSubjectSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a NATS SUBJECT ingestor holds and how long it waits.
+const NATS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "messages the subscription holds ahead of the host",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Driver("65,536 messages"),
+            overflow: BufferOverflow::DropUncounted,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "name resolution",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "connection",
+            bound: WaitBound::Driver("5 s per address"),
+        },
+        DeclaredWait {
+            wait: "the subscription's flush",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "a silent connection",
+            bound: WaitBound::Driver(
+                "a ping every 60 s; the connection ends after 2 go unanswered",
+            ),
+        },
+    ],
+    driver_limits: &[],
+};
+
+/// What the connector of a NATS SUBJECT emitter holds and how long it waits.
+const NATS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "commands queued for the connection",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Driver("2048 commands"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "name resolution",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "connection",
+            bound: WaitBound::Driver("5 s per address"),
+        },
+        DeclaredWait {
+            wait: "a core publish and its flush",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "a JetStream acknowledgement",
+            bound: WaitBound::Clause("ACK TIMEOUT"),
+        },
+    ],
+    driver_limits: &["Messages above the server's max_payload are rejected."],
+};
+
 impl SourceEntity for NatsSubjectSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
         reads_headers: true,
@@ -126,6 +192,7 @@ impl SourceEntity for NatsSubjectSource {
             },
             OptionDeclaration::INSTANCES.required(),
         ],
+        bounds: NATS_SOURCE_BOUNDS,
     };
 }
 
@@ -203,6 +270,7 @@ impl SinkEntity for NatsSubjectSink {
         options: &[],
         envelope: &[],
         properties: &[],
+        bounds: NATS_SINK_BOUNDS,
     };
 }
 

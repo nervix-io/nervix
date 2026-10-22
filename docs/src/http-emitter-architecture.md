@@ -98,10 +98,13 @@ CREATE EMITTER delete_event
   ON GENERAL ERROR LOG;
 ```
 
-The receiver gets zero content octets. HTTP framing may omit `Content-Length` for this request;
-the transport supplies it when a body is present. `GET` and `HEAD`, in any ASCII case, require
-`WITHOUT BODY`, including when the method is computed at runtime. `CONNECT` and `TRACE` are
-unavailable in any ASCII case. Other valid methods retain their evaluated spelling.
+The receiver gets zero content octets. Whether the request declares that empty content depends on
+its evaluated method. A bodyless `POST`, `PUT` or `PATCH`, in any ASCII case, carries
+`Content-Length: 0`. RFC 9110 asks a client to send a length when its method defines a meaning
+for request content, and an endpoint that requires one may refuse a request without it with `411`.
+Any other bodyless method, such as this `DELETE`, carries no `Content-Length`. `GET` and `HEAD`, in
+any ASCII case, require `WITHOUT BODY`, including when the method is computed at runtime. `CONNECT`
+and `TRACE` are unavailable in any ASCII case. Other valid methods retain their evaluated spelling.
 
 ### Scopes, order, and sensitivity
 
@@ -187,15 +190,42 @@ one flush preserve their publication order, and unresolved work stays ahead of l
 is no total order across independent executions, relays, or branches, nor an ordering promise for
 effects an endpoint applies after a connection is lost. Each attempt uses a fresh HTTP/1.1
 connection, closed after final headers, so an unread response body cannot become the next
-response. The client's physical timeout covers DNS, connect, TLS, send, interim heads, and the
-complete final head; queue time and backoff do not consume the next attempt's timeout.
+response. The client's physical `timeout_ms` covers DNS, connect, TLS, send, interim heads, and
+the complete final head; queue time and backoff do not consume the next attempt's timeout.
 
-The transport generates `Host`, `Connection: close`, and `Content-Length` for a present body. It
-adds `Accept: */*` only if the application did not write `Accept`. It adds no `Accept-Encoding` or
-`Content-Type`. It does not store response cookies, issue a second request for an authentication
-challenge, follow a redirect, or retry independently of the host. The codec's bytes are the entire
-body: there is no added wrapper, newline, form encoding, or compression. Writing
-`Content-Encoding` describes bytes the codec already produced and does not transform them.
+One operation budget divides each attempt's `timeout_ms`, counted from the attempt's start. Its
+steps run in this order:
+
+1. The connector resolves the endpoint's host through the node resolver. The lookup takes at most
+   half of `timeout_ms`, whatever the name servers do, so a lookup that answers leaves at least
+   half of the timeout for the steps after it.
+2. It dials the resolved addresses one at a time, in resolution order. An address receives what is
+   left of the budget when its attempt starts, divided equally among the addresses not yet tried,
+   itself included. An address that refuses at once leaves its unused share to the addresses after
+   it, and one whose handshake never completes ends its attempt with its own share, leaving theirs.
+3. Once an address accepts, TLS for an `https` endpoint, the request send, interim heads, and the
+   complete final head share what remains of the budget.
+
+A step that runs out of its time fails the attempt as an infrastructure failure. The request stays
+pending, and `DESCRIBE EMITTER` names the step that ran out:
+
+| Step that ran out | Transient error |
+| --- | --- |
+| The lookup's half | `HTTP DNS resolution failed: resolving '<host>' failed: no answer arrived in time` |
+| The share of the last address tried | `HTTP connection failed: no connection was accepted within the address's share of timeout_ms` |
+| What remained after an address accepted | `HTTP request timed out before complete final response headers` |
+
+When no address accepts a connection, the failure of the last address tried describes the attempt.
+[Name Resolution](./name-resolution.md#dialling-the-answers) owns the resolver, its lookup bounds,
+and the dialling order this connector shares with the other callers that dial for themselves.
+
+The transport generates `Host`, `Connection: close`, and `Content-Length`. The length is that of a
+present body, or `0` for a bodyless `POST`, `PUT` or `PATCH`; any other bodyless request carries
+no `Content-Length`. It adds `Accept: */*` only if the application did not write `Accept`. It adds
+no `Accept-Encoding` or `Content-Type`. It does not store response cookies, issue a second request
+for an authentication challenge, follow a redirect, or retry independently of the host. The codec's
+bytes are the entire body: there is no added wrapper, newline, form encoding, or compression.
+Writing `Content-Encoding` describes bytes the codec already produced and does not transform them.
 
 ### Validation and supported bounds
 
@@ -212,7 +242,7 @@ cannot contain CR, LF, NUL, DEL, or other disallowed ASCII controls.
 | Target | Origin-relative, exactly one leading `/`; normalized path and query at most 8 KiB encoded | Literal: candidate rejected; dynamic: message error before send |
 | Application headers | At most 128 after replacement and 32 KiB of UTF-8 name and value bytes in total; each invocation also has the 32 KiB bound | Invalid literal: candidate rejected; dynamic violation: message error before send |
 | Response headers | At most 128 fields and 64 KiB of field-name and value bytes in **each** interim or final block | Attempt remains unresolved and retries |
-| Attempt | One request awaiting final headers per execution; positive, schedulable client `timeout_ms` | Attempt failure retains work; timeout is physical |
+| Attempt | One request awaiting final headers per execution; positive, schedulable client `timeout_ms`, of which the lookup takes at most half | Attempt failure retains work; timeout is physical |
 | Body | No extra HTTP-specific fixed encoded-body size bound | Encoded bytes remain under node memory pressure until resolved; endpoint `413` rejects the record |
 
 The target is parsed relative to the client's origin and cannot change its scheme, host, or port.
@@ -392,3 +422,21 @@ suites passed another **168 scenarios and 1,764 steps**. The ledger records the 
 focused unit and Shuttle results, documentation build, validation, and an earlier saturated
 cluster run whose three-node setup commands met leadership changes. These results qualify the
 implemented behavior and its stated limits; the ledger remains the detailed evidence record.
+
+Two outlines added after that run qualify the attempt budget and the bodyless framing described
+above, each on one-node and three-node clusters:
+
+- `@http_emitter_bodyless_length` in `http_emitter.feature` sends a bodyless `POST`, `PUT`,
+  `PATCH` and `DELETE` to a receiver that answers `411` to a `POST`, `PUT` or `PATCH` declaring
+  no length. The first three arrive with `Content-Length: 0`, and the `DELETE` arrives without
+  the header.
+- `@http_emitter_address_share` in `http_emitter_transport.feature` resolves the endpoint's name
+  to an address whose handshake never completes, followed by the receiver's address. The request
+  reaches the receiver, and `DESCRIBE EMITTER` then shows no transient error.
+
+Paused-clock unit tests of the HTTP sink end a silent name server's lookup after its half of
+`timeout_ms` and before the whole of it, and end the attempt of an only address that never
+connects with its share; each checks the transient error listed above. A third unit test delivers
+the request through the second address within one attempt when the first never connects. The
+`http-request-heads` Bolero property checks that the request head the sink writes carries every
+prepared field and declares the length the transport rules above require.

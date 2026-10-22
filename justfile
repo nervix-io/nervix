@@ -7,7 +7,7 @@ export RUSTUP_AUTO_INSTALL := "0"
 # CI builds do not need incremental compilation artifacts.
 export CARGO_INCREMENTAL := if env("CI", []) != [] { "0" } else { env("CARGO_INCREMENTAL", []) }
 
-rust_toolchain_version := shell("toml get -r rust-toolchain.toml toolchain.channel")
+rust_toolchain_version := shell("python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path(\"rust-toolchain.toml\").read_text())[\"toolchain\"][\"channel\"])'")
 rustflags := env('RUSTFLAGS', '')
 build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
@@ -307,6 +307,20 @@ test-native-metadata-restore-repeat: tests-deps
 test-scenarios-binary binary *args: download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ quote(args) }}
 
+# Replay a compiled ONNX inspection owner with an explicit runtime library.
+test-onnx-owner-binary binary library *args:
+    ORT_DYLIB_PATH={{ quote(library) }} {{ quote(binary) }} {{ quote(args) }}
+
+# Prepare diagnostic scenario executables for a supervised public replay.
+build-diagnostic-scenarios selection: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(selection) }} in
+        deloxide|deloxide-order|deloxide-stress) ;;
+        *) echo "expected deloxide, deloxide-order or deloxide-stress" >&2; exit 2 ;;
+    esac
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --no-run --package nervix-server --features {{ quote("testing," + selection) }} --lib --test scenarios
+
 # Reproduce a focused public scenario in one diagnostic selection, with the same prerequisites
 # as the complete lane. This does not replace the lane's inventory and evidence qualification.
 test-diagnostic-scenarios selection feature *args: tests-deps
@@ -355,6 +369,40 @@ test-diagnostic-harness selection *args: tests-deps
         echo "diagnostic harness selection completed no tests or ignored selected tests" >&2
         exit 1
     fi
+
+# Run focused library owners in a diagnostic selection and qualify their retained process evidence.
+test-diagnostic-lib selection test *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(selection) }} in
+        deloxide|deloxide-order|deloxide-stress) ;;
+        *) echo "expected deloxide, deloxide-order or deloxide-stress" >&2; exit 2 ;;
+    esac
+    library_attempts={{ quote(cargo_target_dir + "/deloxide/focused/" + selection) }}
+    mkdir -p "$library_attempts"
+    library_attempt="$(mktemp -d "$library_attempts/library.XXXXXX")"
+    export NERVIX_DEADLOCK_EVIDENCE="${NERVIX_DEADLOCK_EVIDENCE:-$library_attempt/evidence}"
+    if [[ -e "$NERVIX_DEADLOCK_EVIDENCE" ]] && { [[ ! -d "$NERVIX_DEADLOCK_EVIDENCE" ]] || [[ -n "$(ls -A -- "$NERVIX_DEADLOCK_EVIDENCE")" ]]; }; then
+        echo "diagnostic library evidence directory must be empty" >&2
+        exit 2
+    fi
+    mkdir -p "$NERVIX_DEADLOCK_EVIDENCE"
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    echo "diagnostic library attempt: $library_attempt"
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --package nervix-server --features {{ quote("testing," + selection) }} --lib -- --exact {{ quote(test) }} {{ quote(args) }} 2>&1 | tee "$library_attempt/library.log"
+    if ! rg --quiet '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$library_attempt/library.log"; then
+        echo "diagnostic library selection completed no tests or ignored selected tests" >&2
+        exit 1
+    fi
+    shopt -s nullglob
+    library_evidence=("$NERVIX_DEADLOCK_EVIDENCE"/deadlock-*.rkyv)
+    if [[ ${#library_evidence[@]} -eq 0 ]]; then
+        echo "diagnostic library selection retained no process evidence" >&2
+        exit 1
+    fi
+    for evidence_file in "${library_evidence[@]}"; do
+        {{ quote(cargo_target_dir + "/debug/nervix-deadlock-report") }} qualify "$evidence_file"
+    done
 
 # Focused kernel tests: every SIMD level the host supports and the forced scalar fallback,
 # beside the crate's doctests.
@@ -442,6 +490,11 @@ coverage-consensus output *args:
 # compiler cache.
 coverage-client-core output *args:
     cargo llvm-cov --no-clean --package nervix-client-core --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
+# Measure one connector crate's unit tests, for a patch confined to it, through the configured
+# compiler cache.
+coverage-connector package output *args:
+    cargo llvm-cov --no-clean --package {{ package }} --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 test-scenarios-reuse *args: tests-deps
     #!/usr/bin/env bash
@@ -665,7 +718,7 @@ test-deadlock-probes features="deloxide" *args:
 # The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
 # and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
 # this list to the inventory.
-shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-consensus", "nervix-server", "nervix-deadlock"]
+shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-sqs", "nervix-consensus", "nervix-server", "nervix-deadlock"]
 
 # Explore every registered Shuttle check of a production owner, each in its own process: under the
 # exploration it declares, then under the uncontrolled-nondeterminism detector. The inventory in
@@ -2111,7 +2164,8 @@ autoinherit-check:
     git diff --exit-code
 
 # Each package/configuration is a separate parallel dependency. The one Cargo recipe below
-# hashes its arguments and toolchain into an isolated directory, and `just --jobs N` bounds it.
+# hashes its package, arguments and toolchain into one of four shared build directories, and
+# `just --jobs N` bounds it.
 clippy_all_features_packages := [
     "nervix-approx-into",
     "nervix-arbitrary",
@@ -2261,14 +2315,20 @@ deloxide-clippy-targets: \
     (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide-stress"]) \
     (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide-stress testing"])
 
-# The shared Clippy command accepts one package and its Cargo arguments. Target, feature,
-# profile and toolchain differences identify separate build directories. Keep kache configured.
-# On CI nothing reads a build directory after its lint and the runner's disk cannot hold them all,
-# so a target that passed deletes its own.
+# Clippy configurations share four build directories, so a dependency one configuration compiled is
+# fresh for the others in its directory that compile it alike. Cargo keeps the artifacts of
+# different features, profiles, targets and flags, and of the stable and nightly compilers, apart
+# there. The SHA-256 of the package, Cargo arguments and toolchain, modulo four, selects the
+# directory, so a configuration returns to the one that holds its artifacts. Four divides 16, so the
+# hash's last hexadecimal digit decides the remainder.
+hexadecimal_modulo_four(hash) := if hash =~ '[048c]$' { "0" } else if hash =~ '[159d]$' { "1" } else if hash =~ '[26ae]$' { "2" } else { "3" }
+clippy_build_directory(package, args, toolchain) := cargo_target_dir / "clippy" / hexadecimal_modulo_four(sha256(show([package, args, toolchain])))
+
+# The shared Clippy command accepts one package and its Cargo arguments. Configurations that share
+# a build directory take turns on its lock. Keep kache configured.
 [private]
 clippy-target package args toolchain="":
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
-    @{{ if env("CI", "") == "true" { "rm -rf " + quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) } else { "true" } }}
+    CARGO_TARGET_DIR={{ quote(clippy_build_directory(package, args, toolchain)) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
 
 # Lint one package and all of its targets; extra arguments retain their boundaries.
 cargo-clippy-package package *args: (clippy-target package ["--all-targets", args])
@@ -2326,7 +2386,7 @@ lint-audit *args: typed-ratchet-build
 
 test-typed-ratchet-compiler:
     just typed-ratchet --fixture-mode ordinary --recompile --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-ordinary.json
-    python3 -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks.CompilerFixtureTests
+    python3 -m unittest scripts.tests.test_typed_ratchet scripts.tests.test_analysis_admission scripts.tests.compiler_fixture_checks.CompilerFixtureTests
 
 test-typed-ratchet-contracts +tests="scripts.tests.compiler_contract_checks scripts.tests.compiler_audit_checks": typed-ratchet-build
     python3 -m unittest {{ tests }}
@@ -2414,7 +2474,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap tes
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.cargo_crap,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_cargo_crap scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.analysis_admission,scripts.ratchet,scripts.cargo_crap,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.test_analysis_admission scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_cargo_crap scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 
@@ -2921,6 +2981,22 @@ coverage-chaos-backup-fault:
         ulimit -n 65536
     fi
     kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/backup-fault-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/backup-fault-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-backup-fault-coverage") }} scripts/chaos/tests/backup-fault-self-test.sh
+
+# Check the restore scenarios' options, the padded guest's bounds, the sampler's records, the
+# staging verdicts and every outcome the restore verdict assigns, as every verifier self-check does.
+test-chaos-restore:
+    exec bash scripts/chaos/tests/restore-self-test.sh
+
+# Measure the restore scenarios' option checks, staging verdicts and outcome verdict.
+coverage-chaos-restore:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/restore-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/restore-fault-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/fixtures/wasm/padded-state-wat.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/restore-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-restore-coverage") }} scripts/chaos/tests/restore-self-test.sh
 
 # Check the deduplicator and window outputs the backup state verdict accepts and each lost or
 # doubled state it refuses, as every verifier self-check does.

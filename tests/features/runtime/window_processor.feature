@@ -988,7 +988,7 @@ Feature: Window processor runtime behavior
         {"tenant":"beta","latency":300}
       ]
       """
-    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+    Then within "10s" the relay subscription receives exactly one payload for each fragment set
       """
       key={"tenant":"acme"} | payload={"sample_count":3,"tenant":"acme","total_latency":6}
       key={"tenant":"beta"} | payload={"sample_count":3,"tenant":"beta","total_latency":600}
@@ -997,7 +997,7 @@ Feature: Window processor runtime behavior
       """
       [{"tenant":"acme","latency":10},{"tenant":"beta","latency":1000}]
       """
-    Then within "30s" the relay subscription receives payloads no sooner than "3s" after they were published
+    Then within "10s" the relay subscription receives payloads no sooner than "3s" after they were published
       """
       key={"tenant":"acme"} | payload={"sample_count":1,"tenant":"acme","total_latency":10}
       key={"tenant":"beta"} | payload={"sample_count":1,"tenant":"beta","total_latency":1000}

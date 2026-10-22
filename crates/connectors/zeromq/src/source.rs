@@ -29,21 +29,33 @@ use nervix_connector::{
 };
 use nervix_models::ClientConfigEntry;
 use thiserror::Error;
-use zeromq::{PullSocket, Socket, SocketRecv, ZmqMessage};
+use zeromq::{PullSocket, Socket, SocketRecv, ZmqError, ZmqMessage};
 
 const ZEROMQ: &str = "zeromq";
 
-/// Why a ZeroMQ source could not open or read its socket.
+/// Why a ZeroMQ source could not open or read its socket. Each driver failure stays the source of
+/// its variant, so a rendered report carries the cause, such as another socket holding the address.
 #[derive(Debug, Error)]
 pub enum ZeroMqSourceError {
     #[error("invalid ZeroMQ client configuration")]
     ClientConfig,
-    #[error("failed to bind ZeroMQ client")]
-    Bind,
-    #[error("failed to connect ZeroMQ client")]
-    Connect,
+    #[error("failed to bind ZeroMQ client to '{addr}'")]
+    Bind {
+        addr: String,
+        #[source]
+        source: ZmqError,
+    },
+    #[error("failed to connect ZeroMQ client to '{addr}'")]
+    Connect {
+        addr: String,
+        #[source]
+        source: ZmqError,
+    },
     #[error("failed to receive a ZeroMQ message")]
-    Receive,
+    Receive {
+        #[source]
+        source: ZmqError,
+    },
 }
 
 type ZeroMqSourceResult<T> = Result<T, Report<ZeroMqSourceError>>;
@@ -64,11 +76,17 @@ impl ZeroMqSourcePlan {
         let mut socket = PullSocket::new();
         if Self::binds(&self.config) {
             socket.bind(&addr).await.map_err(|source| {
-                Report::new(ZeroMqSourceError::Bind).attach_printable(source.to_string())
+                Report::new(ZeroMqSourceError::Bind {
+                    addr: addr.clone(),
+                    source,
+                })
             })?;
         } else {
             socket.connect(&addr).await.map_err(|source| {
-                Report::new(ZeroMqSourceError::Connect).attach_printable(source.to_string())
+                Report::new(ZeroMqSourceError::Connect {
+                    addr: addr.clone(),
+                    source,
+                })
             })?;
         }
         Ok(socket)
@@ -188,10 +206,9 @@ impl BrokerSourceConnector for ZeroMqSource {
             };
             let message = match received {
                 Ok(message) => message,
-                Err(error) => {
+                Err(source) => {
                     self.socket = None;
-                    return Err(Report::new(ZeroMqSourceError::Receive)
-                        .attach_printable(error.to_string())
+                    return Err(Report::new(ZeroMqSourceError::Receive { source })
                         .change_context(SourceError::Read { connector: ZEROMQ }));
                 }
             };
@@ -221,6 +238,10 @@ impl BrokerSourceConnector for ZeroMqSource {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    use nervix_primitives::net::TcpListener;
+
     use super::*;
 
     fn entry(key: &str, value: &str) -> ClientConfigEntry {
@@ -251,6 +272,65 @@ mod tests {
         assert!(
             format!("{error:?}").contains("missing ZeroMQ client config key 'addr'"),
             "the cause names the missing key: {error:?}"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_bind_another_listener_refuses_names_the_address_and_keeps_the_cause() {
+        let Ok(holder) = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await else {
+            panic!("loopback has no free ephemeral port");
+        };
+        let Ok(taken) = holder.local_addr() else {
+            panic!("a bound listener has no address");
+        };
+        // The refusal any second listener on the address meets, which the report must carry.
+        let refusal = match TcpListener::bind(taken).await {
+            Ok(_) => panic!("a second listener bound {taken} while the first listens on it"),
+            Err(refusal) => refusal,
+        };
+        let addr = format!("tcp://{taken}");
+        let plan = ZeroMqSourcePlan::new(vec![entry("addr", &addr), entry("bind", "true")]);
+
+        let error = match plan.pull_socket().await {
+            Ok(_) => panic!("the PULL socket bound {addr} while another socket listens on it"),
+            Err(error) => error,
+        };
+
+        let ZeroMqSourceError::Bind { addr: refused, .. } = error.current_context() else {
+            panic!("a refused bind reports a bind failure: {error:?}");
+        };
+        assert_eq!(refused, &addr);
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains(&refusal.to_string()),
+            "the rendered chain carries the refusal '{refusal}': {rendered}"
+        );
+        drop(holder);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_connect_the_driver_refuses_names_the_address_and_keeps_the_cause() {
+        // The driver refuses an endpoint whose port it cannot read before it dials anything.
+        let addr = "tcp://127.0.0.1:not-a-port".to_string();
+        let plan = ZeroMqSourcePlan::new(vec![entry("addr", &addr)]);
+
+        let error = match plan.pull_socket().await {
+            Ok(_) => panic!("the PULL socket connected to {addr}"),
+            Err(error) => error,
+        };
+
+        let ZeroMqSourceError::Connect {
+            addr: refused,
+            source,
+        } = error.current_context()
+        else {
+            panic!("a refused connect reports a connect failure: {error:?}");
+        };
+        assert_eq!(refused, &addr);
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains(&source.to_string()),
+            "the rendered chain carries the driver's cause '{source}': {rendered}"
         );
     }
 }

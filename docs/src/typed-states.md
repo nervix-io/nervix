@@ -23,6 +23,14 @@ and an absent failure means none has been observed. These are task-owned executi
 never persisted state or substitutes for a missing publishing mode. The
 [connector contract](./connector-contract.md#finishing-a-sink) owns their completion semantics.
 
+The Kafka sink installs its effective native queue byte capacity as `NonZeroU64` after librdkafka
+validates the client configuration. Its confirmation window's on-demand settlement returns
+`Some(SinkRecordId)` for an answered record and `None` for an empty window. A refused enqueue
+keeps the same record until admission succeeds or its wait fails. The optional admission deadline
+is absent while outstanding confirmation answers can provide progress, and is established only
+when a full native queue has no current-window answer left to await. These values are private,
+volatile execution state; the [connector contract](./connector-contract.md) owns their bounds.
+
 A forced-recovery destination that has not installed its execution schedule yet retains that
 absence as an installation wait, rather than inferring that its checkpoints are missing. The
 installation publication and application sequence establish the execution before its fingerprint
@@ -123,6 +131,13 @@ Cleanup failure at a preceding endpoint is reported separately from failure to p
 replacement. A failed preceding configuration supplies no preservation proof: the explicit
 replacement must prepare all of its sessions. An absent `client_id` selects the domain-qualified
 default, with an instance suffix when needed.
+
+**Pulsar input retirement.** The same optional replacement plan distinguishes dropping an input
+from replacing it. A changed owned source requires a comparison of resolved broker address,
+qualified topic and subscription name; ownership and consumer policy are not subscription
+identity. A failed resolution or invalid service address leaves that comparison undecided, reports
+its typed failure and preserves the subscription. It never supplies a default identity or treats
+unknown state as permission to delete broker state.
 
 **Consensus append input.** `None` from the caller's request stream means that input has ended;
 the adapter returns an empty answer stream and opens no transport. `Some` carries the first typed
@@ -311,7 +326,7 @@ Archive preparation reads the first physical tar header into the backup crate's 
 That type carries the regular manifest entry's validated identity and bounded encoded length.
 Restore uses its length to admit manifest decoding before allocating owned archive values. The
 full archive reader uses the same boundary and then verifies the manifest and every section; see
-[Backup And Restore](./backup-and-restore.md).
+[Restore Intake And Preparation](./backup-and-restore-architecture.md#restore-intake-and-preparation).
 
 ## Archived Counts
 
@@ -518,6 +533,12 @@ execution or recovery. Connectors and the session edge validate external represe
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
 
+The Iceberg sink validates its configured location into a URL before creating its storage factory.
+The initialized operator belongs to that storage root: a later object path must match its scheme,
+host, port and container identity before its relative key reaches the operator. Table metadata
+refreshes retain the first table's initialized `FileIO`; they do not install a different storage
+owner alongside refreshed metadata. Invalid object references fail at this boundary.
+
 Generated compiler findings carry a required execution-context field. An explicit null means that
 analysis has not established a source contract; it is an unknown effect, not a cold classification.
 The report decoder requires that field even though its value is optional. Complete compiler,
@@ -597,6 +618,15 @@ teardown end the domain's lifetimes and replace all of its route definitions tog
 other domains. Unbind names the exact binding allocation so a preceding source's close cannot end
 its replacement.
 
+Endpoint request policy is either unacknowledged or a typed acknowledged plan carrying positive
+capacity, physical timeout and retry delay. The decision boundary validates these durations and
+the reject-only quiesce contract once. A WebSocket ACK declaration requires a signaling reference;
+composition verifies its prepared outbound encoder before binding intake. Request outcomes retain
+the distinction between local input refusal, temporary non-admission, downstream failure and an
+interrupted lifetime. Only the public response boundary projects those states onto the shared
+client outcome vocabulary. Exact lifetime ending is a cancellation event distinct from absent
+intake; held replies observe the event while later requests observe absence.
+
 A second in-memory decision, the domain's entrypoint plans, resolves every ingestor's source,
 client, codec and routes and every reingestor's inputs, node filter and routes. It records how a
 route's records get their branch key as one of three states: unbranched, keeping the incoming key,
@@ -659,7 +689,7 @@ domains capture stored checkpoints. An empty generation still has its descriptor
 zero group/row counts. RESTORE resets the stored ownership fence to zero explicitly.
 
 A restored domain has a replicated `Pending` installation from creation and an `Installing`
-authority once its state generation is admitted. Neither state permits `START`. Completion of the
+authority once its state generation is admitted. Neither state permits `START`, direct or transactional. Completion of the
 exact current generation removes the installation; terminal command failure does not. Authority
 carries leader identity and term, execution reference, mutation lease revision and generation.
 Checkpoint revision remains guest history and cannot grant installation authority. Validation at
@@ -674,9 +704,10 @@ Runtime storage has distinct initial and restored namespaces; restore installati
 separate from guest-state generation and checkpoint revision. A current checkpoint is either an
 inline checkpoint or a segmented checkpoint with required revision, length and digest. A read
 uses one database view for namespace selection and payload data. A queued checkpoint job retains
-its selected namespace and validates that it remains current before writing. The storage format
-marker is required for nonempty checkpoint storage; corruption or absence fails explicitly and
-requires recreation rather than inventing a namespace for the stored keys.
+its selected namespace and validates that it remains current before writing. A storage format
+marker other than the current one fails explicitly, and so does a missing marker beside nonempty
+checkpoint storage; either requires recreation rather than inventing a namespace for the stored
+keys.
 
 A branch-aggregate metric checkpoint revision identifies one exact encoded payload. Capture
 retains its elapsed fields once, so another descriptor, stream or persistence request cannot choose
@@ -738,8 +769,15 @@ The paced simulation applications represent endpoint-open intent as `CurrentGene
 later paced generation; initial and contract-change opens retain the stopped-domain refusal.
 The opened producer's generation and its paced clock still own permission to plan readings.
 
-Healthy connector status is absence of a failure; a failure contains its safe error and an optional
-retry in one publication. Domain-clock publication carries lifecycle pause, generation and start
+Healthy connector status is absence of a failure publication. TaskStatus represents task-only,
+connector-only and simultaneous failures as distinct states, each retaining its error and optional
+retry. The writer's identity is independent of the retry kind and diagnostic text. Each writer
+clears its own state in the current atomic publication. Selection retains an active task retry
+first, an active connector retry next, and a task error without a retry after that, so a pending
+retry remains visible to drains. Operator inspection reads both owners' errors and the selected
+retry from one immutable publication. Retained observations are immutable.
+
+Domain-clock publication carries lifecycle pause, generation and start
 point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;
 a present assignment contains its state identity, optional primary, executors and replicas
 together. An absent primary represents an assignment without one primary owner. Replication routes

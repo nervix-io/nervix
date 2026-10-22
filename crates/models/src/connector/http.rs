@@ -19,6 +19,10 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
+    },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
 };
@@ -45,6 +49,67 @@ pub struct HttpRequestSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// What the connector of a HTTP REQUEST ingestor holds and how long it waits.
+const HTTP_REQUEST_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "the response body",
+        bound: BufferBound::Unbounded,
+    }],
+    waits: &[DeclaredWait {
+        wait: "a request: name resolution, connection, TLS and the response",
+        bound: WaitBound::Key {
+            key: DeadlineKey::Timeout,
+            omitted: OmittedDeadline::Unbounded,
+        },
+    }],
+    driver_limits: &[
+        "Response heads above 100 headers or 417,792 bytes are refused.",
+        "A request follows at most 10 redirects.",
+    ],
+};
+
+/// What the connector of a HTTP ENDPOINT holds and how long it waits.
+const HTTP_ENDPOINT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[
+        DeclaredBuffer {
+            holds: "a request body",
+            bound: BufferBound::Unbounded,
+        },
+        DeclaredBuffer {
+            holds: "unresolved requests under MODE ACK, per node and ingestor",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("MODE ACK MAX"),
+                overflow: BufferOverflow::RefuseRequest,
+            },
+        },
+    ],
+    waits: &[
+        DeclaredWait {
+            wait: "a client's request head and body",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "graph acknowledgement under MODE ACK",
+            bound: WaitBound::Clause("ACK TIMEOUT, or the exact intake lifetime ending"),
+        },
+    ],
+    driver_limits: &["Request heads above 100 headers are refused."],
+};
+
+/// What the connector of a HTTP REQUEST emitter holds and how long it waits.
+const HTTP_REQUEST_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[],
+    waits: &[DeclaredWait {
+        wait: "a request: name resolution within half of it, each address's connection within an \
+               equal share of what is left, TLS, writing it and its final response headers",
+        bound: WaitBound::Key {
+            key: DeadlineKey::Timeout,
+            omitted: OmittedDeadline::Required,
+        },
+    }],
+    driver_limits: &["A response head above 74,240 bytes or 128 fields fails the attempt."],
+};
+
 impl SourceEntity for HttpRequestSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
         reads_headers: true,
@@ -57,6 +122,7 @@ impl SourceEntity for HttpRequestSource {
         quiesce: &[DeclaredQuiesce::SUSPEND, DeclaredQuiesce::BUFFER],
         locator: None,
         options: &[OptionDeclaration::EVERY],
+        bounds: HTTP_REQUEST_SOURCE_BOUNDS,
     };
 }
 
@@ -114,10 +180,11 @@ impl SourceEntity for HttpEndpointSource {
         reference: SourceReferenceKind::Endpoint(EndpointType::Http),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
-        delivery: &[DeclaredDelivery::NO_ACK],
+        delivery: &[DeclaredDelivery::NO_ACK, DeclaredDelivery::ACK_REQUEST],
         quiesce: &[DeclaredQuiesce::REJECT, DeclaredQuiesce::ENDPOINT_BUFFER],
         locator: None,
         options: &[],
+        bounds: HTTP_ENDPOINT_SOURCE_BOUNDS,
     };
 }
 
@@ -194,6 +261,7 @@ impl SinkEntity for HttpRequestSink {
         ],
         envelope: &[],
         properties: &[],
+        bounds: HTTP_REQUEST_SINK_BOUNDS,
     };
 }
 

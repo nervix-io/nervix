@@ -25,6 +25,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
+| Buffers | batches one producer submits ahead of their outcomes: at most 1024 batches, within 32 MiB, per producer grant; when full, holds back what fills it |  |
+| Network waits | the acknowledgement of an admitted batch: `ACK TIMEOUT` |  |
+| Driver limits | None declared. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### HTTP REQUEST ingest
 
@@ -41,6 +45,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
+| Buffers | the response body: unbounded |  |
+| Network waits | a request: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |  |
+| Driver limits | Response heads above 100 headers or 417,792 bytes are refused.<br>A request follows at most 10 redirects. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### HTTP ENDPOINT ingest
 
@@ -49,7 +57,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Entity | HTTP ENDPOINT | Compare `HTTP REQUEST`: options, modes, reference. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
 | Reference | Http endpoint |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
-| Modes (complete bodies after MODE) | NO ACK |  |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `read_header`, `read_headers` |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
@@ -57,6 +65,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
+| Buffers | a request body: unbounded<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
+| Network waits | a client's request head and body: unbounded<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |  |
+| Driver limits | Request heads above 100 headers are refused. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### KAFKA TOPIC ingest
 
@@ -73,6 +85,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | replayable |  |
 | Acknowledgement confirmation | answered |  |
+| Buffers | messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it |  |
+| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>offset lookups, watermarks and seeks: fixed 5s<br>subscribe, assign and unsubscribe: unbounded |  |
+| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>receive.message.max.bytes 100000000 |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### PULSAR TOPIC ingest
 
@@ -89,6 +105,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | replayable |  |
 | Acknowledgement confirmation | answered |  |
+| Buffers | messages each partition consumer receives ahead of the host: driver default, a receiver queue of 1000 messages; when full, holds back what fills it |  |
+| Network waits | name resolution: unbounded<br>connection: TCP, TLS and CONNECT: driver default, 10 s per address, 12 retries<br>topic lookup and subscribe: driver default, 30 s per attempt, retried without limit<br>an acknowledgement under ACK: driver default, 30 s operation timeout<br>close: unbounded |  |
+| Driver limits | Inbound frames have no size limit. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### MQTT TOPIC ingest
 
@@ -105,6 +125,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | queued |  |
+| Buffers | each incoming packet, whose bound every CONNECT advertises as its Maximum Packet Size: at most 10240 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>SUBSCRIBE and PUBACK requests for the connection: driver default, 1024 requests; when full, holds back what fills it |  |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |  |
+| Driver limits | A packet above the advertised Maximum Packet Size that a broker sends anyway ends the connection with DISCONNECT Packet too large. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### NATS SUBJECT ingest
 
@@ -121,6 +145,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
+| Buffers | messages the subscription holds ahead of the host: driver default, 65,536 messages; when full, drops what does not fit without counting it |  |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>the subscription's flush: unbounded<br>a silent connection: driver default, a ping every 60 s; the connection ends after 2 go unanswered |  |
+| Driver limits | None declared. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### RABBITMQ QUEUE ingest
 
@@ -137,6 +165,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | written |  |
+| Buffers | deliveries the broker sends ahead of their acknowledgement: at most 1 delivery; when full, holds back what fills it |  |
+| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open and consume: `connect_timeout_ms`; 30s when omitted<br>a silent connection: driver default, twice the negotiated heartbeat |  |
+| Driver limits | A frame above the negotiated frame_max ends the connection. |  |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
 
 ### REDIS PUBSUB ingest
 
@@ -153,6 +185,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
+| Buffers | messages the driver reads ahead of the host: unbounded |  |
+| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>reading the next message: unbounded |  |
+| Driver limits | None declared. |  |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
 
 ### PROMETHEUS QUERY ingest
 
@@ -169,6 +205,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
+| Buffers | the query response: unbounded |  |
+| Network waits | a query: name resolution, connection, TLS and the response: `timeout_ms`; required |  |
+| Driver limits | Response heads above 100 headers or 417,792 bytes are refused. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### ZEROMQ PULL ingest
 
@@ -185,6 +225,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
+| Buffers | the frame a peer is sending: unbounded |  |
+| Network waits | connecting, retried without limit: unbounded<br>the ZMTP handshake: unbounded<br>receiving the next message: unbounded |  |
+| Driver limits | The driver has no high-water mark, maximum message size or heartbeat. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### SQS QUEUE ingest
 
@@ -201,6 +245,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | answered |  |
+| Buffers | The connector holds no buffer between its transport and the host. |  |
+| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a receive and a delete: unbounded |  |
+| Driver limits | A request that stalls below 1 byte a second for 5 s is cancelled. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### WEBSOCKETS CONNECTION ingest
 
@@ -217,6 +265,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
+| Buffers | frames that arrive while the signaling handshake runs: unbounded |  |
+| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded<br>close: fixed 1s |  |
+| Driver limits | A message above 64 MiB or a frame above 16 MiB ends the connection. |  |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
 
 ### WEBSOCKETS ENDPOINT ingest
 
@@ -225,7 +277,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Entity | WEBSOCKETS ENDPOINT | No emit entity is declared. An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload. |
 | Reference | Websockets endpoint |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
-| Modes (complete bodies after MODE) | NO ACK |  |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `read_header`, `read_headers` |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
@@ -233,6 +285,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
+| Buffers | unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
+| Network waits | graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending`<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded |  |
+| Driver limits | A message above 64 MiB or a frame above 16 MiB ends the session. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### SYSLOG LISTENER ingest
 
@@ -249,6 +305,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
+| Buffers | frames read from TCP and TLS connections: at most 64 frames; when full, holds back what fills it |  |
+| Network waits | the TLS handshake of an accepted connection: unbounded<br>reading a connection: unbounded |  |
+| Driver limits | Datagrams wait in the kernel's UDP receive buffer, which drops what does not fit. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ## Emit
 
@@ -268,6 +328,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | batches retained for consumers on a node: at most 134217728 bytes; when full, holds back what fills it |  |
+| Network waits | a delivery attempt: `ACK TIMEOUT` |  |
+| Driver limits | None declared. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### HTTP REQUEST emit
 
@@ -285,6 +349,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | The connector holds no buffer between its transport and the host. |  |
+| Network waits | a request: name resolution within half of it, each address's connection within an equal share of what is left, TLS, writing it and its final response headers: `timeout_ms`; required |  |
+| Driver limits | A response head above 74,240 bytes or 128 fields fails the attempt. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### KAFKA TOPIC emit
 
@@ -302,6 +370,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |  |
+| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, message.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT` |  |
+| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### PULSAR TOPIC emit
 
@@ -319,6 +391,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | receipts held under NO ACK: at most 100 receipts; when full, holds back what fills it<br>messages the driver queues for its connection: driver default, 100 messages; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |  |
+| Network waits | name resolution: unbounded<br>connection: driver default, 10 s per address<br>topic lookup, producer creation and receipts: driver default, the operation timeout: ACK TIMEOUT under ACK, 30 s under NO ACK |  |
+| Driver limits | Messages above the broker's announced maximum are rejected. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### RABBITMQ QUEUE emit
 
@@ -336,6 +412,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>unroutable messages the broker returns under NO ACK: unbounded |  |
+| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the queue check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |  |
+| Driver limits | A frame above the negotiated frame_max ends the connection. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |  |
 
 ### REDIS PUBSUB emit
 
@@ -353,6 +433,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | connections the command pool holds: set by POOL SIZE MAX; when full, holds back what fills it |  |
+| Network waits | checking out a connection, a new one's name resolution, connection, TLS and Redis setup included: `connect_timeout_ms`; 30s when omitted<br>the answer to a PUBLISH: driver default, 500 ms |  |
+| Driver limits | None declared. |  |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
 
 ### MQTT TOPIC emit
 
@@ -370,6 +454,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | publishes queued for the driver: set by 1 under QOS 0, ACK PARALLEL MAX under QOS 1 and 2; when full, fails the publish for the host to retry |  |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>answers to QOS 1 and 2 publishes: `ACK TIMEOUT`<br>writes to the connection: unbounded |  |
+| Driver limits | Packets above the broker's maximum packet size are rejected. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### NATS SUBJECT emit
 
@@ -387,6 +475,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it |  |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush: unbounded<br>a JetStream acknowledgement: `ACK TIMEOUT` |  |
+| Driver limits | Messages above the server's max_payload are rejected. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### ZEROMQ PUSH emit
 
@@ -404,6 +496,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | bytes queued for a peer: unbounded |  |
+| Network waits | connecting and the ZMTP handshake: `connect_timeout_ms`; 30s when omitted<br>a send: `timeout_ms`; unbounded when omitted |  |
+| Driver limits | The driver has no high-water mark, maximum message size or heartbeat. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |  |
 
 ### SQS QUEUE emit
 
@@ -421,6 +517,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | The connector holds no buffer between its transport and the host. |  |
+| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start: unbounded<br>a send: `timeout_ms`; unbounded when omitted |  |
+| Driver limits | A batch request holds at most 10 entries and 256 KiB; a record above 256 KiB is rejected. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### SENTRY EVENT emit
 
@@ -438,6 +538,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | yes |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | The connector holds no buffer between its transport and the host. |  |
+| Network waits | a request: name resolution, connection, TLS and the response headers: `timeout_ms`; unbounded when omitted |  |
+| Driver limits | An event above 1,000,000 bytes is rejected. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### SYSLOG COLLECTOR emit
 
@@ -455,6 +559,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | The connector holds no buffer between its transport and the host. |  |
+| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>a write: unbounded |  |
+| Driver limits | None declared. |  |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
 
 ### OTEL LOGS emit
 
@@ -472,6 +580,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | the export request of a publish without BATCH: unbounded |  |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |  |
+| Driver limits | gRPC responses above 4 MiB are refused. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### OTEL TRACES emit
 
@@ -489,6 +601,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | the export request of a publish without BATCH: unbounded |  |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |  |
+| Driver limits | gRPC responses above 4 MiB are refused. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### OTEL METRICS emit
 
@@ -506,6 +622,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | the export request of a publish without BATCH: unbounded |  |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |  |
+| Driver limits | gRPC responses above 4 MiB are refused. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### CLICKHOUSE TABLE emit
 
@@ -523,6 +643,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | The connector holds no buffer between its transport and the host. |  |
+| Network waits | an insert: connection, TLS, upload and the response: `timeout_ms`; unbounded when omitted |  |
+| Driver limits | None declared. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ### POSTGRES TABLE emit
 
@@ -540,6 +664,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |  |
+| Network waits | a pool acquire: name resolution, connection, TLS and authentication: fixed 30s<br>an insert and its metadata query: unbounded |  |
+| Driver limits | None declared. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### MYSQL TABLE emit
 
@@ -557,6 +685,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |  |
+| Network waits | connection, its handshake and an insert: unbounded |  |
+| Driver limits | The driver has no connect, read or write timeout. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### MONGODB COLLECTION emit
 
@@ -574,6 +706,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |  |
+| Network waits | connection: name resolution, TCP and TLS: driver default, connectTimeoutMS, 10 s<br>server selection: driver default, 30 s<br>the handshake, a pool wait and a write: unbounded |  |
+| Driver limits | A document above 16 MiB is rejected. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### ICEBERG TABLE emit
 
@@ -591,6 +727,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Buffers | records staged on disk until a commit: set by COMMIT EACH ... MAX SIZE; when full, holds back what fills it |  |
+| Network waits | catalog requests: unbounded<br>object-store metadata and delete operations: `timeout_ms`; 1m when omitted<br>object-store reads and writes: `timeout_ms`; 10s when omitted |  |
+| Driver limits | None declared. |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
 ## Clients
 

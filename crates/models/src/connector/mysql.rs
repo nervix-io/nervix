@@ -15,7 +15,14 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use super::{configured_client::configured_client, entity_union::connector_sinks};
+use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
+    configured_client::configured_client,
+    entity_union::connector_sinks,
+};
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
     EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
@@ -46,6 +53,22 @@ pub enum MySqlConflictAction {
     DoNothing,
     DoUpdate,
 }
+
+/// What the connector of a MYSQL TABLE holds and how long it waits.
+const MYSQL_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "connections the pool holds",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("POOL SIZE MAX"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[DeclaredWait {
+        wait: "connection, its handshake and an insert",
+        bound: WaitBound::Unbounded,
+    }],
+    driver_limits: &["The driver has no connect, read or write timeout."],
+};
 
 impl SinkEntity for MySqlTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
@@ -79,6 +102,7 @@ impl SinkEntity for MySqlTableSink {
         }],
         envelope: &[],
         properties: &[],
+        bounds: MYSQL_BOUNDS,
     };
 }
 
