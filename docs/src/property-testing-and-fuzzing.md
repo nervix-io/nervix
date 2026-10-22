@@ -481,7 +481,11 @@ that run in parallel, each in a job of its own:
   `just coverage-bolero 30 <number>/<count>`: the runner tests, its share of the campaigns and the
   complete failure qualification. Only the server preparation is held to one build job; discovery
   and library builds use every core. A shard samples CPU use, steal time and used memory every five
-  seconds and adds the summary to its job summary.
+  seconds and adds the summary to its job summary. Samples also retain guest-reported MHz,
+  UTC and CPU/memory/I/O pressure. Every build step first records the shared short CPU, memory
+  access and filesystem calibration, with JSON and Markdown artifacts. The
+  [runner diagnostics contract](integration-test-lifecycle.md) owns its bounds, units and limits;
+  these measurements never change campaign budgets or decide a property verdict.
 - `bolero-fuzz-combined` downloads every shard's completion evidence, without the raw profiles, and
   runs `just combine-bolero-fuzz`. It accepts only shards 1 to N of one plan, from one workflow run
   and attempt at the tested revision and inventory. Each must be complete, must have run exactly its
