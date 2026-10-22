@@ -40,6 +40,7 @@ Feature: WebSockets connection declarations
   Scenario Outline: A buffered WebSockets connection preserves upgrade headers and frame types through a codec change
     Given entity gate deadline is configured as "30s"
     And a WebSocket declaration peer verifies upgrade headers and sends text and binary frames
+    And the WebSocket declaration peer observes a cancelled opening handshake
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus statements
       """

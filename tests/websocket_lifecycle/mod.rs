@@ -1,8 +1,8 @@
 //! Public WebSocket source lifecycle regressions.
 //!
 //! Layer: test harness.
-//! - **Owns.** A scenario-local peer, its bounded event channel, graceful-close observations and
-//!   measured reconnect delays.
+//! - **Owns.** A scenario-local peer, its bounded event channel, opening cancellations,
+//!   graceful-close observations and measured reconnect delays.
 //! - **Depends on.** The scenario world, execution primitives and the WebSocket protocol.
 //! - **Must not know.** Connector internals, host retry state or runtime ownership handles.
 
@@ -12,13 +12,14 @@ use cucumber::{given, then, when};
 use futures_util::{SinkExt as _, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::{mpsc, oneshot},
     task::AbortOnDropHandle,
     time::{Instant, timeout},
 };
 use tokio_tungstenite::tungstenite::{
-    Message,
+    Error as WebsocketError, Message,
+    error::ProtocolError,
     protocol::{CloseFrame, frame::coding::CloseCode},
 };
 
@@ -33,6 +34,7 @@ pub(super) struct WebsocketPeer {
 }
 
 enum PeerEvent {
+    OpeningCancelled,
     Connected(Instant),
     SentClose(Instant),
     ReceivedClose,
@@ -57,9 +59,19 @@ impl WebsocketPeer {
                     response.headers_mut().append("x-upgrade", "ready".parse().assured("ready is a valid header value"));
                     Ok(response)
                 };
-                let mut socket = tokio_tungstenite::accept_hdr_async(stream, verify_upgrade)
-                    .await
-                    .map_err(io::Error::other)?;
+                let mut socket =
+                    match tokio_tungstenite::accept_hdr_async(stream, verify_upgrade).await {
+                        Ok(socket) => socket,
+                        Err(WebsocketError::Protocol(ProtocolError::HandshakeIncomplete)) => {
+                            // Source replacement can cancel an opening before it becomes a WebSocket.
+                            // Keep the pending payload for the next completed upgrade.
+                            if events_tx.send(PeerEvent::OpeningCancelled).await.is_err() {
+                                return Ok(());
+                            }
+                            continue;
+                        }
+                        Err(error) => return Err(io::Error::other(error)),
+                    };
                 if let Some(release) = payload_release.take() {
                     if release.await.is_err() {
                         return Ok(());
@@ -206,6 +218,39 @@ async fn declaration_peer(world: &mut ScenarioWorld) {
     world.websocket_peer = Some(WebsocketPeer::declaration(listener));
 }
 
+#[given("the WebSocket declaration peer observes a cancelled opening handshake")]
+async fn declaration_opening_cancelled(world: &mut ScenarioWorld) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let endpoint = url::Url::parse(
+        world
+            .placeholders
+            .get("websocket_peer")
+            .assured("the declaration peer has a public endpoint"),
+    )
+    .assured("the declaration peer publishes a valid endpoint");
+    let port = endpoint
+        .port()
+        .assured("the declaration peer publishes its reserved port");
+    let mut opening = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .assured("the abandoned opening reaches the declaration peer");
+    opening
+        .write_all(b"GET /events HTTP/1.1\r\n")
+        .await
+        .assured("the peer receives an incomplete upgrade request");
+    opening
+        .shutdown()
+        .await
+        .assured("the opening client ends before completing its upgrade");
+    drop(opening);
+    let peer = world
+        .websocket_peer
+        .as_mut()
+        .assured("the scenario started its declaration peer");
+    assert!(matches!(peer.next().await, PeerEvent::OpeningCancelled));
+}
+
 #[when("the WebSocket lifecycle peer sends its payload")]
 fn peer_sends_payload(world: &mut ScenarioWorld) {
     world
@@ -249,6 +294,9 @@ async fn peer_receives_close(world: &mut ScenarioWorld) {
             }
             PeerEvent::Ended => panic!("TCP ended without a Close frame"),
             PeerEvent::SentClose(_) => panic!("this peer never initiates a close"),
+            PeerEvent::OpeningCancelled => {
+                panic!("the lifecycle peer did not complete its upgrade")
+            }
         }
     }
 }
