@@ -53,7 +53,7 @@ impl SinkEntity for SentryEventSink {
     /// A Sentry envelope carries at most one `event` item, so a batch is one event, and only the
     /// codec's batch transformation can say where in that event the members go.
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::Client(ConnectorKind::Sentry),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },

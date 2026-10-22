@@ -74,7 +74,7 @@ use nervix_primitives::{
 };
 use nervix_recovery::Discarded as _;
 use nervix_server::{
-    FaultInjection, SchedulerMode, WasmStateResetRequestError,
+    FaultInjection, ModelPublicationRefusalKind, SchedulerMode, WasmStateResetRequestError,
     application::{InternalTransportMode, ShutdownPhaseOutcome},
     memory_pressure::MemoryPressureConfig,
 };
@@ -8915,6 +8915,42 @@ async fn then_relocation_commit_refusal_was_delivered(world: &mut ScenarioWorld,
     );
 }
 
+#[given(
+    expr = "the leader refuses the next model publication in domain {string} and the pause \
+            release after it with {string}"
+)]
+async fn given_leader_refuses_next_model_publication(
+    world: &mut ScenarioWorld,
+    domain: String,
+    refusal: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    let refusal = ModelPublicationRefusalKind::from_str(&refusal)
+        .expect("the scenario names a model publication refusal the fault harness declares");
+    world
+        .fault_injection
+        .refuse_next_model_publication(domain, refusal);
+}
+
+#[then(
+    expr = "the refusal of the model publication in domain {string} and of its pause release was \
+            delivered"
+)]
+async fn then_model_publication_refusal_was_delivered(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    assert!(
+        world
+            .fault_injection
+            .model_publication_refusal_delivered(&domain),
+        "no model publication in domain {domain} met the armed leader refusal of both its \
+         publication and its pause release"
+    );
+}
+
 #[given(expr = "the next domain drain in domain {string} is forced to time out")]
 async fn given_next_domain_drain_is_forced_to_time_out(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -15086,6 +15122,7 @@ async fn when_named_client_closes_cleanly(world: &mut ScenarioWorld, name: Strin
 }
 
 #[when(expr = "client {string} executes these NSPL commands")]
+#[when(expr = "client {string} executes these Plexus statements")]
 async fn when_named_client_executes_commands(
     world: &mut ScenarioWorld,
     name: String,
