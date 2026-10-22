@@ -1743,16 +1743,21 @@ sequenceDiagram
   `otel-hex-ids` property compares all bytes and acceptance with an independent per-digit scalar
   decoder for trace, span and parent-span keys, including lowercase, uppercase, mixed case,
   arbitrary UTF-8 text and the exact key and reason of every refusal.
-- **Iceberg sink.** It stages Arrow data locally on the node's filesystem storage workers,
-  prepares data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the
-  host measures from staging, ends or its staged files reach the maximum commit size. Open checks
-  mapped column names and Iceberg types against the loaded table, after recursively narrowing UTC
-  nanosecond datetimes to microseconds in the staged schema. Staging does not complete an ACK;
-  successful catalog commit does. The sink retains ACKs and its client while a failed commit is
+- **Iceberg sink.** It stages Arrow data locally on the node's filesystem storage workers, prepares
+  data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the host measures
+  from staging, ends or its staged files reach the maximum commit size. Open plans how its commits
+  write the mapped columns into the loaded table, matching them to the table's columns by name and
+  Iceberg type after recursively narrowing UTC nanosecond datetimes to microseconds in the staged
+  schema, and refuses a table whose required column `VALUES` leaves out or maps from an expression
+  that can produce a null. Every commit plans again against the table's current schema and lays each
+  staged batch out as the table's columns, in the table's order, before the Parquet writer, which
+  pairs a batch's columns with a data file's by position: a mapped column lands in the column of its
+  name and an optional column `VALUES` leaves out is written as null. Staging does not complete an
+  ACK; successful catalog commit does. The sink retains ACKs and its client while a failed commit is
   retried. A commit reads its staged files back in groups the bulk memory class can hold at once,
-  and a single file larger than the class alone, charged with the whole class. It charges each
-  group before reading it, returns the charge once the group's rows are in data files, and appends
-  the data files of every group in one catalog commit. It covers the staged files it found when it
+  and a single file larger than the class alone, charged with the whole class. It charges each group
+  before reading it, returns the charge once the group's rows are in data files, and appends the
+  data files of every group in one catalog commit. It covers the staged files it found when it
   began, so the retry of a failed append commits files staged since then in a commit of their own
   instead of acknowledging them unwritten.
   [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate limits.

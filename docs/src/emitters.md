@@ -2498,29 +2498,45 @@ The REST catalog is the authority for namespace and table metadata. Nervix does 
 #### Iceberg table schema
 
 At open, the emitter loads the table through the catalog and requires the table's registered
-location to equal `LOCATION`. It then compares every mapped column, by name, with the table's
-current schema. The column must exist, and its Iceberg type must equal the table column's at every
-depth: the same primitive type, and for a `VEC` or `ARRAY` value an Iceberg list of the same element
-type. A column the table lacks or whose type differs fails the open before any row is staged.
-`DESCRIBE EMITTER` shows the failure as the emitter's transient error, naming the column and, for a
-mismatch, both types, such as `mapped column 'user_id' has Iceberg type string, but the table
-requires long`, and the emitter retries the open on its declared retry policy.
+location to equal `LOCATION`. It then matches the mapped columns to the table's current schema by
+name, so `VALUES` may list them in any order:
+
+- Every mapped column must exist in the table, and its Iceberg type must equal the table column's
+  at every depth: the same primitive type, and for a `VEC` or `ARRAY` value an Iceberg list of the
+  same element type.
+- A table column `VALUES` leaves out must be optional, and every row writes a null into it.
+- A required table column must be mapped from an expression that never produces a null. A field
+  declared `OPTIONAL`, `nullif(...)` and `TRY_CAST(...)` can produce one, so they are refused for a
+  required column even when no row carries a null; `coalesce(...)` with an argument that is never
+  null maps a nullable value into a required column.
+
+A table that breaks one of these rules fails the open before any row is staged. `DESCRIBE EMITTER`
+shows the failure as the emitter's transient error, naming the column, and the emitter retries the
+open on its declared retry policy:
+
+| Failure | Transient error |
+| --- | --- |
+| A mapped column the table lacks | `mapped column 'user_id' does not exist in the Iceberg table` |
+| A mapped column of another type | `mapped column 'user_id' has Iceberg type string, but the table requires long` |
+| A required column `VALUES` leaves out | `table column 'user_id' is required, but VALUES does not map it` |
+| A required column mapped from an expression that can produce a null | `table column 'user_id' is required, but the VALUES expression mapped into it can produce a null` |
 
 The comparison uses the types the emitter writes. An Iceberg `timestamptz` column stores
 microseconds, so Nervix narrows every UTC `DATETIME` from nanoseconds to the microsecond that
 contains it, at every depth of a mapped `VEC` or `ARRAY` value such as `VEC<VEC<DATETIME>>`,
 including values before the Unix epoch. A `DATETIME` therefore maps to a `timestamptz` column, at
-the top level or as a list element, and a `timestamptz_ns` column is refused at open. A table
-schema changed after open is not checked again: a later commit can fail on it, and that commit
-enters the retry path that [Iceberg retries](#iceberg-retries) describes.
+the top level or as a list element, and a `timestamptz_ns` column is refused at open. An integer
+that Iceberg holds in a wider integer keeps its value: `I8`, `U8`, `I16` and `U16` write an `int`
+column and `U32` writes a `long` column, while a `U64` has no Iceberg type and is refused at open.
+An `ARRAY` value writes an Iceberg list of its elements, and `BYTES` writes a `binary` column.
 
-The open-time comparison does not cover the order of the mapped columns, the table columns
-`VALUES` leaves unmapped, or whether a table column is required, and a commit writes the mapped
-columns into the table's columns by position, in the table's column order. `VALUES` must therefore
-map every column of the table, in the table's column order. Mapped columns in another order write
-values into the wrong columns when their types agree, and fail every commit when they differ; a
-table column left unmapped fails every commit. A null mapped to a required table column is not
-refused: the data file stores a non-null value in its place, such as `0` for a `long`.
+Every commit matches the mapped columns against the table's schema as that commit finds it, by the
+same rules, and writes each mapped column into the table column of its name. A column added to the
+table after open is written as null. A change after open that leaves a mapped column without a
+column it can be written into, such as dropping the column, renaming it or changing its type, fails
+the commit with the transient error that names the column, as it would fail an open. That commit
+enters the retry path that [Iceberg retries](#iceberg-retries) describes and keeps its staged rows
+and their acknowledgements until the table can take them again or the emitter is altered.
 
 #### Iceberg staging and commits
 
@@ -2575,9 +2591,10 @@ connection fails or a stop ends the wait. The operator and the initial table's e
 settings are retained across table metadata refreshes; changing those settings requires reopening
 the emitter.
 
-Commit conflicts, table evolution after open, a dropped table, and unavailable catalog or object
-storage are table-level infrastructure failures: Nervix reports them in runtime and drain status and
-retries all affected staged records with the declared policy and backpressure. While a failed
+Commit conflicts, a table change after open that the mapped columns cannot be written into, a
+dropped table, and unavailable catalog or object storage are table-level infrastructure failures:
+Nervix reports them in runtime and drain status and retries all affected staged records with the
+declared policy and backpressure. While a failed
 commit waits for its retry, the emitter takes no new input from its relays: a row that reaches a
 relay during the backoff waits upstream, unless a stop drains the relays. The rows a flush stages
 before the retry are therefore input the emitter's `COLLECT FOR` policy held, which comes due
