@@ -247,11 +247,19 @@ impl Arbitrary<'_> {
         self.quiescing_as_supported(source)
     }
 
-    /// A PromQL query evaluated on a cadence of domain time.
+    /// A PromQL query evaluated on a cadence of domain time, with or without its response bound.
     pub fn prometheus_query_source(&mut self) -> PrometheusQuerySource {
+        let client = self.name();
+        let query = self.string();
+        let max_body_size = if self.entropy.flag() {
+            Some(self.payload_size_limit())
+        } else {
+            None
+        };
         let source = PrometheusQuerySource {
-            client: self.name(),
-            query: self.string(),
+            client,
+            query,
+            max_body_size,
             every: self.clock_period(),
             mode: PrometheusIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,

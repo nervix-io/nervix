@@ -694,6 +694,14 @@ before its shared stop deadline.
 Shutdown does not change any connector's delivery contract. It changes only whether a connector
 reaches its completion point before the process ends.
 
+A graceful stop completes two things for its connectors. Each source in an acknowledged mode
+confirms on its transport the positions of every batch its graph acknowledged before the source
+closes, within the drain timeout, and each emitter finishes its sink when it stops, sending what
+the sink's client still holds by the deadline it is given. [Sources](#sources) and [Sinks](#sinks)
+give each one's deadline and what is left when it passes, and the
+[connector delivery standard](./connector-contract.md#connector-delivery-standard) states the rules
+both follow.
+
 ### Sources
 
 An MQTT execution stop or ownership move retains its persistent broker sessions for resume.
@@ -790,10 +798,13 @@ report when it ends are lost, and the emitter logs at `warn` how many, counting 
 not the events waiting in librdkafka's queue, and reports them as its transient error and an error
 event. Pulsar retains the receipts of records accepted under `NO_ACK` and waits for them within
 that same finish deadline. A driver failure or still-unanswered receipts fail its finish; an
-expired deadline reports their count, without claiming the broker did not receive them. MQTT
-QoS 0 waits within that same finish deadline for its client's event loop to write and flush the
-publishes the client still holds; a failed flush or publishes still unflushed when it ends fail its
-finish, which reports the failure or their count. Every other sink
+expired deadline reports their count, without claiming the broker did not receive them. A Core
+NATS client holds records only after a write ran out of the client's `timeout_ms`, which leaves them
+unresolved and with the client; its finish flushes them within that same finish deadline, and a
+deadline that ends first reports how many the client still held. MQTT QoS 0 waits within that same
+finish deadline for its client's event loop to write and flush the publishes the client still holds;
+a failed flush or publishes still unflushed when it ends fail its finish, which reports the failure
+or their count. Every other sink
 holds nothing once a publish returns, so the publish itself is the
 completion point. [Finishing a sink](./connector-contract.md#finishing-a-sink) lists what each sink
 holds and does.

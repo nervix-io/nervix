@@ -30,11 +30,11 @@ use nervix_models::{
     EndpointName, Expression, ExternalName, FieldName, FlushPolicy, GeneralErrorPolicy,
     GeneratorName, InferencerName, IngestorName, InputCollectPolicy, InspectionFormat,
     JunctionName, LookupName, MaterializedStateDependency, MaterializedStatePolicy,
-    MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, QueueName, ReingestorName, RelayName,
-    ReordererName, RequestedResourceVersion, ResourceName, RetryPolicy, RouteConstruction,
-    SchemaName, SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName,
-    TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
+    MessageErrorPolicy, ModelName, NameError, OutputBranch, PayloadSizeLimit, PlacementName,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, QueueName,
+    ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName, RetryPolicy,
+    RouteConstruction, SchemaName, SignalingProtocolName, SubjectName, SubscriptionName, TableName,
+    TopicName, TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
     WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
@@ -1092,6 +1092,19 @@ pub fn max_batch_size_clause<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     kw_phrase3(Identifier::Max, Identifier::Batch, Identifier::Size)
         .ignore_then(byte_size_lit())
+        .boxed()
+}
+
+/// `MAX BODY SIZE <bytes>`: the most bytes of one response a polled source reads. The size is a
+/// whole number greater than zero followed by its unit, refused here rather than rounded.
+pub fn max_body_size_clause<'src>()
+-> impl Parser<'src, &'src [Token], PayloadSizeLimit, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase3(Identifier::Max, Identifier::Body, Identifier::Size)
+        .ignore_then(byte_size_lit().try_map(|literal, span| {
+            literal
+                .parse::<PayloadSizeLimit>()
+                .map_err(|issue| Rich::custom(span, format!("MAX BODY SIZE {issue}")))
+        }))
         .boxed()
 }
 

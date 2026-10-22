@@ -95,14 +95,12 @@ nodes reference. Kafka client config is passed through to the Kafka driver, so
 `bootstrap.servers` uses its familiar key.
 
 ```nspl
-CREATE CLIENT kafka_local
-  TYPE KAFKA
+CREATE KAFKA CLIENT kafka_local
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9092'
   };
 
-CREATE CLIENT redis_local
-  TYPE REDIS
+CREATE REDIS CLIENT redis_local
   POOL SIZE MIN 1 MAX 4
   CONFIG {
     'addr' = 'redis://127.0.0.1:6379/'
@@ -132,7 +130,7 @@ CREATE KAFKA TOPIC INGESTOR kafka_orders
 Reading top to bottom:
 
 - `KAFKA TOPIC INGESTOR` names the connector and the entity the ingestor reads. `FROM` names the
-  `TYPE KAFKA` client, and the topic and consumer group are string literals sent to Kafka exactly
+  `KAFKA CLIENT`, and the topic and consumer group are string literals sent to Kafka exactly
   as written.
 - `OFFSET BY CONSUMER GROUP` tracks progress in Kafka; `MODE ACK SEQUENTIAL` acknowledges records
   in order. The full Kafka source grammar is in
@@ -211,14 +209,12 @@ CREATE CODEC order_codec
 
 CREATE RELAY orders SCHEMA order_record UNBRANCHED;
 
-CREATE CLIENT kafka_local
-  TYPE KAFKA
+CREATE KAFKA CLIENT kafka_local
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9092'
   };
 
-CREATE CLIENT redis_local
-  TYPE REDIS
+CREATE REDIS CLIENT redis_local
   POOL SIZE MIN 1 MAX 4
   CONFIG {
     'addr' = 'redis://127.0.0.1:6379/'

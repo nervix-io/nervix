@@ -43,7 +43,7 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO later_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER published FROM first_events, later_events
@@ -131,7 +131,7 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER published FROM outgoing
@@ -194,7 +194,7 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER published FROM outgoing
@@ -262,7 +262,7 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER published FROM outgoing
@@ -314,7 +314,7 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -329,7 +329,7 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
       CREATE <attachment> EMITTER published FROM outgoing
@@ -427,7 +427,7 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER guarded FROM outgoing
@@ -531,7 +531,7 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER tenant_events FROM outgoing
@@ -614,7 +614,7 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         TIMESTAMP NOW
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = <timeout_ms>
       };
       CREATE EMITTER published FROM outgoing
@@ -679,7 +679,7 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER published FROM outgoing

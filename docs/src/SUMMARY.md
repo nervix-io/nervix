@@ -63,6 +63,7 @@
   - [Coverage Reports And The Complexity Gate](./coverage-reports.md)
   - [Errors And Diagnostics](./errors-and-diagnostics.md)
   - [Typed States And Validation Boundaries](./typed-states.md)
+  - [Node Settings](./node-settings.md)
   - [Connector Crates And The Connector Contract](./connector-contract.md)
   - [HTTP Emitter Architecture](./http-emitter-architecture.md)
   - [Client Ingestors And Emitters](./client-io-architecture.md)

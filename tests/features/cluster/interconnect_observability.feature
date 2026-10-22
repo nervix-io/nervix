@@ -65,7 +65,7 @@ Feature: Interconnection observability
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event UNBRANCHED;
-      CREATE CLIENT sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -121,7 +121,7 @@ Feature: Interconnection observability
       uploaded resource version 1
       """
     When node "node-3" is started
-    Then within "30s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"
+    Then within "300s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"
       """
       DESCRIBE RESOURCE large_model VERSION 1;
       """

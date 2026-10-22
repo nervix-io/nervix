@@ -202,6 +202,21 @@ pub fn validate(cx: &LateContext<'_>, node: HirId, attribute: &rustc_hir::Attrib
     );
     let contract = kind(attribute);
     let valid = match name.as_str() {
+        "constant" => {
+            matches!(
+                owner,
+                Node::Item(rustc_hir::Item {
+                    kind: rustc_hir::ItemKind::Const(..),
+                    ..
+                }) | Node::ImplItem(rustc_hir::ImplItem {
+                    kind: rustc_hir::ImplItemKind::Const(..),
+                    ..
+                }) | Node::TraitItem(rustc_hir::TraitItem {
+                    kind: rustc_hir::TraitItemKind::Const(..),
+                    ..
+                })
+            ) && contract.is_some_and(|kind| kind.as_str() == "fixed")
+        }
         "layer" => {
             (module
                 || named_type
