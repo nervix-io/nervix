@@ -17,8 +17,7 @@ Feature: Model alteration quiesce classification
         TO SCHEMA alter_event;
       CREATE RELAY alter_events SCHEMA alter_event UNBRANCHED CAPACITY 3;
 
-      CREATE CLIENT alter_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT alter_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'

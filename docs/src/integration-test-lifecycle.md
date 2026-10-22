@@ -108,6 +108,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
+| Publication-relative receipt timing | A runtime task owns the subscription read before publication and retains its receipt timestamp. The assertion bounds completion after the HTTP publishing step returns; scenario teardown cancels an unfinished reader before stopping nodes | `tests/common/runner_observation.rs`, `tests/common/raw_session.rs` and the timed subscription steps in `tests/scenarios.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
@@ -577,6 +578,15 @@ A late subscription read can lengthen the observed delay. The production-owner r
 two retained rows immediately before and at the duration boundary, and three rows meeting the
 message threshold before that deadline.
 
+The two scenarios that install a 48 MiB resource on a restarted node wait five minutes for its
+ready replica, and the native client waits ten minutes for the `UPLOAD RESOURCE` before it. The
+leader answers an upload only once every live node has fetched, verified and installed the
+archive, and the restarted node records its pending replica and opens its transfer within about
+seven seconds of starting. Both waits are then the pace of a 48 MiB transfer under the suite's
+storage and CPU load, which canonical producers on 21 October 2026 measured at 7 to 59 seconds for
+the same archive, and 24 such scenarios beside each other on a disk-backed host at 25 to 53
+seconds. The former 30-second catch-up bound held only on a lightly loaded runner.
+
 The boundary between them is kept in four places.
 
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
@@ -736,6 +746,7 @@ second module runs the operation, it is named after the owner.
 | A gRPC receiver wait: captured calls | `grpc_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A server process's startup, its exit, or a log line | `server_process.rs`, reading the executable through `server_executable.rs` | 120 seconds from the launch for reading the executable, spawning the process and waiting until it accepts commands; 120 and 60 seconds | The step fails, quoting the last 80 lines of the process log. A failed startup also says how reading the executable went, which kinds of answer the readiness probes got and when, and, when its deadline passed, what the still-running process and its host were doing |
 | Convergence of a started or restarted real-process cluster, or of one restarted member | `process_cluster_convergence.rs`, run by `server_process_cluster.rs` | 120 seconds for the running members to report the targets they observe a killed member through before it is relaunched, then 120 seconds for convergence after the start or relaunch, with each status request capped at 10 seconds | The step fails naming the first condition the members' latest answers did not meet in the last round that ended before the deadline, with every member's latest status and any later failed request; a status line the wait cannot read fails it at once |
+| An `UPLOAD RESOURCE` a step runs through the native client, every attempt and redirect included | `cluster.rs`, run by `tests/scenarios.rs` | 10 minutes for the client's request and retry windows, instead of its 120-second defaults; the client's other commands keep the defaults | The step fails with the client's typed outcome: an uncertain upload or the expired retry deadline |
 | A one-shot CLI command or a streaming output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for a subscription line, the duration the step names for a clock line, between 10 and 60 seconds, and 10 seconds for clock-process exit after Ctrl-C | The step fails with the process result or retained output lines |
 | Text the interactive CLI is expected to display, its startup banner included | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds, pressing Enter every 250 milliseconds so the REPL draws a prompt and prints the events it queued; a row expected from repeated HTTP posts gets 2 seconds after each post within the same 60 | The step fails quoting the newest 40 lines the terminal displayed, with control sequences removed and repeated lines collapsed |
 | The interactive CLI's exit after the scenario types `exit` | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds | The step fails with the exit status or the elapsed wait, quoting the same transcript |
@@ -792,6 +803,7 @@ ordering fails to build rather than producing a harness that outwaits itself.
 | Startup attempt, 36 seconds | A policy input | The slowest healthy node startup, 24.2 seconds, fits in one attempt; the same 3,465 startups had a 2.0-second median and a 4.3-second 99th percentile |
 | Node startup, 84 seconds | Two budgeted attempts, each funding 36 seconds of readiness, 5 seconds of cleanup and a 1-second pause; cleanup and later attempts share the remaining total | Stays under a 90-second ceiling |
 | Cluster cleanup, 60 seconds | The slowest healthy cluster stop, rounded up to 15 seconds, times a headroom of 4 | 12.2 seconds at the slowest over 163 cleanups, with a 0.15-second median and 1.6 seconds at the 90th percentile |
+| Upload command, 10 minutes | The slowest healthy upload of a 48 MiB archive, rounded up to 120 seconds, times a headroom of 5, and shorter than the suite budget | With 48 such uploads on one shared, disk-backed host, those that completed did so inside the client's 120-second window and 35 others expired it; 72 on an idle host took at most 52 seconds |
 | Suite, 75 minutes | The 120-minute scenario job limit, less 30 minutes for pre-suite work and a 15-minute reserve after it | Run 39569675589 completed 3,336 attempts in 34m28s; twice the rounded 35-minute healthy ceiling plus five minutes of slack fits the budget. Run 39656928785's partial progress projects about 55 minutes |
 
 The assertions keep these orderings, among others:
@@ -877,6 +889,26 @@ its tenant and sequence and arrive after the declared lower bound, inside the un
 budget. Starting a new silence window after an HTTP response would reject a valid row whose
 collection or flush deadline elapsed while the harness awaited that response. The production
 owner's timing checks retain the independent branch-deadline assertions.
+
+The WASM reset outline `Reset drains accepted buffered output once and cancels the old branch
+timer` starts a bounded receipt observation before posting the fresh alpha input. The observer
+owns the subscription session on a runtime worker and confirms its first poll before publication.
+It timestamps the next received row there, preserving that instant until the assertion reads the
+result, then returns the session for the duplicate-output check. The row must match the alpha key,
+tenant and release marker and arrive at least three seconds after that publication. Both cluster
+sizes retain the ordered pre-reset alpha/beta drain, the five-second receive budget after the
+publishing request returns and the three-second guest timer. The read remains active across that
+request; the assertion bounds its completion and teardown cancels it if a step fails. A queued
+early row cannot acquire a later timestamp merely because the runner resumes late. This
+observation measures client receipt, not server emission, and cannot
+remove scheduling delay on the observer's own runtime worker. Ordinary raw sessions still read
+only while a caller waits; their later dequeues do not supply independent receipt evidence.
+
+Paused-clock harness controls cover a valid receipt learned late, an early receipt learned late,
+a row predating publication, cancellation and a reader panic. The WASM host's isolated-store test
+separately drops an instance with an armed request, starts its fresh lifetime and checks exact
+domain-time deadlines for it and an untouched sibling. These tests and the public reset outline
+provide complementary receipt and instance-ownership evidence; they add no synchronization claim.
 
 The MQTT changed-address restart scenario waits for the post-restart marker within its bounded
 delivery window. Its persistent QoS 1 source may replay the pre-restart marker before that row;

@@ -21,7 +21,7 @@ Feature: Client producers across real node process faults
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -119,7 +119,7 @@ Feature: Client producers across real node process faults
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders
@@ -217,7 +217,7 @@ Feature: Client producers across real node process faults
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER published FROM orders

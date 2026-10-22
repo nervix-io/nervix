@@ -342,8 +342,7 @@ Feature: Checked numeric execution
           ON MESSAGE ERROR SEND TO numeric_errors
           SET input_id = input.id,
               error_message = error.message;
-      CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'

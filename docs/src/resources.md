@@ -198,8 +198,7 @@ Inside other client config values, Nervix renders values with a lightweight Jinj
 Example:
 
 ```nspl
-CREATE IF NOT EXISTS CLIENT kafka_tls
-  TYPE KAFKA
+CREATE IF NOT EXISTS KAFKA CLIENT kafka_tls
   MOUNT dev_tls VERSION 1
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9094',
@@ -224,8 +223,7 @@ Example:
 CREATE IF NOT EXISTS RESOURCE dev_tls;
 UPLOAD RESOURCE dev_tls VERSION './tls/dev';
 
-CREATE IF NOT EXISTS CLIENT redis_tls
-  TYPE REDIS
+CREATE IF NOT EXISTS REDIS CLIENT redis_tls
   POOL SIZE MIN 1 MAX 4
   MOUNT dev_tls VERSION 1
   CONFIG {

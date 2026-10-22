@@ -208,7 +208,7 @@ including Kafka, Pulsar, RabbitMQ, Redis, MQTT, ClickHouse, Postgres, MySQL, Mon
 Prometheus, Quickwit, Jaeger, and a Sentry-compatible Bugsink service.
 
 The local Sentry-compatible service is available at `http://127.0.0.1:18090`. Sign in with
-`admin@example.org` / `admin`, create a project, and copy its DSN into a `TYPE SENTRY` client used
+`admin@example.org` / `admin`, create a project, and copy its DSN into a `SENTRY CLIENT` used
 by a Sentry emitter. These credentials and the Compose `SECRET_KEY` are development-only.
 
 RustFS provides the local Rust-written S3-compatible target for Iceberg emitters:

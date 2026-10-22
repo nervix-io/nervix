@@ -98,8 +98,8 @@ Build configuration in dependency order:
    wrote; an uncompilable candidate module rejects the whole rebinding with every binding and its
    saved state still in place.
 3. Define internal schemas, branch-key schemas, branches, wire schemas, and codecs.
-4. Define clients, signaling protocols, virtual hosts/endpoints, lookup models, and trusted Roto
-   UDFs as needed.
+4. Define clients with a `<CONNECTOR> CLIENT` head, such as `CREATE KAFKA CLIENT`. Define signaling
+   protocols, virtual hosts/endpoints, lookup models, and trusted Roto UDFs as needed.
 5. Define relays before nodes that read or write them.
 6. Define ingestors, processors, generators, and emitters in graph order.
 7. Define placement rules after every referenced runtime node, including each relay, exists.
@@ -456,7 +456,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   is resolved when the statement is applied, and the stored hash map and `SHOW CREATE HASH MAP`
   contain the resulting number.
 - Declare connection-pool bounds on every `POSTGRES`, `MYSQL`, `MONGODB`, and `REDIS` client, after
-  `TYPE` and before an optional `MOUNT`: `POOL SIZE MIN <u32> MAX <positive_u32>`, in that order,
+  the client name and before an optional `MOUNT`: `POOL SIZE MIN <u32> MAX <positive_u32>`, in that order,
   with the minimum no greater than the maximum. The clause is required even when only ingestors
   reference the client, and no other client type accepts it. Never put pool sizing in connector
   `CONFIG` or an address query parameter. One pool serves every local user of a named client on one
@@ -560,7 +560,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   singleton wire schema directly with `FROM SYSLOG`, keep the format independent of the UDP/TCP/TLS
   client transport, and use only the documented `SYSLOG LISTENER INGESTOR ... MODE NO ACK` source
   and `NO_ACK` sink forms.
-- For a Sentry sink, reference a `TYPE SENTRY` client containing the project DSN and use a codec
+- For a Sentry sink, reference a `SENTRY CLIENT` containing the project DSN and use a codec
   that emits one Sentry event JSON object per record. Do not add header writes to the Sentry route.
 - List topics, queues, streams, tables, buckets, catalogs, namespaces, collections, and other
   external prerequisites separately. Nervix does not create them as a side effect of starting a

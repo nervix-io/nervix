@@ -218,14 +218,12 @@ Feature: Ingestor metrics
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification <relay_branching>;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-metrics-{{test_id}}'
         };
-        CREATE CLIENT redis_main
-        TYPE REDIS
+        CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{redis_addr}}'
@@ -312,8 +310,7 @@ Feature: Ingestor metrics
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_immediate_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_immediate_source;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-immediate-flush-{{test_id}}'
@@ -435,8 +432,7 @@ Feature: Ingestor metrics
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_remote_owner_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_remote_owner_metrics_source;
-        CREATE CLIENT redis_main
-        TYPE REDIS
+        CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{redis_addr}}'
