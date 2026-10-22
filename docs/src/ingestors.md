@@ -307,8 +307,11 @@ the node discarded after a RabbitMQ, SQS or MQTT source reconnected, because the
 what the lost connection did not acknowledge; see
 [Connector Crates And The Connector Contract](connector-contract.md). It renders
 `nervix_ingestor_decode_rejections_total` and `last decode rejection:` as well; see
-[When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload). `SHOW CREATE` round-trips the
-full clause.
+[When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload). It renders
+`nervix_ingestor_oversized_payloads_total`, the payloads the node's source dropped because they
+exceed their client's message size bound, such as a Syslog UDP datagram larger than
+`max_message_size`; see [Oversized payloads](connector-contract.md#oversized-payloads).
+`SHOW CREATE` round-trips the full clause.
 
 ## When The Codec Refuses A Payload
 
@@ -615,21 +618,28 @@ CREATE IF NOT EXISTS HTTP CLIENT http_tls
 
 ## Client Deadlines
 
-A client's `timeout_ms` and `connect_timeout_ms` mean the same thing for every connector that reads
-them. `timeout_ms` bounds the whole of one request or operation: name resolution, connection setup,
-TLS and the answer. `connect_timeout_ms` bounds establishing a connection: name resolution, the
-address attempts, TLS and the protocol's own handshake. Each value is a positive whole number of
-milliseconds.
+A client's `timeout_ms`, `connect_timeout_ms` and `idle_timeout_ms` mean the same thing for every
+connector that reads them. `timeout_ms` bounds the whole of one request or operation: name
+resolution, connection setup, TLS and the answer. `connect_timeout_ms` bounds establishing a
+connection: name resolution, the address attempts, TLS and the protocol's own handshake.
+`idle_timeout_ms` bounds how long a connection may carry nothing while its connector waits to read
+from it. Each value is a positive whole number of milliseconds.
 
 `HTTP` and `PROMETHEUS` clients read `timeout_ms`. `RABBITMQ`, `REDIS` and `WEBSOCKETS` clients read
 `connect_timeout_ms`, and allow 30 seconds when it is left out. A `ZEROMQ PULL` ingestor reads
-neither key, so nothing bounds its connection; see [ZeroMQ](#zeromq). A `RABBITMQ` client's deadline
-covers resolving the broker, the address attempts, TLS, the AMQP handshake, opening the ingestor's
-channel, setting its prefetch window and starting its consumer. A request or connection that runs
-out of its deadline becomes the ingestor's transient status, and the ingestor retries on its
-policy; a connection that runs out of `connect_timeout_ms` is reported naming the key and its
-bound. [Connector Capabilities](connector-capabilities.md) lists each entity's network waits and
-what bounds each one, including the waits nothing bounds yet.
+none of these keys, so nothing bounds its connection; see [ZeroMQ](#zeromq). A `RABBITMQ` client's
+deadline covers resolving the broker, the address attempts, TLS, the AMQP handshake, opening the
+ingestor's channel, setting its prefetch window and starting its consumer. A request or connection
+that runs out of its deadline becomes the ingestor's transient status, and the ingestor retries on
+its policy; a connection that runs out of `connect_timeout_ms` is reported naming the key and its
+bound.
+
+A `SYSLOG LISTENER` serves many senders, so a sender that stalls is not the ingestor's status. A TLS
+listener's client bounds the TLS handshake of each connection it accepts by `connect_timeout_ms`, 30
+seconds when it is left out, and a TCP or TLS listener's client may set `idle_timeout_ms`. A
+connection that runs out of either is closed, and the listener goes on reading the others; see
+[Syslog](syslog.md). [Connector Capabilities](connector-capabilities.md) lists each entity's network
+waits and what bounds each one, including the waits nothing bounds yet.
 
 ## Client Ingestors
 
@@ -1503,9 +1513,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | none |
 | Acknowledgement confirmation | none |
 | Buffers | frames read from TCP and TLS connections: at most 64 frames; when full, holds back what fills it |
-| Network waits | the TLS handshake of an accepted connection: unbounded<br>reading a connection: unbounded |
+| Network waits | the TLS handshake of an accepted connection: `connect_timeout_ms`; 30s when omitted<br>reading a connection: `idle_timeout_ms`; unbounded when omitted |
 | Driver limits | Datagrams wait in the kernel's UDP receive buffer, which drops what does not fit. |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
 See the [SYSLOG LISTENER capability and mirror reference](connector-capabilities.md#syslog-listener-ingest).
 <!-- connector-matrix:ingest-syslog-listener:end -->

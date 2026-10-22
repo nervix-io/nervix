@@ -69,6 +69,7 @@ pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
         last_decode_rejection: summary
             .last_decode_rejection
             .map(decode_rejection_to_envelope),
+        oversized_payloads_total: summary.oversized_payloads_total,
         memory_backpressure_paused: summary.memory_backpressure_paused,
         transient_error: summary.transient_error,
         reconnect_backoff: summary.reconnect_backoff,
@@ -114,6 +115,7 @@ pub(in crate::application) fn runtime_ingestor_describe_from_envelope(
             last_decode_rejection: summary
                 .last_decode_rejection
                 .map(decode_rejection_from_envelope),
+            oversized_payloads_total: summary.oversized_payloads_total,
             memory_backpressure_paused: summary.memory_backpressure_paused,
             transient_error: summary.transient_error,
             reconnect_backoff: summary.reconnect_backoff,
@@ -363,6 +365,10 @@ pub(in crate::application) fn format_ingestor_describe_output(
         format!(
             "nervix_ingestor_decode_rejections_total: {}",
             summary.decode_rejections_total
+        ),
+        format!(
+            "nervix_ingestor_oversized_payloads_total: {}",
+            summary.oversized_payloads_total
         ),
     ]);
     let last_decode_rejection = match summary.last_decode_rejection.as_ref() {

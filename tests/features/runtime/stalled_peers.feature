@@ -350,6 +350,60 @@ Feature: Stalled peers
       | 1            |
       | 3            |
 
+  Scenario Outline: A Syslog collector whose server stops reading is reported within timeout_ms
+    Given a <cluster_size> node nervix cluster is started
+    And a silent endpoint "syslog_peer" is listening
+    # One frame larger than both TCP buffers between the collector and a server that reads
+    # nothing keeps the collector's write waiting.
+    And a repeated text placeholder "bulk_message" of 8000000 bytes is prepared
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
+      CREATE WIRE JSON SCHEMA syslog_event_wire MODE STRICT (
+        facility integer, severity integer, message string
+      );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA syslog_event_wire TO SCHEMA syslog_event;
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
+      CREATE VHOST edge stalled-syslog-{{test_id}}.example.com;
+      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SYSLOG CLIENT syslog_forwarder CONFIG {
+        'protocol' = 'tcp',
+        'addr' = '{{syslog_peer}}',
+        'timeout_ms' = '1000'
+      };
+      CREATE EMITTER syslog_forward FROM events
+        TO SYSLOG syslog_forwarder MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        ENCODE USING syslog_codec INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "stalled-syslog-{{test_id}}.example.com" path "/events"
+      """
+      {"facility":1,"severity":5,"message":"{{bulk_message}}"}
+      """
+    Then within "30s" DESCRIBE EMITTER "syslog_forward" on the leader node contains
+      """
+      within timeout_ms 1s
+      """
+    And the silent endpoint "syslog_peer" eventually accepts 2 connections
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: A WebSocket connection whose server never answers its upgrade is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "websocket_peer" is listening

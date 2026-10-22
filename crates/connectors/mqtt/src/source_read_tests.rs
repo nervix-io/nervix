@@ -96,6 +96,9 @@ impl Read {
         match batch {
             SourceBatch::Messages(messages) => Self::Completed(Self::ids(&messages)),
             SourceBatch::Interrupted { gathered } => Self::Interrupted(Self::ids(&gathered)),
+            SourceBatch::Oversized { payloads } => {
+                panic!("an MQTT read drops no publish for its size, yet it dropped {payloads}")
+            }
             SourceBatch::ResumeRequired | SourceBatch::Closed => {
                 panic!("a read from a connection neither resumes nor closes")
             }

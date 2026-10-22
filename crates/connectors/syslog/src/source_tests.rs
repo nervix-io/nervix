@@ -2,9 +2,10 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** RFC 6587 frames and failures at every read boundary, the read cursor and its single
-//!   compaction per read, and the property that framing does not depend on how reads split a
-//!   stream.
-//! - **Depends on.** The production stream frame decoder and connection reader.
+//!   compaction per read, the property that framing does not depend on how reads split a stream,
+//!   the deadlines of an accepted connection, and the oversized datagram a listener drops.
+//! - **Depends on.** The production stream frame decoder, connection reader, TLS acceptance and UDP
+//!   listener, Tokio's paused clock, and a generated TLS server identity.
 //! - **Must not know.** Codecs, runtime collectors or listener lifecycle.
 
 #![cfg_attr(
@@ -16,10 +17,14 @@ use std::{
     collections::VecDeque,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
+use nervix_connector::DeadlineElapsed;
+use nervix_models::DeadlineKey;
+use nervix_primitives::time::Instant;
 use nonzero_ext::nonzero;
-use tokio::io::ReadBuf;
+use tokio::io::{AsyncWriteExt as _, DuplexStream, ReadBuf};
 
 use super::*;
 
@@ -510,6 +515,7 @@ async fn read_connection(
         peer_addr,
         nonzero!(128usize),
         allow_non_transparent,
+        None,
         tx,
         paused_rx,
     )
@@ -589,6 +595,15 @@ fn listener_connection_and_frame_failures_name_their_cause_once() {
         ),
         format!(
             "{:#}",
+            Report::new(DeadlineElapsed {
+                operation: "the TLS handshake",
+                key: DeadlineKey::ConnectTimeout,
+                bound: Duration::from_secs(1),
+            })
+            .change_context(SyslogConnectionError::Deadline)
+        ),
+        format!(
+            "{:#}",
             Report::new(SyslogFrameError::InvalidOctetCount {
                 source: parse_failure.clone(),
             })
@@ -603,7 +618,290 @@ fn listener_connection_and_frame_failures_name_their_cause_once() {
             "Syslog stream listener accept failed: the peer reset the connection".to_string(),
             "TLS handshake failed: the peer reset the connection".to_string(),
             "stream read failed: the peer reset the connection".to_string(),
+            "connection ran out of its deadline: the TLS handshake did not finish within \
+             connect_timeout_ms 1s"
+                .to_string(),
             format!("malformed Syslog octet count: {parse_failure}"),
         ]
+    );
+}
+
+/// The idle deadline every connection check below gives its client's `idle_timeout_ms`.
+const IDLE: Duration = Duration::from_secs(5);
+
+fn idle_deadline() -> ConfiguredDeadline {
+    ConfiguredDeadline::idle(&[ClientConfigEntry {
+        key: "idle_timeout_ms".to_string(),
+        value: IDLE.as_millis().to_string(),
+    }])
+    .assured("five seconds is a valid deadline")
+    .assured("the entry sets idle_timeout_ms")
+}
+
+/// The deadline whose elapsed wait ended `outcome`, which the connection's failure keeps beneath it.
+fn elapsed_deadline(outcome: &error_stack::Result<(), SyslogConnectionError>) -> DeadlineElapsed {
+    let error = outcome
+        .as_ref()
+        .err()
+        .assured("the connection ended at its deadline");
+    assert!(matches!(
+        error.current_context(),
+        SyslogConnectionError::Deadline
+    ));
+    *error
+        .frames()
+        .find_map(|frame| frame.downcast_ref::<DeadlineElapsed>())
+        .assured("the elapsed deadline stays beneath the connection's failure")
+}
+
+/// A connection the check writes to through `client`, read by the production connection reader
+/// with the idle deadline, and the frames it delivered.
+struct IdleConnection {
+    client: DuplexStream,
+    reader: nervix_primitives::task::JoinHandle<error_stack::Result<(), SyslogConnectionError>>,
+    frames: mpsc::Receiver<ReceivedSyslogFrame>,
+    paused: watch::Sender<bool>,
+}
+
+impl IdleConnection {
+    fn open() -> Self {
+        let (client, server) = tokio::io::duplex(1024);
+        let (tx, frames) = mpsc::channel(STREAM_INTAKE_QUEUE_CAPACITY);
+        let (paused, paused_rx) = watch::channel(false);
+        let reader = nervix_primitives::task::spawn(read_stream_connection(
+            server,
+            SocketAddr::from(([127, 0, 0, 1], 6514)),
+            nonzero!(128usize),
+            true,
+            Some(idle_deadline()),
+            tx,
+            paused_rx,
+        ));
+        Self {
+            client,
+            reader,
+            frames,
+            paused,
+        }
+    }
+
+    async fn ended(self) -> error_stack::Result<(), SyslogConnectionError> {
+        self.reader
+            .await
+            .assured("the connection reader does not panic")
+    }
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_connection_that_sends_nothing_is_closed_at_its_idle_deadline() {
+    let started = Instant::now();
+    let connection = IdleConnection::open();
+
+    let outcome = connection.ended().await;
+
+    assert_eq!(started.elapsed(), IDLE);
+    let elapsed = elapsed_deadline(&outcome);
+    assert_eq!(elapsed.key, DeadlineKey::IdleTimeout);
+    assert_eq!(elapsed.bound, IDLE);
+    assert_eq!(
+        elapsed.to_string(),
+        "waiting for the connection's next bytes did not finish within idle_timeout_ms 5s"
+    );
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn each_read_restarts_the_idle_deadline() {
+    let mut connection = IdleConnection::open();
+    let mut last_frame = Instant::now();
+    for frame in [b"5 first", b"5 again", b"5 third"] {
+        nervix_primitives::time::sleep(IDLE * 3 / 4).await;
+        connection
+            .client
+            .write_all(frame)
+            .await
+            .assured("the connection reads what the client writes");
+        let delivered = connection
+            .frames
+            .recv()
+            .await
+            .assured("the reader delivers each frame");
+        assert_eq!(delivered.payload, &frame[2..]);
+        last_frame = Instant::now();
+    }
+
+    let outcome = connection.ended().await;
+
+    assert_eq!(last_frame.elapsed(), IDLE);
+    assert_eq!(elapsed_deadline(&outcome).key, DeadlineKey::IdleTimeout);
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_suspended_connection_is_not_closed_for_idleness() {
+    let connection = IdleConnection::open();
+    connection.paused.send_replace(true);
+    nervix_primitives::time::sleep(IDLE * 4).await;
+    assert!(
+        !connection.reader.is_finished(),
+        "a connection the listener does not read is never idle"
+    );
+    let resumed = Instant::now();
+    connection.paused.send_replace(false);
+
+    let outcome = connection.ended().await;
+
+    assert_eq!(resumed.elapsed(), IDLE);
+    assert_eq!(elapsed_deadline(&outcome).key, DeadlineKey::IdleTimeout);
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_connection_without_an_idle_deadline_waits_for_its_sender() {
+    let (mut client, server) = tokio::io::duplex(1024);
+    let (tx, mut frames) = mpsc::channel(STREAM_INTAKE_QUEUE_CAPACITY);
+    let (_paused, paused_rx) = watch::channel(false);
+    let reader = nervix_primitives::task::spawn(read_stream_connection(
+        server,
+        SocketAddr::from(([127, 0, 0, 1], 6514)),
+        nonzero!(128usize),
+        true,
+        None,
+        tx,
+        paused_rx,
+    ));
+    nervix_primitives::time::sleep(Duration::from_secs(3_600)).await;
+    client
+        .write_all(b"4 late")
+        .await
+        .assured("the connection reads what the client writes");
+    let delivered = frames.recv().await.assured("the reader delivers the frame");
+    assert_eq!(delivered.payload, b"late");
+    drop(client);
+    reader
+        .await
+        .assured("the connection reader does not panic")
+        .assured("the client closed the connection after a complete frame");
+}
+
+/// A TLS acceptor for a self-signed `localhost` identity.
+fn tls_acceptor() -> TlsAcceptor {
+    nervix_connector::install_rustls_crypto_provider();
+    let identity = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .assured("a self-signed identity for a fixed name can be generated");
+    let key = rustls_pki_types::PrivateKeyDer::Pkcs8(rustls_pki_types::PrivatePkcs8KeyDer::from(
+        identity.key_pair.serialize_der(),
+    ));
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![identity.cert.der().clone()], key)
+        .assured("a generated identity is a valid server identity");
+    TlsAcceptor::from(nervix_primitives::sync::StdArc::new(config))
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_tls_handshake_that_never_completes_is_closed_at_connect_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .assured("a loopback TCP port is available");
+    let address = listener.local_addr().assured("the listener is bound");
+    // Opens the connection and never sends its client hello.
+    let client = TcpStream::connect(address)
+        .await
+        .assured("the listener accepts connections");
+    let (accepted, _) = listener.accept().await.assured("the connection arrives");
+    let handshake = ConfiguredDeadline::connect(&[ClientConfigEntry {
+        key: "connect_timeout_ms".to_string(),
+        value: "2000".to_string(),
+    }])
+    .assured("two seconds is a valid deadline");
+    let started = Instant::now();
+
+    let outcome = accept_tls(&tls_acceptor(), accepted, handshake).await;
+
+    assert_eq!(started.elapsed(), Duration::from_secs(2));
+    let error = outcome
+        .err()
+        .assured("a client that never says hello is not accepted");
+    assert!(matches!(
+        error.current_context(),
+        SyslogConnectionError::Deadline
+    ));
+    let elapsed = error
+        .frames()
+        .find_map(|frame| frame.downcast_ref::<DeadlineElapsed>())
+        .assured("the elapsed deadline stays beneath the connection's failure");
+    assert_eq!(elapsed.key, DeadlineKey::ConnectTimeout);
+    assert_eq!(elapsed.bound, Duration::from_secs(2));
+    drop(client);
+}
+
+#[nervix_primitives::test]
+async fn a_client_that_does_not_speak_tls_fails_its_handshake() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .assured("a loopback TCP port is available");
+    let address = listener.local_addr().assured("the listener is bound");
+    let mut client = TcpStream::connect(address)
+        .await
+        .assured("the listener accepts connections");
+    let (accepted, _) = listener.accept().await.assured("the connection arrives");
+    // A plain TCP sender writes a frame where the listener expects its client hello.
+    client
+        .write_all(b"<13>1 - - - - - - sent without TLS\n")
+        .await
+        .assured("the loopback connection takes the frame");
+    let handshake =
+        ConfiguredDeadline::connect(&[]).assured("an omitted key takes the default deadline");
+
+    let outcome = accept_tls(&tls_acceptor(), accepted, handshake).await;
+
+    let error = outcome
+        .err()
+        .assured("bytes that are not a TLS record never complete a handshake");
+    assert!(matches!(
+        error.current_context(),
+        SyslogConnectionError::TlsHandshake { .. }
+    ));
+    drop(client);
+}
+
+#[nervix_primitives::test]
+async fn an_oversized_datagram_is_dropped_and_the_next_one_received() {
+    let socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .assured("a loopback UDP port is available");
+    let address = socket.local_addr().assured("the socket is bound");
+    let mut listener = SyslogUdpListener {
+        socket,
+        datagram: vec![0_u8; 65_535],
+    };
+    let sender = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .assured("a loopback UDP port is available");
+    let bound = nonzero!(32usize);
+    sender
+        .send_to(&[b'x'; 33], address)
+        .await
+        .assured("the oversized datagram is sent");
+    sender
+        .send_to(b"<13>1 - - - - - -", address)
+        .await
+        .assured("the datagram within the bound is sent");
+
+    let oversized = listener
+        .receive(bound)
+        .await
+        .assured("the listener receives the first datagram");
+    let within = listener
+        .receive(bound)
+        .await
+        .assured("the listener receives the second datagram");
+
+    assert!(matches!(oversized, SyslogReceived::OversizedDatagram));
+    let SyslogReceived::Message(message) = within else {
+        panic!("a datagram within max_message_size is a message");
+    };
+    assert_eq!(message.payload(), b"<13>1 - - - - - -");
+    assert_eq!(
+        message.peer_addr,
+        sender.local_addr().assured("the sender is bound")
     );
 }

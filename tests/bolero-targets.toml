@@ -3071,10 +3071,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/application/__fuzz__/application__describe_output__properties__bolero_ingestor_describe_reports_round_trip/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "ingestor-describe-envelope"
-invariant = "A current runtime ingestor report, with its readiness, quiesce state and counters, transport redeliveries, decode rejection count and last decode rejection with its reference, codec, Kafka or IPv4 and IPv6 syslog position, sorted fields, message and instant, backpressure, transient error, reconnect state, Kafka domain offsets, client producer gauges and ordered metric lines, survives the describe envelope conversion and the production command response codec unchanged."
+invariant = "A current runtime ingestor report, with its readiness, quiesce state and counters, transport redeliveries, decode rejection count and last decode rejection with its reference, codec, Kafka or IPv4 and IPv6 syslog position, sorted fields, message and instant, oversized payload count, backpressure, transient error, reconnect state, Kafka domain offsets, client producer gauges and ordered metric lines, survives the describe envelope conversion and the production command response codec unchanged."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"

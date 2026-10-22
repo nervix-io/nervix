@@ -499,14 +499,15 @@ deadline keys mean the same thing for every connector:
 | --- | --- |
 | `timeout_ms` | The whole of one request or operation: name resolution, connection setup, TLS and the answer. |
 | `connect_timeout_ms` | Establishing a connection: name resolution, the address attempts, TLS and the protocol's own handshake. |
+| `idle_timeout_ms` | How long a connection may carry nothing while its connector waits to read from it, after which the connector closes it. |
 
-A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or a
-declared idle key, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
+A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or by
+`idle_timeout_ms`, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
 number of milliseconds no longer than about 146 years, the vocabulary's `ClientDeadline` rule, and
-the connector contract's `ConfiguredDeadline` reads both keys once, so no connector parses its own. A
+the connector contract's `ConfiguredDeadline` reads each key once, so no connector parses its own. A
 connector that dials for itself and reads `connect_timeout_ms` allows 30 seconds where the client
-leaves the key out, and a connection that runs out of its deadline is reported naming the key and
-its bound.
+leaves the key out, and so does a listener that bounds the TLS handshake of a connection it accepted
+by that key. A connection that runs out of its deadline is reported naming the key and its bound.
 
 A connector that dials for itself spends one `OperationBudget` from `nervix-dns` on an operation. The
 caller declares how much of it the name lookup may take: whatever is left for an operation that is
@@ -520,9 +521,12 @@ bounds the handshake and the request that follow.
 Each deadline key an entity's waits name is a runtime capability, `STALLED PEER <key>`, and the
 capability inventory names a scenario that observes it: a peer that stops answering during a wait
 the key bounds surfaces as the entity's transient status within that bound, and the connector
-retries on its policy. A silent endpoint accepts connections and never answers, a stallable endpoint
-in front of a dependency stops carrying bytes in both directions while its connections stay open,
-and the HTTP and gRPC receivers can hold a response; scenarios stand them where the stall belongs.
+retries on its policy. A listener serves many peers, so one that stalls is not the entity's status:
+the bound closes that peer's connection, and the scenario observes the connection end no sooner than
+the bound while the listener goes on reading its other peers. A silent endpoint accepts connections
+and never answers or reads, a stallable endpoint in front of a dependency stops carrying bytes in
+both directions while its connections stay open, and the HTTP and gRPC receivers can hold a
+response; scenarios stand them where the stall belongs.
 
 #### Review checklist
 
@@ -928,6 +932,16 @@ returns a queued publish first, so a dropped poll loses no publish it read. It c
 acknowledgement still waiting for room in a send buffer the broker has stopped draining; a
 persistent session then delivers that publish again when it resumes, as it does any publish whose
 acknowledgement never reached the broker.
+
+### Oversized payloads
+
+A source whose transport delivers each payload on its own, so dropping one leaves the next intact,
+drops a payload larger than its client's message size bound and returns `SourceBatch::Oversized`
+with how many it dropped. The host counts them in `nervix_ingestor_oversized_payloads_total`, which
+`DESCRIBE INGESTOR` renders, and reads again at once; the drop is neither a read failure nor a
+decode rejection, because the payload never reached the codec. A `SYSLOG LISTENER` does this for a
+UDP datagram larger than `max_message_size`. A stream transport cannot find the frame after an
+oversized one, so its source closes that connection instead and counts nothing.
 
 ### MQTT session retirement
 

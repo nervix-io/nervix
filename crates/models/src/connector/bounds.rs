@@ -26,12 +26,14 @@ use strum::{AsRefStr, EnumIter, IntoStaticStr};
 
 use crate::ClientDeadline;
 
-/// How long a connection a connector dials for itself may take to establish when its client leaves
-/// `connect_timeout_ms` out: name resolution, the address attempts, TLS and the protocol handshake.
+/// How long establishing a connection may take when its client leaves `connect_timeout_ms` out: for
+/// a connection a connector dials for itself, name resolution, the address attempts, TLS and the
+/// protocol handshake; for one a listener accepted, its TLS handshake.
 ///
 /// A policy input: generous for a peer across a wide area network, and short enough that a silent
 /// name server or an address that drops every packet costs one attempt of the retry policy rather
-/// than the operating system's connect timeout.
+/// than the operating system's connect timeout, and that a peer which never completes its handshake
+/// holds a listener's connection no longer.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 const _: () = assert!(
@@ -174,6 +176,10 @@ pub enum DeadlineKey {
     /// TLS and the protocol's own handshake included.
     #[strum(serialize = "connect_timeout_ms")]
     ConnectTimeout,
+    /// `idle_timeout_ms`: how long a connection may carry nothing while its connector waits to read
+    /// from it, after which the connector closes it.
+    #[strum(serialize = "idle_timeout_ms")]
+    IdleTimeout,
 }
 
 impl DeadlineKey {
@@ -203,10 +209,18 @@ mod tests {
     use super::*;
     use crate::RuntimeCapability;
 
-    /// Waits that name both keys, one of them twice, beside one a clause bounds.
+    /// Waits that name every key, one of them twice and the idle one first, beside one a clause
+    /// bounds.
     const KEYED: DeclaredBounds = DeclaredBounds {
         buffers: &[],
         waits: &[
+            DeclaredWait {
+                wait: "reading a connection",
+                bound: WaitBound::Key {
+                    key: DeadlineKey::IdleTimeout,
+                    omitted: OmittedDeadline::Unbounded,
+                },
+            },
             DeclaredWait {
                 wait: "a connection",
                 bound: WaitBound::Key {
@@ -240,7 +254,11 @@ mod tests {
     fn each_deadline_key_a_wait_names_is_listed_once_in_key_order() {
         assert_eq!(
             KEYED.deadline_keys(),
-            vec![DeadlineKey::Timeout, DeadlineKey::ConnectTimeout]
+            vec![
+                DeadlineKey::Timeout,
+                DeadlineKey::ConnectTimeout,
+                DeadlineKey::IdleTimeout
+            ]
         );
     }
 
@@ -274,6 +292,7 @@ mod tests {
     fn each_named_key_is_one_stalled_peer_check_written_as_its_client_key() {
         assert_eq!(DeadlineKey::Timeout.key(), "timeout_ms");
         assert_eq!(DeadlineKey::ConnectTimeout.key(), "connect_timeout_ms");
+        assert_eq!(DeadlineKey::IdleTimeout.key(), "idle_timeout_ms");
         let checks: Vec<String> = RuntimeCapability::of_bounds(KEYED)
             .iter()
             .map(ToString::to_string)
@@ -282,7 +301,8 @@ mod tests {
             checks,
             vec![
                 "STALLED PEER timeout_ms".to_string(),
-                "STALLED PEER connect_timeout_ms".to_string()
+                "STALLED PEER connect_timeout_ms".to_string(),
+                "STALLED PEER idle_timeout_ms".to_string()
             ]
         );
     }
