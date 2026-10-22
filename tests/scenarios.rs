@@ -107,7 +107,7 @@ use crate::common::{
         HttpsPublishLoopOutcome, InterconnectCredentialFault, TEST_AUTH_PASSWORD,
         TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
         assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
-        observe_kafka_through, publish_kafka_record_through,
+        command_connect_options, observe_kafka_through, publish_kafka_record_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
@@ -15909,14 +15909,14 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_the_leader_
         .cluster()
         .grpc_uri(&leader)
         .expect("failed to resolve leader gRPC URI");
+    let commands = expand_placeholders(world, docstring(step));
     let client = Client::connect_with_options(
         &grpc_uri,
         client_domain(&world.domain),
-        client_connect_options(&grpc_uri).expect("failed to build client tls options"),
+        command_connect_options(&grpc_uri, &commands).expect("failed to build client tls options"),
     )
     .await
     .expect("failed to connect leader client");
-    let commands = expand_placeholders(world, docstring(step));
     for command in nspl_statements(&commands) {
         let outcome = client
             .execute(command.clone())

@@ -13,6 +13,16 @@ from scripts.typed_ratchet import ROOT, TOOLCHAIN, Runner
 
 
 class CompilerContractTests(unittest.TestCase):
+    def test_fixed_constant_contracts(self) -> None:
+        allowed = self.compile("constant_allowed")
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        rejected = self.compile("constant_invalid", "--error-format=json")
+        self.assertNotEqual(rejected.returncode, 0, rejected.stderr)
+        diagnostics = [json.loads(line) for line in rejected.stderr.splitlines() if line.startswith("{")]
+        findings = [item for item in diagnostics if (item.get("code") or {}).get("code") == "nervix::invalid_contract"]
+        self.assertEqual(len(findings), 5, rejected.stderr)
+        self.assertEqual({span["line_start"] for finding in findings for span in finding["spans"] if span["is_primary"]}, {3, 6, 9, 12, 13})
+
     def test_resolved_arithmetic_and_combinator_contracts(self) -> None:
         for name, diagnostic in (("api_arithmetic", "nervix::clamped_arithmetic"),
                                  ("api_combinator", "nervix::combinator_control_flow")):

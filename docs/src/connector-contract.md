@@ -104,9 +104,74 @@ not introduce a synchronization claim.
 
 Before closing a connector epic, review changes landed from parallel work for additional name
 sources, free-text causes, inaccurate boundary annotations, and publish, mapping, batch or
-acknowledgement paths missing their unit or property coverage. Record the review, evidence and
-any compliance tasks on the owning ClickUp epic and tasks. Implementation reports and temporary
-audit findings are not repository documentation.
+acknowledgement paths missing their unit or property coverage, and hold them to the
+[delivery review](#delivery-review) below. Record the review, evidence and any compliance tasks on
+the owning ClickUp epic and tasks. Implementation reports and temporary audit findings are not
+repository documentation.
+
+### Connector delivery standard
+
+A connector loses, duplicates or stalls nothing beyond what its declarations state. The following
+standard applies to each source and sink, its declarations, and the host paths that drive it,
+including a path another feature adds or changes. Each rule names the section that owns its detail.
+
+- **Declarations state what the transport gives.** Every source entity declares its position
+  class, what its positions still mean once their connection is gone, and its acknowledgement
+  confirmation, how far its transport has confirmed them once acknowledging returns. A source whose
+  client returns before its transport answers declares that weaker confirmation rather than
+  reporting one it did not get. The host handles each class once after a lost connection: it
+  retries a `replayable` source's rejection before reading again, discards and counts the pending
+  positions of a `broker_redelivered` source, and keeps nothing for a source of class `none`; see
+  [Source boundary](#source-boundary).
+- **Progress follows confirmation.** `acknowledge` returns once the transport has confirmed the
+  positions as far as the entity declares, or with a typed acknowledgement failure. The host reports
+  a batch's progress and releases its work only then, so a drain, an ownership handoff and a
+  graceful stop wait for that confirmation within their deadlines; see
+  [Confirmed acknowledgements](#confirmed-acknowledgements).
+- **A codec's refusal is consumed once.** A payload its codec refuses leaves its batch as a decode
+  rejection, which the ingestor's `ON GENERAL ERROR` policy reports, and in an acknowledged mode its
+  position is acknowledged with the batch's other positions instead of being presented again. A
+  refusal for room judged nothing and stays a retry; see
+  [Decode Rejections](./errors-and-diagnostics.md#decode-rejections).
+- **A cancelled read keeps what it took.** The host awaits every read it starts, and a read it
+  cancels ends with every message it had already taken, which the host takes in; see
+  [Interrupted reads](#interrupted-reads).
+- **Every sink finishes.** `finish` has no default. It sends what the sink's client still holds by
+  the deadline the host gives it, or reports what it could not send; see
+  [Finishing a sink](#finishing-a-sink).
+- **A brokered sink never resends what its broker confirmed.** A record sink that awaits its
+  broker's answers in `MODE ACK` does so through the contract's `ConfirmationWindow`, which settles
+  every answer already given before a failure ends the publish; see [Sink boundary](#sink-boundary).
+  The RabbitMQ sink, which settles what its broker confirmed itself when it loses a channel, is
+  the one brokered sink that does not use the window yet.
+- **Every buffer and every wait is declared with its bound.** The deadline keys keep one meaning,
+  no driver call parks an asynchronous worker, and each deadline key an entity's waits name has its
+  stalled-peer scenario. A change adds no unbounded buffer and no wait that only a stop ends; one
+  that already exists stays declared unbounded until its connector bounds it. See
+  [Bounds and deadlines](#bounds-and-deadlines).
+- **A delivery defect is reproduced before it is fixed.** A fix for a lost, duplicated or stalled
+  delivery starts from a reproducer that fails because of the defect: a public scenario through the
+  connector's real transport, and a Shuttle check over the production owner where the defect is an
+  interleaving.
+
+The generated tables of this chapter list each source entity's position class and acknowledgement
+confirmation, the capability inventory names each entity's stalled-peer scenarios, and the Shuttle
+checks of broker source reconnect, confirmation, refused payload confirmation and read
+interruption, and of the brokered sink confirmation window, hold the host's protocols for these
+rules; see [Protocols and their checks](./data-plane-concurrency.md#protocols-and-their-checks).
+
+#### Delivery review
+
+A change that adds or alters a source or sink entity, or a host path that drives one, checks that:
+
+- each source entity declares the position class and acknowledgement confirmation its transport
+  actually gives;
+- a read the host cancels returns every message it took;
+- a payload its codec refuses becomes a decode rejection rather than failing its whole batch;
+- each sink answers `finish` for what its client can still hold once a publish returns, and a
+  brokered sink in `MODE ACK` awaits its broker through the `ConfirmationWindow`;
+- the [bounds review checklist](#review-checklist) holds;
+- a new host protocol on these paths has a Shuttle check over its production owner.
 
 ### DNS for HTTP and Iceberg
 
@@ -321,6 +386,11 @@ connection failed, lookup failures included, before the source reports the failu
 connections stay open when their host's answer changes or expires; the next connection resolves
 again.
 
+SQS unit checks retain a bound, non-listening socket for each refused endpoint until the request
+finishes. The socket keeps another parallel fixture from listening on that address while still
+making the SDK observe connection refusal. The ownership check verifies both properties; source
+receive stand-ins continue to run independently beside these checks.
+
 ### DNS for OTEL gRPC
 
 The OTEL sink receives the node's resolver in its typed sink configuration. Its gRPC transport
@@ -460,9 +530,10 @@ and the HTTP and gRPC receivers can hold a response; scenarios stand them where 
 
 A change that adds or alters a connector's buffers or network waits checks that:
 
-- every buffer between the transport and the host is declared with its capacity and overflow;
-- every network wait is bounded by a declared key, clause, fixed bound or driver default, or is
-  declared unbounded;
+- every buffer between the transport and the host is declared with its capacity and overflow, and
+  only a buffer already declared unbounded stays so;
+- every network wait is bounded by a declared key, clause, fixed bound or driver default, and only
+  a wait already declared unbounded stays so;
 - every deadline key it reads keeps the meaning above and is read through `ConfiguredDeadline`;
 - no driver call parks an asynchronous worker;
 - every deadline key its declaration names has its stalled-peer scenario in the inventory.
@@ -954,6 +1025,12 @@ it did not get:
 | `queued` | `MQTT TOPIC` | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. An MQTT `PUBACK` is written when the client's event loop is next polled. |
 | `written` | `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
 <!-- connector-matrix:confirmation:end -->
+
+`HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` and `CLIENT PRODUCER` declare `none` as both their position
+class and their acknowledgement confirmation because they hold no transport position. In an
+acknowledged mode an endpoint answers its sender for each payload, and the client source for each
+batch, once that payload's or batch's acknowledgement root resolves; the answer settles nothing on
+a transport that the host could confirm or ask to deliver again.
 
 A Kafka consumer group in `MODE NO ACK` leaves its commits to the driver, which commits the
 positions it delivered on its own cadence, `auto.commit.interval.ms`, so acknowledging such a batch
@@ -1872,12 +1949,13 @@ drain boundary. This chapter does not redefine those output formats.
 
 1. Declare each entity it serves in the vocabulary: one Model per entity with its
    [declaration](#entity-declarations), which states its modes, quiesce modes, locator, options,
-   body, batching and every other fact a statement can say about it, and a typed name, checked by
-   the entity's own rule, for each external name its statement writes. The connector and entity
-   together name the statement's head, such as `KAFKA TOPIC INGESTOR`. Then add the connector's
-   grammar module, which owns each entity's body, and its completion; the generated conformance
-   tests hold both to the declaration. Keep external driver configuration raw only where
-   pass-through is its intentional contract.
+   body, batching, [bounds](#bounds-and-deadlines), a source's position class and acknowledgement
+   confirmation as its transport gives them, and every other fact a statement can say about it,
+   and a typed name, checked by the entity's own rule, for each external name its statement
+   writes. The connector and entity together name the statement's head, such as
+   `KAFKA TOPIC INGESTOR`. Then add the connector's grammar module, which owns each entity's body,
+   and its completion; the generated conformance tests hold both to the declaration. Keep external
+   driver configuration raw only where pass-through is its intentional contract.
 2. Validate schema, reference, branch, header, quiesce, delivery, and external contract rules in
    the registry. Convert the validated Model into one typed start-plan variant before execution;
    a source's variant belongs to the registry's ingestor planner.
@@ -1887,7 +1965,9 @@ drain boundary. This chapter does not redefine those output formats.
    sink answers `finish` for what its client can still hold once a publish returns, as
    [Finishing a sink](#finishing-a-sink) describes, and adds its row to that table. A broker
    source ends a read the host cancels with every message it already took, as
-   [Interrupted reads](#interrupted-reads) describes, and adds its row to that table. Add its
+   [Interrupted reads](#interrupted-reads) describes, and adds its row to that table. Its
+   `acknowledge` returns at the confirmation its entity declares. The
+   [connector delivery standard](#connector-delivery-standard) lists the remaining rules. Add its
    composition mapping in the server; do not teach the contract or registry about the driver.
 4. Add unit coverage for transport behavior and feature scenarios through NSPL, including
    three-node execution and failure paths, and register the scenarios that observe each declared
