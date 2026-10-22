@@ -76,6 +76,11 @@ both use the same schedule-to-revision planning boundary.
 | Emitters | Typed sink and optional connector client or codec, ordered source relays and predicates, construction, request and ordering expressions, flush, batching, ACK, and error policies | Resolve local mounts and schemas, bind programs, register local or remote consumers, and open the sink |
 | Message errors | Source and optional partial-output schemas, target relay and branch, route flush contract, and ordered `SET` program | Bind once for the installed revision; execute it for failed records using their captured state |
 
+Kafka source installation also binds the node-owned executor into the connector plan. Partition
+inspectors used by scheduling and the host's partition watch use that same node executor. The
+connector interprets the effective native client deadline and admits its synchronous driver calls;
+the decision layer neither opens a consumer nor selects a worker backend.
+
 The tables describe distinct decisions in one revision, not independently selectable runtime
 configurations. Every node, including one placed elsewhere, is planned from the same domain
 schedule. This lets a local owner, its replicas, a remote relay consumer, and a future owner
@@ -179,9 +184,11 @@ The schedule classifier retains Model-based change-aspect and quiescence decisio
 registry. The runtime receives typed dynamic values, affected node identities, state purges,
 and gate relays. It does not reclassify the new schedule. An entity swap that fails locally
 falls back to a full rebuild of the desired revision; the actual wider engagement is reported as
-a recovery expansion. If that rebuild also fails, application fails and the committed revision
-remains eligible for retry. A plan is complete even for a narrow change, so fallback uses the
-same desired revision rather than reconstructing one from live tasks.
+a recovery expansion. A failed emitter stop is returned instead: its task is retained with the
+sink's held records, and rebuilding would discard the stop's exact finish outcome. If a fallback
+rebuild also fails, application fails and the committed revision remains eligible for retry. A plan
+is complete even for a narrow change, so fallback uses the same desired revision rather than
+reconstructing one from live tasks.
 
 The swap sequence fences delivery before stopping an owner, prepares new local placement and
 programs, replaces relay owner and remote-consumer edges, and publishes the routing snapshot

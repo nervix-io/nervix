@@ -29,11 +29,11 @@ use super::{
 use crate::{
     AcknowledgementConfirmation, ByteSizeUnit, ClientName, ConnectorKind, DeclaredDelivery,
     DeclaredQuiesce, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    EmitterPublishingModeKind, Expression, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass, RetryPolicy,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    EmitterPublishingModeKind, Expression, HeaderLayout, HeaderModel, IngestAcknowledgement,
+    IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration, LocatorName, OptionChoice,
+    OptionDeclaration, OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass,
+    RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
+    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Sqs: unpooled, config Nervix, CreateClientSqs => SqsConfigEntry);
@@ -121,7 +121,8 @@ const SQS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for SqsQueueSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
+        // An SQS message's attributes: one value per name, in no order.
+        headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Sqs),
@@ -220,7 +221,8 @@ pub enum SqsFifoGroup {
 
 impl SinkEntity for SqsQueueSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: true,
+        // An SQS message's attributes: one value per name, the last written, in no order.
+        headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
         reference: SinkReferenceKind::Client(ConnectorKind::Sqs),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional {

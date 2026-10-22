@@ -296,7 +296,11 @@ whole report. Every format carries the same typed envelope in the command result
 
 A new leader automatically resumes every `COMMITTING` transaction from its recorded applying step.
 Completed effects are not repeated, and a failed remaining step records its statement number and
-error while preserving the applied prefix. A model step that did not pause and whose VHOSTs an HTTPS
+error while preserving the applied prefix. A model step whose earlier coordinator paused the domain
+and stopped before publishing it runs again under the pause it finds: the step adopts that pause as
+its own, drains it, checks its frozen inputs against the domain as the pause left it, and releases
+it before recording any outcome. An ordinary command whose internal transaction is still
+`COMMITTING` stays applying and keeps its domain mutation lease until that transaction finishes. A model step that did not pause and whose VHOSTs an HTTPS
 listener could not install is the one step whose failure removes its own effect: the record of that
 failure also restores the schedule the step replaced, so the applied prefix ends before it. Both
 the first attempt and a resuming leader apply this rule. Repeating the outstanding `COMMIT` joins

@@ -80,6 +80,19 @@ coordinator recovers that progress under the same execution reference, joining t
 returning its recorded outcome. Only a refusal decided against the attempt as it still stands
 becomes the command's outcome. A command's own domain pause therefore never fails that command.
 
+A coordinator also inherits the attempt's own domain pause. A leader whose lease lapsed refuses
+writes while it still leads, so the coordinator that paused the domain for a model step can stop
+before it publishes the step or releases the pause, and the next coordinator, on the same leader or
+a new one, finds the domain paused. That pause belongs to the step: the coordinator records it as
+engaged in the step's actual quiescence, drains it, checks the step's frozen inputs against the
+domain as the pause left it, and releases it before the step records any outcome, a planning-input
+refusal included. The pause therefore never refuses the attempt's revision-derived successor or
+the next command. When a coordinator stops on any other failure while the attempt is still
+committing, the command stays applying: it answers `OutcomeUnknown` with the `StillApplying` cause
+and keeps its domain mutation lease, which the committing attempt needs to finish its application
+and release its pause. Reconciliation, or a repetition under the same reference, finishes the
+attempt before the command records its outcome.
+
 Resource uploads follow the same replay rule with an upload identity instead. It is scoped to the
 user, domain, and resource, bound to the verified archive digest, and retained without expiry; see
 [Resource Versions And Bindings](./resource-versions.md#assignment). Transaction appends
@@ -300,6 +313,11 @@ An engaged domain pause belongs to that applying step until its mutation owner r
 the resumed runtime state becomes usable. A refused resume proposal keeps the step recoverable;
 it cannot finish the transaction or release its mutation lease while leaving the domain paused.
 This cleanup boundary applies to successful steps and definitive application failures alike.
+A step whose coordinator paused the domain and stopped before publishing the step's effect is not
+yet applying, so the coordinator that runs it again finds the pause engaged. It adopts the pause as
+the step's own, as recorded engaged quiescence, drains it, and validates the frozen inputs against
+the domain as that pause left it. Every outcome of the step, a planning-input refusal included,
+then releases the adopted pause under the transaction's lease before it is recorded.
 A reconnecting commit waiter attaches to the transaction and continues waiting for that terminal
 result. A definitive failure records one `FAILED` outcome, the failing step, and the committed
 prefix. The final operation and topology report remains with the transaction tombstone until the

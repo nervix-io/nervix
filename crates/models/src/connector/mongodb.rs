@@ -82,7 +82,7 @@ const MONGODB_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SinkEntity for MongoDbCollectionSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::Client(ConnectorKind::MongoDb),
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },

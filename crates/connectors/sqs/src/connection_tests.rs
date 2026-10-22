@@ -22,7 +22,7 @@ use nervix_connector::{
 use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::{ClientConfigEntry, SqsQueueName, Timestamp};
 use nervix_primitives::{
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
     task::JoinHandle,
 };
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
@@ -380,14 +380,8 @@ async fn a_host_that_does_not_resolve_is_the_typed_cause_of_the_queue_lookup_fai
 #[nervix_primitives::test]
 async fn a_refused_connection_is_described_by_its_causes() {
     let fixture = Fixture::start().await;
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .await
-        .expect("a loopback port is available");
-    let port = listener
-        .local_addr()
-        .expect("a bound listener has an address")
-        .port();
-    drop(listener);
+    let endpoint = RefusedEndpoint::reserve();
+    let port = endpoint.port();
     let client = SqsSink::client_from_config(
         &client_config(&format!("http://127.0.0.1:{port}")),
         fixture.dns(),
@@ -424,23 +418,50 @@ fn a_service_response_keeps_its_short_description() {
     assert_eq!(failure.description(), "service error");
 }
 
-/// A port on the loopback address nothing listens on, so every connection to it is refused.
-pub(crate) async fn closed_port() -> u16 {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+/// A bound endpoint that refuses connections and keeps its address reserved for this check.
+pub(crate) struct RefusedEndpoint {
+    socket: TcpSocket,
+}
+
+impl RefusedEndpoint {
+    pub(crate) fn reserve() -> Self {
+        let socket = TcpSocket::new_v4().expect("a loopback socket can be created");
+        socket
+            .bind((Ipv4Addr::LOCALHOST, 0).into())
+            .expect("a loopback port is available");
+        Self { socket }
+    }
+
+    pub(crate) fn port(&self) -> u16 {
+        self.socket
+            .local_addr()
+            .expect("a bound socket has an address")
+            .port()
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_refused_endpoint_keeps_its_port_reserved() {
+    let endpoint = RefusedEndpoint::reserve();
+    let port = endpoint.port();
+
+    assert!(
+        TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_err(),
+        "another fixture must not listen on the refused endpoint"
+    );
+    let error = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
         .await
-        .expect("a loopback port is available");
-    let port = listener
-        .local_addr()
-        .expect("a bound listener has an address")
-        .port();
-    drop(listener);
-    port
+        .expect_err("a reserved endpoint that does not listen refuses connections");
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
 }
 
 #[nervix_primitives::test]
 async fn a_send_that_cannot_connect_fails_the_publish_without_answering_a_record() {
     let fixture = Fixture::start().await;
-    let port = closed_port().await;
+    let endpoint = RefusedEndpoint::reserve();
+    let port = endpoint.port();
     for (mode, operation) in [
         (
             SqsPublishingMode::Single,
@@ -585,7 +606,8 @@ async fn a_source_looks_its_queue_up_once_when_it_first_resumes() {
 #[nervix_primitives::test]
 async fn a_source_that_cannot_reach_the_service_opens_and_fails_its_resume() {
     let fixture = Fixture::start().await;
-    let port = closed_port().await;
+    let endpoint = RefusedEndpoint::reserve();
+    let port = endpoint.port();
     let mut source = open_source(
         &client_config(&format!("http://127.0.0.1:{port}")),
         fixture.dns(),

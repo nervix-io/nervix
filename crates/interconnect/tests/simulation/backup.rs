@@ -828,8 +828,8 @@ fn exercise_backup_section(run: ScenarioRun, sections: SectionSet) -> Result<(),
                         offset,
                         u64::try_from(CONTAINER_BYTES).assured("fixture length fits")
                     );
-                    // Fetch and install use the same reserved snapshot stream slot. Complete
-                    // capture first, as the production archive staging boundary does.
+                    // Complete capture before installation begins, as the production archive
+                    // staging boundary does.
                     install_action(&client, &peer, &coordination, sections.begin_install()).await;
                     let mut offset = 0;
                     for index in 0..SECTION_COUNT {

@@ -158,7 +158,59 @@ impl HttpSource {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use reqwest::header::{HeaderName, HeaderValue};
+
     use super::*;
+
+    /// HTTP REQUEST ingestors declare repeats by name with lowercase names: a polled response's
+    /// fields are visited under their lowercase names, every value of a repeated field together
+    /// and in the order the response carried them.
+    #[test]
+    fn response_fields_are_visited_lowercase_with_every_value_of_a_field_together() {
+        let mut fields = HeaderMap::new();
+        for (name, value) in [
+            ("X-Trace", "a"),
+            ("Tenant", "x"),
+            ("x-trace", "b"),
+            ("TENANT", "y"),
+        ] {
+            fields.append(
+                HeaderName::from_bytes(name.as_bytes()).expect("each name is a valid field name"),
+                HeaderValue::from_static(value),
+            );
+        }
+        let mut visited: Vec<(String, String)> = Vec::new();
+        HttpResponseHeaders(&fields)
+            .visit(&mut |name, value| visited.push((name.to_string(), value.to_string())));
+
+        // The order of different names is not declared, so only each name's values are compared,
+        // after checking that a name's values arrive together.
+        let mut finished = std::collections::BTreeSet::new();
+        let mut current: Option<&str> = None;
+        let mut values: std::collections::BTreeMap<&str, Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for (name, value) in &visited {
+            if current != Some(name.as_str()) {
+                if let Some(previous) = current {
+                    finished.insert(previous);
+                }
+                assert!(
+                    !finished.contains(name.as_str()),
+                    "every value of {name} is visited together: {visited:?}"
+                );
+                current = Some(name);
+            }
+            values
+                .entry(name.as_str())
+                .or_default()
+                .push(value.as_str());
+        }
+        let expected = std::collections::BTreeMap::from([
+            ("tenant", vec!["x", "y"]),
+            ("x-trace", vec!["a", "b"]),
+        ]);
+        assert_eq!(values, expected);
+    }
 
     #[test]
     fn http_source_reads_endpoint_and_method_configuration() {

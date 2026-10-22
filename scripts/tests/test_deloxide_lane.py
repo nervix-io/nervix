@@ -442,7 +442,7 @@ class InventoryTests(unittest.TestCase):
         for index, group in enumerate(identities):
             for other in identities[index + 1:]:
                 self.assertTrue(group.isdisjoint(other))
-        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [96, 10, 6])
+        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [100, 10, 6])
         for invocation, group in zip(phases, groups, strict=True):
             registered = inventory.workloads_of(invocation.id, "deloxide-stress")
             self.assertEqual(deloxide_lane.scenario_problems(invocation, registered, group), [])
@@ -469,8 +469,8 @@ class InventoryTests(unittest.TestCase):
             if workload.selections == {"deloxide-order"}
         }
         self.assertEqual(len(inventory.workloads_of("probes", "deloxide")), 14)
-        self.assertEqual(len(inventory.workloads_of("probes", "deloxide-order")), 22)
-        self.assertEqual(len(order_only), 8)
+        self.assertEqual(len(inventory.workloads_of("probes", "deloxide-order")), 23)
+        self.assertEqual(len(order_only), 9)
         self.assertEqual(
             list(inventory.invocations),
             ["probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
@@ -565,11 +565,11 @@ class InventoryTests(unittest.TestCase):
                 self.assertEqual(counterpart.invariant, workload.invariant)
                 self.assertTrue(counterpart.coverage.startswith("Under scheduling stress: "))
         self.assertEqual(set(stressed), expected)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 96)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 100)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-transaction-retention", "deloxide-stress")), 6)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-endpoint-acknowledgement", "deloxide-stress")), 10)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 51)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 53)
         stress_ids = {workload.id for workload in inventory.workloads.values() if workload.id.startswith("stress.")}
         for path, owner in inventory.owners.items():
             with self.subTest(owner=path):

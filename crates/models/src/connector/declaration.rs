@@ -103,6 +103,8 @@ pub enum OptionValue {
     Client(ConnectorKind),
     /// A clause of several parts, as the option's example writes them.
     Clause,
+    /// A byte size: a whole number greater than zero followed by its unit, such as `16MiB`.
+    Size,
 }
 
 /// One choice an option offers.
@@ -289,7 +291,8 @@ pub enum RuntimeCapability {
     /// An emitter setting one envelope clause.
     Envelope(EnvelopeClauseKind),
     /// A peer that stops answering during a wait the deadline key bounds surfacing as the
-    /// entity's transient status within that key's bound.
+    /// entity's transient status within that key's bound, or, for a listener, which serves many
+    /// peers, closing that peer's connection no sooner than the bound.
     StalledPeer(DeadlineKey),
     /// An emitter setting one property.
     Property { name: &'static str },

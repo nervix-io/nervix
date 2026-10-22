@@ -22,6 +22,13 @@ use super::{BlockedAttempt, BoundedText, LockSite, TrackedLockId, TrackedThreadI
 
 pub const MAX_ORDER_EDGES: usize = 64;
 pub const MAX_ORDER_WITNESSES: usize = 1_024;
+/// The directed lock-instance edges one process's order history keeps. Ending a lock does not give
+/// its edges back, so a lock that lives for one request and is taken under the lock of an owner
+/// that outlives it spends one edge per request, as relay admission records do under their peer
+/// owner. The three-node 40-relay materialized restore with a leadership handoff leaves more than
+/// 13,000 such edges in one process, and more when its relay deliveries retry, so the bound leaves
+/// room for several times that.
+pub const MAX_ORDER_HISTORY_EDGES: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LockLifetime {

@@ -133,6 +133,94 @@ class RatchetGateTests(unittest.TestCase):
 
 class CountTests(unittest.TestCase):
 
+    def test_tunable_aliases_stay_in_their_lexical_scope(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, {**ANCHOR, "src/lib.rs": """
+use std::time::Duration;
+mod inner { type Duration = String; const LABEL: Duration = make(); }
+const WAIT: Duration = Duration::from_secs(3);
+fn run() { use std::time::Duration as Budget; Budget::from_millis(2); }
+#[cfg(test)] mod tests { type Duration = String; }
+"""})
+            self.assertEqual([site.line for site in measure_sources(root)["hidden_tunables"]], [4, 5])
+
+    def test_hidden_tunables_cover_every_governed_constant_type(self) -> None:
+        types = ["Duration", "usize", "u64", "u32", "u16", "u8", "i64", "i32", "f64", "NonZeroU8", "NonZeroUsize", "ByteUnit"]
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = "\n".join(f"const C{index}: {kind} = make();" for index, kind in enumerate(types))
+            write_repository(root, {**ANCHOR, "src/lib.rs": source})
+            self.assertEqual(count(root, "hidden_tunables"), len(types))
+
+    def test_fixed_contracts_cannot_hide_malformed_or_misplaced_annotations(self) -> None:
+        for annotation in [
+            '#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = ""))] const C: usize = 1;',
+            '#[cfg_attr(nervix_lint, nervix::constant(variable, reason = "wire"))] const C: usize = 1;',
+            '#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = "wire"))] fn f() {}',
+            '#[cfg_attr(any(), nervix::constant(fixed, reason = "wire"))] const C: usize = 1;',
+        ]:
+            with self.subTest(annotation=annotation), TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_repository(root, {**ANCHOR, "src/lib.rs": annotation})
+                with self.assertRaisesRegex(SystemExit, "invalid fixed-constant contract"):
+                    measure_sources(root)
+
+    def test_hidden_tunables_count_numeric_constants_and_literal_policy_calls(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, {**ANCHOR, "src/policy.rs": """
+use std::time::Duration as Budget;
+const WAIT: Budget = Budget::from_secs(30);
+const DEPTH: usize = 64;
+const NAME: &str = "Duration::from_secs(99)";
+#[cfg(any())] const OTHER: std::num::NonZeroU32 = nonzero!(8u32);
+fn configure() {
+    let wait = Budget::from_millis(5);
+    let queue = mpsc::channel(16);
+    let rows = Vec::with_capacity(128);
+    let permits = Semaphore::new(4);
+    let dynamic = Vec::with_capacity(rows.len());
+}
+"""})
+            sites = measure_sources(root)["hidden_tunables"]
+            self.assertEqual([site.line for site in sites], [3, 4, 6, 8, 9, 10, 11])
+            (root / "src/new.rs").write_text("const NEW: u64 = 12;\n")
+            self.assertEqual(count(root, "hidden_tunables"), 8)
+
+    def test_hidden_tunable_exclusions_are_narrow_and_source_owned(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, {**ANCHOR, "src/policy.rs": """
+#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = "the frame ABI reserves four bytes"))]
+const WIDTH: usize = 4;
+struct Local { budget: Setting<Budget> }
+impl Default for Local { fn default() -> Self { Self { budget: Duration::from_secs(7) } } }
+impl SettingDefinition for Budget {
+    fn default_value() -> Duration { Duration::from_secs(8) }
+    fn other() { Duration::from_secs(9); }
+}
+#[cfg(test)] mod checks { const ONLY: usize = 10; }
+#[test] fn probe() { Duration::from_secs(11); }
+struct Ordinary;
+impl Default for Ordinary { fn default() -> Self { Duration::from_secs(12); Self } }
+""", "tests/probe.rs": "const LIMIT: usize = 1;", "benches/probe.rs": "const LIMIT: usize = 1;",
+                "examples/probe.rs": "const LIMIT: usize = 1;", "crates/arbitrary/src/lib.rs": "const LIMIT: usize = 1;",
+                "crates/model-harness/src/lib.rs": "const LIMIT: usize = 1;", "crates/test-environment/src/lib.rs": "const LIMIT: usize = 1;",
+                "crates/benchmark/src/lib.rs": "const LIMIT: usize = 1;", "tools/probe/src/lib.rs": "const LIMIT: usize = 1;"})
+            self.assertEqual([site.line for site in measure_sources(root)["hidden_tunables"]], [8, 13])
+
+    def test_hidden_tunable_gate_refuses_an_added_policy_literal(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, {"src/lib.rs": "fn configure() {}\n"})
+            write_baseline(root / BASELINE_FILE, {item.name: len(measure_sources(root)[item.name]) for item in COUNTS})
+            (root / "src/lib.rs").write_text("fn configure() { mpsc::channel(32); }\n")
+            with mock.patch("scripts.ratchet.check_synchronization", return_value=None):
+                status, report, _ = run("--root", str(root))
+            self.assertEqual(status, 1)
+            self.assertIn("hidden_tunables: 0 -> 1", report)
+
     def test_malformed_source_cannot_report_a_clean_structural_count(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

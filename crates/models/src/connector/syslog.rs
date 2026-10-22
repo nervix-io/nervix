@@ -59,11 +59,17 @@ const SYSLOG_LISTENER_BOUNDS: DeclaredBounds = DeclaredBounds {
     waits: &[
         DeclaredWait {
             wait: "the TLS handshake of an accepted connection",
-            bound: WaitBound::Unbounded,
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
         },
         DeclaredWait {
             wait: "reading a connection",
-            bound: WaitBound::Unbounded,
+            bound: WaitBound::Key {
+                key: DeadlineKey::IdleTimeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
         },
     ],
     driver_limits: &[
@@ -83,8 +89,11 @@ const SYSLOG_COLLECTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredWait {
-            wait: "a write",
-            bound: WaitBound::Unbounded,
+            wait: "writing and flushing a frame",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
         },
     ],
     driver_limits: &[],
@@ -92,7 +101,7 @@ const SYSLOG_COLLECTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for SyslogListenerSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
+        headers: None,
         metadata: SourceMetadataScope::Syslog,
         executes_on_every_cluster_node: true,
         reference: SourceReferenceKind::Client(ConnectorKind::Syslog),
@@ -167,7 +176,7 @@ pub struct SyslogCollectorSink {
 
 impl SinkEntity for SyslogCollectorSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::Client(ConnectorKind::Syslog),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },

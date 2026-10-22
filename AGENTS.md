@@ -286,6 +286,11 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   missing value, state variant, required identity, conversion failure, or boundary representation
   is modeled or validated must keep that chapter current in the same change. Interconnect,
   domain-clock, and shutdown details remain in their own authoritative chapters.
+- [Node Settings](docs/src/node-settings.md) is the authoritative architecture reference for
+  prerequisites, cluster parameters and node capabilities. Changes to setting declarations,
+  defaults, derivations, fixed-value contracts, validation, carriers, change procedures,
+  capability sizing or settings enforcement keep that chapter current in the same change.
+  Interconnect, consensus, connector and lifecycle chapters retain their detailed contracts.
 - [Execution Plans](docs/src/execution-plans.md) is the authoritative architecture reference for
   converting a committed schedule into one typed execution revision and installing it as running
   or passive runtime state. Any change to revision construction, typed node, resource, source,
@@ -375,15 +380,30 @@ source contract, the sink contract, or both, from `nervix-connector` in `crates/
   required public scenarios or concurrency evidence.
 - Every buffer a connector holds between its transport and the host is declared in its entity's
   `DeclaredBounds` with its capacity and overflow, and every network wait with what ends it,
-  unbounded ones included. `timeout_ms` and `connect_timeout_ms` keep the one meaning the
-  contract gives them and are read through `ConfiguredDeadline`; no driver call that parks its thread
+  unbounded ones included. A change adds no unbounded buffer and no wait that only the host's stop
+  ends; one that already exists stays declared unbounded until its connector bounds it. Each
+  client deadline key, such as `timeout_ms` or `connect_timeout_ms`, keeps the one meaning the
+  contract gives it and is read through `ConfiguredDeadline`; no driver call that parks its thread
   runs on an asynchronous worker; and every deadline key an entity's waits name has its
   `STALLED PEER` scenario in the capability inventory.
   [Bounds and deadlines](docs/src/connector-contract.md#bounds-and-deadlines) owns the rule and
   its review checklist.
-- The [connector hygiene standard](docs/src/connector-contract.md#connector-hygiene-standard)
-  owns the detailed requirements. Before closing a connector epic, review landed parallel work
-  against it and record evidence and compliance tasks on ClickUp. Keep the contract chapter,
+- A connector loses, duplicates or stalls nothing beyond what its declarations state. Every source
+  entity declares the position class and acknowledgement confirmation its transport actually
+  gives, and `acknowledge` returns only once that confirmation arrives, so progress, a drain and a
+  handoff wait for the transport. A read the host cancels returns every message it already took. A
+  payload its codec refuses is consumed as a decode rejection through the ingestor's general error
+  policy, never presented again. Every sink implements `finish` for what its client still holds,
+  by the host's deadline, and a brokered sink in `MODE ACK` awaits its broker through the shared
+  `ConfirmationWindow`, so a retry never resends a confirmed record. A connector delivery defect
+  is fixed red first, from a public scenario through the connector's real transport and, where the
+  defect is an interleaving, a Shuttle check over its production owner. The
+  [connector delivery standard](docs/src/connector-contract.md#connector-delivery-standard) owns
+  these rules and their review.
+- The [connector hygiene standard](docs/src/connector-contract.md#connector-hygiene-standard) and
+  the [connector delivery standard](docs/src/connector-contract.md#connector-delivery-standard)
+  own the detailed requirements. Before closing a connector epic, review landed parallel work
+  against both and record evidence and compliance tasks on ClickUp. Keep the contract chapter,
   relevant manuals and the ratchet current in the same change.
 
 `just ratchet` and the clock-boundary check treat the connector crates as data plane, so code that
@@ -708,6 +728,41 @@ build and the existing tests, and nothing in it changes behavior.
 - Session subscriptions retain their existing creation, deletion, delivery, sampling, and
   backpressure semantics. They are read-only filtered views and do not support construction,
   inheritance, values, or side effects.
+
+## Node Settings
+
+- A setting exists as a field of a class-typed group. Its `SettingDefinition` declares exactly
+  one sealed class (`Prerequisites`, `ClusterParameters` or `NodeCapabilities`), its semantic
+  value, name, single default, optional derivation and validation. Groups carry `Setting<D>`
+  fields; explicit values and defaults cross the same typed validation boundary.
+- A prerequisite is what a node must bring to reach the live cluster; it travels through gossip
+  and the handshake and is checked at join. [Node Settings](docs/src/node-settings.md) owns the
+  closed list and timing bounds. Nothing needed to reach the cluster depends on what it can
+  learn only after reaching it.
+- A cluster parameter is what the cluster accepts or promises. It has one Raft-committed value,
+  seeded only at first bootstrap and changed by an administrative Plexus statement. A value
+  the registry validates against is never an independent node flag.
+- A node capability is what one node can carry. It is detected or overridden locally and
+  announced through Raft; peers honour its bounds and placement uses its committed record.
+  It changes no cluster acceptance rule or guarantee.
+- Derived values are named methods on their owner, never flags. Defaults are written once in
+  the owning definition. Dependent defaults remain `Option` at the edge until resolved against
+  typed context. Validate operator-supplied relationships before I/O and transitions at commit.
+- A fixed constant declares `nervix::constant(fixed, reason = "...")`, gated with
+  `cfg_attr(nervix_lint, ...)`; the reason names the wire format, RFC, persisted layout, ABI or
+  invariant that fixes it. A convenient literal is not a fixed-value contract.
+- Values depending on the external system are clauses or declared client keys in that
+  connector's Plexus surface, owned by its connector epic; node settings own host policy.
+- Changes remain correct during a rolling restart in any order, take full effect when the
+  last node adopts them, and support the same rollback in reverse. Only prerequisites reject
+  incompatible peers. Mixed operational values within one current shape obey the alpha
+  one-shape rule; they introduce no alternate data representation.
+- Flags use `--<area>-<name>` and `NERVIX_<AREA>_<NAME>`. Resolved settings are observable with
+  secrets redacted, including per-node capabilities and committed-versus-running drift.
+- The temporary `hidden_tunables` source count only decreases while area owners adopt the
+  declarations. It counts governed numeric constants and literal policy calls outside class
+  defaults and reviewed fixed contracts. Its compiler-rule replacement removes the detector
+  and numeric baseline entry together.
 
 ## Runtime and Infrastructure Invariants
 
@@ -1265,7 +1320,8 @@ build and the existing tests, and nothing in it changes behavior.
   complexity 30, which reads no coverage.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual
   Rust cast expressions, struct fields whose presence depends on `cfg(feature = "testing")`, and
-  functions whose cyclomatic complexity exceeds 30.
+  functions whose cyclomatic complexity exceeds 30, and `hidden_tunables`, numeric policy outside
+  class-typed settings and fixed-value contracts as specified in Node Settings.
   The stable source parser sees inactive branches and named or tuple fields; raw identifiers,
   import aliases, qualified paths and conditional documentation attributes are not those facts.
   Complexity is measured by the cargo-crap version `scripts/cargo_crap.py` pins, which
@@ -1295,7 +1351,7 @@ build and the existing tests, and nothing in it changes behavior.
   expectation widened to cover another operation fail. Generated reports are outputs under target,
   never enforcement inputs. Do not infer policy from filenames, sharing traits or method names.
 - [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md) owns the complete
-  fifteen-family contract matrix, source/compiler scope, qualification and review limits. A new
+  sixteen-family contract matrix, source/compiler scope, qualification and review limits. A new
   or changed semantic rule ships with allowed/rejected compiler fixtures distinguished by the
   resolved fact, false-positive and false-negative controls, precise diagnostic/span assertions,
   and invalid, unfulfilled and widened-expectation checks. Source rules also qualify inactive
@@ -1488,12 +1544,50 @@ build and the existing tests, and nothing in it changes behavior.
   Shuttle, Loom, Turmoil, Chaos or Bolero evidence that covers it instead.
 - After completing requested repository changes, include a proposed Conventional Commit title and
   description in the final response. Follow Conventional Commits and select the title type from the
-  current `type-enum` in `./commitlint.config.js`. Put the title and description together in one
-  fenced code block. Keep the title and each description paragraph on a single unwrapped line; do
-  not insert manual line breaks within them because Git and GitHub handle display wrapping.
+  current `type-enum` in `./commitlint.config.js` by the meanings in [Commit Types](#commit-types).
+  Put the title and description together in one fenced code block. Keep the title and each
+  description paragraph on a single unwrapped line; do not insert manual line breaks within them
+  because Git and GitHub handle display wrapping.
 - When the user requests follow-up changes, regenerate both so the final response contains an
   updated title and description that reflect the complete resulting change instead of a stale
   earlier proposal.
+
+## Commit Types
+
+A commit or pull request title takes its type from the `type-enum` in `./commitlint.config.js`,
+and each type has exactly one meaning:
+
+- `feat` adds or extends a product feature: something a user of Nervix, a developer building on
+  it, or an operator or administrator running it can see.
+- `fix` repairs an actual product defect. A repair to a test is `test`, and a repair to CI or a
+  script is `build`; neither is ever `fix`.
+- `perf` improves the performance of the product. Faster tests are `test` and faster scripts are
+  `build`; neither is ever `perf`.
+- `refactor` changes product code without changing its functionality or its performance. A product
+  code change that also affects performance is `perf`.
+- `style` changes style, such as formatting, anywhere in the repository.
+- `test` covers anything related to tests of every kind, including new tests and fixes to existing
+  ones.
+- `build` changes scripts, `justfile` recipes, CI workflows, how Cargo is invoked, and other build
+  and CI tooling.
+- `doc` changes the published product documentation, such as the book under `docs/src`, or
+  documentation in code.
+- `chore` covers anything no other type matches, and a change whose affected part is hard to state
+  clearly.
+- `version` is the commit that changes the product version.
+- `dep` changes Cargo dependencies, typically by upgrading them.
+- `security` is the preferred type for a security issue, including a dependency upgrade.
+- `revert` reverts an earlier commit.
+- `drop` removes product functionality.
+- `agent` changes the instructions for AI agents: `AGENTS.md` and the agent instructions it
+  references, such as the skills under `.agents/skills`.
+- `bench` changes benchmarks only.
+
+Choose the most relevant type even where types intersect. A type names the change as a whole
+rather than every part it touches: a feature adds tests and is still `feat`, and a fix adds its
+reproducer and is still `fix`. Where two types describe the same change, the more specific one is
+the more relevant: an upgrade to a dependency version that fixes a vulnerability is `security`, not
+`dep`. A change to the `type-enum` keeps this section current in the same change.
 
 ## Error and Diagnostic Quality
 

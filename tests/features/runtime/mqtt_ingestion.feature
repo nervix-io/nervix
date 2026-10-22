@@ -21,8 +21,7 @@ Feature: MQTT ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}?keep_alive=30',
           'client_id' = 'nervix-cucumber-ingestor-{{test_id}}'
@@ -83,8 +82,7 @@ Feature: MQTT ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}?keep_alive=30',
           'client_id' = 'nervix-cucumber-ingestor-reconnect-{{test_id}}'
@@ -148,8 +146,7 @@ Feature: MQTT ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-noack-parallel-{{test_id}}'
@@ -207,8 +204,7 @@ Feature: MQTT ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-fixed-{{test_id}}'
@@ -257,8 +253,7 @@ Feature: MQTT ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-template-{{test_id}}-{{instance}}'
@@ -318,8 +313,7 @@ Feature: MQTT ingestion
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
-      CREATE CLIENT mqtt_main
-        TYPE MQTT
+      CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}'
         };
@@ -385,14 +379,12 @@ Feature: MQTT ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-ack-seq-in-{{test_id}}'
         };
-        CREATE CLIENT mqtt_out
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_out
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-ack-seq-out-{{test_id}}'
@@ -466,8 +458,7 @@ Feature: MQTT ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-ack-parallel-{{test_id}}-{{instance}}'
@@ -537,8 +528,7 @@ Feature: MQTT ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-buffer-<mode_tag>-{{test_id}}'
@@ -631,8 +621,7 @@ Feature: MQTT ingestion
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_main
-        TYPE MQTT
+      CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-gather-{{test_id}}'
@@ -719,8 +708,7 @@ Feature: MQTT ingestion
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_main
-        TYPE MQTT
+      CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-poison-{{test_id}}'
@@ -761,6 +749,67 @@ Feature: MQTT ingestion
     And within "30s" DESCRIBE INGESTOR "mqtt_poison" on the leader node contains
       """
       nervix_ingestor_decode_rejections_total: 1
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # The ingestor's client advertises its declared packet bound as the Maximum Packet Size of every
+  # CONNECT, so the broker discards a larger publish instead of sending it, and the persistent
+  # session never presents it again. The publish behind it reaches the relay.
+  @mqtt_ingest_packet_bound
+  Scenario Outline: The broker discards a publish above an MQTT ingestor's packet bound, and the ingestor keeps consuming
+    Given MQTT is running
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE MQTT CLIENT mqtt_main
+        CONFIG {
+          'addr' = '{{mqtt_addr}}',
+          'client_id' = 'nervix-cucumber-ingestor-bounded-{{test_id}}'
+        };
+      CREATE MQTT TOPIC INGESTOR mqtt_bounded
+        FROM mqtt_main TOPIC 'bounded_{{test_id}}' SESSION PERSISTENT QOS 1
+          MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    Then within "10s" DESCRIBE INGESTOR "mqtt_bounded" on the leader node contains
+      """
+      ready: true
+      """
+    When an MQTT QoS 1 message of 20480 bytes is published to topic "bounded_{{test_id}}"
+    And MQTT QoS 1 message is published to topic "bounded_{{test_id}}"
+      """
+      {"user_id":7}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "user_id":7
       """
 
     Examples:

@@ -53,8 +53,8 @@ Feature: Web console visual client, vhost and endpoint creation
       | 3            |
 
   @visual_client_pool_create
-  Scenario: A pooled client preserves its explicit bounds and sends masked configuration values
-    Given a 1 node nervix cluster is started
+  Scenario Outline: A pooled client preserves its explicit bounds and sends masked configuration values
+    Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     When these NSPL commands are executed on the leader node
       """
@@ -65,9 +65,9 @@ Feature: Web console visual client, vhost and endpoint creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='client']" is clicked
     And selector ".create-name" is filled with "visual_redis"
-    And selector ".create-client-type [data-type='http']" is clicked
+    And selector ".create-client-type [data-client-type='http-client']" is clicked
     And selector ".create-client-config-add" is clicked
-    And selector ".create-client-type [data-type='redis']" is clicked
+    And selector ".create-client-type [data-client-type='redis-client']" is clicked
     Then selector ".create-client-config-entry" does not exist
     When selector ".create-submit" is clicked
     Then selector ".create-validation" contains "Pool minimum"
@@ -83,6 +83,7 @@ Feature: Web console visual client, vhost and endpoint creation
     And selector ".create-client-config-entry:nth-of-type(2) .create-client-config-key" is filled with "password"
     And selector ".create-client-config-entry:nth-of-type(2) .create-client-config-value" is filled with "visual-secret"
     Then selector ".create-preview" contains "POOL SIZE MIN 1 MAX 4"
+    And selector ".create-preview" contains "CREATE REDIS CLIENT visual_redis"
     And selector ".create-preview" does not contain "visual-secret"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
@@ -90,11 +91,17 @@ Feature: Web console visual client, vhost and endpoint creation
     And selector ".prompt-row input" is filled with "SHOW CREATE CLIENT visual_redis;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "POOL SIZE MIN 1 MAX 4"
+    And selector ".terminal" contains "CREATE REDIS CLIENT visual_redis"
     And selector ".terminal" contains "visual-secret"
 
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @visual_client_mount_create
-  Scenario: A client mount selects an explicit completed resource version
-    Given a 1 node nervix cluster is started
+  Scenario Outline: A client mount selects an explicit completed resource version
+    Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And node "node-1" has resource directory "client_mount" containing
       """
@@ -111,7 +118,7 @@ Feature: Web console visual client, vhost and endpoint creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='client']" is clicked
     And selector ".create-name" is filled with "visual_http"
-    And selector ".create-client-type [data-type='http']" is clicked
+    And selector ".create-client-type [data-client-type='http-client']" is clicked
     And selector ".create-client-mount-enabled" is clicked
     And selector ".create-client-resource .create-choice-search" is filled with "visual_client_bundle"
     Then selector ".create-client-resource [data-value='visual_client_bundle']" exists
@@ -122,12 +129,19 @@ Feature: Web console visual client, vhost and endpoint creation
     And selector ".create-client-config-key" is filled with "url"
     And selector ".create-client-config-value" is filled with "http://127.0.0.1:1"
     Then selector ".create-preview" contains "MOUNT visual_client_bundle VERSION 1"
+    And selector ".create-preview" contains "CREATE HTTP CLIENT visual_http"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".prompt-row input" is filled with "SHOW CREATE CLIENT visual_http;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "MOUNT visual_client_bundle VERSION 1"
+    And selector ".terminal" contains "CREATE HTTP CLIENT visual_http"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   @visual_vhost_tls_create
   Scenario Outline: A visual TLS VHOST installs its pinned certificate on every live node
@@ -177,7 +191,7 @@ Feature: Web console visual client, vhost and endpoint creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='client']" is clicked
     And selector ".create-name" is filled with "visual_socket_client"
-    And selector ".create-client-type [data-type='websockets']" is clicked
+    And selector ".create-client-type [data-client-type='websockets-client']" is clicked
     And selector ".create-client-signaling .create-choice-search" is filled with "visual_handshake"
     Then selector ".create-client-signaling [data-value='visual_handshake']" exists
     When selector ".create-client-signaling [data-value='visual_handshake']" is clicked

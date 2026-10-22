@@ -26,6 +26,8 @@ fn small_executor() -> Executor {
             bulk_cpu: one(),
             consensus_storage: one(),
             filesystem_storage: one(),
+            connector_storage: crate::ConnectorStorageWorkers::resolve(Some(one()))
+                .expect("one worker fits the primitive permit bound"),
             pending_jobs: one(),
         },
         budgets: MemoryBudgets::default(),
@@ -50,6 +52,8 @@ fn queued_executor(pending_jobs: usize) -> Executor {
                 bulk_cpu: one(),
                 consensus_storage: one(),
                 filesystem_storage: one(),
+                connector_storage: crate::ConnectorStorageWorkers::resolve(Some(one()))
+                    .expect("one worker fits the primitive permit bound"),
                 pending_jobs: one(),
             }
         },
@@ -70,6 +74,40 @@ async fn default_limits_validate_together() {
     assert_eq!(snapshot.control_cpu.workers, 1);
     assert_eq!(snapshot.consensus_storage.workers, 1);
     assert_eq!(snapshot.filesystem_storage.workers, 2);
+    assert_eq!(snapshot.connector_storage.workers, 2);
+}
+
+#[test]
+fn connector_worker_capacity_is_a_validated_node_capability() {
+    use nervix_models::{NodeCapabilities, SettingClass as _, SettingDefinition as _};
+
+    use crate::ConnectorStorageWorkers;
+
+    let default = ConnectorStorageWorkers::resolve(None).expect("the default capacity is valid");
+    let explicit = ConnectorStorageWorkers::resolve(Some(NonZeroUsize::MIN))
+        .expect("one worker fits the primitive permit bound");
+    let copied = explicit;
+    assert_eq!(copied, explicit);
+    assert_eq!(default.value().get(), 2);
+    assert_eq!(explicit.value().get(), 1);
+    assert_eq!(
+        ConnectorStorageWorkers::NAME,
+        "execution-connector-storage-workers"
+    );
+    assert_eq!(
+        <ConnectorStorageWorkers as nervix_models::SettingDefinition>::Class::NAME,
+        NodeCapabilities::NAME
+    );
+    let error = ConnectorStorageWorkers::resolve(Some(NonZeroUsize::MAX))
+        .expect_err("a capability claim must fit the primitive's permit representation");
+    assert_eq!(
+        error.current_context(),
+        &ExecutionConfigError::WorkerCountTooLarge {
+            class: "connector_storage",
+            workers: usize::MAX,
+            maximum: nervix_primitives::sync::Semaphore::MAX_PERMITS,
+        }
+    );
 }
 
 #[nervix_primitives::test]
@@ -377,6 +415,59 @@ async fn a_storage_job_waiting_for_a_place_runs_once_the_full_queue_frees_one() 
     assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
 }
 
+async fn connector_storage_isolation() {
+    let executor = small_executor();
+    let (started, has_started) = nervix_primitives::sync::oneshot::channel();
+    let (release, released) = nervix_primitives::sync::oneshot::channel();
+    let charge = executor
+        .try_reserve(MemoryClass::Commands, 1)
+        .expect("the connector job can reserve its envelope");
+    let occupied = executor.clone();
+    let running = nervix_primitives::task::spawn(async move {
+        occupied
+            .run_storage(StorageClass::Connector, charge, move |_, _| {
+                started.send(()).expect("the test awaits worker admission");
+                released
+                    .blocking_recv()
+                    .expect("the test releases the worker");
+            })
+            .await
+            .expect("the admitted connector job completes");
+    });
+    has_started
+        .await
+        .expect("the connector reports its admission");
+    let snapshot = executor.snapshot();
+    assert_eq!(snapshot.connector_storage.running, 1);
+    assert_eq!(snapshot.filesystem_storage.running, 0);
+    assert_eq!(snapshot.consensus_storage.running, 0);
+    for class in [StorageClass::Filesystem, StorageClass::Consensus] {
+        let charge = executor
+            .try_reserve(MemoryClass::Commands, 1)
+            .expect("each independent job can reserve its envelope");
+        executor
+            .run_storage(class, charge, |_, _| ())
+            .await
+            .expect("an occupied connector worker cannot hold other storage classes");
+        assert_eq!(executor.snapshot().connector_storage.running, 1);
+    }
+    release
+        .send(())
+        .expect("the connector remains held until both jobs finish");
+    running.await.expect("the connector supervisor is joined");
+    let snapshot = executor.snapshot();
+    assert_eq!(snapshot.connector_storage.running, 0);
+    assert_eq!(snapshot.connector_storage.completed, 1);
+    assert_eq!(snapshot.filesystem_storage.completed, 1);
+    assert_eq!(snapshot.consensus_storage.completed, 1);
+    assert_eq!(snapshot.commands_memory.reserved_bytes, 0);
+}
+
+#[nervix_primitives::test]
+async fn a_blocked_connector_leaves_filesystem_and_consensus_workers_available() {
+    connector_storage_isolation().await;
+}
+
 #[cfg(feature = "shuttle")]
 mod shuttle_checks {
     use std::{future::Future, task::Poll};
@@ -424,6 +515,7 @@ mod shuttle_checks {
             ("bulk_cpu", snapshot.bulk_cpu),
             ("consensus_storage", snapshot.consensus_storage),
             ("filesystem_storage", snapshot.filesystem_storage),
+            ("connector_storage", snapshot.connector_storage),
         ] {
             assert_eq!(
                 workers.running, 0,
@@ -611,6 +703,13 @@ mod shuttle_checks {
     #[test]
     fn shuttle_occupied_bulk_execution_leaves_control_execution_untouched() {
         check_random_and_pct(occupied_bulk_execution_invariant);
+    }
+
+    #[test]
+    fn shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(super::connector_storage_isolation());
+        });
     }
 
     fn queued_job_drop_invariant() {
