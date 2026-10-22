@@ -429,8 +429,10 @@ qualification evidence.
 The `checks`, `tests`, and `scenarios` jobs use Go 1.26 and check out the source before installing
 their pinned Go formatters. This makes the installer and the later cache publication and report
 scripts available when a tool setup step fails. The installer retains every attempt in a
-`go-tool-bootstrap-<job>` artifact and retries only a checksum database transport error within its
-eight-minute budget. The publication and report steps check for their scripts before calling them,
+`go-tool-bootstrap-<job>` artifact and retries transport errors reading Go's public module proxy or
+checksum database within its eight-minute budget. Checksum verification remains mandatory; compiler,
+version and verification failures end installation immediately. The publication and report steps
+check for their scripts before calling them,
 so a failed checkout does not add a second failure that obscures the original one. The jobs'
 existing deadlines and test budgets are unchanged.
 

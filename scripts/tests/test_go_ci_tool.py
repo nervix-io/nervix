@@ -17,9 +17,35 @@ CHECKSUM_STREAM_ERROR = (
     "reading https://sum.golang.org/tile/8/0/x220/225: "
     "stream error: stream ID 3; INTERNAL_ERROR; received from peer\n"
 )
+MODULE_ARCHIVE_STREAM_ERROR = (
+    'golang.org/x/text@v0.34.0: read '
+    '"https://proxy.golang.org/golang.org/x/text/@v/v0.34.0.zip": '
+    "stream error: stream ID 97; INTERNAL_ERROR; received from peer\n"
+)
 
 
 class GoCiToolTests(unittest.TestCase):
+    def test_module_archive_transport_recovers_with_verification_and_evidence(self) -> None:
+        attempts = [
+            subprocess.CompletedProcess(["go"], 1, "", MODULE_ARCHIVE_STREAM_ERROR),
+            subprocess.CompletedProcess(["go"], 0, "installed\n", ""),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(install_go_ci_tool.subprocess, "run", side_effect=attempts) as run:
+                with mock.patch.object(install_go_ci_tool.time, "sleep") as sleep:
+                    status = install_go_ci_tool.install("ghokin", Path(directory))
+
+            self.assertEqual(status, 0)
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(sleep.call_args.args, (2,))
+            for call in run.call_args_list:
+                self.assertEqual(call.args[0], ["go", "install", "github.com/antham/ghokin/v3@v3.9.0"])
+                self.assertEqual(call.kwargs["env"]["GOSUMDB"], "sum.golang.org")
+                self.assertEqual(call.kwargs["env"]["GONOSUMDB"], "")
+                self.assertEqual(call.kwargs["env"]["GOPRIVATE"], "")
+            self.assertIn(MODULE_ARCHIVE_STREAM_ERROR.strip(), (Path(directory) / "ghokin/attempt-01.log").read_text())
+            self.assertIn("Exit status: 0", (Path(directory) / "ghokin/attempt-02.log").read_text())
+
     def test_checksum_transport_recovers_with_failed_attempt_retained(self) -> None:
         attempts = [
             subprocess.CompletedProcess(["go"], 1, "", CHECKSUM_STREAM_ERROR),
@@ -40,7 +66,7 @@ class GoCiToolTests(unittest.TestCase):
             first = (Path(directory) / "dockerfmt/attempt-01.log").read_text()
             second = (Path(directory) / "dockerfmt/attempt-02.log").read_text()
             self.assertIn(CHECKSUM_STREAM_ERROR.strip(), first)
-            self.assertIn("Retryable checksum transport error: True", first)
+            self.assertIn("Retryable public download transport error: True", first)
             self.assertIn("Exit status: 0", second)
 
     def test_compiler_and_verification_failures_do_not_retry(self) -> None:
@@ -48,6 +74,9 @@ class GoCiToolTests(unittest.TestCase):
             "# github.com/antham/ghokin/v3\n./main.go:10:2: undefined: parser\n",
             "go: verifying module: checksum mismatch\n",
             CHECKSUM_STREAM_ERROR + "go: verifying module: checksum mismatch\n",
+            MODULE_ARCHIVE_STREAM_ERROR + "go: verifying module: checksum mismatch\n",
+            MODULE_ARCHIVE_STREAM_ERROR + "SECURITY ERROR\n",
+            MODULE_ARCHIVE_STREAM_ERROR.replace("proxy.golang.org/", "example.com/"),
             "go: github.com/antham/ghokin/v3@v3.9.0: invalid version\n",
         )
         for failure in failures:
@@ -63,15 +92,17 @@ class GoCiToolTests(unittest.TestCase):
                     self.assertEqual(len(list((Path(directory) / "ghokin").glob("attempt-*.log"))), 1)
 
     def test_persistent_transport_failure_stops_after_three_attempts(self) -> None:
-        answer = subprocess.CompletedProcess(["go"], 1, "", CHECKSUM_STREAM_ERROR)
-        with tempfile.TemporaryDirectory() as directory:
-            with mock.patch.object(install_go_ci_tool.subprocess, "run", return_value=answer) as run:
-                with mock.patch.object(install_go_ci_tool.time, "sleep") as sleep:
-                    status = install_go_ci_tool.install("dockerfmt", Path(directory))
-            self.assertEqual(status, 1)
-            self.assertEqual(run.call_count, 3)
-            self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 5])
-            self.assertEqual(len(list((Path(directory) / "dockerfmt").glob("attempt-*.log"))), 3)
+        for failure in (CHECKSUM_STREAM_ERROR, MODULE_ARCHIVE_STREAM_ERROR):
+            with self.subTest(failure=failure):
+                answer = subprocess.CompletedProcess(["go"], 1, "", failure)
+                with tempfile.TemporaryDirectory() as directory:
+                    with mock.patch.object(install_go_ci_tool.subprocess, "run", return_value=answer) as run:
+                        with mock.patch.object(install_go_ci_tool.time, "sleep") as sleep:
+                            status = install_go_ci_tool.install("dockerfmt", Path(directory))
+                    self.assertEqual(status, 1)
+                    self.assertEqual(run.call_count, 3)
+                    self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 5])
+                    self.assertEqual(len(list((Path(directory) / "dockerfmt").glob("attempt-*.log"))), 3)
 
     def test_timeout_is_bounded_and_keeps_partial_output(self) -> None:
         error = subprocess.TimeoutExpired(["go", "install"], 300, output=b"partial download\n")
