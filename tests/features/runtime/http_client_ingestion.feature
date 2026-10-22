@@ -16,7 +16,7 @@ Feature: HTTP client ingestion
       CREATE SCHEMA user_id_branch (user_id I64);
       CREATE BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
-      CREATE CLIENT http_main TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT http_main CONFIG {
         'endpoint' = '{{mock_http_dns_addr}}/http/{{test_id}}',
         'method' = 'GET',
         'timeout_ms' = 5000
@@ -67,8 +67,7 @@ Feature: HTTP client ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
-        CREATE CLIENT http_main
-        TYPE HTTP
+        CREATE HTTP CLIENT http_main
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
           'method' = 'GET',
@@ -122,8 +121,7 @@ Feature: HTTP client ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
-        CREATE CLIENT http_main
-        TYPE HTTP
+        CREATE HTTP CLIENT http_main
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
           'method' = 'GET',

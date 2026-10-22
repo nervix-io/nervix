@@ -30,12 +30,12 @@ Feature: MQTT name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_in TYPE MQTT MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE MQTT CLIENT mqtt_in MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
         'client_id' = 'nervix-dns-in-{{test_id}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
-      CREATE CLIENT mqtt_out TYPE MQTT MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE MQTT CLIENT mqtt_out MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
         'client_id' = 'nervix-dns-out-{{test_id}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
@@ -103,12 +103,12 @@ Feature: MQTT name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_in TYPE MQTT MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE MQTT CLIENT mqtt_in MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{mqtt_tls_dns_addr}}',
         'client_id' = 'nervix-dns-in-{{test_id}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
-      CREATE CLIENT mqtt_out TYPE MQTT MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE MQTT CLIENT mqtt_out MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{mqtt_tls_dns_addr}}',
         'client_id' = 'nervix-dns-out-{{test_id}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
@@ -163,11 +163,11 @@ Feature: MQTT name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_in TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_in CONFIG {
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-dns-in-{{test_id}}'
       };
-      CREATE CLIENT mqtt_out TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_out CONFIG {
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-dns-out-{{test_id}}'
       };
@@ -247,7 +247,7 @@ Feature: MQTT name resolution
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -263,7 +263,7 @@ Feature: MQTT name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT mqtt_sink TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_sink CONFIG {
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-mqtt-dns-boundary-{{test_id}}'
       };
@@ -320,11 +320,11 @@ Feature: MQTT name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_in TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_in CONFIG {
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-dns-in-{{test_id}}'
       };
-      CREATE CLIENT mqtt_out TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_out CONFIG {
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-dns-out-{{test_id}}'
       };

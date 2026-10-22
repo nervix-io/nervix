@@ -126,7 +126,7 @@ Feature: Bounded multi-domain backup waits and exact recovery
       | 1            |
       | 3            |
 
-  Scenario Outline: A bounded native wait recovers the original multi-domain backup
+  Scenario Outline: A bounded native wait recovers the original multi-domain backup after a <first_cut_seconds> second first cut
     Given a <cluster_size> node nervix cluster is started
     And the active domain is saved as placeholder "backup_base"
     And the active domain is "{{backup_base}}_a"
@@ -143,13 +143,15 @@ Feature: Bounded multi-domain backup waits and exact recovery
       """
     Given the backup cut for domain "{{backup_base}}_a" will pause before its capture
     And the backup cut for domain "{{backup_base}}_b" will pause before its capture
-    When a bounded native backup wait is recovered under its original reference
-    Then backup archive "native-recovered.nvxb" retains both native recovery cuts
+    When a bounded native backup wait is recovered under its original reference after a <first_cut_seconds> second first cut
+    Then backup archive "native-recovered.nvxb" retains both native recovery cuts after a <first_cut_seconds> second first cut
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | first_cut_seconds |
+      | 1            | 2                 |
+      | 3            | 2                 |
+      | 1            | 12                |
+      | 3            | 12                |
 
   Scenario Outline: An NSPL cluster backup waits across independent domain cut budgets
     Given a <cluster_size> node nervix cluster is started

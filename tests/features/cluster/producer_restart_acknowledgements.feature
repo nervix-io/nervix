@@ -27,7 +27,7 @@ Feature: Remote acknowledgements across a producer restart
         BRANCHED BY restart_ack_branch;
       CREATE RELAY restart_ack_after_records SCHEMA restart_ack_event
         BRANCHED BY restart_ack_branch;
-      CREATE CLIENT restart_ack_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT restart_ack_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

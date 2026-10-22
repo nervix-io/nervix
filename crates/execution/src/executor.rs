@@ -31,6 +31,7 @@ struct ExecutorInner {
     bulk_cpu: WorkerPool,
     consensus_storage: WorkerPool,
     filesystem_storage: WorkerPool,
+    connector_storage: WorkerPool,
     management_memory: MemoryBudget,
     commands_memory: MemoryBudget,
     relay_memory: MemoryBudget,
@@ -50,6 +51,7 @@ pub struct ExecutorSnapshot {
     pub bulk_cpu: WorkerClassSnapshot,
     pub consensus_storage: WorkerClassSnapshot,
     pub filesystem_storage: WorkerClassSnapshot,
+    pub connector_storage: WorkerClassSnapshot,
     pub management_memory: MemoryBudgetSnapshot,
     pub commands_memory: MemoryBudgetSnapshot,
     pub relay_memory: MemoryBudgetSnapshot,
@@ -121,6 +123,11 @@ impl Executor {
                 filesystem_storage: WorkerPool::new(
                     StorageClass::Filesystem.into(),
                     validated.workers.filesystem_storage,
+                    validated.workers.pending_jobs,
+                ),
+                connector_storage: WorkerPool::new(
+                    StorageClass::Connector.into(),
+                    *validated.workers.connector_storage.value(),
                     validated.workers.pending_jobs,
                 ),
                 management_memory: MemoryBudget::new(
@@ -287,6 +294,7 @@ impl Executor {
             bulk_cpu: self.inner.bulk_cpu.snapshot(),
             consensus_storage: self.inner.consensus_storage.snapshot(),
             filesystem_storage: self.inner.filesystem_storage.snapshot(),
+            connector_storage: self.inner.connector_storage.snapshot(),
             management_memory: self.inner.management_memory.snapshot(),
             commands_memory: self.inner.commands_memory.snapshot(),
             relay_memory: self.inner.relay_memory.snapshot(),
@@ -332,6 +340,7 @@ impl Executor {
         match class {
             StorageClass::Consensus => &self.inner.consensus_storage,
             StorageClass::Filesystem => &self.inner.filesystem_storage,
+            StorageClass::Connector => &self.inner.connector_storage,
         }
     }
 }

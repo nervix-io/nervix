@@ -121,8 +121,7 @@ CREATE RELAY signal_windows SCHEMA signal_window BRANCHED BY by_asset_signal CAP
 CREATE BRANCH by_site_critical SCHEMA site_branch TTL 5m;
 CREATE RELAY site_critical_signals SCHEMA machine_signal BRANCHED BY by_site_critical CAPACITY 64;
 
-CREATE CLIENT nats_edge
-  TYPE NATS
+CREATE NATS CLIENT nats_edge
   CONFIG {
     'addr' = 'nats://127.0.0.1:4222'
   };

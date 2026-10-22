@@ -77,8 +77,8 @@ pub(super) struct BrokerRead<M> {
 
 /// What the loop does with a read once it returned.
 pub(super) enum ReadOutcome<M> {
-    /// The messages to take in: none when the source returned an empty batch, or a cancelled read
-    /// had gathered nothing.
+    /// The messages to take in: none when the source returned an empty batch, a cancelled read
+    /// had gathered nothing, or the source dropped what it read for its size.
     TakeIn(Vec<M>),
     ResumeRequired,
     Closed,
@@ -88,6 +88,7 @@ pub(super) enum ReadOutcome<M> {
 impl<M> BrokerRead<M> {
     /// What the loop does with this read. A batch the source contract forbids, an empty one or an
     /// interruption the host did not ask for, is reported, and what it carries is still taken in.
+    /// Payloads the source dropped for their size are counted, and the loop reads again.
     pub(super) fn into_outcome(self, host: &SourceHost) -> ReadOutcome<M> {
         match self.batch {
             Ok(SourceBatch::Messages(messages)) => {
@@ -103,6 +104,10 @@ impl<M> BrokerRead<M> {
                     );
                 }
                 ReadOutcome::TakeIn(gathered)
+            }
+            Ok(SourceBatch::Oversized { payloads }) => {
+                host.record_oversized_payloads(payloads);
+                ReadOutcome::TakeIn(Vec::new())
             }
             Ok(SourceBatch::ResumeRequired) => ReadOutcome::ResumeRequired,
             Ok(SourceBatch::Closed) => ReadOutcome::Closed,

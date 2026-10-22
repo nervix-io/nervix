@@ -28,7 +28,7 @@ Feature: Declared endpoint surfaces
         DECODE USING event_codec
         TO candidate_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT syslog_listener TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
       CREATE SYSLOG LISTENER INGESTOR candidate_syslog
         FROM syslog_listener MODE NO ACK ON QUIESCE SUSPEND

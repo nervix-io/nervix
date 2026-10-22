@@ -15,6 +15,7 @@ checks = [
   "tests::shuttle_checks::shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit",
   "tests::shuttle_checks::shuttle_full_wait_queue_is_exact_typed_backpressure",
   "tests::shuttle_checks::shuttle_occupied_bulk_execution_leaves_control_execution_untouched",
+  "tests::shuttle_checks::shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched",
   "tests::shuttle_checks::shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot",
   "tests::shuttle_checks::shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit",
   "tests::shuttle_checks::shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity",

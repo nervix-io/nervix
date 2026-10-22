@@ -18,7 +18,7 @@ Feature: Ingestor quiesce engagement during dispatch
         FROM WIRE JSON SCHEMA quiesce_event_wire
         TO SCHEMA quiesce_event;
       CREATE RELAY quiesce_output SCHEMA quiesce_event UNBRANCHED;
-      CREATE CLIENT quiesce_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT quiesce_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
