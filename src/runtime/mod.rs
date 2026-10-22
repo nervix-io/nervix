@@ -307,6 +307,7 @@ mod remote_dispatch;
 mod reorderer;
 mod resources;
 mod runtime_lifecycle;
+mod runtime_settings;
 mod schedule_apply;
 mod snapshot_staging;
 #[cfg(feature = "benchmarks")]
@@ -971,6 +972,8 @@ pub(crate) use relay_batch::{RelayMessage, RelayRecordBatch};
 pub(crate) use relay_channel::{RelayBroadcast, RelayReceiver as RelaySubscriptionReceiver};
 pub(crate) use relay_subscription::RelaySubscriptionDefinition;
 use relay_subscription::{RelaySubscriptionRefusal, RelaySubscriptions};
+pub(crate) use runtime_settings::RuntimeEnvironment;
+pub use runtime_settings::{RestoreStagingMaxBytes, RuntimeSettings, StateSnapshotInterval};
 use state_assignment::{CheckpointOwners, ScheduledStateAssignment, SharedStateAssignment};
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};

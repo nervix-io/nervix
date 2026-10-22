@@ -75,7 +75,7 @@ use nervix_primitives::{
 use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, ModelPublicationRefusalKind, SchedulerMode, WasmStateResetRequestError,
-    application::{InternalTransportMode, ShutdownPhaseOutcome},
+    application::{InternalTransportMode, SettingOverride, ShutdownPhaseOutcome},
     memory_pressure::MemoryPressureConfig,
 };
 use nervix_test_environment::{TestParallelism, TestParallelismArgs};
@@ -6444,11 +6444,13 @@ async fn given_raft_retention_bounds(
         world.cluster.is_none(),
         "raft retention must be configured before the cluster starts"
     );
-    world.cluster_config.raft_retention = nervix_consensus::RaftRetentionPolicy {
-        snapshot_entry_threshold: snapshot_entries,
-        covered_entries_retained: covered_entries,
-        ..nervix_consensus::RaftRetentionPolicy::default()
-    };
+    world.cluster_config.raft_retention =
+        nervix_consensus::RaftRetentionSettings::resolve(nervix_consensus::RaftRetentionBounds {
+            snapshot_entry_threshold: Some(snapshot_entries),
+            covered_entries_retained: Some(covered_entries),
+            ..nervix_consensus::RaftRetentionBounds::default()
+        })
+        .assured("the retention bounds declare no validation");
 }
 
 #[given(expr = "consensus commits on node {string} take {string}")]
@@ -8838,6 +8840,30 @@ async fn given_memory_pressure_is_configured(
         .validate()
         .expect("memory pressure watermarks must be valid");
     world.cluster_config.memory_pressure = Some(config);
+}
+
+/// Names one setting a node starts with, by the option that sets it and the value written as the
+/// command line reads it. It applies over the cluster's own settings from the node's next start,
+/// read and validated exactly as `nervix-server` reads them, so a scenario needs no step per
+/// setting.
+#[given(regex = r"^(\S+) starts with (\S+) = (\S+)$")]
+fn given_node_starts_with_setting(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    name: String,
+    value: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let setting = SettingOverride { name, value };
+    match world.cluster.as_mut() {
+        Some(cluster) => cluster.override_node_setting(&node_id, setting),
+        None => world
+            .cluster_config
+            .node_setting_overrides
+            .entry(node_id)
+            .or_default()
+            .push(setting),
+    }
 }
 
 #[given(expr = "drain timeout is configured as {string}")]

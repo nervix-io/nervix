@@ -105,12 +105,10 @@ pub enum AppError {
     ShutdownCluster,
     #[error("failed to close the node's stores")]
     CloseStores,
-    #[error("memory high watermark requires memory low watermark")]
-    MissingMemoryPressureLowWatermark,
-    #[error("memory low watermark requires memory high watermark")]
-    MissingMemoryPressureHighWatermark,
     #[error("invalid memory pressure configuration")]
     InvalidMemoryPressureConfig,
+    #[error("failed to read the node settings")]
+    ReadSettings,
     #[error("failed to initialize memory pressure monitor")]
     InitMemoryPressureMonitor,
     #[error("gRPC server failed")]
