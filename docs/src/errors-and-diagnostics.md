@@ -1576,6 +1576,14 @@ report above the domain lifecycle and consensus or runtime cause, and leaves the
 A refused resume updates the coordinator's current quiescence diagnostics; it does not become a
 definitive application failure merely because the coordinator temporarily lost its authority. An existing
 definitive effect failure is retained when cleanup succeeds in that same completion attempt.
+An ordinary command whose internal transaction is still committing when its commit attempt ends on
+any other report, such as `TransactionCommitError::RecoverQuiescence` above a drain timeout or a
+consensus write refused by a saturated log, answers `OutcomeUnknown` with the `StillApplying` cause
+rather than `Failed`. That report describes one attempt, and the committing transaction keeps the
+command's domain mutation lease until recovery under the same reference records the outcome. A
+model step that adopts its transaction's own pause validates its frozen planning inputs against
+the domain as that pause left it, so `PlanningInputsChanged` names only inputs that another owner
+changed.
 
 An ordinary command's preflight, queue, and commit-planning refusals are reports decided against
 its coordinator's observation of the command's internal transaction. Before the session maps such a

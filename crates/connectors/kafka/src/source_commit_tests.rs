@@ -3,7 +3,7 @@
 //! Each test drives the production source through a real librdkafka consumer that joins a group on
 //! the mock broker, and reads the group's committed offset back through a second consumer, so a
 //! commit counts only once the broker stored it. The broker answers at once unless a test makes it
-//! refuse a commit.
+//! refuse a commit or hold its answers.
 
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -34,6 +34,10 @@ const GROUP: &str = "orders-ingestor";
 
 /// An auto-commit interval no test outlasts, so the driver's own cadence never commits during one.
 const DRIVER_CADENCE_MS: &str = "3600000";
+
+/// A round-trip time no test outlasts, so the broker holds the answer to every request it receives
+/// until the test sets its round-trip time back to zero.
+const HELD_ROUND_TRIP: Duration = Duration::from_secs(3600);
 
 /// How long a test waits for its source to join the group and read the published record. The mock
 /// coordinator holds a new group's first rebalance for three seconds.
@@ -210,17 +214,21 @@ async fn a_commit_its_group_refuses_fails_the_acknowledgement() {
 async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_holds_the_next() {
     let cluster = cluster();
     publish(&cluster).await;
+    publish(&cluster).await;
     let mut source = subscribed_source(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
-    let positions = read_positions(&mut source).await;
+    let first_positions = read_positions(&mut source).await;
+    let second_positions = read_positions(&mut source).await;
     let short_deadline = Duration::from_secs(1);
     let mut commits = GroupCommits::new(short_deadline);
 
-    // With its only broker down, the group has no coordinator to answer a commit.
+    // The coordinator holds its answers, so a commit stays unanswered until the test releases
+    // them. Its broker stays up: an outage can outlast the member's session, after which the
+    // coordinator refuses the commits of a member it no longer knows.
     cluster
-        .broker_down(1)
-        .assured("the mock cluster takes down a broker it has");
+        .broker_round_trip_time(1, HELD_ROUND_TRIP)
+        .assured("the mock cluster delays the answers of a broker it has");
     for _attempt in 0..2 {
-        let request = GroupCommitRequest::acknowledged(&positions)
+        let request = GroupCommitRequest::acknowledged(&first_positions)
             .assured("the read position is a valid offset");
         let committed = commits.commit(&source.consumer, GROUP, request).await;
         let Err(report) = committed else {
@@ -237,19 +245,20 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
         assert!(commits.unanswered.is_some());
     }
 
-    // Once the broker is back, the next commit waits for the unanswered one and then commits.
+    // Once the coordinator answers again, the next commit waits for the unanswered one and then
+    // commits its own, later offset: the unanswered commit's late answer is not the next one's.
     cluster
-        .broker_up(1)
-        .assured("the mock cluster brings back a broker it has");
+        .broker_round_trip_time(1, Duration::ZERO)
+        .assured("the mock cluster releases the answers of a broker it has");
     commits.deadline = READ_DEADLINE;
-    let request =
-        GroupCommitRequest::acknowledged(&positions).assured("the read position is a valid offset");
+    let request = GroupCommitRequest::acknowledged(&second_positions)
+        .assured("the read position is a valid offset");
     commits
         .commit(&source.consumer, GROUP, request)
         .await
-        .assured("the group's coordinator answers once its broker is back");
+        .assured("the group's coordinator answers once it releases its answers");
     assert!(commits.unanswered.is_none());
-    assert_eq!(committed_offset(&cluster), Some(1));
+    assert_eq!(committed_offset(&cluster), Some(2));
 }
 
 #[nervix_primitives::test]

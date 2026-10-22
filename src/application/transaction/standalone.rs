@@ -27,7 +27,9 @@ use nervix_models::{CommandExecutionReference, DomainName, Statement, UserName};
 
 use super::{
     super::{
-        command_result::{CommandDiagnostic, CommandDisposition, CommandResult},
+        command_result::{
+            CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause,
+        },
         model_mutation::command_error,
         session_service::SessionServiceImpl,
     },
@@ -204,22 +206,39 @@ impl SessionServiceImpl {
         } else {
             Box::pin(self.execute_replicated_commit(&transaction_id)).await
         };
-        match finished {
-            Ok(transaction) => standalone_transaction_result(&transaction),
-            Err(error) => {
-                if let Some(ConsensusError::LeadershipLost { leader_id }) =
-                    error.downcast_ref::<ConsensusError>()
-                {
-                    self.not_leader_response("", leader_id.clone()).await
-                } else {
-                    let message = transaction_commit_error_message(&error);
-                    command_error(format!(
-                        "durable command transaction '{transaction_id}' remains applying: \
-                         {message}"
-                    ))
-                }
-            }
+        let error = match finished {
+            Ok(transaction) => return standalone_transaction_result(&transaction),
+            Err(error) => error,
+        };
+        if let Some(ConsensusError::LeadershipLost { leader_id }) =
+            error.downcast_ref::<ConsensusError>()
+        {
+            return self.not_leader_response("", leader_id.clone()).await;
         }
+        let message = transaction_commit_error_message(&error);
+        let attempt = self
+            .inner
+            .consensus
+            .current_transaction(&transaction_id)
+            .await;
+        if let Some(attempt) = attempt
+            && let TransactionState::Committing(_) = attempt.state
+        {
+            // The committing transaction holds the command's domain mutation lease, and a pause
+            // its step engaged stays its own until that step's application completes. A terminal
+            // result would release the lease the transaction needs to finish, so the command stays
+            // applying and recovery under the same reference finishes the transaction first.
+            return CommandResult::new(
+                CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying),
+                format!(
+                    "durable command transaction '{transaction_id}' remains applying: {message}; \
+                     retry it with the same reference to learn its outcome"
+                ),
+            );
+        }
+        command_error(format!(
+            "durable command transaction '{transaction_id}' did not complete: {message}"
+        ))
     }
 
     /// Brings the command's statement into its transaction, starting from `observed`, what this

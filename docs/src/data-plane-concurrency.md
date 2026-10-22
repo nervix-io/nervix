@@ -57,7 +57,13 @@ step's tracked impact recorder to recover an engaged domain pause before retaini
 outcome. The public pause-release regression controls two leadership transfers and is registered
 in the active, order and stressed lifecycle selections. The detector observes the surrounding
 tracked acquisitions; asynchronous proposal waits and the test barriers remain outside its scope.
-No new synchronization protocol or hot-path map access is introduced.
+No new synchronization protocol or hot-path map access is introduced. A coordinator that adopts its
+transaction's pause records it on the same tracked impact recorder before anything can end the
+step, then drains and releases it on the existing paths. The public outline whose leader refuses a
+model publication and the pause release after it, as a leader whose lease lapsed, joins the same
+three selections on one and three nodes. Its saturated-log counterpart, which keeps an ordinary
+command applying while its transaction commits, adds no tracked acquisition and stays outside
+them; its owner test and public scenario cover it.
 
 ## Remote ACK And Admission Owners
 
