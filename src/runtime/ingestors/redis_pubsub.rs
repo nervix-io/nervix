@@ -15,12 +15,12 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_redis::{RedisPubSubSource, RedisPubSubSourcePlan};
+use nervix_connector_redis::{RedisPubSubIngestor, RedisPubSubIngestorPlan};
 
 use super::{
     super::*,
-    IngestorStartError, SourceStartError,
-    source::{BrokerSourceStart, SourceStart},
+    IngestorConnectorStartError, IngestorStartError,
+    connector::{BrokerIngestorStart, IngestorStart},
 };
 
 impl RedisPubSubIngestorStartPlan {
@@ -28,7 +28,7 @@ impl RedisPubSubIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
         let RedisPubSubIngestorStartPlan {
             client,
             channel,
@@ -38,11 +38,13 @@ impl RedisPubSubIngestorStartPlan {
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
         let Some(dns) = runtime.dns() else {
-            return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
+            return Err(
+                ingestor.connector_start_failure(IngestorConnectorStartError::NodeDnsUnavailable)
+            );
         };
-        let connector = RedisPubSubSourcePlan::new(resolved.entries, channel, dns.clone())
+        let connector = RedisPubSubIngestorPlan::new(resolved.entries, channel, dns.clone())
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        BrokerSourceStart {
+        BrokerIngestorStart {
             connector,
             instances: NonZeroU64::MIN,
             acknowledgement: mode.acknowledgement(),
@@ -54,7 +56,7 @@ impl RedisPubSubIngestorStartPlan {
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "redis",
         }
-        .open::<RedisPubSubSource>(ingestor)
+        .open::<RedisPubSubIngestor>(ingestor)
         .await
     }
 }

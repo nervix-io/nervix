@@ -74,15 +74,15 @@ name = "nervix-connector-kafka"
 
 [[package]]
 checks = [
-  "topic::source::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_publish_the_broker_delivered",
-  "topic::source::shuttle_tests::shuttle_a_read_whose_batch_timeout_races_the_cancellation_hands_over_every_publish",
+  "topic::ingestor::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_publish_the_broker_delivered",
+  "topic::ingestor::shuttle_tests::shuttle_a_read_whose_batch_timeout_races_the_cancellation_hands_over_every_publish",
 ]
 name = "nervix-connector-mqtt"
 
 [[package]]
 checks = [
-  "queue::source::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_message_its_receives_took",
-  "queue::source::shuttle_tests::shuttle_a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget",
+  "queue::ingestor::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_message_its_receives_took",
+  "queue::ingestor::shuttle_tests::shuttle_a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget",
 ]
 name = "nervix-connector-sqs"
 
@@ -159,13 +159,13 @@ checks = [
   "runtime::ingestor_quiesce::tests::shuttle_checks::shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room",
   "runtime::ingestor_quiesce::tests::shuttle_checks::shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room",
   "runtime::ingestor_quiesce::tests::shuttle_checks::shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads",
-  "runtime::ingestors::source::shuttle_tests::shuttle_a_drain_waits_for_the_transport_to_confirm_a_batch_with_a_refused_payload",
-  "runtime::ingestors::source::shuttle_tests::shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch",
-  "runtime::ingestors::source::shuttle_tests::shuttle_a_reconnect_discards_rejections_the_broker_redelivers",
-  "runtime::ingestors::source::shuttle_tests::shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took",
-  "runtime::ingestors::source::shuttle_tests::shuttle_broker_source_observes_engagement_during_dispatch",
-  "runtime::ingestors::source::shuttle_tests::shuttle_paced_source_observes_engagement_during_dispatch",
-  "runtime::ingestors::source::shuttle_tests::shuttle_request_source_observes_engagement_during_dispatch",
+  "runtime::ingestors::connector::shuttle_tests::shuttle_a_drain_waits_for_the_transport_to_confirm_a_batch_with_a_refused_payload",
+  "runtime::ingestors::connector::shuttle_tests::shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch",
+  "runtime::ingestors::connector::shuttle_tests::shuttle_a_reconnect_discards_rejections_the_broker_redelivers",
+  "runtime::ingestors::connector::shuttle_tests::shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took",
+  "runtime::ingestors::connector::shuttle_tests::shuttle_broker_source_observes_engagement_during_dispatch",
+  "runtime::ingestors::connector::shuttle_tests::shuttle_paced_source_observes_engagement_during_dispatch",
+  "runtime::ingestors::connector::shuttle_tests::shuttle_request_source_observes_engagement_during_dispatch",
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held",
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed",
   "runtime::local_drain::shuttle_tests::shuttle_a_batch_a_consumer_takes_while_a_drain_observes_is_never_missing_from_it",

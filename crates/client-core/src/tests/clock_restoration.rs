@@ -41,8 +41,11 @@ impl ServedExchange {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
         let exchange = detached_exchange(frames, pending.clone());
-        let reader =
-            ExchangeReader::new(pending, exchange.sinks.clone(), exchange.generation.clone());
+        let reader = ExchangeReader::new(
+            pending,
+            exchange.emitters.clone(),
+            exchange.generation.clone(),
+        );
         let client = client_on(exchange, Some(domain("tenant")));
         (client, Self { requests, reader })
     }
@@ -53,10 +56,10 @@ impl ServedExchange {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
         let mut exchange = detached_exchange(frames, pending.clone());
-        let sinks = client.inner.events.sinks.clone();
-        exchange.generation = sinks.begin_generation();
-        exchange.sinks = sinks.clone();
-        let reader = ExchangeReader::new(pending, sinks, exchange.generation.clone());
+        let emitters = client.inner.events.emitters.clone();
+        exchange.generation = emitters.begin_generation();
+        exchange.emitters = emitters.clone();
+        let reader = ExchangeReader::new(pending, emitters, exchange.generation.clone());
         (exchange, Self { requests, reader })
     }
 
@@ -249,7 +252,7 @@ async fn an_attachment_moved_before_its_old_session_ends_keeps_the_tick_it_repor
         DomainClockEvent::Ticked(ticked(6)),
         "only a tick of the new session that advances the clock is reported"
     );
-    assert!(client.inner.events.sinks.clocks.take_event().is_none());
+    assert!(client.inner.events.emitters.clocks.take_event().is_none());
     assert_eq!(
         client
             .domain_clock(&domain("tenant"))

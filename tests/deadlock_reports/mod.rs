@@ -16,8 +16,8 @@ use cucumber::{given, then, when};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_deadlock::{DeadlockEvidence, ProcessRecord, RecordedFinding};
 use nervix_primitives::deadlock::{
-    Access, BlockedAttempt, BoundedText, DiagnosticSelection, Finding, LockKind, LockLifetime,
-    LockSite, OrderEdge, OrderLock, OrderWitness, PotentialCycle, SourceSite, TrackedLockId,
+    Access, BlockedAttempt, BoundedText, DiagnosticSelection, Finding, IngestorSite, LockKind,
+    LockLifetime, LockSite, OrderEdge, OrderLock, OrderWitness, PotentialCycle, TrackedLockId,
     TrackedThreadId,
 };
 
@@ -61,7 +61,7 @@ impl ScenarioWorld {
 #[given("diagnostic evidence containing a potential lock-order cycle")]
 fn given_potential_cycle(world: &mut ScenarioWorld) {
     let id = |number| NonZeroU64::new(number).assured("fixture identities are positive");
-    let source = |line| SourceSite {
+    let source = |line| IngestorSite {
         file: BoundedText::new("fixture/owner.rs"),
         line,
         column: 2,

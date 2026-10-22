@@ -114,7 +114,7 @@ impl ActiveGraph {
             if let Some(client) = node.dataflow_source_client_node() {
                 nodes.insert(client.id);
             }
-            if let Some(client) = node.dataflow_sink_client_node() {
+            if let Some(client) = node.dataflow_emitter_client_node() {
                 nodes.insert(client.id);
             }
         }
@@ -424,7 +424,7 @@ impl ActiveGraph {
                 edges.push(ingest_edge);
                 nodes.push(client.node);
             }
-            if let Some(client) = source.dataflow_sink_client() {
+            if let Some(client) = source.dataflow_emitter_client() {
                 let emit_edge = DataflowEdge::data(
                     source.dataflow_id(),
                     client.node.id.clone(),
@@ -591,9 +591,9 @@ impl ActiveNode {
         match &ingestor.input {
             IngestorInput::Transport(input) => {
                 let source = input.source.source_ref();
-                let source_kind = input.source.source_kind().as_str();
+                let entity_kind = input.source.entity_kind().as_str();
                 Some(DataflowNode::new(
-                    format!("{}_source:{}", source_kind, source.as_str()),
+                    format!("{}_source:{}", entity_kind, source.as_str()),
                     source.as_str(),
                     DataflowNodeRole::Client { transport },
                 ))
@@ -623,24 +623,24 @@ impl ActiveNode {
 
     /// The external system node an emitter writes to. Graph counts use the node alone so they do
     /// not allocate metric strings that only a rendered edge needs.
-    fn dataflow_sink_client_node(&self) -> Option<DataflowNode> {
+    fn dataflow_emitter_client_node(&self) -> Option<DataflowNode> {
         let Model::Emitter(emitter) = self.config.as_ref() else {
             return None;
         };
-        let client = emitter.sink.client()?;
+        let client = emitter.connector.client()?;
         Some(DataflowNode::new(
-            format!("client_sink:{}", client.as_str()),
+            format!("client_emitter:{}", client.as_str()),
             client.as_str(),
             DataflowNodeRole::Client {
-                transport: emitter.sink.transport_label().to_string(),
+                transport: emitter.connector.transport_label().to_string(),
             },
         ))
     }
 
     /// The external system an emitter writes to. The metric names the input relay only when the
     /// emitter has exactly one, since that is what makes the count attributable to a relay.
-    fn dataflow_sink_client(&self) -> Option<DataflowClient> {
-        let node = self.dataflow_sink_client_node()?;
+    fn dataflow_emitter_client(&self) -> Option<DataflowClient> {
+        let node = self.dataflow_emitter_client_node()?;
         let Model::Emitter(emitter) = self.config.as_ref() else {
             return None;
         };
@@ -877,7 +877,7 @@ fn emitter_subtype(model: &Model) -> &str {
     let Model::Emitter(emitter) = model else {
         return "EMITTER";
     };
-    emitter.sink.transport_label()
+    emitter.connector.transport_label()
 }
 
 const fn dataflow_processor_kind(kind: ModelKind) -> Option<DataflowProcessorKind> {
@@ -1476,7 +1476,7 @@ mod tests {
             "source client missing from {node_ids:?}"
         );
         assert!(
-            node_ids.contains("client_sink:broker"),
+            node_ids.contains("client_emitter:broker"),
             "sink client missing from {node_ids:?}"
         );
         let edges = dataflow_graph
@@ -1490,16 +1490,16 @@ mod tests {
                 ("client_source:broker", "ingestor:ingest_events"),
                 ("ingestor:ingest_events", "relay:raw_events"),
                 ("relay:raw_events", "emitter:emit_events"),
-                ("emitter:emit_events", "client_sink:broker"),
+                ("emitter:emit_events", "client_emitter:broker"),
             ])
         );
-        let sink_metric = dataflow_graph
+        let emitter_metric = dataflow_graph
             .edges
             .iter()
-            .find(|edge| edge.target == "client_sink:broker")
+            .find(|edge| edge.target == "client_emitter:broker")
             .and_then(|edge| edge.metric.as_ref())
             .expect("single-input emitter sink edge must carry a metric");
-        assert_eq!(sink_metric.relay.as_deref(), Some("raw_events"));
+        assert_eq!(emitter_metric.relay.as_deref(), Some("raw_events"));
 
         let _ = fs::remove_dir_all(path);
     }

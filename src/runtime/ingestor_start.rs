@@ -530,8 +530,8 @@ mod tests {
         ClientConfigEntry, ClientName, ClusterNodeName, ClusterSchedule, CodecName,
         CodecWireFormat, CreateClientMqtt, CreateCodec, CreateIngestor, CreateJsonWireSchema,
         CreateRelay, CreateSchema, DomainConfig, DomainPace, DomainSchedule, DomainState,
-        DomainStatus, GeneralErrorPolicy, IngestSource, IngestorName, JsonType, ModelKind,
-        MqttIngestMode, MqttQos, MqttSession, MqttSource, MqttTopicSource, OutputBranch,
+        DomainStatus, GeneralErrorPolicy, IngestorEntity, IngestorName, JsonType, ModelKind,
+        MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor, OutputBranch,
         ParseAsType, ProcessorOutputs, RelayBranching, RelayName, RetryPolicy, SchemaField,
         SchemaName, WireSchemaField, WireSchemaName,
     };
@@ -648,8 +648,8 @@ mod tests {
                             .with_branch(OutputBranch::Unbranched),
                             input: nervix_models::IngestorInput::Transport(
                                 nervix_models::TransportIngestorInput {
-                                    source: IngestSource::Mqtt(MqttSource::Topic(
-                                        MqttTopicSource {
+                                    source: IngestorEntity::Mqtt(MqttIngestor::Topic(
+                                        MqttTopicIngestor {
                                             client,
                                             topic: nervix_models::MqttTopicFilter::parse(
                                                 "notifications",
@@ -781,7 +781,7 @@ mod tests {
                         .with_branch(OutputBranch::Unbranched),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
+                            source: IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
                                 client,
                                 topic: nervix_models::MqttTopicFilter::parse("notifications")
                                     .expect("valid topic filter"),

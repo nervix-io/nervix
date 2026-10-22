@@ -6,8 +6,8 @@ use std::{num::NonZeroU64, panic::Location, time::UNIX_EPOCH};
 use meticulous::{OptionExt as _, ResultExt as _};
 
 use crate::deadlock::{
-    Access, ActiveCycle, BlockedThread, BoundedText, CycleOutOfBounds, LockKind, MAX_CYCLE_THREADS,
-    MAX_TEXT_BYTES, SourceSite, TextOutOfBounds, TrackedLockId, TrackedThreadId,
+    Access, ActiveCycle, BlockedThread, BoundedText, CycleOutOfBounds, IngestorSite, LockKind,
+    MAX_CYCLE_THREADS, MAX_TEXT_BYTES, TextOutOfBounds, TrackedLockId, TrackedThreadId,
 };
 
 fn number(value: u64) -> NonZeroU64 {
@@ -136,7 +136,7 @@ fn a_cycle_has_threads_within_its_bound_and_omits_only_past_it() {
 #[test]
 fn identities_sites_kinds_and_access_describe_themselves() {
     let caller = Location::caller();
-    let site = SourceSite::from_location(caller);
+    let site = IngestorSite::from_location(caller);
     assert_eq!(site.file.as_str(), caller.file());
     assert_eq!(site.line, caller.line());
     assert_eq!(

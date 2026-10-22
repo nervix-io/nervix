@@ -644,7 +644,7 @@ pub(super) struct EmitterPublication<'a> {
 
 impl EmitterBatchBuffer {
     pub(super) fn new(
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         flush_policy: &FlushPolicy,
         buffered_messages: Arc<EmitterBufferedMessages>,
     ) -> Self {
@@ -675,7 +675,7 @@ impl EmitterBatchBuffer {
 
     pub(super) fn reconfigure(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         flush_policy: &FlushPolicy,
     ) -> EmitterRuntimeResult<()> {
         self.flush_policy = context.parse_flush_policy(flush_policy);
@@ -695,7 +695,7 @@ impl EmitterBatchBuffer {
     /// deadline forward nor pays for a clock read.
     fn arm_cadence(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         flush_policy: RuntimeFlushPolicy,
     ) -> EmitterRuntimeResult<()> {
         if self.cadence.is_armed() {
@@ -758,7 +758,7 @@ impl EmitterBatchBuffer {
 
     pub(super) fn push(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         batch: EmitterPublishBatch,
     ) -> EmitterRuntimeResult<bool> {
         let Some(flush_policy) = self.flush_policy else {
@@ -799,7 +799,7 @@ impl EmitterBatchBuffer {
         self.update_buffered_messages();
     }
 
-    fn is_due(&self, context: &EmitterSinkContext) -> EmitterRuntimeResult<bool> {
+    fn is_due(&self, context: &EmitterConnectorContext) -> EmitterRuntimeResult<bool> {
         let snapshot = context.execution_snapshot()?;
         self.cadence
             .is_due(&context.clock, &snapshot)
@@ -808,7 +808,7 @@ impl EmitterBatchBuffer {
 
     pub(super) fn should_flush(
         &self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         force: bool,
     ) -> EmitterRuntimeResult<bool> {
         if self.pending.is_empty() {
@@ -881,7 +881,7 @@ mod tests {
     use super::*;
     use crate::runtime::{
         emitter_ordering_group::EvaluatedOrderingGroups,
-        test_fixtures::{input_batch, input_batch_with, input_schema, named, sink_context},
+        test_fixtures::{emitter_context, input_batch, input_batch_with, input_schema, named},
     };
 
     #[nervix_primitives::test]
@@ -1402,7 +1402,7 @@ mod tests {
         let mut buffer = EmitterBatchBuffer::default();
         let error = buffer
             .push(
-                &sink_context(),
+                &emitter_context(),
                 EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
             )
             .expect_err("an unconfigured buffer must reject input");
@@ -1463,7 +1463,7 @@ mod tests {
             .checked_add(second.estimated_bytes())
             .assured("the two test batches are far smaller than the u64 byte range");
 
-        let context = sink_context();
+        let context = emitter_context();
         assert!(
             !buffer
                 .push(&context, first)
@@ -1581,7 +1581,7 @@ mod tests {
 
     #[test]
     fn batch_buffer_honors_its_size_boundary_and_logical_cadence() {
-        let context = sink_context();
+        let context = emitter_context();
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
             interval: Duration::from_secs(60),
@@ -1622,7 +1622,7 @@ mod tests {
 
     #[test]
     fn forced_retry_ignores_the_ordinary_buffer_deadline() {
-        let context = sink_context();
+        let context = emitter_context();
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
             interval: Duration::from_secs(60),
@@ -1653,7 +1653,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn a_sink_that_commits_separately_takes_the_rows_it_accepted() {
+    async fn a_emitter_that_commits_separately_takes_the_rows_it_accepted() {
         let (first_acks, mut first_completion) = AckSet::root();
         let (second_acks, second_completion) = AckSet::root();
         let mut batch = EmitterPublishBatch::from_batch(
@@ -1721,7 +1721,7 @@ mod tests {
     /// buffer.
     #[test]
     fn a_torn_down_emitter_keeps_none_of_its_staged_messages_counted() {
-        let context = sink_context();
+        let context = emitter_context();
         let reported_messages = Arc::new(AtomicUsize::new(0));
         let buffered_messages = Arc::new(EmitterBufferedMessages::new(reported_messages.clone()));
         let buffer =
@@ -1740,7 +1740,7 @@ mod tests {
 
     #[test]
     fn batch_buffer_drain_clear_reconfigure_and_drop_reset_accounting() {
-        let context = sink_context();
+        let context = emitter_context();
         let reported_messages = Arc::new(AtomicUsize::new(0));
         let buffered_messages = Arc::new(EmitterBufferedMessages::new(reported_messages.clone()));
         let mut buffer = EmitterBatchBuffer::new(
@@ -1778,7 +1778,7 @@ mod tests {
 
         buffer
             .push(
-                &sink_context(),
+                &emitter_context(),
                 EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
             )
             .expect("reconfigured buffer must accept input");
@@ -1797,7 +1797,7 @@ mod tests {
     async fn batch_buffer_ack_helpers_merge_and_complete_pending_batches() {
         let (first_acks, first_completion) = AckSet::root();
         let (second_acks, second_completion) = AckSet::root();
-        let context = sink_context();
+        let context = emitter_context();
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
         buffer
@@ -1837,7 +1837,7 @@ mod tests {
         buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
 
         buffer
-            .push(&sink_context(), batch.clone())
+            .push(&emitter_context(), batch.clone())
             .expect("retry buffer must retain the batch");
         root.ack_success();
         assert!(
@@ -1862,7 +1862,7 @@ mod tests {
         let (second_acks, second_completion) = AckSet::root();
         let reported_messages = Arc::new(AtomicUsize::new(0));
         let buffered_messages = Arc::new(EmitterBufferedMessages::new(reported_messages.clone()));
-        let context = sink_context();
+        let context = emitter_context();
         let mut buffer = EmitterBatchBuffer::default();
         buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
         buffer.buffered_messages = buffered_messages.clone();

@@ -17,23 +17,24 @@ use serde::{Deserialize, Serialize};
 use super::{
     bounds::{DeadlineKey, DeclaredBounds, DeclaredWait, OmittedDeadline, WaitBound},
     configured_client::configured_client,
-    entity_union::connector_sinks,
+    entity_union::connector_emitters,
 };
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    LocatorDeclaration, LocatorName, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkReferenceKind, SinkValueMapping, SinkValueMappings,
+    ClientName, ConnectorKind, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
+    EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
+    EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, LocatorDeclaration,
+    LocatorName,
 };
 
 configured_client!(ClickHouse: unpooled, config Nervix, CreateClientClickHouse => ClickHouseConfigEntry);
 
-pub type ClickHouseValueMapping = SinkValueMapping;
+pub type ClickHouseValueMapping = EmitterValueMapping;
 
 /// One table a ClickHouse client inserts rows into.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct ClickHouseTableSink {
+pub struct ClickHouseTableEmitter {
     pub mode: ClickHouseTablePublishingMode,
     pub client: ClientName,
     pub table: ClickHouseTableName,
@@ -53,10 +54,10 @@ const CLICKHOUSE_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &[],
 };
 
-impl SinkEntity for ClickHouseTableSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+impl EmitterDeclaration for ClickHouseTableEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         headers: None,
-        reference: SinkReferenceKind::Client(ConnectorKind::ClickHouse),
+        reference: EmitterReferenceKind::Client(ConnectorKind::ClickHouse),
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
@@ -72,9 +73,9 @@ impl SinkEntity for ClickHouseTableSink {
     };
 }
 
-impl SinkBody for ClickHouseTableSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for ClickHouseTableEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::ClickHouse,
         })
@@ -84,20 +85,20 @@ impl SinkBody for ClickHouseTableSink {
         Some(&mut self.client)
     }
 
-    fn value_mappings(&self) -> SinkValueMappings<'_> {
-        SinkValueMappings::values(&self.values)
+    fn value_mappings(&self) -> EmitterValueMappings<'_> {
+        EmitterValueMappings::values(&self.values)
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector ClickHouse = "CLICKHOUSE";
     /// What a ClickHouse sink writes.
-    pub enum ClickHouseSink;
+    pub enum ClickHouseEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum ClickHouseEmitterMode;
     /// The entities a ClickHouse sink writes.
-    pub enum ClickHouseSinkEntity {
-        Table(ClickHouseTableSink, ClickHouseTablePublishingMode) = "TABLE";
+    pub enum ClickHouseEmitterEntity {
+        Table(ClickHouseTableEmitter, ClickHouseTablePublishingMode) = "TABLE";
     }
 }
 

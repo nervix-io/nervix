@@ -29,7 +29,7 @@
 pub use rdkafka as testing_rdkafka;
 
 mod delivery;
-mod source;
+mod ingestor;
 
 use std::{
     ffi::c_int,
@@ -44,12 +44,21 @@ use arch_into::ArchInto as _;
 use async_trait::async_trait;
 use delivery::{HandedOverRecord, KafkaDeliveryReport, KafkaProducerContext};
 use error_stack::Report;
+pub use ingestor::{
+    KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
+    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit,
+    KafkaIngestor, KafkaIngestorError, KafkaIngestorMessage, KafkaIngestorOffsetMode,
+    KafkaIngestorPlan, KafkaOffsetPosition, TopicPartitionInspector,
+};
+// Criterion measures the per-partition folds an acknowledgement and a rejection run.
+#[cfg(feature = "benchmarks")]
+pub use ingestor::{earliest_message_offsets, latest_positions};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     AckConfirmation, BrokerAnswer, BrokerPublishingMode, BrokerVerdict, ConfirmationWindow,
-    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish, SinkFinishError,
-    SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord,
-    SinkRecordId, SinkStartError, SinkStartResult,
+    EmitterFinish, EmitterFinishError, EmitterFinishResult, EmitterHost, EmitterLifecycle,
+    EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError,
+    EmitterWriteResult, PerRecordOutcome, RecordEmitter, RejectedEmitterMember,
 };
 use nervix_models::{ClientConfigEntry, KafkaTopicName};
 use nervix_primitives::{
@@ -62,15 +71,6 @@ use rdkafka::{
     message::{Header as KafkaHeader, OwnedHeaders},
     producer::{BaseRecord, Producer, ThreadedProducer},
 };
-pub use source::{
-    KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
-    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit,
-    KafkaOffsetPosition, KafkaSource, KafkaSourceError, KafkaSourceMessage, KafkaSourceOffsetMode,
-    KafkaSourcePlan, TopicPartitionInspector,
-};
-// Criterion measures the per-partition folds an acknowledgement and a rejection run.
-#[cfg(feature = "benchmarks")]
-pub use source::{earliest_message_offsets, latest_positions};
 use thiserror::Error;
 
 const KAFKA: &str = "kafka";
@@ -104,13 +104,13 @@ const QUEUE_CAPACITY_PROPERTY: &str = "queue.buffering.max.kbytes";
 /// place. Recheck that short interval cooperatively; ACK TIMEOUT bounds the complete wait.
 const QUEUE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
 
-pub struct KafkaSinkConfig {
+pub struct KafkaEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub topic: KafkaTopicName,
     pub mode: BrokerPublishingMode,
 }
 
-pub struct KafkaSink {
+pub struct KafkaEmitter {
     producer: ThreadedProducer<KafkaProducerContext>,
     topic: KafkaTopicName,
     mode: BrokerPublishingMode,
@@ -209,12 +209,12 @@ impl Future for KafkaAnswer {
             Poll::Ready(report) => report,
             Poll::Pending => return Poll::Pending,
         };
-        Poll::Ready(KafkaSink::broker_answer(report))
+        Poll::Ready(KafkaEmitter::broker_answer(report))
     }
 }
 
-impl KafkaSink {
-    pub fn new(config: KafkaSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
+impl KafkaEmitter {
+    pub fn new(config: KafkaEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
         let producer_config = Self::producer_config(&config.config, config.mode)?;
         let queue_capacity_bytes = Self::producer_queue_capacity(&producer_config)?;
         let producer = Self::create_producer(&producer_config)?;
@@ -229,7 +229,7 @@ impl KafkaSink {
     /// Reads the effective native limit, including librdkafka's default, without a second default
     /// table. Native configuration validation has already constrained this field to a positive
     /// C integer before its decimal representation is read.
-    fn producer_queue_capacity(config: &ClientConfig) -> SinkStartResult<NonZeroU64> {
+    fn producer_queue_capacity(config: &ClientConfig) -> EmitterStartResult<NonZeroU64> {
         let native = config
             .create_native_config()
             .map_err(Self::invalid_configuration)?;
@@ -245,10 +245,10 @@ impl KafkaSink {
         Ok(NonZeroU64::new(bytes).assured("librdkafka validates a positive queue byte limit"))
     }
 
-    fn invalid_configuration(error: KafkaError) -> Report<SinkStartError> {
+    fn invalid_configuration(error: KafkaError) -> Report<EmitterOpenError> {
         let description = error.to_string();
         Report::new(error)
-            .change_context(SinkStartError::InvalidConfiguration { sink: KAFKA })
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: KAFKA })
             .attach_printable(description)
     }
 
@@ -256,8 +256,8 @@ impl KafkaSink {
     /// librdkafka's queue accounting charges the payload alone, separately from wire-size checks.
     fn queue_size_rejection(
         &self,
-        record: &SinkRecord,
-    ) -> Option<RejectedSinkRecord<SinkRecordId>> {
+        record: &EmitterRecord,
+    ) -> Option<RejectedEmitterMember<EmitterRecordId>> {
         let bytes: u64 = record.payload.len().arch_into();
         if bytes <= self.queue_capacity_bytes.get() {
             return None;
@@ -281,7 +281,7 @@ impl KafkaSink {
     fn producer_config(
         entries: &[ClientConfigEntry],
         mode: BrokerPublishingMode,
-    ) -> SinkStartResult<ClientConfig> {
+    ) -> EmitterStartResult<ClientConfig> {
         let mut config = ClientConfig::new();
         for entry in entries {
             config.set(&entry.key, &entry.value);
@@ -295,7 +295,7 @@ impl KafkaSink {
             Err(error) => {
                 let description = error.to_string();
                 return Err(Report::new(error)
-                    .change_context(SinkStartError::InvalidConfiguration { sink: KAFKA })
+                    .change_context(EmitterOpenError::InvalidConfiguration { connector: KAFKA })
                     .attach_printable(description));
             }
         };
@@ -306,13 +306,13 @@ impl KafkaSink {
 
     fn create_producer(
         config: &ClientConfig,
-    ) -> SinkStartResult<ThreadedProducer<KafkaProducerContext>> {
+    ) -> EmitterStartResult<ThreadedProducer<KafkaProducerContext>> {
         match config.create_with_context(KafkaProducerContext::new()) {
             Ok(producer) => Ok(producer),
             Err(error) => {
                 let description = error.to_string();
                 Err(Report::new(error)
-                    .change_context(SinkStartError::Initialize { sink: KAFKA })
+                    .change_context(EmitterOpenError::Initialize { connector: KAFKA })
                     .attach_printable(description))
             }
         }
@@ -322,8 +322,8 @@ impl KafkaSink {
     /// its queue delivers it.
     async fn publish_unconfirmed(
         &self,
-        records: Vec<SinkRecord>,
-    ) -> PerRecordOutcome<SinkRecordId> {
+        records: Vec<EmitterRecord>,
+    ) -> PerRecordOutcome<EmitterRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
             nervix_primitives::task::consume_budget().await;
@@ -353,9 +353,9 @@ impl KafkaSink {
     /// A full producer queue waits for an outstanding answer before trying the same record again.
     async fn publish_confirmed(
         &self,
-        records: Vec<SinkRecord>,
+        records: Vec<EmitterRecord>,
         settings: AckConfirmation,
-    ) -> PerRecordOutcome<SinkRecordId> {
+    ) -> PerRecordOutcome<EmitterRecordId> {
         let mut window: ConfirmationWindow<KafkaAnswer> =
             ConfirmationWindow::new(KAFKA, settings, records.len());
         for record in records {
@@ -391,10 +391,10 @@ impl KafkaSink {
     /// a separate admission deadline, without extending any handed-over record's deadline.
     async fn hand_over_confirmed(
         &self,
-        record: &SinkRecord,
+        record: &EmitterRecord,
         window: &mut ConfirmationWindow<KafkaAnswer>,
         timeout: Duration,
-    ) -> SinkPublishResult<KafkaAnswer> {
+    ) -> EmitterWriteResult<KafkaAnswer> {
         let mut queue_deadline = None;
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -436,11 +436,11 @@ impl KafkaSink {
     fn queue_wait_failed(
         error: KafkaError,
         failure: KafkaQueueWaitError,
-    ) -> Report<SinkPublishError> {
+    ) -> Report<EmitterWriteError> {
         let description = failure.to_string();
         Report::new(error)
             .change_context(failure)
-            .change_context(SinkPublishError::Publish { sink: KAFKA })
+            .change_context(EmitterWriteError::Publish { connector: KAFKA })
             .attach_printable(description)
     }
 
@@ -452,7 +452,7 @@ impl KafkaSink {
     /// refusal and is dropped here.
     fn hand_over(
         &self,
-        message: &SinkRecord,
+        message: &EmitterRecord,
         answer: Option<oneshot::Sender<KafkaDeliveryReport>>,
     ) -> Result<(), KafkaError> {
         let handed_over = self.producer.context().retain(answer);
@@ -503,21 +503,21 @@ impl KafkaSink {
             Ok(KafkaDeliveryReport::Failed(error)) => {
                 let description = format!("kafka delivery failed: {error}");
                 Err(Report::new(error)
-                    .change_context(SinkPublishError::Publish { sink: KAFKA })
+                    .change_context(EmitterWriteError::Publish { connector: KAFKA })
                     .attach_printable(description))
             }
             Err(dropped) => Err(Report::new(dropped)
-                .change_context(SinkPublishError::Publish { sink: KAFKA })
+                .change_context(EmitterWriteError::Publish { connector: KAFKA })
                 .attach_printable("kafka producer dropped the record without a delivery report")),
         }
     }
 
     /// The failure that ends a publish whose record the producer refused to take for a reason
     /// that is not the record's own, such as a full producer queue.
-    fn refused_hand_over(error: KafkaError) -> Report<SinkPublishError> {
+    fn refused_hand_over(error: KafkaError) -> Report<EmitterWriteError> {
         let description = format!("kafka producer refused the record: {error}");
         Report::new(error)
-            .change_context(SinkPublishError::Publish { sink: KAFKA })
+            .change_context(EmitterWriteError::Publish { connector: KAFKA })
             .attach_printable(description)
     }
 
@@ -579,40 +579,43 @@ impl KafkaSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for KafkaSink {
+impl EmitterLifecycle for KafkaEmitter {
     /// Flushes the producer's queue, which holds the records a `NO ACK` publish delivered and
     /// librdkafka has not sent yet, and any record a publish handed over and then gave up on. A
     /// flush sends them at once, whatever `linger.ms` says.
     ///
     /// The outcome counts records alone, each until librdkafka serves its delivery report, and never
     /// the events waiting in the producer's queue beside them.
-    async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
+    async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
         if self.retained_records() == 0 {
-            return Ok(SinkFinish::NothingHeld);
+            return Ok(EmitterFinish::NothingHeld);
         }
         let producer = self.producer.clone();
         let flushing =
             nervix_primitives::task::spawn_blocking(move || Self::flush_until(&producer, deadline));
         let flushed = flushing.await.map_err(|source| {
-            Report::new(source).change_context(SinkFinishError::Flush { sink: KAFKA })
+            Report::new(source).change_context(EmitterFinishError::Flush { connector: KAFKA })
         })?;
         match flushed {
-            Ok(()) => Ok(SinkFinish::Flushed),
+            Ok(()) => Ok(EmitterFinish::Flushed),
             Err(error @ KafkaError::Flush(RDKafkaErrorCode::OperationTimedOut)) => {
                 let records = self.retained_records();
                 if records == 0 {
                     // The flush waits until librdkafka holds no message, and librdkafka still holds
                     // one while the polling thread serves its report, so a flush can give up after
                     // the last record's report was served. Every record then left the producer.
-                    return Ok(SinkFinish::Flushed);
+                    return Ok(EmitterFinish::Flushed);
                 }
-                Err(Report::new(error).change_context(SinkFinishError::Unsent {
-                    sink: KAFKA,
-                    records,
-                }))
+                Err(
+                    Report::new(error).change_context(EmitterFinishError::Unsent {
+                        connector: KAFKA,
+                        records,
+                    }),
+                )
             }
             Err(error) => {
-                Err(Report::new(error).change_context(SinkFinishError::Flush { sink: KAFKA }))
+                Err(Report::new(error)
+                    .change_context(EmitterFinishError::Flush { connector: KAFKA }))
             }
         }
     }
@@ -623,8 +626,8 @@ impl SinkLifecycle for KafkaSink {
 }
 
 #[async_trait]
-impl RecordSink for KafkaSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
+impl RecordEmitter for KafkaEmitter {
+    async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         match self.mode {
             BrokerPublishingMode::NoAck => self.publish_unconfirmed(records).await,
             BrokerPublishingMode::Ack(settings) => self.publish_confirmed(records, settings).await,
@@ -643,14 +646,14 @@ mod tests {
     use error_stack::{AttachmentKind, Context, FrameKind, Report};
     use meticulous::ResultExt as _;
     use nervix_connector::{
-        AckConfirmation, BrokerPublishingMode, BrokerVerdict, SinkPublishError, SinkStartError,
+        AckConfirmation, BrokerPublishingMode, BrokerVerdict, EmitterOpenError, EmitterWriteError,
     };
     use nervix_models::ClientConfigEntry;
     use nervix_primitives::sync::oneshot;
     use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 
     use super::{
-        KafkaDeliveryReport, KafkaMessageTimeout, KafkaMessageTimeoutError, KafkaSink,
+        KafkaDeliveryReport, KafkaEmitter, KafkaMessageTimeout, KafkaMessageTimeoutError,
         LONGEST_MESSAGE_TIMEOUT_MILLIS,
     };
 
@@ -680,7 +683,7 @@ mod tests {
 
     #[test]
     fn a_delivered_record_is_confirmed() {
-        let answer = KafkaSink::broker_answer(Ok(KafkaDeliveryReport::Delivered));
+        let answer = KafkaEmitter::broker_answer(Ok(KafkaDeliveryReport::Delivered));
 
         let Ok(verdict) = answer else {
             panic!("a delivered record has an answer, got {answer:?}");
@@ -692,7 +695,7 @@ mod tests {
     fn a_delivery_error_about_the_record_refuses_it_for_good() {
         let error = KafkaError::MessageProduction(RDKafkaErrorCode::MessageSizeTooLarge);
 
-        let answer = KafkaSink::broker_answer(Ok(KafkaDeliveryReport::Failed(error.clone())));
+        let answer = KafkaEmitter::broker_answer(Ok(KafkaDeliveryReport::Failed(error.clone())));
 
         let Ok(verdict) = answer else {
             panic!("a refused record has an answer, got {answer:?}");
@@ -709,14 +712,14 @@ mod tests {
     fn any_other_delivery_error_leaves_the_record_unknown_under_its_typed_cause() {
         let error = KafkaError::MessageProduction(RDKafkaErrorCode::MessageTimedOut);
 
-        let answer = KafkaSink::broker_answer(Ok(KafkaDeliveryReport::Failed(error.clone())));
+        let answer = KafkaEmitter::broker_answer(Ok(KafkaDeliveryReport::Failed(error.clone())));
 
         let Err(failure) = answer else {
             panic!("a timed out record has no answer, got {answer:?}");
         };
         assert_eq!(
             failure.current_context(),
-            &SinkPublishError::Publish { sink: "kafka" }
+            &EmitterWriteError::Publish { connector: "kafka" }
         );
         assert_eq!(failure.downcast_ref::<KafkaError>(), Some(&error));
         assert_eq!(
@@ -731,14 +734,14 @@ mod tests {
         drop(answer);
         let dropped = report.await;
 
-        let answer = KafkaSink::broker_answer(dropped);
+        let answer = KafkaEmitter::broker_answer(dropped);
 
         let Err(failure) = answer else {
             panic!("a record without a report has no answer, got {answer:?}");
         };
         assert_eq!(
             failure.current_context(),
-            &SinkPublishError::Publish { sink: "kafka" }
+            &EmitterWriteError::Publish { connector: "kafka" }
         );
         assert!(
             failure
@@ -756,11 +759,11 @@ mod tests {
     fn a_refused_hand_over_keeps_the_producer_error_beneath_the_publish_failure() {
         let error = KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull);
 
-        let failure = KafkaSink::refused_hand_over(error.clone());
+        let failure = KafkaEmitter::refused_hand_over(error.clone());
 
         assert_eq!(
             failure.current_context(),
-            &SinkPublishError::Publish { sink: "kafka" }
+            &EmitterWriteError::Publish { connector: "kafka" }
         );
         assert_eq!(failure.downcast_ref::<KafkaError>(), Some(&error));
         assert_eq!(
@@ -815,8 +818,9 @@ mod tests {
             entry("delivery.timeout.ms", "300000"),
         ];
 
-        let config = KafkaSink::producer_config(&entries, confirmed(Duration::from_millis(2_500)))
-            .expect("an ACK TIMEOUT of seconds fits librdkafka's message timeout");
+        let config =
+            KafkaEmitter::producer_config(&entries, confirmed(Duration::from_millis(2_500)))
+                .expect("an ACK TIMEOUT of seconds fits librdkafka's message timeout");
 
         assert_eq!(config.get("message.timeout.ms"), Some("2500"));
         assert_eq!(config.get("delivery.timeout.ms"), None);
@@ -830,7 +834,7 @@ mod tests {
             entry("delivery.timeout.ms", "300000"),
         ];
 
-        let config = KafkaSink::producer_config(&entries, BrokerPublishingMode::NoAck)
+        let config = KafkaEmitter::producer_config(&entries, BrokerPublishingMode::NoAck)
             .expect("the client entries pass through");
 
         assert_eq!(config.get("delivery.timeout.ms"), Some("300000"));
@@ -848,7 +852,7 @@ mod tests {
             BrokerPublishingMode::NoAck,
             confirmed(Duration::from_secs(5)),
         ] {
-            let config = KafkaSink::producer_config(&entries, mode)
+            let config = KafkaEmitter::producer_config(&entries, mode)
                 .expect("the client entries pass through");
 
             assert_eq!(
@@ -862,30 +866,30 @@ mod tests {
 
     #[test]
     fn native_queue_configuration_installs_a_positive_capacity_or_its_typed_failure() {
-        let config = KafkaSink::producer_config(
+        let config = KafkaEmitter::producer_config(
             &[entry("queue.buffering.max.kbytes", "1")],
             BrokerPublishingMode::NoAck,
         )
         .assured("NO ACK configuration does not perform a fallible conversion");
         assert_eq!(
-            KafkaSink::producer_queue_capacity(&config)
+            KafkaEmitter::producer_queue_capacity(&config)
                 .assured("one KiB is within librdkafka's positive C-integer queue range")
                 .get(),
             1024
         );
 
         for value in ["0", "-1", "not-a-capacity"] {
-            let config = KafkaSink::producer_config(
+            let config = KafkaEmitter::producer_config(
                 &[entry("queue.buffering.max.kbytes", value)],
                 BrokerPublishingMode::NoAck,
             )
             .assured("NO ACK configuration does not perform a fallible conversion");
-            let Err(failure) = KafkaSink::producer_queue_capacity(&config) else {
+            let Err(failure) = KafkaEmitter::producer_queue_capacity(&config) else {
                 panic!("native validation must refuse queue capacity {value}");
             };
             assert_eq!(
                 failure.current_context(),
-                &SinkStartError::InvalidConfiguration { sink: "kafka" }
+                &EmitterOpenError::InvalidConfiguration { connector: "kafka" }
             );
             assert!(failure.contains::<KafkaError>());
             assert!(format!("{failure:#}").contains("queue.buffering.max.kbytes"));
@@ -893,16 +897,16 @@ mod tests {
     }
 
     #[test]
-    fn an_ack_timeout_librdkafka_cannot_hold_refuses_the_sink_configuration() {
+    fn an_ack_timeout_librdkafka_cannot_hold_refuses_the_emitter_configuration() {
         let timeout = Duration::from_secs(30 * 24 * 60 * 60);
 
-        let Err(error) = KafkaSink::producer_config(&[], confirmed(timeout)) else {
+        let Err(error) = KafkaEmitter::producer_config(&[], confirmed(timeout)) else {
             panic!("an ACK TIMEOUT of 30 days exceeds librdkafka's message timeout");
         };
 
         assert_eq!(
             error.current_context(),
-            &SinkStartError::InvalidConfiguration { sink: "kafka" }
+            &EmitterOpenError::InvalidConfiguration { connector: "kafka" }
         );
         assert_eq!(
             error.downcast_ref::<KafkaMessageTimeoutError>(),
@@ -923,7 +927,7 @@ mod tests {
             RDKafkaErrorCode::InvalidTimestamp,
             RDKafkaErrorCode::InvalidRecord,
         ] {
-            assert!(KafkaSink::is_record_rejection(
+            assert!(KafkaEmitter::is_record_rejection(
                 &KafkaError::MessageProduction(code)
             ));
         }
@@ -937,7 +941,7 @@ mod tests {
             RDKafkaErrorCode::AllBrokersDown,
             RDKafkaErrorCode::MessageTimedOut,
         ] {
-            assert!(!KafkaSink::is_record_rejection(
+            assert!(!KafkaEmitter::is_record_rejection(
                 &KafkaError::MessageProduction(code)
             ));
         }

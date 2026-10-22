@@ -59,11 +59,11 @@ impl ConfiguredFaultInjection {
         None
     }
 
-    pub(in crate::runtime) fn sink_client_is_unavailable(&self, _emitter: &EmitterName) -> bool {
+    pub(in crate::runtime) fn emitter_client_is_unavailable(&self, _emitter: &EmitterName) -> bool {
         false
     }
 
-    pub(in crate::runtime) fn take_emitter_sink_stall(
+    pub(in crate::runtime) fn take_emitter_connector_stall(
         &self,
         _emitter: &EmitterName,
     ) -> Option<usize> {

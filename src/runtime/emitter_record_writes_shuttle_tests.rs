@@ -23,7 +23,7 @@
 // scheduling step as the operation it records. The emitter's own counts are the production owner's
 // state, so they are the selected, modeled atomics.
 use futures_util::FutureExt as _;
-use nervix_connector::SinkPublishError;
+use nervix_connector::EmitterWriteError;
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_primitives::{
     sync::{StdArc, atomic as selected},
@@ -42,8 +42,8 @@ const CONFIRMED_PAYLOAD: &[u8] = b"[0,1]";
 /// The payload the modeled sink rejects whenever it is written.
 const REJECTED_PAYLOAD: &[u8] = b"[2,3]";
 
-fn position(row_index: usize) -> SinkRecordPosition {
-    SinkRecordPosition {
+fn position(row_index: usize) -> EmitterRecordPosition {
+    EmitterRecordPosition {
         batch_index: 0,
         row_index,
     }
@@ -84,15 +84,17 @@ fn payload(rows: &[usize], bytes: &[u8]) -> PreparedPayload<EncodedPayload> {
 }
 
 /// The answers of a sink that stalled before it answered for any record of the write.
-fn stalled() -> PerRecordOutcome<SinkRecordId> {
+fn stalled() -> PerRecordOutcome<EmitterRecordId> {
     let mut outcome = PerRecordOutcome::with_capacity(0);
-    outcome.fail(Report::new(SinkPublishError::Publish { sink: "modeled" }));
+    outcome.fail(Report::new(EmitterWriteError::Publish {
+        connector: "modeled",
+    }));
     outcome
 }
 
 /// The answers of the modeled sink, which confirms one payload and rejects the other by what the
 /// record carries.
-fn answered(records: &[SinkRecord]) -> PerRecordOutcome<SinkRecordId> {
+fn answered(records: &[EmitterRecord]) -> PerRecordOutcome<EmitterRecordId> {
     let mut outcome = PerRecordOutcome::with_capacity(records.len());
     for record in records {
         if record.payload == CONFIRMED_PAYLOAD {
@@ -182,7 +184,7 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
             );
             emitter_confirmed.store(true, Ordering::SeqCst);
             let mut confirmed = PerRecordOutcome::with_capacity(1);
-            confirmed.deliver(SinkRecordId::new(0));
+            confirmed.deliver(EmitterRecordId::new(0));
             let answers = prepared
                 .answers(&mut batches, retry.payloads, confirmed)
                 .assured("the confirmation names the one record of the retry");
@@ -521,7 +523,7 @@ fn a_drain_never_finds_the_emitter_empty_while_a_member_is_retained() {
             let retry = prepared.next_write();
             nervix_primitives::task::yield_now().await;
             let mut confirmed = PerRecordOutcome::with_capacity(1);
-            confirmed.deliver(SinkRecordId::new(0));
+            confirmed.deliver(EmitterRecordId::new(0));
             let answers = prepared
                 .answers(batches, retry.payloads, confirmed)
                 .assured("the confirmation names the one record of the flush");

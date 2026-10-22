@@ -925,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_write_names_the_sink_failure_once_in_the_rendered_chain() {
+    fn a_refused_write_names_the_emitter_failure_once_in_the_rendered_chain() {
         let text = batch(vec![(
             "s",
             StdArc::new(StringArray::from(vec!["plain", "quote \" inside"])),

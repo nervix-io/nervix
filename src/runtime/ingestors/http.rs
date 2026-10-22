@@ -14,12 +14,12 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_http::{HttpSource, HttpSourcePlan};
+use nervix_connector_http::{HttpIngestor, HttpIngestorPlan};
 
 use super::{
     super::*,
-    IngestorStartError, SourceStartError,
-    source::{PacedSourceStart, SourceStart},
+    IngestorConnectorStartError, IngestorStartError,
+    connector::{IngestorStart, PacedIngestorStart},
 };
 
 impl HttpIngestorStartPlan {
@@ -27,16 +27,18 @@ impl HttpIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
         let HttpIngestorStartPlan { client, every } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
         let Some(dns) = runtime.dns() else {
-            return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
+            return Err(
+                ingestor.connector_start_failure(IngestorConnectorStartError::NodeDnsUnavailable)
+            );
         };
-        PacedSourceStart {
-            connector: HttpSourcePlan {
+        PacedIngestorStart {
+            connector: HttpIngestorPlan {
                 config: resolved.entries,
                 dns: dns.clone(),
             },
@@ -47,7 +49,7 @@ impl HttpIngestorStartPlan {
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "http",
         }
-        .open::<HttpSource>(runtime, ingestor)
+        .open::<HttpIngestor>(runtime, ingestor)
         .await
     }
 }

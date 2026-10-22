@@ -623,8 +623,8 @@ misses multiple occurrences, the cadence returns the newest due instant once and
 to the first future boundary. Consumers that need both meanings keep the scheduled due instant
 separate from the fresh execution snapshot taken when work actually runs.
 
-[Connector Crates And The Connector Contract](./connector-contract.md#source-boundary) defines
-the paced source's host and connector responsibilities; this chapter owns the cadence's time
+[Connector Crates And The Connector Contract](./connector-contract.md#ingestor-boundary) defines
+the paced ingestor's host and connector responsibilities; this chapter owns the cadence's time
 mapping and missed-occurrence behavior.
 
 The architecture keeps four time classes distinct:
@@ -685,7 +685,7 @@ elsewhere in the console; it does not recognize the browser's own `Date.now()`, 
 reads for display-only freshness of its dataflow graph and its reconnect countdown.
 
 The source check masks `cfg(test)` module bodies through the shared Rust scanner, including modules
-with source contracts or additional attributes. It preserves line coordinates and product code
+with ingestor contracts or additional attributes. It preserves line coordinates and product code
 after each fixture module. A harness layer contract alone grants no clock permission to product code.
 
 ## Recovery And Distributed Guarantees

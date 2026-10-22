@@ -20,8 +20,12 @@ pub(super) fn mode<'src>()
 
 pub(super) fn topic_body<'src>(
     context: EmitterContext,
-) -> impl Parser<'src, &'src [Token], ParsedDestination<PulsarTopicSink>, extra::Err<ParseError<'src>>>
-+ Clone {
+) -> impl Parser<
+    'src,
+    &'src [Token],
+    ParsedDestination<PulsarTopicEmitter>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
     encoded_destination(
         context,
         client_ref()
@@ -29,7 +33,7 @@ pub(super) fn topic_body<'src>(
             .then(external_name::<PulsarTopicName>())
             .then_ignore(kw(Identifier::Mode))
             .then(mode())
-            .map(|((client, topic), mode)| PulsarTopicSink {
+            .map(|((client, topic), mode)| PulsarTopicEmitter {
                 client,
                 topic,
                 mode,

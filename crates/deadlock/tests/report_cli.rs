@@ -10,12 +10,12 @@ use std::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_deadlock::{DeadlockEvidence, ProcessRecord, RecordedFinding};
 use nervix_primitives::deadlock::{
-    Access, BlockedAttempt, BoundedText, DiagnosticSelection, LockKind, LockLifetime, LockSite,
-    OrderEdge, OrderLock, OrderWitness, PotentialCycle, SourceSite, TrackedLockId, TrackedThreadId,
+    Access, BlockedAttempt, BoundedText, DiagnosticSelection, IngestorSite, LockKind, LockLifetime,
+    LockSite, OrderEdge, OrderLock, OrderWitness, PotentialCycle, TrackedLockId, TrackedThreadId,
 };
 
 fn cycle(access: Access) -> RecordedFinding {
-    let source = SourceSite {
+    let source = IngestorSite {
         file: BoundedText::new(file!()),
         line: line!(),
         column: 1,

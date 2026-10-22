@@ -268,7 +268,7 @@ including endpoint ingestors, which serve on every node, and ingestors whose sch
 move. It also ignores `ON QUIESCE`. Already admitted payloads continue through their routes, route
 buffers are force-flushed whatever their `FLUSH EACH` cadence, and Nervix waits for their ACK roots
 to resolve before the source session stops, so offsets, acknowledgements, and deletes complete for
-work that reached its sinks. A root still unresolved when the drain timeout passes is negatively
+work that reached its emitters. A root still unresolved when the drain timeout passes is negatively
 acknowledged, and the source's redelivery contract applies. A raw quiesce buffer is outside runtime
 graph work, so a shutdown discards what it retained instead of replaying it. See
 [Planned Ownership Handoffs And Failover](control-plane.md#planned-ownership-handoffs-and-failover)
@@ -363,7 +363,7 @@ is full, what happens to a payload depends on whether its sender can present it 
   `Retry-After` and closes an established WebSocket with 1013, so the sender sends it again.
 - A payload that `BUFFER` retained waits for a place when its buffer drains; see
   [Quiesce Modes](#quiesce-modes).
-- A paced source has already moved past its poll, so the poll waits for a place. Waiting delays the
+- A paced ingestor has already moved past its poll, so the poll waits for a place. Waiting delays the
   next poll, and the domain cadence coalesces the occurrences it missed into one poll at the newest
   due instant.
 - A source read in `MODE NO ACK` cannot present a payload again either. The payload waits for a
@@ -766,13 +766,13 @@ One batch is one source acknowledgement unit. It has exactly one terminal outcom
 | Outcome | Meaning | Cause |
 | --- | --- | --- |
 | not admitted | No row entered the graph. | `invalid batch: <defect>`, `suspended`, `busy`, `draining`, `producer ended`, `credit exceeded` |
-| completed | Every route and acknowledging sink its rows reached confirmed them under the graph's rules. | — |
+| completed | Every route and acknowledging emitter its rows reached confirmed them under the graph's rules. | — |
 | processing failed | The batch was admitted and its acknowledgement failed. Some of its effects may have happened. | `ack_timeout`, `rejected` |
 | unknown outcome | The batch may have been admitted and processed, but no terminal result can be established. | `interrupted`, `owner_lost`; a client whose session ended adds `session_lost` |
 
 Transport receipt is never an outcome. A batch completes under the normal acknowledgement rules: a
 row a filter drops is resolved; a detached boundary resolves where it detaches; and an
-acknowledging sink resolves its rows at its own success boundary, such as the complete response
+acknowledging emitter resolves its rows at its own success boundary, such as the complete response
 headers of an HTTP emitter. The defects of an invalid batch are `malformed`, `unexpected message`,
 `compressed`, `schema mismatch`, `not one batch`, `too many rows`, `too large`, and `invalid data`.
 

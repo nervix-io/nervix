@@ -79,7 +79,7 @@ impl Fixture {
             key: "addr".to_string(),
             value: addr.to_string(),
         }];
-        let (client, _) = ClickHouseSink::client_from_config(&config, self.dns())
+        let (client, _) = ClickHouseEmitter::client_from_config(&config, self.dns())
             .expect("the client configuration is valid");
         client
     }
@@ -114,7 +114,7 @@ fn stand_in(listener: TcpListener) -> JoinHandle<String> {
 }
 
 async fn insert(client: &ClickHouseClient) -> error_stack::Result<(), ClickHouseWriteError> {
-    ClickHouseSink::insert(
+    ClickHouseEmitter::insert(
         client,
         "events",
         Bytes::from_static(b"{\"id\":1}\n"),
@@ -213,7 +213,9 @@ async fn a_host_that_does_not_resolve_is_the_typed_cause_of_the_insert_failure()
     let report = ClickHouseWriteError::into_report(error);
     assert_eq!(
         report.current_context(),
-        &SinkPublishError::Publish { sink: CLICKHOUSE }
+        &EmitterWriteError::Publish {
+            connector: CLICKHOUSE
+        }
     );
     assert_eq!(
         report
@@ -283,7 +285,7 @@ async fn a_client_without_tls_entries_speaks_plain_http_only() {
     assert_eq!(fixture.authority.total_questions(), 0);
 }
 
-fn message_of(report: &Report<SinkPublishError>) -> Option<&str> {
+fn message_of(report: &Report<EmitterWriteError>) -> Option<&str> {
     report
         .frames()
         .find_map(|frame| frame.downcast_ref::<String>())

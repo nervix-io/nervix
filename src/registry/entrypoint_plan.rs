@@ -526,13 +526,13 @@ impl EntrypointPlans {
                             node: node.identifier.clone(),
                         }));
                     }
-                    let source_kind = ingestor.input.source_model_kind();
+                    let entity_kind = ingestor.input.source_model_kind();
                     let source_ref = ingestor.input.source_ref();
-                    let Some(source) = nodes.get(&NodeRef::new(source_kind, source_ref.clone()))
+                    let Some(source) = nodes.get(&NodeRef::new(entity_kind, source_ref.clone()))
                     else {
                         return Err(Report::new(EntrypointPlanError::MissingSource {
                             ingestor: ingestor.name.clone(),
-                            kind: source_kind,
+                            kind: entity_kind,
                             reference: source_ref,
                         }));
                     };

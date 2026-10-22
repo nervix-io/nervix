@@ -17,9 +17,12 @@ pub(super) fn mode<'src>()
 {
     request_mode!(ClickHouseTablePublishingMode)
 }
-pub(super) fn table_body<'src>()
--> impl Parser<'src, &'src [Token], ParsedDestination<ClickHouseTableSink>, extra::Err<ParseError<'src>>>
-+ Clone {
+pub(super) fn table_body<'src>() -> impl Parser<
+    'src,
+    &'src [Token],
+    ParsedDestination<ClickHouseTableEmitter>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
     values_destination(
         client_ref()
             .then_ignore(kw(Identifier::Table))
@@ -28,7 +31,7 @@ pub(super) fn table_body<'src>()
             .then(mode())
             .then_ignore(kw(Identifier::Values))
             .then(clickhouse_values())
-            .map(|(((client, table), mode), values)| ClickHouseTableSink {
+            .map(|(((client, table), mode), values)| ClickHouseTableEmitter {
                 client,
                 table,
                 mode,

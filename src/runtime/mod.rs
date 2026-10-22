@@ -92,8 +92,8 @@ use nervix_models::{
 mod fixture_vocabulary {
     pub(super) use nervix_models::{
         ClusterSchedule, CreateClientHttp, CreateClientPrometheus, CreateClientRabbitMq,
-        CreateEmitter, CreateIngestor, CreateReingestor, CreateRelay, DomainSchedule, IngestSource,
-        Model, OutputBranch, ScheduledNode, ScheduledNodes,
+        CreateEmitter, CreateIngestor, CreateReingestor, CreateRelay, DomainSchedule,
+        IngestorEntity, Model, OutputBranch, ScheduledNode, ScheduledNodes,
     };
 }
 #[cfg(test)]
@@ -173,14 +173,14 @@ use crate::{
         BranchedProcessorSpec, ClientIngestorStartPlan, DomainActivationPlan,
         DynamicExecutionUpdate, EndpointIngestorStartPlan, EndpointRequestPlan,
         EntitySwapExecution, EntrypointPlans, ExecutionDelta, ExecutionNode, ExecutionRevision,
-        GeneratorExecutionPlan, GeneratorRoutePlan, HttpIngestorStartPlan, IngestorInputPlan,
-        IngestorSpec, IngestorStartPlan, KafkaDomainOffsetPlacement, KafkaIngestorStartPlan,
-        KafkaOffsetPlan, LookupResourcePlan, LoweredConstruction, MessageErrorCompileSchemas,
-        MessageErrorRouteKey, MessageErrorRouteSpecs, MqttIngestorStartPlan, NatsIngestorStartPlan,
-        PlannedClusterRevision, PlannedCodec, PlannedCodecWireFormat, PlannedEntryRoute,
-        PlannedRouteBranch, PlannedSignalingProtocol, PrometheusIngestorStartPlan,
-        PulsarIngestorStartPlan, RabbitMqIngestorStartPlan, RedisPubSubIngestorStartPlan,
-        ReingestorInputPlan, ReingestorPlan, SourceStartPlan, SqsIngestorStartPlan,
+        GeneratorExecutionPlan, GeneratorRoutePlan, HttpIngestorStartPlan, IngestorConnectorPlan,
+        IngestorInputPlan, IngestorSpec, IngestorStartPlan, KafkaDomainOffsetPlacement,
+        KafkaIngestorStartPlan, KafkaOffsetPlan, LookupResourcePlan, LoweredConstruction,
+        MessageErrorCompileSchemas, MessageErrorRouteKey, MessageErrorRouteSpecs,
+        MqttIngestorStartPlan, NatsIngestorStartPlan, PlannedClusterRevision, PlannedCodec,
+        PlannedCodecWireFormat, PlannedEntryRoute, PlannedRouteBranch, PlannedSignalingProtocol,
+        PrometheusIngestorStartPlan, PulsarIngestorStartPlan, RabbitMqIngestorStartPlan,
+        RedisPubSubIngestorStartPlan, ReingestorInputPlan, ReingestorPlan, SqsIngestorStartPlan,
         SyslogIngestorStartPlan, TransportInputPlan, WasmModulePlan, WebsocketsIngestorStartPlan,
         ZeroMqIngestorStartPlan,
     },
@@ -220,13 +220,13 @@ mod domain_rebuild;
 mod emitter_batch_packing;
 mod emitter_buffer;
 mod emitter_client;
+mod emitter_connectors;
 mod emitter_encoding;
 mod emitter_http_requests;
 mod emitter_ordering_group;
 mod emitter_publishing;
 mod emitter_record_writes;
 mod emitter_retry;
-mod emitter_sinks;
 mod emitter_supervision;
 mod emitter_task;
 mod emitter_values;
@@ -280,7 +280,7 @@ mod node_settings;
 mod observability;
 mod ownership_handoff_error;
 mod planning;
-mod pooled_sink_clients;
+mod pooled_emitter_clients;
 mod processor_branch_restore;
 mod processor_branch_task;
 mod processor_output;
@@ -401,14 +401,15 @@ use emitter_buffer::{
     DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublication,
     EmitterPublishBatch, PublishReport, RowToPack,
 };
-use emitter_client::{ClientEmitterSink, ClientPayload};
-use emitter_encoding::EncodedRecordSink;
+use emitter_client::{ClientConsumerConnector, ClientPayload};
+use emitter_connectors::EmitterConnectorStarter;
+use emitter_encoding::EncodedRecordEmitter;
 use emitter_ordering_group::{CompiledOrderingGroup, OrderingGroupError, OrderingGroups};
 use emitter_publishing::{
-    EmitterPublishBatchOwner, EmitterPublishControl, EmitterPublishFailure, EmitterPublishResult,
-    EmitterSink, EmitterSinkState, RejectedEmitterRecord, RejectedRecordInput,
-    await_emitter_confirmation, emitter_unavailable_reason, finish_rejected_records,
-    sink_publish_failure,
+    EmitterConnector, EmitterConnectorState, EmitterPublishBatchOwner, EmitterPublishControl,
+    EmitterPublishFailure, EmitterPublishResult, RejectedEmitterRecord, RejectedRecordInput,
+    await_emitter_confirmation, emitter_publish_failure, emitter_unavailable_reason,
+    finish_rejected_records,
 };
 use emitter_record_writes::{
     CheckedPreparation, EncodedPayload, PreparedHttpRequest, PreparedPayload, PreparedPayloads,
@@ -418,17 +419,16 @@ use emitter_retry::{
     EmitterAcknowledgements, EmitterRetryDeferral, EmitterRetrySchedule, RETRY_ACK_ALIVE_EACH,
     emitter_retry_delay,
 };
-use emitter_sinks::EmitterSinkStarter;
 use emitter_supervision::{
     EmitterRetryKind, EmitterRetryStatus, EmitterStartError, EmitterTaskCommand,
     ScheduledEmitterTask, clear_emitter_stop_signal,
 };
 use emitter_task::{
-    EmitterRuntimeError, EmitterRuntimeResult, EmitterSinkContext, emitter_error_message,
+    EmitterConnectorContext, EmitterRuntimeError, EmitterRuntimeResult, emitter_error_message,
     emitter_init_error, emitter_publish_error_is_retryable, emitter_report,
 };
 use emitter_values::{
-    MappedRequestSink, MappedRowSink, MappedValuesProjection, MappedValuesProjectionInit,
+    MappedRequestEmitter, MappedRowEmitter, MappedValuesProjection, MappedValuesProjectionInit,
 };
 pub(crate) use endpoint::{EndpointDispatchOutcome, ResolvedEndpointRoute};
 use endpoint::{EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint};
@@ -460,7 +460,7 @@ use force_flush::{
 use generator::GeneratorTaskSpec;
 use http_request_fields::{
     AcceptedHttpRequests, AdmittedHttpRequests, CompiledHttpRequestFields, HttpRequestFields,
-    HttpRequestInput, HttpRequestSchemas, SourceRecords,
+    HttpRequestInput, HttpRequestSchemas, IngestorRecords,
 };
 use inferencer_output::flush_branch_inferencer_output;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
@@ -518,7 +518,7 @@ use message_error_plan::{
     BoundMessageErrorRoute, BoundMessageErrorRoutes, MessageErrorRouteBindingContext,
 };
 use nervix_connector_kafka::KafkaOffsetPosition;
-pub(in crate::runtime) use nervix_models::SourceMetadataScope;
+pub(in crate::runtime) use nervix_models::IngestorMetadataScope;
 use nervix_models::{DeduplicatorName, ReingestorName};
 pub(in crate::runtime) use node::RuntimeInner;
 use planning::{

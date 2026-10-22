@@ -23,7 +23,7 @@ use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_client_core::{ClientError, EmitterDelivery, RequestKind};
 use nervix_models::SchemaField;
 
-use super::ClientEmitterSink;
+use super::ClientConsumerConnector;
 use crate::runtime_schema::generated_batches::{
     GeneratedDomain, GeneratedSchema, LogicalValue, assert_same_batch,
 };
@@ -50,7 +50,7 @@ fn delivered_rows(source: &RecordBatch, mask: u8) -> Vec<usize> {
 
 /// The stream the sink writes for `rows` of `source`.
 fn delivery(schema: &GeneratedSchema, source: &RecordBatch, rows: &[usize]) -> Bytes {
-    ClientEmitterSink::encode_rows(&schema.compiled, source, rows)
+    ClientConsumerConnector::encode_rows(&schema.compiled, source, rows)
         .assured("rows of the emitter's own output schema encode")
 }
 

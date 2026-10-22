@@ -25,17 +25,17 @@ use super::{
         WaitBound,
     },
     configured_client::configured_client,
-    entity_union::{connector_sinks, connector_sources},
+    entity_union::{connector_emitters, connector_ingestors},
     external_name::{ExternalNameError, external_names, refuse_control_characters, require_length},
 };
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, HeaderLayout, HeaderModel,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, KafkaIngestMode,
-    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue, PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind,
+    EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
+    EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
+    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
+    IngestorReferenceKind, KafkaIngestMode, LocatorDeclaration, LocatorName, OptionChoice,
+    OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass,
 };
 
 configured_client!(Pulsar: unpooled, config Nervix, CreateClientPulsar => PulsarConfigEntry);
@@ -107,7 +107,7 @@ fn pulsar_subscription_rule(text: &str) -> Result<(), ExternalNameError> {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct PulsarTopicSource {
+pub struct PulsarTopicIngestor {
     pub client: ClientName,
     pub topic: PulsarTopicName,
     pub subscription: PulsarSubscription,
@@ -245,13 +245,13 @@ const PULSAR_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["Messages above the broker's announced maximum are rejected."],
 };
 
-impl SourceEntity for PulsarTopicSource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
+impl IngestorDeclaration for PulsarTopicIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // A Pulsar message carries its properties as a list, in the order the producer wrote them.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
-        metadata: SourceMetadataScope::Headers,
+        metadata: IngestorMetadataScope::Headers,
         executes_on_every_cluster_node: false,
-        reference: SourceReferenceKind::Client(ConnectorKind::Pulsar),
+        reference: IngestorReferenceKind::Client(ConnectorKind::Pulsar),
         position_class: PositionClass::Replayable,
         // In an `ACK` mode; `MODE NO ACK` acknowledges without waiting for the broker.
         acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
@@ -290,9 +290,9 @@ impl SourceEntity for PulsarTopicSource {
     };
 }
 
-impl SourceBody for PulsarTopicSource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Client(&self.client)
+impl IngestorEntityBody for PulsarTopicIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Client(&self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -308,15 +308,15 @@ impl SourceBody for PulsarTopicSource {
     }
 }
 
-connector_sources! {
+connector_ingestors! {
     connector Pulsar = "PULSAR";
     /// What a Pulsar source reads.
-    pub enum PulsarSource;
+    pub enum PulsarIngestor;
     /// The alterations of the ingestors that read a Pulsar entity.
     pub enum PulsarIngestorAlteration;
     /// The entities a Pulsar source reads.
-    pub enum PulsarSourceEntity {
-        Topic(PulsarTopicSource) = "TOPIC", "Pulsar";
+    pub enum PulsarIngestorEntity {
+        Topic(PulsarTopicIngestor) = "TOPIC", "Pulsar";
     }
 }
 
@@ -324,17 +324,17 @@ connector_sources! {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct PulsarTopicSink {
+pub struct PulsarTopicEmitter {
     pub mode: PulsarTopicPublishingMode,
     pub client: ClientName,
     pub topic: PulsarTopicName,
 }
 
-impl SinkEntity for PulsarTopicSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+impl EmitterDeclaration for PulsarTopicEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         // The producer keeps a message's properties in a map: one value per name, the last written.
         headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
-        reference: SinkReferenceKind::Client(ConnectorKind::Pulsar),
+        reference: EmitterReferenceKind::Client(ConnectorKind::Pulsar),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
@@ -350,9 +350,9 @@ impl SinkEntity for PulsarTopicSink {
     };
 }
 
-impl SinkBody for PulsarTopicSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for PulsarTopicEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::Pulsar,
         })
@@ -363,15 +363,15 @@ impl SinkBody for PulsarTopicSink {
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector Pulsar = "PULSAR";
     /// What a Pulsar sink writes.
-    pub enum PulsarSink;
+    pub enum PulsarEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum PulsarEmitterMode;
     /// The entities a Pulsar sink writes.
-    pub enum PulsarSinkEntity {
-        Topic(PulsarTopicSink, PulsarTopicPublishingMode) = "TOPIC";
+    pub enum PulsarEmitterEntity {
+        Topic(PulsarTopicEmitter, PulsarTopicPublishingMode) = "TOPIC";
     }
 }
 

@@ -15,12 +15,12 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_zeromq::{ZeroMqSource, ZeroMqSourcePlan};
+use nervix_connector_zeromq::{ZeroMqIngestor, ZeroMqIngestorPlan};
 
 use super::{
     super::*,
     IngestorStartError,
-    source::{BrokerSourceStart, SourceStart},
+    connector::{BrokerIngestorStart, IngestorStart},
 };
 
 impl ZeroMqIngestorStartPlan {
@@ -28,13 +28,13 @@ impl ZeroMqIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
         let ZeroMqIngestorStartPlan { client, mode } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        BrokerSourceStart {
-            connector: ZeroMqSourcePlan::new(resolved.entries),
+        BrokerIngestorStart {
+            connector: ZeroMqIngestorPlan::new(resolved.entries),
             instances: NonZeroU64::MIN,
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,
@@ -45,7 +45,7 @@ impl ZeroMqIngestorStartPlan {
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "zeromq",
         }
-        .open::<ZeroMqSource>(ingestor)
+        .open::<ZeroMqIngestor>(ingestor)
         .await
     }
 }

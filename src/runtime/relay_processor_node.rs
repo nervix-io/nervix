@@ -602,7 +602,7 @@ impl RelayProcessorNode {
                         ProcessorOutputDispatchContext {
                             branch,
                             node_kind: self.kind,
-                            source_kind: self.kind,
+                            entity_kind: self.kind,
                             processor: &self.processor,
                             error_policies: &self.error_policies,
                             materialized_state: ProcessorMaterializedState::Admitted(
@@ -1420,7 +1420,7 @@ impl RelayProcessorNode {
                 ProcessorOutputDispatchContext {
                     branch,
                     node_kind: self.kind,
-                    source_kind: self.kind,
+                    entity_kind: self.kind,
                     processor: &self.processor,
                     error_policies: &self.error_policies,
                     materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(
@@ -1791,7 +1791,7 @@ impl RelayProcessorNode {
                 ProcessorOutputDispatchContext {
                     branch,
                     node_kind,
-                    source_kind: node_kind,
+                    entity_kind: node_kind,
                     processor,
                     error_policies,
                     materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(

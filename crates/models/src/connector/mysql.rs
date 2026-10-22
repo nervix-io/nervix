@@ -21,24 +21,24 @@ use super::{
         WaitBound,
     },
     configured_client::configured_client,
-    entity_union::connector_sinks,
+    entity_union::connector_emitters,
 };
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SinkValueMapping,
-    SinkValueMappings,
+    ClientName, ConnectorKind, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
+    EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
+    EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, LocatorDeclaration,
+    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
 };
 
 configured_client!(MySql: pooled, config NervixWithAddressQuery, CreateClientMySql => MySqlConfigEntry);
 
-pub type MySqlValueMapping = SinkValueMapping;
+pub type MySqlValueMapping = EmitterValueMapping;
 
 /// One table a MySQL client inserts rows into.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct MySqlTableSink {
+pub struct MySqlTableEmitter {
     pub mode: MySqlTablePublishingMode,
     pub client: ClientName,
     pub table: MySqlTableName,
@@ -71,10 +71,10 @@ const MYSQL_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["The driver has no connect, read or write timeout."],
 };
 
-impl SinkEntity for MySqlTableSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+impl EmitterDeclaration for MySqlTableEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         headers: None,
-        reference: SinkReferenceKind::Client(ConnectorKind::MySql),
+        reference: EmitterReferenceKind::Client(ConnectorKind::MySql),
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
@@ -105,9 +105,9 @@ impl SinkEntity for MySqlTableSink {
     };
 }
 
-impl SinkBody for MySqlTableSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for MySqlTableEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::MySql,
         })
@@ -117,20 +117,20 @@ impl SinkBody for MySqlTableSink {
         Some(&mut self.client)
     }
 
-    fn value_mappings(&self) -> SinkValueMappings<'_> {
-        SinkValueMappings::values(&self.values)
+    fn value_mappings(&self) -> EmitterValueMappings<'_> {
+        EmitterValueMappings::values(&self.values)
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector MySql = "MYSQL";
     /// What a MySQL sink writes.
-    pub enum MySqlSink;
+    pub enum MySqlEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum MySqlEmitterMode;
     /// The entities a MySQL sink writes.
-    pub enum MySqlSinkEntity {
-        Table(MySqlTableSink, MySqlTablePublishingMode) = "TABLE";
+    pub enum MySqlEmitterEntity {
+        Table(MySqlTableEmitter, MySqlTablePublishingMode) = "TABLE";
     }
 }
 

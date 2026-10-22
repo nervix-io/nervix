@@ -12,7 +12,7 @@
 //! Current boundary violation: `compile_parts` takes `SignalingWireFormat` and
 //! `SignalingProtocolOnConnect` from the configuration Model and parses its timeout text.
 //! The decision layer owns conversion to a typed signaling plan before this engine compiles it.
-//! The module also defines `SignalingDataSink`; the accepted-data host service belongs to the
+//! The module also defines `SignalingDataEmitter`; the accepted-data host service belongs to the
 //! shared connector contract, not an interface owned by this integration.
 
 use std::{future::Future, time::Duration};
@@ -514,15 +514,15 @@ impl SessionState {
     async fn stream<S, D>(
         &self,
         frame: Vec<u8>,
-        sink: &D,
+        connector: &D,
         websocket: &mut WebSocketStream<S>,
     ) -> error_stack::Result<(), WebsocketSignalingError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
-        D: SignalingDataSink,
+        D: SignalingDataEmitter,
     {
         if self.accepting
-            && let Some(reply) = sink.accept_and_reply(frame).await
+            && let Some(reply) = connector.accept_and_reply(frame).await
         {
             websocket
                 .send(reply)
@@ -544,10 +544,10 @@ impl SessionState {
         reason = "the selected sink accepts each admitted signaling payload"
     )
 )]
-pub trait SignalingDataSink {
+pub trait SignalingDataEmitter {
     fn accept(&self, payload: Vec<u8>) -> impl Future<Output = ()> + Send;
 
-    /// A request-scoped intake can answer an accepted data frame during signaling. Other sinks
+    /// A request-scoped intake can answer an accepted data frame during signaling. Other emitters
     /// keep their ordinary one-way delivery.
     fn accept_and_reply(&self, payload: Vec<u8>) -> impl Future<Output = Option<Message>> + Send {
         let accepted = self.accept(payload);
@@ -575,11 +575,11 @@ impl WebsocketSignalingSession {
     pub async fn run<S, D>(
         &self,
         websocket: &mut WebSocketStream<S>,
-        sink: &D,
+        connector: &D,
     ) -> error_stack::Result<(), WebsocketSignalingError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
-        D: SignalingDataSink,
+        D: SignalingDataEmitter,
     {
         // Outlives the timed future so a timeout can name what the current step was waiting on.
         let mut pending: Vec<&Arc<StatefulJaqProgram>> = Vec::new();
@@ -589,7 +589,7 @@ impl WebsocketSignalingSession {
         };
         let outcome = time::timeout(
             self.protocol.timeout,
-            self.run_steps(websocket, &mut pending, &mut session, sink),
+            self.run_steps(websocket, &mut pending, &mut session, connector),
         )
         .await;
 
@@ -610,11 +610,11 @@ impl WebsocketSignalingSession {
         websocket: &mut WebSocketStream<S>,
         pending: &mut Vec<&'a Arc<StatefulJaqProgram>>,
         session: &mut SessionState,
-        sink: &D,
+        connector: &D,
     ) -> error_stack::Result<(), WebsocketSignalingError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
-        D: SignalingDataSink,
+        D: SignalingDataEmitter,
     {
         let mut sent = 0usize;
 
@@ -658,7 +658,7 @@ impl WebsocketSignalingSession {
                 CompiledSignalingStep::Wait(wait) => {
                     pending.clear();
                     pending.extend(wait.matchers.iter());
-                    self.wait_for_step(websocket, wait, pending, session, sink)
+                    self.wait_for_step(websocket, wait, pending, session, connector)
                         .await?;
                     // Completing a marked step means the peer is streaming: open the relay so
                     // later frames flow while the remaining steps continue.
@@ -678,11 +678,11 @@ impl WebsocketSignalingSession {
         step: &'a CompiledWaitStep,
         pending: &mut Vec<&'a Arc<StatefulJaqProgram>>,
         session: &mut SessionState,
-        sink: &D,
+        connector: &D,
     ) -> error_stack::Result<(), WebsocketSignalingError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
-        D: SignalingDataSink,
+        D: SignalingDataEmitter,
     {
         while !pending.is_empty() {
             nervix_primitives::task::consume_budget().await;
@@ -705,7 +705,7 @@ impl WebsocketSignalingSession {
             };
 
             let Some(value) = self.protocol.decode_frame(&frame, is_text) else {
-                session.stream(frame, sink, websocket).await?;
+                session.stream(frame, connector, websocket).await?;
                 continue;
             };
 
@@ -722,7 +722,7 @@ impl WebsocketSignalingSession {
                 .iter()
                 .position(|matcher| matcher_is_satisfied(matcher, &value, &session.state))
             else {
-                session.stream(frame, sink, websocket).await?;
+                session.stream(frame, connector, websocket).await?;
                 continue;
             };
 
@@ -906,17 +906,17 @@ mod tests {
 
     /// Records what reached ingestion, and when relative to the handshake finishing.
     #[derive(Default)]
-    struct RecordingSink {
+    struct RecordingEmitter {
         accepted: StdArc<Mutex<Vec<Vec<u8>>>>,
     }
 
-    impl RecordingSink {
+    impl RecordingEmitter {
         fn accepted(&self) -> Vec<Vec<u8>> {
             self.accepted.lock().clone()
         }
     }
 
-    impl SignalingDataSink for RecordingSink {
+    impl SignalingDataEmitter for RecordingEmitter {
         async fn accept(&self, payload: Vec<u8>) {
             self.accepted.lock().push(payload);
         }
@@ -1379,16 +1379,16 @@ mod tests {
         protocol: CreateSignalingProtocol,
         steps: Vec<PeerStep>,
     ) -> error_stack::Result<Vec<Vec<u8>>, WebsocketSignalingError> {
-        let sink = RecordingSink::default();
-        run_against_peer_with(protocol, steps, &sink)
+        let connector = RecordingEmitter::default();
+        run_against_peer_with(protocol, steps, &connector)
             .await
-            .map(|()| sink.accepted())
+            .map(|()| connector.accepted())
     }
 
     async fn run_against_peer_with(
         protocol: CreateSignalingProtocol,
         steps: Vec<PeerStep>,
-        sink: &RecordingSink,
+        connector: &RecordingEmitter,
     ) -> error_stack::Result<(), WebsocketSignalingError> {
         let (server_io, client_io) = tokio::io::duplex(8 * 1024);
         let compiled =
@@ -1429,7 +1429,7 @@ mod tests {
 
         let mut websocket = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
         let result = WebsocketSignalingSession::new(compiled)
-            .run(&mut websocket, sink)
+            .run(&mut websocket, connector)
             .await;
         peer.abort();
         if let Some(failure) = failure.lock().clone() {
@@ -1569,7 +1569,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn accept_data_opens_the_relay_mid_handshake() {
-        let sink = RecordingSink::default();
+        let connector = RecordingEmitter::default();
         let error = run_against_peer_with(
             protocol(
                 SignalingWireFormat::Json,
@@ -1594,7 +1594,7 @@ mod tests {
                 // Arrives after the relay opens, so it streams even though the handshake goes on.
                 PeerStep::Send(Message::Text(r#"{"seq":2}"#.to_string())),
             ],
-            &sink,
+            &connector,
         )
         .await
         .expect_err("the second subscription is never acknowledged");
@@ -1607,12 +1607,12 @@ mod tests {
             "unexpected error: {error}"
         );
         // Only the frame that arrived after the relay opened reached it.
-        assert_eq!(sink.accepted(), vec![br#"{"seq":2}"#.to_vec()]);
+        assert_eq!(connector.accepted(), vec![br#"{"seq":2}"#.to_vec()]);
     }
 
     #[nervix_primitives::test]
     async fn accept_data_on_connect_streams_from_the_first_frame() {
-        let sink = RecordingSink::default();
+        let connector = RecordingEmitter::default();
         let error = run_against_peer_with(
             protocol(
                 SignalingWireFormat::Json,
@@ -1628,7 +1628,7 @@ mod tests {
                 PeerStep::Expect(r#"{"op": "subscribe"}"#.to_string()),
                 PeerStep::Send(Message::Text(r#"{"seq":1}"#.to_string())),
             ],
-            &sink,
+            &connector,
         )
         .await
         .expect_err("the subscription is never acknowledged");
@@ -1640,7 +1640,7 @@ mod tests {
             ),
             "unexpected error: {error}"
         );
-        assert_eq!(sink.accepted(), vec![br#"{"seq":1}"#.to_vec()]);
+        assert_eq!(connector.accepted(), vec![br#"{"seq":1}"#.to_vec()]);
     }
 
     #[nervix_primitives::test]
@@ -1679,7 +1679,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn payload_is_dropped_when_the_opening_step_is_never_satisfied() {
-        let sink = RecordingSink::default();
+        let connector = RecordingEmitter::default();
         let error = run_against_peer_with(
             protocol(
                 SignalingWireFormat::Json,
@@ -1698,7 +1698,7 @@ mod tests {
                 // The marked matcher is never satisfied, so ingestion never opens.
                 PeerStep::Send(Message::Text(r#"{"seq":1}"#.to_string())),
             ],
-            &sink,
+            &connector,
         )
         .await
         .expect_err("the first subscription is never acknowledged");
@@ -1711,7 +1711,7 @@ mod tests {
             "unexpected error: {error}"
         );
         assert!(
-            sink.accepted().is_empty(),
+            connector.accepted().is_empty(),
             "payload must not reach the relay before a step opens it"
         );
     }

@@ -48,10 +48,11 @@ use nervix_columnar_json::{
     NestedNulls,
 };
 use nervix_connector::{
-    ConfiguredDeadline, MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome,
-    RejectedSinkRecord, RowRequest, RowRequestLimits, RowSink, RustlsClientConfigSource,
-    SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkRecordPosition,
-    SinkStartError, SinkStartResult, client_config_value, optional_client_config_value,
+    ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle,
+    EmitterOpenError, EmitterRecordPosition, EmitterStartResult, EmitterWriteError,
+    MappedEmitterMember, MappedEmitterRows, MeasuredRequest, PerRecordOutcome,
+    RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits, RustlsClientConfigProvider,
+    client_config_value, optional_client_config_value,
 };
 use nervix_dns::{DnsLookupError, DnsResolver};
 use nervix_models::{ClickHouseTableName, ClientConfigEntry, EmitterBatchPolicy};
@@ -68,7 +69,7 @@ const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What one ClickHouse emitter inserts through, from its typed sink plan.
-pub struct ClickHouseSinkConfig {
+pub struct ClickHouseEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub table: ClickHouseTableName,
     /// The node resolver every connection of the client resolves the host of `addr` through.
@@ -78,7 +79,7 @@ pub struct ClickHouseSinkConfig {
 }
 
 /// The ClickHouse sink, which encodes each mapped row as one `JSONEachRow` line.
-pub struct ClickHouseSink {
+pub struct ClickHouseEmitter {
     client: ClickHouseClient,
     request_timeout: Option<Duration>,
     table: ClickHouseTableName,
@@ -176,9 +177,11 @@ impl ClickHouseWriteError {
         Some(description)
     }
 
-    fn into_report(report: Report<Self>) -> Report<SinkPublishError> {
+    fn into_report(report: Report<Self>) -> Report<EmitterWriteError> {
         let error = report.current_context();
-        let publish = SinkPublishError::Publish { sink: CLICKHOUSE };
+        let publish = EmitterWriteError::Publish {
+            connector: CLICKHOUSE,
+        };
         if let Some(lookup) = error.lookup_failure() {
             let reason = format!("ClickHouse insert request failed: {lookup}");
             return report.change_context(publish).attach_printable(reason);
@@ -208,7 +211,7 @@ struct EncodedLines {
 impl EncodedLines {
     fn encode(
         carriers: &[JsonColumns<'_>],
-        members: &[MappedSinkMember],
+        members: &[MappedEmitterMember],
     ) -> error_stack::Result<Self, JsonWriteError> {
         let mut body = Vec::new();
         let mut ends = Vec::with_capacity(members.len());
@@ -263,9 +266,9 @@ impl EncodedLines {
     }
 }
 
-impl ClickHouseSink {
-    pub fn new(config: ClickHouseSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
-        let ClickHouseSinkConfig {
+impl ClickHouseEmitter {
+    pub fn new(config: ClickHouseEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+        let ClickHouseEmitterConfig {
             config,
             table,
             dns,
@@ -290,14 +293,20 @@ impl ClickHouseSink {
     pub fn client_from_config(
         config: &[ClientConfigEntry],
         dns: DnsResolver,
-    ) -> SinkStartResult<(ClickHouseClient, Option<Duration>)> {
-        let invalid = || Report::new(SinkStartError::InvalidConfiguration { sink: CLICKHOUSE });
+    ) -> EmitterStartResult<(ClickHouseClient, Option<Duration>)> {
+        let invalid = || {
+            Report::new(EmitterOpenError::InvalidConfiguration {
+                connector: CLICKHOUSE,
+            })
+        };
         let addr = client_config_value(config, "addr", "ClickHouse")
             .map_err(|error| invalid().attach_printable(error.to_string()))?;
         let request_timeout = ConfiguredDeadline::timeout(config)
-            .change_context(SinkStartError::InvalidConfiguration { sink: CLICKHOUSE })?
+            .change_context(EmitterOpenError::InvalidConfiguration {
+                connector: CLICKHOUSE,
+            })?
             .map(ConfiguredDeadline::bound);
-        let tls_config = RustlsClientConfigSource::new(config)
+        let tls_config = RustlsClientConfigProvider::new(config)
             .build()
             .map_err(|error| invalid().attach_printable(error.to_string()))?;
         let mut connector = HttpConnector::new_with_resolver(dns);
@@ -363,18 +372,21 @@ impl ClickHouseSink {
 }
 
 #[async_trait::async_trait]
-impl SinkLifecycle for ClickHouseSink {
+impl EmitterLifecycle for ClickHouseEmitter {
     /// Each insert is answered before the publish returns, so the client holds nothing.
-    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
-        Ok(SinkFinish::NothingHeld)
+    async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
+        Ok(EmitterFinish::NothingHeld)
     }
 }
 
 #[async_trait::async_trait]
-impl RowSink for ClickHouseSink {
+impl RowEmitter for ClickHouseEmitter {
     /// Writes the rows of every carrier in inserts of at most `MAX MESSAGES` rows whose body is at
     /// most `MAX SIZE` bytes.
-    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
+    async fn publish(
+        &mut self,
+        rows: MappedEmitterRows<'_>,
+    ) -> PerRecordOutcome<EmitterRecordPosition> {
         let members = rows.members();
         let mut outcome = PerRecordOutcome::with_capacity(members.len());
         let specs = Self::column_specs(rows.target_columns);
@@ -383,8 +395,9 @@ impl RowSink for ClickHouseSink {
             match JsonColumns::new(carrier.batch, &specs, NestedNulls::Write) {
                 Ok(columns) => carriers.push(columns),
                 Err(error) => {
-                    outcome
-                        .fail(error.change_context(SinkPublishError::Publish { sink: CLICKHOUSE }));
+                    outcome.fail(error.change_context(EmitterWriteError::Publish {
+                        connector: CLICKHOUSE,
+                    }));
                     return outcome;
                 }
             }
@@ -392,7 +405,9 @@ impl RowSink for ClickHouseSink {
         let lines = match EncodedLines::encode(&carriers, &members) {
             Ok(lines) => lines,
             Err(error) => {
-                outcome.fail(error.change_context(SinkPublishError::Publish { sink: CLICKHOUSE }));
+                outcome.fail(error.change_context(EmitterWriteError::Publish {
+                    connector: CLICKHOUSE,
+                }));
                 return outcome;
             }
         };
@@ -458,7 +473,7 @@ impl RowSink for ClickHouseSink {
                         match inserted {
                             Ok(()) => outcome.deliver(rows.position(member)),
                             Err(error) if error.current_context().is_record_error() => {
-                                outcome.reject(RejectedSinkRecord::external(
+                                outcome.reject(RejectedEmitterMember::external(
                                     rows.position(member),
                                     rows.occurred_at(member),
                                     error.current_context().record_reason(),
@@ -473,7 +488,7 @@ impl RowSink for ClickHouseSink {
                 }
                 Err(error) if error.current_context().is_record_error() => {
                     let member = members[written.start];
-                    outcome.reject(RejectedSinkRecord::external(
+                    outcome.reject(RejectedEmitterMember::external(
                         rows.position(member),
                         rows.occurred_at(member),
                         error.current_context().record_reason(),
@@ -605,7 +620,7 @@ mod tests {
             "tags".to_string(),
         ];
 
-        let specs = ClickHouseSink::column_specs(&columns);
+        let specs = ClickHouseEmitter::column_specs(&columns);
         let mapped = JsonColumns::new(&batch, &specs, NestedNulls::Write)
             .assured("the test columns have supported Arrow types");
 
@@ -644,7 +659,7 @@ mod tests {
         ]));
         let batch = RecordBatch::try_new(schema, vec![StdArc::new(pairs), StdArc::new(raw)])
             .expect("the mapped batch should build");
-        let specs = ClickHouseSink::column_specs(&["pair".to_string(), "raw".to_string()]);
+        let specs = ClickHouseEmitter::column_specs(&["pair".to_string(), "raw".to_string()]);
         let mapped = JsonColumns::new(&batch, &specs, NestedNulls::Write)
             .expect("fixed-size arrays and bytes are supported");
 
@@ -672,13 +687,13 @@ mod tests {
             vec![StdArc::new(Int64Array::from(vec![Some(1), Some(22), None]))],
         )
         .expect("the mapped batch should build");
-        let specs = ClickHouseSink::column_specs(&["id".to_string()]);
+        let specs = ClickHouseEmitter::column_specs(&["id".to_string()]);
         let mapped = [JsonColumns::new(&batch, &specs, NestedNulls::Write)
             .expect("the test column has a supported Arrow type")];
         let members = [
-            MappedSinkMember { carrier: 0, row: 2 },
-            MappedSinkMember { carrier: 0, row: 0 },
-            MappedSinkMember { carrier: 0, row: 1 },
+            MappedEmitterMember { carrier: 0, row: 2 },
+            MappedEmitterMember { carrier: 0, row: 0 },
+            MappedEmitterMember { carrier: 0, row: 1 },
         ];
 
         let lines = EncodedLines::encode(&mapped, &members).expect("the test rows should encode");
@@ -703,7 +718,7 @@ mod tests {
     async fn client_rejects_an_invalid_request_timeout() {
         let fixture = Fixture::start().await;
         for value in ["later", "0"] {
-            let error = match ClickHouseSink::client_from_config(
+            let error = match ClickHouseEmitter::client_from_config(
                 &client_config("http://127.0.0.1:8123", value),
                 fixture.dns(),
             ) {
@@ -726,7 +741,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn client_parses_the_request_timeout() {
         let fixture = Fixture::start().await;
-        let (_, request_timeout) = ClickHouseSink::client_from_config(
+        let (_, request_timeout) = ClickHouseEmitter::client_from_config(
             &client_config("http://127.0.0.1:8123", "275"),
             fixture.dns(),
         )
@@ -748,12 +763,12 @@ mod tests {
                 .expect("test listener should have an address")
         );
         let (client, request_timeout) =
-            ClickHouseSink::client_from_config(&client_config(addr, "30"), fixture.dns())
+            ClickHouseEmitter::client_from_config(&client_config(addr, "30"), fixture.dns())
                 .expect("ClickHouse client config should be valid");
 
         let result = nervix_primitives::time::timeout(
             Duration::from_millis(250),
-            ClickHouseSink::insert(
+            ClickHouseEmitter::insert(
                 &client,
                 "events",
                 Bytes::from_static(b"{\"id\":1}\n"),
@@ -780,7 +795,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn clickhouse_client_config_validates_tls_ca_file() {
         let fixture = Fixture::start().await;
-        let error = match ClickHouseSink::client_from_config(
+        let error = match ClickHouseEmitter::client_from_config(
             &[
                 ClientConfigEntry {
                     key: "addr".to_string(),

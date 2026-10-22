@@ -16,8 +16,8 @@ use ahash::{HashMap, HashMapExt};
 use error_stack::Report;
 use meticulous::{OptionExt, ResultExt};
 use nervix_models::{
-    CreateEndpoint, DomainName, EndpointType, IngestorInput, Model, ModelIndex, ModelKind, NodeRef,
-    PrometheusApiRoot, RelayName, SourceReference, parse_duration_text,
+    CreateEndpoint, DomainName, EndpointType, IngestorInput, IngestorReference, Model, ModelIndex,
+    ModelKind, NodeRef, PrometheusApiRoot, RelayName, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::graph::DiGraph;
@@ -589,7 +589,7 @@ impl DomainState {
 
                             let kind = input.source.kind();
                             match input.source.reference() {
-                                SourceReference::Client(client) => {
+                                IngestorReference::Client(client) => {
                                     let client_node = expect_kind(
                                         domain,
                                         identifier,
@@ -624,7 +624,7 @@ impl DomainState {
                                     }
                                     graph.add_edge(client_node, source, EdgeKind::RequiredBy);
                                 }
-                                SourceReference::Endpoint(endpoint) => {
+                                IngestorReference::Endpoint(endpoint) => {
                                     let endpoint_node = expect_kind(
                                         domain,
                                         identifier,
@@ -1432,7 +1432,7 @@ impl DomainState {
                     }
 
                     let mut http_origin = None;
-                    if let Some(client_name) = emitter.sink.client() {
+                    if let Some(client_name) = emitter.connector.client() {
                         let client = expect_kind(
                             domain,
                             identifier,
@@ -1447,7 +1447,7 @@ impl DomainState {
                                 "expect_kind above resolved this client reference against the \
                                  same model set",
                             );
-                        let expected = emitter.sink.capabilities().reference;
+                        let expected = emitter.connector.capabilities().reference;
                         let found = client_model.connector_kind().verified(
                             "this model was resolved as a client above, and every client model \
                              configures a connector",
@@ -1458,15 +1458,17 @@ impl DomainState {
                                 identifier: identifier.as_str().to_string(),
                                 reason: format!(
                                     "{} emitter requires a {} client, found {} client '{}'",
-                                    emitter.sink.transport_label(),
+                                    emitter.connector.transport_label(),
                                     expected,
                                     found.keyword(),
                                     client_name.as_str(),
                                 ),
                             }));
                         }
-                        if let (nervix_models::EmitSink::Http(_), Model::ClientHttp(http_client)) =
-                            (emitter.sink.as_ref(), client_model)
+                        if let (
+                            nervix_models::EmitterEntity::Http(_),
+                            Model::ClientHttp(http_client),
+                        ) = (emitter.connector.as_ref(), client_model)
                         {
                             http_origin = Some(validate_http_emitter_client(
                                 domain,
@@ -1477,7 +1479,7 @@ impl DomainState {
                         graph.add_edge(client, source, EdgeKind::RequiredBy);
                     }
 
-                    if let Some(catalog) = emitter.sink.catalog_client() {
+                    if let Some(catalog) = emitter.connector.catalog_client() {
                         let catalog_client = expect_kind(
                             domain,
                             identifier,
@@ -1503,7 +1505,7 @@ impl DomainState {
                                 reason: format!(
                                     "{} emitter requires an {} catalog client, found {} client \
                                      '{}'",
-                                    emitter.sink.transport_label(),
+                                    emitter.connector.transport_label(),
                                     catalog.connector.keyword(),
                                     found.keyword(),
                                     catalog.client.as_str(),
@@ -1513,10 +1515,12 @@ impl DomainState {
                         graph.add_edge(catalog_client, source, EdgeKind::RequiredBy);
                     }
 
-                    let output_schema = match emitter.sink.as_ref() {
-                        nervix_models::EmitSink::Client(nervix_models::ClientSink::Consumer(
-                            nervix_models::ClientConsumerSink { schema, .. },
-                        )) => {
+                    let output_schema = match emitter.connector.as_ref() {
+                        nervix_models::EmitterEntity::Client(
+                            nervix_models::ClientEmitter::Consumer(
+                                nervix_models::ClientConsumerEmitter { schema, .. },
+                            ),
+                        ) => {
                             let schema_node = expect_kind(
                                 domain,
                                 identifier,
@@ -1535,7 +1539,7 @@ impl DomainState {
                                     identifier: identifier.as_str().to_string(),
                                     reason: format!(
                                         "{} emitter output does not resolve to a schema",
-                                        emitter.sink.kind()
+                                        emitter.connector.kind()
                                     ),
                                 }));
                             };

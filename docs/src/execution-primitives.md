@@ -226,7 +226,7 @@ names in any `justfile` recipe, Cargo configuration, workflow or build script. T
 unstable runtime controls belong to the Turmoil build: the check rejects `--cfg tokio_unstable` in
 any `justfile` recipe but a Turmoil one, and in Cargo configuration, a workflow or a build script.
 
-The analysis cfg of the [source contracts](./data-plane-concurrency.md#source-contracts), `nervix_lint`, is tooling only and
+The analysis cfg of the [ingestor contracts](./data-plane-concurrency.md#source-contracts), `nervix_lint`, is tooling only and
 selects nothing. Only the analysis driver sets it, for the crates it analyzes, and the analysis must
 read the code a product build compiles. The check rejects `--cfg nervix_lint` in any `justfile`
 recipe, Cargo configuration, workflow or build script, a `cfg` or `cfg!` predicate that names it,
@@ -341,7 +341,7 @@ a file whose owners block in different ways, such as the CLI's, has a permission
 | Owner | Blocks through | Why it stays outside the executor | What bounds it |
 | --- | --- | --- | --- |
 | The resolver's configuration load in `nervix-dns` | `task::spawn_blocking` | A node reads its resolver configuration before it builds its executor, and the Rust client and the CLI build the same resolver without one | Two small files, read once for each resolver built |
-| The Kafka sink's final producer-queue drain | `task::spawn_blocking` | librdkafka's flush waits on the network, independently of the source control-call class | The host's physical flush deadline |
+| The Kafka emitter's final producer-queue drain | `task::spawn_blocking` | librdkafka's flush waits on the network, independently of the source control-call class | The host's physical flush deadline |
 | The Rust client's backup download and restore upload, and the CLI's event printer | `task::spawn_blocking` | A client tool is not a node and has no executor | One rename of a written archive, one sequential read of an archive, and one printer thread for the life of the command |
 | The CLI's completion prompt | `task::block_in_place` | A client tool is not a node and has no executor; its line editor asks for completions synchronously on the thread that runs the CLI's main task, so the prompt waits there for the completion while the runtime's workers keep the session running | One completion at a time, only while the operator waits at the prompt; each page of suggestions ends by the client's retry deadline, and a repeated continuation ends the completion |
 | The benchmark driver and the scenario harness | `task::spawn_blocking` | A harness is not a node; it waits on brokers, databases, probe threads and the C binding from its own process | Each call's own timeout, or the probe or thread it joins |

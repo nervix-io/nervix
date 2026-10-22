@@ -39,12 +39,12 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_connector::{
-    ConfiguredDeadline, HttpClientConfig, MappedSinkCarrier, MappedSinkRows, MeasuredRequest,
-    PerRecordOutcome, PreparedRowRequest, RejectedSinkRecord, RowRequest, RowRequestLimits,
-    RowRequestPreparation, RowRequestSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
-    SinkPublishError, SinkPublishResult, SinkRecordId, SinkRecordPosition, SinkRetryDelay,
-    SinkRowRequest, SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
-    optional_client_config_value, read_tls_file,
+    ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle,
+    EmitterOpenError, EmitterRecordId, EmitterRecordPosition, EmitterRetryDelay, EmitterRowRequest,
+    EmitterStartResult, EmitterWriteError, EmitterWriteResult, HttpClientConfig,
+    MappedEmitterCarrier, MappedEmitterRows, MeasuredRequest, PerRecordOutcome, PreparedRowRequest,
+    RejectedEmitterMember, RowRequest, RowRequestEmitter, RowRequestLimits, RowRequestPreparation,
+    client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, EmitterBatchPolicy, FieldPath, Timestamp};
 use nervix_primitives::{sync::StdArc, time::Instant};
@@ -92,7 +92,7 @@ const OTEL: &str = "otel";
 const OTLP_PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 
 /// The OpenTelemetry sink, which exports each mapped row as one OTLP record.
-pub struct OtelSink {
+pub struct OtelEmitter {
     client: OtelClient,
     signal: OtelSignal,
     /// Where the signal's Export requests go, and the response each is answered with.
@@ -110,7 +110,7 @@ pub struct OtelSink {
 }
 
 /// What one OTEL emitter exports with, from its typed sink plan.
-pub struct OtelSinkConfig {
+pub struct OtelEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub dns: nervix_dns::DnsResolver,
     pub signal: OtelSignal,
@@ -389,7 +389,7 @@ struct OtelPartialSuccess {
 enum OtelTransportOutcome {
     Accepted(Option<OtelPartialSuccess>),
     Rejected(String),
-    Failed(Report<SinkPublishError>),
+    Failed(Report<EmitterWriteError>),
 }
 
 #[derive(Debug, Error)]
@@ -430,11 +430,11 @@ impl OtelRecordError {
     /// The rejection the host delivers for the row this value came from.
     fn rejected(
         error: Report<Self>,
-        position: SinkRecordPosition,
+        position: EmitterRecordPosition,
         occurred_at: Timestamp,
-    ) -> RejectedSinkRecord<SinkRecordPosition> {
+    ) -> RejectedEmitterMember<EmitterRecordPosition> {
         let context = error.current_context();
-        RejectedSinkRecord::invalid(
+        RejectedEmitterMember::invalid(
             position,
             occurred_at,
             context.reason.clone(),
@@ -483,8 +483,8 @@ enum OtelValueError {
 type OtelValueResult<T> = error_stack::Result<T, OtelValueError>;
 
 /// A configuration this sink cannot start with.
-fn invalid_configuration(reason: impl std::fmt::Display) -> Report<SinkStartError> {
-    Report::new(SinkStartError::InvalidConfiguration { sink: OTEL })
+fn invalid_configuration(reason: impl std::fmt::Display) -> Report<EmitterOpenError> {
+    Report::new(EmitterOpenError::InvalidConfiguration { connector: OTEL })
         .attach_printable(reason.to_string())
 }
 
@@ -495,16 +495,16 @@ fn invalid_configuration(reason: impl std::fmt::Display) -> Report<SinkStartErro
         reason = "the caller supplies typed name and error conversions at the OTEL boundary"
     )
 )]
-fn publish_failure(reason: impl std::fmt::Display) -> Report<SinkPublishError> {
-    Report::new(SinkPublishError::Publish { sink: OTEL }).attach_printable(reason.to_string())
+fn publish_failure(reason: impl std::fmt::Display) -> Report<EmitterWriteError> {
+    Report::new(EmitterWriteError::Publish { connector: OTEL }).attach_printable(reason.to_string())
 }
 
 /// A failed export the host retries no sooner than the receiver asked it to.
 fn publish_failure_after(
     reason: impl std::fmt::Display,
     delay: Duration,
-) -> Report<SinkPublishError> {
-    publish_failure(reason).attach(SinkRetryDelay(delay))
+) -> Report<EmitterWriteError> {
+    publish_failure(reason).attach(EmitterRetryDelay(delay))
 }
 
 /// A refused export that no retry would change, such as a receiver that rejects this endpoint.
@@ -514,12 +514,13 @@ fn publish_failure_after(
         reason = "the caller supplies typed name and error conversions at the OTEL boundary"
     )
 )]
-fn misconfigured(reason: impl std::fmt::Display) -> Report<SinkPublishError> {
-    Report::new(SinkPublishError::Misconfigured { sink: OTEL }).attach_printable(reason.to_string())
+fn misconfigured(reason: impl std::fmt::Display) -> Report<EmitterWriteError> {
+    Report::new(EmitterWriteError::Misconfigured { connector: OTEL })
+        .attach_printable(reason.to_string())
 }
 
 impl OtelClientSettings {
-    fn parse(config: &[ClientConfigEntry]) -> SinkStartResult<Self> {
+    fn parse(config: &[ClientConfigEntry]) -> EmitterStartResult<Self> {
         const ALLOWED_KEYS: &[&str] = &[
             "endpoint",
             "protocol",
@@ -583,7 +584,7 @@ impl OtelClientSettings {
             }
         };
         let timeout = ConfiguredDeadline::timeout(config)
-            .change_context(SinkStartError::InvalidConfiguration { sink: OTEL })?
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: OTEL })?
             .map(ConfiguredDeadline::bound);
         let headers = optional_client_config_value(config, "headers")
             .map(Self::parse_headers)
@@ -599,7 +600,7 @@ impl OtelClientSettings {
         })
     }
 
-    fn parse_headers(raw: &str) -> SinkStartResult<Vec<(String, String)>> {
+    fn parse_headers(raw: &str) -> EmitterStartResult<Vec<(String, String)>> {
         if raw.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -621,15 +622,15 @@ impl OtelClientSettings {
     }
 }
 
-impl OtelSink {
+impl OtelEmitter {
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
             reason = "the caller supplies typed name and error conversions at the OTEL boundary"
         )
     )]
-    pub fn new(config: OtelSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
-        let OtelSinkConfig {
+    pub fn new(config: OtelEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+        let OtelEmitterConfig {
             config,
             dns,
             signal,
@@ -690,7 +691,7 @@ impl OtelSink {
     fn transport_from_config(
         config: &[ClientConfigEntry],
         dns: &nervix_dns::DnsResolver,
-    ) -> SinkStartResult<OtelTransport> {
+    ) -> EmitterStartResult<OtelTransport> {
         let settings = OtelClientSettings::parse(config)?;
         match settings.protocol {
             OtelProtocol::Grpc => {
@@ -771,7 +772,7 @@ impl OtelSink {
         }
     }
 
-    fn grpc_metadata(headers: &[(String, String)]) -> SinkStartResult<MetadataMap> {
+    fn grpc_metadata(headers: &[(String, String)]) -> EmitterStartResult<MetadataMap> {
         let mut metadata = MetadataMap::new();
         for (key, value) in headers {
             let key = MetadataKey::<Ascii>::from_bytes(key.as_bytes()).map_err(|error| {
@@ -785,7 +786,7 @@ impl OtelSink {
         Ok(metadata)
     }
 
-    fn http_headers(headers: &[(String, String)]) -> SinkStartResult<HeaderMap> {
+    fn http_headers(headers: &[(String, String)]) -> EmitterStartResult<HeaderMap> {
         let mut parsed = HeaderMap::new();
         for (key, value) in headers {
             let name = HeaderName::from_bytes(key.as_bytes()).map_err(|error| {
@@ -955,15 +956,15 @@ impl OtelSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for OtelSink {
+impl EmitterLifecycle for OtelEmitter {
     /// Each Export request is answered before the publish returns, so the client holds nothing.
-    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
-        Ok(SinkFinish::NothingHeld)
+    async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
+        Ok(EmitterFinish::NothingHeld)
     }
 }
 
 #[async_trait]
-impl RowRequestSink for OtelSink {
+impl RowRequestEmitter for OtelEmitter {
     /// Converts every selected row once and divides the converted records of each carrier, in
     /// source order, into Export requests of one resource and one scope, encoding each request
     /// exactly once.
@@ -975,17 +976,17 @@ impl RowRequestSink for OtelSink {
     /// record that alone exceeds it is refused.
     async fn prepare(
         &mut self,
-        rows: MappedSinkRows<'_>,
-    ) -> SinkPublishResult<RowRequestPreparation> {
+        rows: MappedEmitterRows<'_>,
+    ) -> EmitterWriteResult<RowRequestPreparation> {
         let mut preparation = RowRequestPreparation::default();
         let observed_time = {
-            let mapping_input = OtelSink::observation_time_unix_nano();
+            let mapping_input = OtelEmitter::observation_time_unix_nano();
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(error) => Err({
                     let reason = error.current_context().reason.clone();
                     error
-                        .change_context(SinkPublishError::Publish { sink: OTEL })
+                        .change_context(EmitterWriteError::Publish { connector: OTEL })
                         .attach_printable(reason)
                 }),
             }
@@ -1008,11 +1009,14 @@ impl RowRequestSink for OtelSink {
         nervix::dispatch(reason = "external OTEL conversion and SDK publication own their \
                                    callback effects; no internal runtime ownership is inferred")
     )]
-    async fn publish(&mut self, requests: Vec<SinkRowRequest>) -> PerRecordOutcome<SinkRecordId> {
+    async fn publish(
+        &mut self,
+        requests: Vec<EmitterRowRequest>,
+    ) -> PerRecordOutcome<EmitterRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(requests.len());
         for request in requests {
             nervix_primitives::task::consume_budget().await;
-            let SinkRowRequest {
+            let EmitterRowRequest {
                 id,
                 body,
                 occurred_at,
@@ -1032,7 +1036,7 @@ impl RowRequestSink for OtelSink {
                     outcome.deliver(id);
                 }
                 OtelTransportOutcome::Rejected(reason) => {
-                    outcome.reject(RejectedSinkRecord::external(id, occurred_at, reason));
+                    outcome.reject(RejectedEmitterMember::external(id, occurred_at, reason));
                 }
                 OtelTransportOutcome::Failed(error) => {
                     outcome.fail(error);
@@ -1044,13 +1048,13 @@ impl RowRequestSink for OtelSink {
     }
 }
 
-impl OtelSink {
+impl OtelEmitter {
     /// Prepares the Export requests that carry the rows of one carrier: one request without
     /// `BATCH`, and with it requests of at most `MAX MESSAGES` records whose protobuf encoding is at
     /// most `MAX SIZE` bytes.
     async fn prepare_carrier(
         &self,
-        carrier: &MappedSinkCarrier<'_>,
+        carrier: &MappedEmitterCarrier<'_>,
         observed_time: u64,
         preparation: &mut RowRequestPreparation,
     ) {
@@ -1060,7 +1064,7 @@ impl OtelSink {
             attributes: &self.attributes,
             attribute_offset: self.attribute_offset,
         };
-        let position = |row: usize| SinkRecordPosition {
+        let position = |row: usize| EmitterRecordPosition {
             batch_index: carrier.batch_index,
             row_index: row,
         };
@@ -1372,7 +1376,7 @@ impl OtelTransport {
         }
     }
 
-    fn http_body(body: Vec<u8>, compression: OtelCompression) -> SinkPublishResult<Vec<u8>> {
+    fn http_body(body: Vec<u8>, compression: OtelCompression) -> EmitterWriteResult<Vec<u8>> {
         if compression == OtelCompression::None {
             return Ok(body);
         }
@@ -1610,7 +1614,7 @@ impl OtelMappedBatch<'_> {
             .ok_or_else(|| {
                 OtelRecordError::new(key, format!("OTEL VALUES key '{key}' is not DATETIME"))
             })?;
-        OtelSink::timestamp_to_unix_nano(array.value(row), key).map(Some)
+        OtelEmitter::timestamp_to_unix_nano(array.value(row), key).map(Some)
     }
 
     fn attributes(&self, row: usize) -> error_stack::Result<Vec<KeyValue>, OtelRecordError> {
@@ -1752,10 +1756,10 @@ impl OtelMappedBatch<'_> {
         selected_rows: &[usize],
         batch_index: usize,
         occurred_at: Timestamp,
-        positions: &mut Vec<SinkRecordPosition>,
-        rejected: &mut Vec<RejectedSinkRecord<SinkRecordPosition>>,
+        positions: &mut Vec<EmitterRecordPosition>,
+        rejected: &mut Vec<RejectedEmitterMember<EmitterRecordPosition>>,
     ) -> Metric {
-        let position = |row: usize| SinkRecordPosition {
+        let position = |row: usize| EmitterRecordPosition {
             batch_index,
             row_index: row,
         };
@@ -2351,7 +2355,7 @@ fn number_value_at(array: &ArrayRef, row: usize) -> OtelValueResult<number_data_
                 )
                 .value(row),
         )),
-        ty if OtelSink::is_integer_type(ty) => {
+        ty if OtelEmitter::is_integer_type(ty) => {
             integer_as_i64(array, row).map(number_data_point::Value::AsInt)
         }
         ty => Err(Report::new(OtelValueError::ExpectedMetricNumeric {
@@ -2407,7 +2411,7 @@ fn any_value_at(array: &ArrayRef, row: usize) -> OtelValueResult<Option<AnyValue
                 )
                 .value(row),
         ),
-        ty if OtelSink::is_integer_type(ty) => {
+        ty if OtelEmitter::is_integer_type(ty) => {
             any_value::Value::IntValue(integer_as_i64(array, row)?)
         }
         DataType::Timestamp(TimeUnit::Nanosecond, _) => {
@@ -2686,7 +2690,7 @@ mod tests {
     async fn grpc_transport_initialization_does_not_require_a_reachable_endpoint()
     -> Result<(), Report<nervix_dns::DnsConfigurationError>> {
         let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system()).await?;
-        let transport = OtelSink::transport_from_config(
+        let transport = OtelEmitter::transport_from_config(
             &config(&[
                 ("endpoint", "http://127.0.0.1:0"),
                 ("protocol", "grpc"),
@@ -2703,7 +2707,7 @@ mod tests {
         };
         assert_eq!(
             error.current_context(),
-            &SinkPublishError::Publish { sink: OTEL },
+            &EmitterWriteError::Publish { connector: OTEL },
             "an unreachable receiver is a failure the host retries"
         );
         Ok(())
@@ -2737,7 +2741,7 @@ mod tests {
         })
         .await
         .assured("the fixture DNS configuration is valid");
-        let transport = OtelSink::transport_from_config(
+        let transport = OtelEmitter::transport_from_config(
             &config(&[
                 ("endpoint", "http://otel-grpc.nervix.test:4317"),
                 ("protocol", "grpc"),
@@ -2916,7 +2920,7 @@ mod tests {
             "OTEL unsigned value cannot be negative"
         );
 
-        let timestamp = OtelSink::timestamp_to_unix_nano(-1, "time")
+        let timestamp = OtelEmitter::timestamp_to_unix_nano(-1, "time")
             .expect_err("negative event time is invalid for OTLP");
         assert!(timestamp.contains::<std::num::TryFromIntError>());
         assert_eq!(timestamp.current_context().key, "time");
@@ -2924,14 +2928,14 @@ mod tests {
 
     #[test]
     fn observation_timestamp_samples_actual_utc() {
-        let before = OtelSink::timestamp_to_unix_nano(
+        let before = OtelEmitter::timestamp_to_unix_nano(
             nervix_connector::physical_time::actual_utc_now().unix_nanos(),
             "before",
         )
         .expect("actual UTC must be after the Unix epoch");
-        let observed = OtelSink::observation_time_unix_nano()
+        let observed = OtelEmitter::observation_time_unix_nano()
             .expect("actual UTC observation time must be after the Unix epoch");
-        let after = OtelSink::timestamp_to_unix_nano(
+        let after = OtelEmitter::timestamp_to_unix_nano(
             nervix_connector::physical_time::actual_utc_now().unix_nanos(),
             "after",
         )

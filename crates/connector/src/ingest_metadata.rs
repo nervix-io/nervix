@@ -17,7 +17,7 @@
     )
 )]
 
-use nervix_models::SourceMetadataScope;
+use nervix_models::IngestorMetadataScope;
 
 /// Transport headers of one source message, visited in the order its entity's declared header model
 /// keeps them: as the message carries them for `ordered_repeats`, each name's values together for
@@ -104,18 +104,18 @@ pub enum IngestMetadataRow<'a> {
 impl IngestMetadataRow<'_> {
     /// The metadata scope this row carries the fields of, which is the one builder set it can be
     /// appended into.
-    pub fn scope(&self) -> SourceMetadataScope {
+    pub fn scope(&self) -> IngestorMetadataScope {
         match self {
-            Self::Kafka { .. } => SourceMetadataScope::Kafka,
-            Self::Syslog { .. } => SourceMetadataScope::Syslog,
-            Self::Headers { .. } => SourceMetadataScope::Headers,
+            Self::Kafka { .. } => IngestorMetadataScope::Kafka,
+            Self::Syslog { .. } => IngestorMetadataScope::Syslog,
+            Self::Headers { .. } => IngestorMetadataScope::Headers,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::SourceMetadataScope;
+    use nervix_models::IngestorMetadataScope;
 
     use super::{IngestMetadataRow, NoIngestHeaders};
 
@@ -127,16 +127,16 @@ mod tests {
             offset: 42,
             headers: &NoIngestHeaders,
         };
-        assert_eq!(kafka.scope(), SourceMetadataScope::Kafka);
+        assert_eq!(kafka.scope(), IngestorMetadataScope::Kafka);
 
         let syslog = IngestMetadataRow::Syslog {
             peer_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 514)),
         };
-        assert_eq!(syslog.scope(), SourceMetadataScope::Syslog);
+        assert_eq!(syslog.scope(), IngestorMetadataScope::Syslog);
 
         let headers = IngestMetadataRow::Headers {
             headers: &NoIngestHeaders,
         };
-        assert_eq!(headers.scope(), SourceMetadataScope::Headers);
+        assert_eq!(headers.scope(), IngestorMetadataScope::Headers);
     }
 }

@@ -298,13 +298,13 @@ impl Runtime {
         super::branch_task_stop_timeout(self.inner.domain_drain_timeout)
     }
 
-    /// When the emitters of a domain execution that stops now finish their sinks: the domain drain
+    /// When the emitters of a domain execution that stops now finish their emitters: the domain drain
     /// timeout from now, the same bound a stop command gives an emitter.
     pub(in crate::runtime) fn emitter_finish_deadline(&self) -> Instant {
         self.emitter_finish_deadline_within(self.inner.domain_drain_timeout)
     }
 
-    /// When the emitters of a domain execution that stops now finish their sinks, no later than
+    /// When the emitters of a domain execution that stops now finish their emitters, no later than
     /// `limit` from now.
     fn emitter_finish_deadline_within(&self, limit: Duration) -> Instant {
         let budget = limit.min(self.inner.domain_drain_timeout);

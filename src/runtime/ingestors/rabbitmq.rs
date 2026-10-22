@@ -15,12 +15,12 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_rabbitmq::{RabbitMqSource, RabbitMqSourcePlan};
+use nervix_connector_rabbitmq::{RabbitMqIngestor, RabbitMqIngestorPlan};
 
 use super::{
     super::*,
-    IngestorStartError, SourceStartError,
-    source::{BrokerSourceStart, SourceStart},
+    IngestorConnectorStartError, IngestorStartError,
+    connector::{BrokerIngestorStart, IngestorStart},
 };
 
 impl RabbitMqIngestorStartPlan {
@@ -28,7 +28,7 @@ impl RabbitMqIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
         let RabbitMqIngestorStartPlan {
             client,
             queue,
@@ -39,10 +39,12 @@ impl RabbitMqIngestorStartPlan {
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
         let Some(dns) = runtime.dns() else {
-            return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
+            return Err(
+                ingestor.connector_start_failure(IngestorConnectorStartError::NodeDnsUnavailable)
+            );
         };
-        BrokerSourceStart {
-            connector: RabbitMqSourcePlan::new(
+        BrokerIngestorStart {
+            connector: RabbitMqIngestorPlan::new(
                 resolved.entries,
                 dns.clone(),
                 queue,
@@ -58,7 +60,7 @@ impl RabbitMqIngestorStartPlan {
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "rabbitmq",
         }
-        .open::<RabbitMqSource>(ingestor)
+        .open::<RabbitMqIngestor>(ingestor)
         .await
     }
 }

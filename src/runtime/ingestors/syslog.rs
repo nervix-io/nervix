@@ -15,13 +15,13 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_syslog::{SyslogSource, SyslogSourcePlan};
+use nervix_connector_syslog::{SyslogIngestor, SyslogIngestorPlan};
 use nervix_models::IngestAcknowledgement;
 
 use super::{
     super::*,
     IngestorStartError,
-    source::{BrokerSourceStart, SourceStart},
+    connector::{BrokerIngestorStart, IngestorStart},
 };
 
 impl SyslogIngestorStartPlan {
@@ -29,16 +29,16 @@ impl SyslogIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
         let SyslogIngestorStartPlan { client } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let connector = SyslogSourcePlan::new(resolved.entries, |configured| {
+        let connector = SyslogIngestorPlan::new(resolved.entries, |configured| {
             runtime.syslog_ingestor_bind_addr(configured)
         })
         .change_context_lazy(|| ingestor.initialize_failure())?;
-        BrokerSourceStart {
+        BrokerIngestorStart {
             connector,
             instances: NonZeroU64::MIN,
             acknowledgement: IngestAcknowledgement::Unacknowledged,
@@ -51,7 +51,7 @@ impl SyslogIngestorStartPlan {
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "syslog",
         }
-        .open::<SyslogSource>(ingestor)
+        .open::<SyslogIngestor>(ingestor)
         .await
     }
 }

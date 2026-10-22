@@ -580,7 +580,7 @@ services:
 
   # Lightweight Sentry-compatible backend for local emitter development.
   sentry:
-    image: bugsink/bugsink:2.3.1
+    image: bugemitter/bugemitter:2.3.1
     container_name: nervix-sentry
     ports:
       - "18090:8000"

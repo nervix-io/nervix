@@ -28,7 +28,7 @@ use std::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{EmitterBatchPolicy, PayloadSizeLimit, Timestamp};
 
-use crate::sink::RejectedSinkRecord;
+use crate::emitter::RejectedEmitterMember;
 
 /// The most rows and measured bytes one request of a row or row request sink carries.
 ///
@@ -93,15 +93,15 @@ impl RowOversize {
         id: Id,
         occurred_at: Timestamp,
         request: &str,
-    ) -> RejectedSinkRecord<Id> {
+    ) -> RejectedEmitterMember<Id> {
         let size = self.size;
         match self.exceeded {
-            ExceededLimit::Declared(limit) => RejectedSinkRecord::oversize(
+            ExceededLimit::Declared(limit) => RejectedEmitterMember::oversize(
                 id,
                 occurred_at,
                 format!("{request} of one row measures {size} bytes, above MAX SIZE {limit}"),
             ),
-            ExceededLimit::Native(limit) => RejectedSinkRecord::external(
+            ExceededLimit::Native(limit) => RejectedEmitterMember::external(
                 id,
                 occurred_at,
                 format!(

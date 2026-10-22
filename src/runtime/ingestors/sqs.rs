@@ -15,12 +15,12 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_sqs::{SqsSource, SqsSourcePlan};
+use nervix_connector_sqs::{SqsIngestor, SqsIngestorPlan};
 
 use super::{
     super::*,
-    IngestorStartError, SourceStartError,
-    source::{BrokerSourceStart, SourceStart},
+    IngestorConnectorStartError, IngestorStartError,
+    connector::{BrokerIngestorStart, IngestorStart},
 };
 
 impl SqsIngestorStartPlan {
@@ -28,7 +28,7 @@ impl SqsIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
         let SqsIngestorStartPlan {
             client,
             queue,
@@ -39,14 +39,16 @@ impl SqsIngestorStartPlan {
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
         let Some(dns) = runtime.dns() else {
-            return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
+            return Err(
+                ingestor.connector_start_failure(IngestorConnectorStartError::NodeDnsUnavailable)
+            );
         };
         // The plan builds its client without a request; each instance looks the queue up when it
         // resumes, so an unreachable service is a transient source failure, not a failed start.
-        let connector = SqsSourcePlan::new(&resolved.entries, queue, dns.clone())
+        let connector = SqsIngestorPlan::new(&resolved.entries, queue, dns.clone())
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        BrokerSourceStart {
+        BrokerIngestorStart {
             connector,
             instances,
             acknowledgement: mode.acknowledgement(),
@@ -58,7 +60,7 @@ impl SqsIngestorStartPlan {
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "sqs",
         }
-        .open::<SqsSource>(ingestor)
+        .open::<SqsIngestor>(ingestor)
         .await
     }
 }

@@ -24,15 +24,15 @@ An emitter defines:
 - one or more source relays that declare the same payload schema
 - an optional input collection policy
 - the codec used for encoding
-- the transport-specific sink
-- the sink's explicit publishing mode, confirmation window and bound where applicable, and retry
+- the transport-specific emitter
+- the emitter's explicit publishing mode, confirmation window and bound where applicable, and retry
   pacing
 - an optional batching clause bounding how many records one external write carries and its encoded
-  size, required for database sinks
+  size, required for database emitters
 - the flush policy used to collect a batch before publishing
 - whether the branch is `ATTACHED` or `DETACHED`
 - route-local codec construction or a direct `VALUES` mapping
-- optional ordered header invocations on supported codec sinks
+- optional ordered header invocations on supported codec emitters
 - optional ordered materialized-state dependencies
 
 ## Statement heads and external names
@@ -110,17 +110,17 @@ named branches cannot configure one branch-bound dependency or error relay acros
 
 All emitters declare `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE`, and
 `DESCRIBE EMITTER` reports the declared policy on its `flush:` line. `FLUSH`
-means Nervix collects an in-memory Arrow batch before handing it to the external sink. `FLUSH EACH`
+means Nervix collects an in-memory Arrow batch before handing it to the external emitter. `FLUSH EACH`
 is a domain-logical duration, so a paced domain's `TIME RATE` accelerates or slows it; retry
-backoff, acknowledgement keepalive, and sink acknowledgement timeouts stay on the physical clock.
+backoff, acknowledgement keepalive, and emitter acknowledgement timeouts stay on the physical clock.
 See [Domains And Time](domains-and-time.md) for the full clock split. The
 [NSPL Overview](nspl-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg
-additionally requires `COMMIT EACH <duration> MAX SIZE <bytes>` as part of its sink clause: flush
+additionally requires `COMMIT EACH <duration> MAX SIZE <bytes>` as part of its emitter clause: flush
 writes local Arrow IPC staging files, and commit writes their rows into Parquet data files and
 appends those files to the table in one catalog commit. `ON MESSAGE ERROR SEND TO`
 buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
-interval or maximum batch-size boundary. Which sinks gain from larger flush batches, and which
+interval or maximum batch-size boundary. Which emitters gain from larger flush batches, and which
 publish per record regardless of batch size, is covered by the
 [flush tuning guidance](nspl-overview.md).
 
@@ -141,8 +141,8 @@ only at the external export boundary.
 
 ## Publishing modes
 
-Every emitter sink requires `MODE <body>` before its body selection, immediately before
-`ENCODE USING` when the sink uses a codec. There is no implicit mode, confirmation window, ACK
+Every emitter emitter requires `MODE <body>` before its body selection, immediately before
+`ENCODE USING` when the emitter uses a codec. There is no implicit mode, confirmation window, ACK
 timeout, or retry cadence. `SHOW CREATE EMITTER` and `DESCRIBE EMITTER` render the complete mode.
 
 The shared variables are:
@@ -161,18 +161,18 @@ The shared variables are:
   clock cannot schedule extends nothing. Retries continue with backpressure until the external
   system recovers or an operator repairs its provisioning.
 
-Request/response sinks—SQS, Sentry, OTEL, HTTP, the databases, and Iceberg—do not take
+Request/response emitters—SQS, Sentry, OTEL, HTTP, the databases, and Iceberg—do not take
 `ACK TIMEOUT`. Except for Iceberg, their client request timeout bounds the response: SQS, Sentry,
 OTEL, and ClickHouse clients expose that bound as the optional `timeout_ms` CONFIG key, and a client
 an HTTP emitter uses must declare it. An Iceberg emitter's object-store client bounds each storage
 call with its own optional `timeout_ms`, while Nervix sets no deadline on its REST catalog requests,
-as [Iceberg retries](#iceberg-retries) describes. For every sink, Nervix accounts for records
+as [Iceberg retries](#iceberg-retries) describes. For every emitter, Nervix accounts for records
 individually wherever the transport exposes individual results: delivered records acknowledge
 upstream, definitively invalid records follow `ON MESSAGE ERROR`, and a retry resends only records
 that are neither delivered nor rejected. An ambiguous or infrastructure-wide failure is never used
 to discard a record.
 
-| Sink | Mode forms | Publish success boundary |
+| Emitter | Mode forms | Publish success boundary |
 | --- | --- | --- |
 | Kafka | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | Local producer-queue acceptance for `NO ACK`; one delivery report per record for `ACK` |
 | Pulsar | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | Producer acceptance for `NO ACK`; one broker receipt per record for `ACK` |
@@ -234,7 +234,7 @@ construction, competing consumers, application ACK, buffering and lifecycle in a
 connector `CLIENT` object, codec, header operations, or direct `VALUES` form. The emitter still
 uses its ordinary `FROM` predicates, optional collection, materialized dependencies, ordered
 `INHERIT` and `SET`, route `WHERE`, error policies, placement, and `ATTACHED` or `DETACHED`
-boundary. A client sink requires `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>`, an explicit
+boundary. A client emitter requires `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>`, an explicit
 `ACK TIMEOUT` and `RETRY POLICY`, `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>`, and its
 ordinary required `FLUSH` policy. `SHOW CREATE EMITTER` preserves this full contract.
 
@@ -425,7 +425,7 @@ source relays and branches it serves. It sends the requests a flush releases in 
 Independent executions have no total order, and an endpoint can apply a request after Nervix loses
 its response, so this order does not settle ambiguous remote effects.
 
-The HTTP sink speaks HTTP/1.1. It creates a connection for each attempt and closes it after final
+The HTTP emitter speaks HTTP/1.1. It creates a connection for each attempt and closes it after final
 headers, so an unread or stalled body cannot be reused as the next response. DNS resolution,
 connection acquisition, TLS negotiation, the complete request send, interim responses and
 complete final headers share the client's physical `timeout_ms`; queueing behind an earlier
@@ -434,7 +434,7 @@ host takes at most half of `timeout_ms`, whatever the name servers do, and each 
 to is tried in turn within an equal share of what is left, so an address that never answers leaves
 the next one time to connect and the request time to be sent and answered. HTTPS validates trust and
 the destination hostname and uses the client's pinned CA and optional client certificate mounts.
-Starting the sink reads local configuration and sends no probe.
+Starting the emitter reads local configuration and sends no probe.
 
 The transport writes `Host`, `Connection: close`, and `Content-Length`: the body's length when a
 body exists, and `0` for a `POST`, `PUT` or `PATCH` declared `WITHOUT BODY`, as servers that require
@@ -449,7 +449,7 @@ Each interim and final response header block may contain at most 128 fields and 
 name and value bytes. Malformed headers or final framing and any exceeded bound fail the attempt,
 even when the final status line says `200`. Complete valid final `200`–`299` headers deliver the
 record, including `202` and `204`; a stalled or failed body after those headers does not reverse
-delivery. The sink never waits for a body or uses bodies and trailers as graph data.
+delivery. The emitter never waits for a body or uses bodies and trailers as graph data.
 
 `408`, `425`, `429`, and `500`–`599` retain the current request and all later work for host retry.
 `401`, `403`, and `407` do the same and report an authentication or authorization infrastructure
@@ -505,7 +505,7 @@ USING` selects a codec body. `DROP ENCODE` is invalid for HTTP; use a complete `
 WITHOUT BODY` replacement. The retained construction and error scopes must be valid for the new
 selection.
 
-Changing the HTTP sink, method, path, client reference, body selection, or publishing mode uses
+Changing the HTTP emitter, method, path, client reference, body selection, or publishing mode uses
 `ENTITY_PAUSE`. The emitter drains every admitted request with the client and request fields that
 prepared it before the replacement starts. If that drain fails, the change fails and the old
 definition remains active; an unanswered request is never sent to the proposed destination.
@@ -578,7 +578,7 @@ counter, and the counters carry only the ordinary graph labels, never a request 
 
 ## Batching
 
-An emitter may declare two hard limits for every batch it publishes, written after the complete sink
+An emitter may declare two hard limits for every batch it publishes, written after the complete emitter
 clause and its route construction, and before the flush policy:
 
 ```nspl,ignore
@@ -604,7 +604,7 @@ CREATE KAFKA TOPIC EMITTER kafka_notifications
   ON GENERAL ERROR LOG;
 ```
 
-| Sinks | Clause |
+| Emitters | Clause |
 | --- | --- |
 | Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry, Syslog, OTEL, Iceberg | Optional |
 | ClickHouse, Postgres, MySQL, MongoDB | Required: a database write always carries several rows |
@@ -628,14 +628,14 @@ The codec forms are described in [Schemas and codecs](schemas-and-codecs.md#batc
 These checks cover the whole candidate graph, so replacing a codec that a batching emitter uses
 is validated against that emitter too.
 
-`SHOW CREATE EMITTER` renders the clause between the sink clause and `FLUSH`, with the size in the
+`SHOW CREATE EMITTER` renders the clause between the emitter clause and `FLUSH`, with the size in the
 unit it was written in. `DESCRIBE EMITTER` reports it on the line after `to:`, as
 `batch: MAX MESSAGES 500 MAX SIZE 1MiB` or `batch: none`.
 
 The complete contract for batch payloads — packing, containers per wire format, exact size
-measurement and failure attribution for every sink — is defined in
+measurement and failure attribution for every emitter — is defined in
 [Optional emitter batching](https://github.com/nervix-io/nervix/blob/main/docs/specifications/emitter-batching.md).
-The database sinks bound every insert or bulk write by both limits, as
+The database emitters bound every insert or bulk write by both limits, as
 [Database writes](#database-writes) describes. An OTEL emitter with the clause bounds each export
 request; without it, OTEL keeps one request per pending Arrow batch. Iceberg keeps its data-file
 and commit boundaries.
@@ -742,7 +742,7 @@ message, and one entry never carries more than one batch message.
 the connector learns the destination's limit, it checks every message against it before writing,
 counting what it writes around the payload:
 
-| Sink | Limit checked before a message is written | Counted around the payload |
+| Emitter | Limit checked before a message is written | Counted around the payload |
 | --- | --- | --- |
 | Kafka | The producer's `message.max.bytes` client setting | The record key, headers and record overhead |
 | MQTT | The Maximum Packet Size the broker declared in its latest `CONNACK`, and the largest packet the protocol can express | The fixed header, topic, packet identifier and property length |
@@ -763,7 +763,7 @@ with ten bytes of framing, so such a message is written and refused afterwards. 
 refusal rejects every member the same way, with the broker's reason, such as
 `PULSAR rejected record: the Pulsar broker does not allow the message: Exceed maximum message
 size`. In `MODE NO ACK` the message was already delivered when the producer accepted it, so the
-refusal is reported at finish through the sink's typed failure, after that earlier completion.
+refusal is reported at finish through the emitter's typed failure, after that earlier completion.
 
 The remaining limits are not visible to the client. RabbitMQ's `max_message_size` is a broker
 setting that AMQP never tells a client, and the broker compares it with the message body alone. A
@@ -786,13 +786,13 @@ maximum message size drops a larger message after the sending socket has accepte
 ### Database writes
 
 ClickHouse, Postgres, MySQL and MongoDB always write several rows at once, so their emitters
-require the clause. A flush hands the sink every run of rows from successive Arrow carriers of one
-source relay and concrete branch, in the order the emitter would have published them, and the sink
+require the clause. A flush hands the emitter every run of rows from successive Arrow carriers of one
+source relay and concrete branch, in the order the emitter would have published them, and the emitter
 writes the run as inserts or bulk writes of at most `MAX MESSAGES` rows. Every source record stays
 one row or one document: an array or `VEC` value is one column value, never a set of rows, and no
 destination schema changes.
 
-| Sink | One write | `MAX SIZE` measures |
+| Emitter | One write | `MAX SIZE` measures |
 | --- | --- | --- |
 | ClickHouse | One `INSERT INTO <table> FORMAT JSONEachRow` request | The request body, one JSON line and newline per row, before the client compresses it |
 | Postgres | One `INSERT ... SELECT ... FROM unnest(...)` statement binding one text array per mapped column | The statement text and every bound array as the extended-query protocol encodes it: a 20-byte array header, then a four-byte length and the value's text for each row |
@@ -841,7 +841,7 @@ rows into the same writes again, and a write the destination already took is tak
 conflict policy where duplicates matter. Where MongoDB answered for some documents of a write, the
 retry carries only the documents it left unresolved.
 
-Each sink writes a `BYTES` value in its native binary form: the octets themselves in a ClickHouse
+Each emitter writes a `BYTES` value in its native binary form: the octets themselves in a ClickHouse
 `String`, the `bytea` hex format Postgres reads back as the same octets, the octets bound to a MySQL
 binary or blob column, and generic BSON binary data in MongoDB. An `ARRAY` or `VEC` value is a JSON
 array in ClickHouse's `JSONEachRow` and in the JSON text Postgres and MySQL bind for it, and a BSON
@@ -895,10 +895,10 @@ fails when the source has no predicate.
 
 Changing only `FLUSH` is a `DYNAMIC` update. The live emitter keeps its pending Arrow batches,
 installs the new cadence, and receives a force-flush kick, so buffered output is neither discarded
-nor re-encoded. Source-predicate, sink, publishing-mode, client, codec, collection, batching, and
+nor re-encoded. Source-predicate, emitter, publishing-mode, client, codec, collection, batching, and
 attachment changes use
 `ENTITY_PAUSE`: Nervix gates all of the emitter's source relays, drains collected input and pending
-sink output, replaces that emitter task, and releases the gates. Changing source membership uses
+emitter output, replaces that emitter task, and releases the gates. Changing source membership uses
 `DOMAIN_PAUSE` because it changes graph topology. Other relays continue flowing during an entity
 pause; sibling consumers of a gated source may see bounded backpressure until the gate is released.
 The complete candidate graph is validated before any change is committed.
@@ -949,7 +949,7 @@ WHERE input.active
 Entries are independent and do not create variables. Order does not affect evaluation, duplicate
 external keys are invalid, `output` is unavailable, and sensitive values require explicit leakage.
 Bare fields, `message.field`, and `input.field` read the source row. Direct emitters reject
-`INHERIT` and all current direct sinks reject `INVOKE`.
+`INHERIT` and all current direct emitters reject `INVOKE`.
 
 ## Header invocations
 
@@ -976,8 +976,8 @@ Each emitter that writes transport headers declares a
 `CLIENT CONSUMER`, `REDIS PUBSUB`, `MQTT TOPIC`, `ZEROMQ PUSH`, `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`, `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION`, `ICEBERG TABLE` write no transport headers and refuse `write_header`.
 <!-- connector-matrix:emit-headers:end -->
 
-Where a sink keeps one value per name, a second `write_header` whose name is a string literal equal,
-as the sink compares names, to an earlier literal one is refused when the statement is validated,
+Where a emitter keeps one value per name, a second `write_header` whose name is a string literal equal,
+as the emitter compares names, to an earlier literal one is refused when the statement is validated,
 with a message such as `emitter 'out' in domain 'shop' writes header 'route' at INVOKE #1 and again
 at #3, but PULSAR TOPIC emitters keep one value per header name, so the later write would replace
 the earlier one on every record`. A name an expression computes is not compared then: at run time a
@@ -1077,7 +1077,7 @@ status, and the emitter retries on its policy; a deadline that runs out is repor
 and its bound. [Connector Capabilities](connector-capabilities.md) lists each entity's network waits
 and what bounds each one, including the waits nothing bounds yet.
 
-## Supported Emitter Sinks
+## Supported Emitter Emitters
 
 ### Kafka
 
@@ -1447,7 +1447,7 @@ reconnects, so the retry can deliver them a second time. A write first waits, wi
 nothing more until it has, so a retry never queues another copy behind the one the client holds.
 Without `timeout_ms` a write waits for its flush however long that takes. When the emitter stops,
 its finish flushes what the client still holds by the finish deadline; see
-[Finishing a sink](./connector-contract.md#finishing-a-sink).
+[Finishing a emitter](./connector-contract.md#finishing-a-emitter).
 
 `JETSTREAM` waits for one `PubAck` per record. The stream must already exist and capture the
 subject; a missing stream is an infrastructure error that remains under backpressure until an
@@ -1503,7 +1503,7 @@ See the [ZEROMQ PUSH capability and mirror reference](connector-capabilities.md#
 ZeroMQ has no delivery acknowledgment; success is socket acceptance. Transient socket failures are
 paced by the declared retry policy.
 
-The sink is a PUSH socket on the client's `addr`, a `tcp://<host>:<port>` or `ipc://<path>`
+The emitter is a PUSH socket on the client's `addr`, a `tcp://<host>:<port>` or `ipc://<path>`
 endpoint. With `'bind' = 'true'` the socket binds that address and peers connect to it; otherwise
 it connects to a peer bound there. Every value of the client's `CONFIG` is rendered the way an
 ingestor renders it, so it can name the client's `MOUNT`; see
@@ -1571,7 +1571,7 @@ See the [SYSLOG COLLECTOR capability and mirror reference](connector-capabilitie
 
 The client sends UDP datagrams, persistent RFC 6587 TCP frames, or RFC 5425 TLS frames. TCP uses
 octet-counting by default and may select non-transparent framing; TLS always uses octet counting.
-Success is local socket acceptance and flush, not remote delivery confirmation. The sink requires
+Success is local socket acceptance and flush, not remote delivery confirmation. The emitter requires
 a codec and rejects header writes. See [Syslog](syslog.md) for client configuration, framing,
 message errors, retry behavior, and limits.
 
@@ -1889,7 +1889,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [OTEL METRICS capability and mirror reference](connector-capabilities.md#otel-metrics-emit).
 <!-- connector-matrix:emit-otel-metrics:end -->
 
-OTEL emission is a codec-free direct sink for OTLP logs, traces, and metric data points. It uses a
+OTEL emission is a codec-free direct emitter for OTLP logs, traces, and metric data points. It uses a
 `OTEL CLIENT` and supports both OTLP/gRPC and OTLP/HTTP-protobuf. The protocol is always
 explicit; there is no hidden default:
 
@@ -2125,7 +2125,7 @@ record-specific failure is isolated by re-executing the insert one record at a t
 land and only poison rows follow `ON MESSAGE ERROR`. Postgres and MySQL re-execute them on the
 connection the failed insert already holds, so isolation does not wait for the client's pool again,
 as [Database client pools](./database-client-pools.md#borrowing-and-waiting) describes. Isolation can
-reapply rows from the failed insert; use the sink's idempotent write facilities where available.
+reapply rows from the failed insert; use the emitter's idempotent write facilities where available.
 Dividing a flush into inserts also means one flush is not an atomic database transaction.
 For a rejected row, the error names a safe ClickHouse error name, Postgres SQLSTATE, or MySQL
 SQLSTATE and code. Destination response text can quote a bound value, so it is not included in
@@ -2462,7 +2462,7 @@ Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE US
 
 The catalog and object-store HTTP clients resolve endpoint names through the node's configured
 DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
-resolver for object operations and credential HTTP calls. DNS failures enter the existing sink
+resolver for object operations and credential HTTP calls. DNS failures enter the existing emitter
 initialization or commit retry path; they do not advance the commit or ACK boundary.
 
 GCS uses the same emitter shape with a `GCS CLIENT` and `gs://` locations:
@@ -2562,7 +2562,7 @@ together; the maximum batch and commit sizes, the commit retry backoff, and a dr
 independent of domain pace. The temporary-file root defaults to `/tmp` and can be changed with
 `--temp-dir` or `NERVIX_TEMP_DIR`.
 
-The sink completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
+The emitter completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
 ACK boundary. Record-level expression and construction errors are attributed through `ON MESSAGE
 ERROR` before staging. See [ACK Semantics And Effective
 Delivery](#ack-semantics-and-effective-delivery) for attachment and fan-out behavior.
@@ -2622,8 +2622,8 @@ rows it still held staged. Iceberg appends are not idempotent.
 
 ## Codec Behavior On Emission
 
-`ENCODE USING <codec>` follows the sink it encodes for, because whether a codec applies is a
-property of the sink. Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS and Sentry publish an
+`ENCODE USING <codec>` follows the emitter it encodes for, because whether a codec applies is a
+property of the emitter. Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS and Sentry publish an
 encoded payload and require it. ClickHouse, Postgres, MySQL, and MongoDB map columns with `VALUES`
 and do not take a codec. OTEL maps signal fields and attributes with `VALUES` and takes no codec.
 Iceberg writes typed records and takes none.
@@ -2642,15 +2642,15 @@ That lets the emitter publish a different JSON envelope for each outbound row wi
 
 ## ACK Semantics And Effective Delivery
 
-Nervix composes per-hop ACKs. The effective delivery semantics of a source-to-sink path are the
+Nervix composes per-hop ACKs. The effective delivery semantics of a source-to-emitter path are the
 observable duplicate and loss behavior produced by the source delivery mode, the emitter's
 publishing `MODE`, its attachment, and the external service. They are not the ACK mechanics of any
 one hop.
 
-Publishing `MODE` selects the sink completion point at which the emitter considers a record
+Publishing `MODE` selects the emitter completion point at which the emitter considers a record
 delivered. Attachment determines whether that outcome participates in the upstream ACK chain:
 
-- `ATTACHED`: emitter success or failure at the selected sink completion point stays part of the
+- `ATTACHED`: emitter success or failure at the selected emitter completion point stays part of the
   upstream ACK chain.
 - `DETACHED`: relay fan-out acknowledges upstream immediately. The emitter still waits for its
   declared confirmations, applies its retry policy, error-routes record failures, and exerts local
@@ -2666,15 +2666,15 @@ Redis Pub/Sub, and ZeroMQ expose earlier acceptance boundaries and can lose ackn
 after a crash or downstream failure. A stop sends what a Kafka producer still queues, waits for
 accepted Pulsar messages' receipts, flushes what a Core NATS client still holds after a write ran
 out of `timeout_ms`, and waits for an MQTT QoS 0 client to send the publishes it still holds, within
-the stop's deadline; see [Finishing a sink](./connector-contract.md#finishing-a-sink). External
+the stop's deadline; see [Finishing a emitter](./connector-contract.md#finishing-a-emitter). External
 broker durability and
 idempotence settings remain the user's client and service configuration.
 
 When one source record reaches multiple emitters or multiple attached routes, the upstream ACK
-completes only after every attached emitter reaches its sink completion point. A failure on any
-attached path reopens source retry for the record on all paths. A sink that already published
-successfully may therefore receive the record again because a sibling sink failed. This applies to
-every sink without idempotent writes. Iceberg is the canonical case: rows can be appended to the
+completes only after every attached emitter reaches its emitter completion point. A failure on any
+attached path reopens source retry for the record on all paths. A emitter that already published
+successfully may therefore receive the record again because a sibling emitter failed. This applies to
+every emitter without idempotent writes. Iceberg is the canonical case: rows can be appended to the
 table again after a sibling emitter fails.
 
 This sibling-retry case assumes a source mode that retries when an attached ACK fails or is lost. A
@@ -2682,15 +2682,15 @@ no-ACK source cannot create that retry duplicate, but it can lose the record ins
 
 A WASM processor on the path adds one more retry of the same kind. It dispatches a guest callback's
 output before the checkpoint of the guest's state completes and holds back only the source ACK, so
-a checkpoint that fails negatively acknowledges records whose output a sink may already have
+a checkpoint that fails negatively acknowledges records whose output a emitter may already have
 published, and the source redelivers them. See
 [Recovery, Replay And Duplicates](wasm-processor-guests.md#recovery-replay-and-duplicates).
 
 Every `DETACHED` path has a common loss window: a process can fail after relay fan-out acknowledges
-upstream but before the emitter reaches its declared sink completion point. The table below calls
+upstream but before the emitter reaches its declared emitter completion point. The table below calls
 out the additional mode- and transport-specific duplicate and loss conditions.
 
-| Sink | Duplicate conditions (`ATTACHED`) | Additional loss conditions | Idempotency available in Nervix |
+| Emitter | Duplicate conditions (`ATTACHED`) | Additional loss conditions | Idempotency available in Nervix |
 | --- | --- | --- | --- |
 | Kafka | `ACK` retry after an ambiguous delivery report or timeout; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration |
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
@@ -2726,19 +2726,19 @@ at-least-once delivery attempts while making the resulting table or collection s
 effectively-once for that conflict contract.
 
 Iceberg appends are not idempotent. Deduplicate by the stable key at query time or in downstream
-compaction or `MERGE` work. Nervix does not isolate sibling-sink retries by changing ACK mechanics.
+compaction or `MERGE` work. Nervix does not isolate sibling-emitter retries by changing ACK mechanics.
 That is an [accepted tradeoff](#accepted-tradeoff-shared-retry).
 
 ### Accepted Tradeoff: Shared Retry
 
 One input ACK represents all attached descendants. This keeps ACK composition small and preserves
 backpressure across the graph. It also means one attached failure retries successful siblings.
-Nervix accepts that coupling instead of maintaining a transactional per-sink commit ledger.
+Nervix accepts that coupling instead of maintaining a transactional per-emitter commit ledger.
 
 ### Graph Design
 
-When the same records feed a non-idempotent sink and other emitters, consider `DETACHED` mode for a
-non-critical path or separate relays with separate ACK boundaries per sink so one sink's failure
+When the same records feed a non-idempotent emitter and other emitters, consider `DETACHED` mode for a
+non-critical path or separate relays with separate ACK boundaries per emitter so one emitter's failure
 does not drive duplicates into another. `DETACHED` makes that path at-most-once relative to the
 upstream ACK: the emitter still confirms and retries according to `MODE`, but a crash after the
 detached ACK can lose its in-memory work without causing source redelivery.

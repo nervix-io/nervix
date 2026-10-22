@@ -313,7 +313,7 @@ just ratchet --show functions_over_complexity_30
 
 The baseline stores a count, not a list of approved functions. A new function above 30 raises it;
 raising the complexity of one already above 30 does not. Decomposing an over-complex function is
-the repair, with `just ratchet --update` recording a lower count. A source contract or numeric
+the repair, with `just ratchet --update` recording a lower count. A ingestor contract or numeric
 allowance never substitutes for complete analysis.
 
 CRAP is unsuitable as a deterministic gate because measured line hits vary across executions.

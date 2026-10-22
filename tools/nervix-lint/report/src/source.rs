@@ -15,13 +15,13 @@ use syn::{
 };
 
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SourceInput {
+pub struct IngestorConnectorInput {
     pub path: String,
     pub source: String,
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-pub struct SourceSite {
+pub struct IngestorSite {
     pub path: String,
     pub line: usize,
     pub column: usize,
@@ -29,7 +29,7 @@ pub struct SourceSite {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SourceError {
+pub enum IngestorError {
     #[error("invalid fixed-constant contract at {path}:{line}:{column}: {problem}")]
     ConstantContract {
         path: String,
@@ -47,12 +47,12 @@ pub enum SourceError {
     },
 }
 
-pub fn scan(files: Vec<SourceInput>) -> Result<Vec<SourceSite>, error_stack::Report<SourceError>> {
+pub fn scan(files: Vec<IngestorConnectorInput>) -> Result<Vec<IngestorSite>, error_stack::Report<IngestorError>> {
     let mut sites = BTreeSet::new();
     for input in files {
         let parsed = syn::parse_file(&input.source).map_err(|cause| {
             let location = cause.span().start();
-            SourceError::Syntax {
+            IngestorError::Syntax {
                 path: input.path.clone(),
                 line: location.line,
                 column: location.column,
@@ -71,13 +71,13 @@ pub fn scan(files: Vec<SourceInput>) -> Result<Vec<SourceSite>, error_stack::Rep
 
 struct Scanner<'a> {
     path: &'a str,
-    sites: &'a mut BTreeSet<SourceSite>,
+    sites: &'a mut BTreeSet<IngestorSite>,
 }
 
 impl Scanner<'_> {
     fn site(&mut self, span: Span, rule: &str) {
         let start = span.start();
-        self.sites.insert(SourceSite {
+        self.sites.insert(IngestorSite {
             path: self.path.into(),
             line: start.line,
             column: start.column,

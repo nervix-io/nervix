@@ -295,13 +295,13 @@ impl std::error::Error for TextOutOfBounds {}
 /// Where in the source an operation was written: a file, a line and a column, as the compiler
 /// records them for a caller.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SourceSite {
+pub struct IngestorSite {
     pub file: BoundedText,
     pub line: u32,
     pub column: u32,
 }
 
-impl SourceSite {
+impl IngestorSite {
     pub fn from_location(location: &Location<'_>) -> Self {
         Self {
             file: BoundedText::new(location.file()),
@@ -311,7 +311,7 @@ impl SourceSite {
     }
 }
 
-impl fmt::Display for SourceSite {
+impl fmt::Display for IngestorSite {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}:{}", self.file, self.line, self.column)
     }
@@ -359,7 +359,7 @@ impl fmt::Display for Access {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LockSite {
     pub kind: LockKind,
-    pub constructed_at: SourceSite,
+    pub constructed_at: IngestorSite,
 }
 
 /// A lock a blocked thread waits for.
@@ -375,7 +375,7 @@ pub struct WaitedLock {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockedAttempt {
     pub access: Access,
-    pub at: SourceSite,
+    pub at: IngestorSite,
 }
 
 /// One thread of a cycle: it waits for a lock that the next thread of the cycle holds.

@@ -277,7 +277,7 @@ cause without quoting the frame's payload.
 
 ## Emitter
 
-The syslog sink requires a codec and supports only `NO ACK`:
+The syslog emitter requires a codec and supports only `NO ACK`:
 
 ```nspl,ignore
 TO SYSLOG <client>

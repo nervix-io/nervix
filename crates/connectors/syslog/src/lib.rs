@@ -21,14 +21,14 @@
 )]
 
 mod config;
-mod sink;
-mod source;
+mod emitter;
+mod ingestor;
 
 pub use config::{
     DEFAULT_MAX_MESSAGE_SIZE, MAX_UDP_PAYLOAD_SIZE, SyslogClientConfig, SyslogConfigError,
     SyslogDeadlineScope, SyslogDirection, SyslogFraming, SyslogProtocol,
 };
-pub use sink::{SyslogSink, SyslogSinkConfig};
+pub use emitter::{SyslogEmitter, SyslogEmitterConfig};
 #[cfg(feature = "benchmarks")]
-pub use source::{SyslogFrameError, frame_stream};
-pub use source::{SyslogSource, SyslogSourceMessage, SyslogSourcePlan};
+pub use ingestor::{SyslogFrameError, frame_stream};
+pub use ingestor::{SyslogIngestor, SyslogIngestorMessage, SyslogIngestorPlan};

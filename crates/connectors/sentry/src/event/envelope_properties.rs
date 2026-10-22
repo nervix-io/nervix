@@ -24,7 +24,7 @@ struct EnvelopeCase {
     occurred_at: Timestamp,
 }
 
-impl SentrySink {
+impl SentryEmitter {
     fn fixture() -> Self {
         Self {
             client: HttpClient::new(),
@@ -78,10 +78,10 @@ impl EnvelopeCase {
     }
 
     fn assert_attempts(&self) {
-        let mut sink = SentrySink::fixture();
+        let mut connector = SentryEmitter::fixture();
         let codec_bytes = serde_json::to_vec(&self.event)
             .assured("the bounded event holds only serializable JSON values");
-        let prepared = sink
+        let prepared = connector
             .prepare_payload(codec_bytes, self.occurred_at)
             .assured("the generated event has a valid UUID, timestamp and bounded JSON body");
         let mut lines = prepared.split(|byte| *byte == b'\n');
@@ -126,7 +126,7 @@ impl EnvelopeCase {
         assert_eq!(event, Value::Object(expected));
 
         for _ in 0..4 {
-            let request = sink
+            let request = connector
                 .envelope_request(prepared.clone())
                 .build()
                 .assured("the prepared Sentry URL, headers and bytes form an HTTP request");
@@ -138,10 +138,10 @@ impl EnvelopeCase {
 
 #[test]
 fn invalid_event_json_is_a_definitive_preparation_refusal_with_its_complete_cause() {
-    let mut sink = SentrySink::fixture();
+    let mut connector = SentryEmitter::fixture();
     let occurred_at = Timestamp::from_unix_nanos(946_684_800_000_000_000);
     let payload = b"not json";
-    let Err(refusal) = sink.prepare_payload(payload.to_vec(), occurred_at) else {
+    let Err(refusal) = connector.prepare_payload(payload.to_vec(), occurred_at) else {
         panic!("non-JSON bytes must be refused before any request");
     };
     let Err(cause) = serde_json::from_slice::<Map<String, Value>>(payload) else {

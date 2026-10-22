@@ -16,12 +16,12 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_prometheus::{PrometheusSource, PrometheusSourcePlan};
+use nervix_connector_prometheus::{PrometheusIngestor, PrometheusIngestorPlan};
 
 use super::{
     super::*,
-    IngestorStartError, SourceStartError,
-    source::{PacedSourceStart, SourceStart},
+    IngestorConnectorStartError, IngestorStartError,
+    connector::{IngestorStart, PacedIngestorStart},
 };
 
 impl PrometheusIngestorStartPlan {
@@ -29,7 +29,7 @@ impl PrometheusIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
         let PrometheusIngestorStartPlan {
             client,
             query,
@@ -40,14 +40,16 @@ impl PrometheusIngestorStartPlan {
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
         let Some(dns) = runtime.dns() else {
-            return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
+            return Err(
+                ingestor.connector_start_failure(IngestorConnectorStartError::NodeDnsUnavailable)
+            );
         };
         // Each intake batch fills at most one ingest group, so a vector of any size enters the
         // graph group by group.
         let intake_batch = NonZeroUsize::new(INGEST_GROUP_MAX_ROWS)
             .assured("an ingest group holds at least one message");
-        PacedSourceStart {
-            connector: PrometheusSourcePlan {
+        PacedIngestorStart {
+            connector: PrometheusIngestorPlan {
                 config: resolved.entries,
                 query,
                 max_body_size,
@@ -59,7 +61,7 @@ impl PrometheusIngestorStartPlan {
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "prometheus",
         }
-        .open::<PrometheusSource>(runtime, ingestor)
+        .open::<PrometheusIngestor>(runtime, ingestor)
         .await
     }
 }
@@ -71,7 +73,8 @@ impl PrometheusIngestorStartPlan {
 )]
 mod tests {
     use nervix_models::{
-        BufferBound, BufferCapacity, BufferOverflow, PrometheusQuerySource, SourceEntity as _,
+        BufferBound, BufferCapacity, BufferOverflow, IngestorDeclaration as _,
+        PrometheusQueryIngestor,
     };
 
     use super::*;
@@ -80,7 +83,7 @@ mod tests {
     /// each batch in with.
     #[test]
     fn the_declared_intake_batch_is_one_ingest_group() {
-        let [_, intake_batch] = PrometheusQuerySource::CAPABILITIES.bounds.buffers else {
+        let [_, intake_batch] = PrometheusQueryIngestor::CAPABILITIES.bounds.buffers else {
             panic!("a query source declares its response and its intake batch");
         };
         let group = u64::try_from(INGEST_GROUP_MAX_ROWS)

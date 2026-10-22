@@ -5,13 +5,13 @@ use crate::{
     AckWindow, AlterGenerator, AlterGeneratorError, AlterGeneratorOperation, AlterIngestor,
     AlterIngestorError, AlterIngestorOperation, AlterPlacement, AlterPlacementError,
     AlterPlacementOperation, AlterRelay, AlterRelayError, AlterRelayOperation,
-    AlterTransportIngestorOperation, BranchSelection, ClientIngestMode, ClientProducerSource,
+    AlterTransportIngestorOperation, BranchSelection, ClientIngestMode, ClientProducerIngestor,
     ClientSourceEntity, CodecBatchContainer, CodecJaqFormat, CodecJaqTransformations,
     CodecProtobufConfig, CodecWireFormat, CreateGenerator, CreateIngestor, CreatePlacement,
     CreateRelay, EndpointIngestMode, Expression, FlushPolicy, GeneralErrorPolicy,
-    HttpEndpointSource, HttpSourceEntity, IngestQuiesceMode, IngestSourceKind, IngestorAlteration,
-    KafkaSourceEntity, KafkaTopicSource, Literal, MaterializedRelayState, ModelKind,
-    PlacementPolicy, ProcessorOutput, ProcessorOutputs, RelayBranching, RetryPolicy,
+    HttpEndpointIngestor, HttpIngestorEntity, IngestQuiesceMode, IngestorAlteration,
+    IngestorEntityKind, KafkaIngestorEntity, KafkaTopicIngestor, Literal, MaterializedRelayState,
+    ModelKind, PlacementPolicy, ProcessorOutput, ProcessorOutputs, RelayBranching, RetryPolicy,
 };
 
 fn named<N>(raw: &str) -> N
@@ -23,8 +23,8 @@ where
 }
 
 /// An HTTP endpoint source that buffers what arrives while its ingestor is quiesced.
-fn http_endpoint(endpoint: &str) -> HttpEndpointSource {
-    HttpEndpointSource {
+fn http_endpoint(endpoint: &str) -> HttpEndpointIngestor {
+    HttpEndpointIngestor {
         endpoint: named(endpoint),
         mode: EndpointIngestMode::NoAck,
         quiesce: IngestQuiesceMode::EndpointBuffer {
@@ -35,7 +35,7 @@ fn http_endpoint(endpoint: &str) -> HttpEndpointSource {
 
 /// The operations of an `ALTER HTTP ENDPOINT INGESTOR` statement.
 fn http_endpoint_alteration(
-    operations: Vec<AlterTransportIngestorOperation<HttpEndpointSource>>,
+    operations: Vec<AlterTransportIngestorOperation<HttpEndpointIngestor>>,
 ) -> IngestorAlteration {
     operations.into()
 }
@@ -422,7 +422,7 @@ fn ingestor_alter_applies_only_under_the_head_of_the_stored_pair() {
         filter_where: None,
     };
     let kafka_alteration: IngestorAlteration =
-        vec![AlterTransportIngestorOperation::<KafkaTopicSource>::from(
+        vec![AlterTransportIngestorOperation::<KafkaTopicIngestor>::from(
             AlterIngestorOperation::SetGeneralError {
                 policy: GeneralErrorPolicy::Ignore,
             },
@@ -439,8 +439,8 @@ fn ingestor_alter_applies_only_under_the_head_of_the_stored_pair() {
     assert_eq!(
         error.current_context(),
         &AlterIngestorError::KindMismatch {
-            stored: IngestSourceKind::Http(HttpSourceEntity::Endpoint),
-            requested: IngestSourceKind::Kafka(KafkaSourceEntity::Topic),
+            stored: IngestorEntityKind::Http(HttpIngestorEntity::Endpoint),
+            requested: IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic),
         }
     );
     assert_eq!(
@@ -502,7 +502,7 @@ fn client_producer_alter_sets_its_source_and_honors_only_suspension() {
     let base = CreateIngestor {
         name: named("orders_in"),
         output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("orders"))]),
-        input: crate::IngestorInput::Client(ClientProducerSource {
+        input: crate::IngestorInput::Client(ClientProducerIngestor {
             schema: named("order"),
             mode: mode.clone(),
         }),
@@ -510,7 +510,7 @@ fn client_producer_alter_sets_its_source_and_honors_only_suspension() {
         general_error_policy: GeneralErrorPolicy::Log,
         filter_where: None,
     };
-    let replacement = ClientProducerSource {
+    let replacement = ClientProducerIngestor {
         schema: named("order_next"),
         mode,
     };
@@ -532,17 +532,19 @@ fn client_producer_alter_sets_its_source_and_honors_only_suspension() {
         .expect("a client producer alteration applies to a client producer ingestor");
     assert_eq!(candidate.input, crate::IngestorInput::Client(replacement));
     assert_eq!(
-        candidate.input.source_kind(),
-        IngestSourceKind::Client(ClientSourceEntity::Producer)
+        candidate.input.entity_kind(),
+        IngestorEntityKind::Client(ClientSourceEntity::Producer)
     );
 
     let mut candidate = base.clone();
     let error = candidate
         .apply_alter(&AlterIngestor {
             ingestor: named("orders_in"),
-            alteration: vec![AlterIngestorOperation::<ClientProducerSource>::SetQuiesce {
-                quiesce: IngestQuiesceMode::Drop,
-            }]
+            alteration: vec![
+                AlterIngestorOperation::<ClientProducerIngestor>::SetQuiesce {
+                    quiesce: IngestQuiesceMode::Drop,
+                },
+            ]
             .into(),
         })
         .expect_err("a client producer keeps unsent batches with its producer");

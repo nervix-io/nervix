@@ -16,8 +16,8 @@ use std::fmt;
 
 use error_stack::{Context, Report};
 use nervix_models::{
-    BranchSelection, ClientName, ConnectorKind, DomainName, EmitSinkKind, EndpointName,
-    EndpointType, FieldName, IngestSourceKind, ModelKind, ModelName, PrometheusClientConfigError,
+    BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind, EndpointName,
+    EndpointType, FieldName, IngestorEntityKind, ModelKind, ModelName, PrometheusClientConfigError,
     RelayName,
 };
 use thiserror::Error;
@@ -127,7 +127,7 @@ pub(crate) enum RegistryError {
     IngestorClientConnectorMismatch {
         domain: DomainName,
         ingestor: ModelName,
-        kind: IngestSourceKind,
+        kind: IngestorEntityKind,
         client: ClientName,
         required: ConnectorKind,
         found: ConnectorKind,
@@ -139,7 +139,7 @@ pub(crate) enum RegistryError {
     IngestorEndpointTypeMismatch {
         domain: DomainName,
         ingestor: ModelName,
-        kind: IngestSourceKind,
+        kind: IngestorEntityKind,
         endpoint: EndpointName,
         required: EndpointType,
         found: EndpointType,
@@ -334,13 +334,13 @@ pub(crate) enum RegistryError {
         expected_branch: BranchSelection,
     },
     #[error(
-        "emitter '{emitter}' in domain '{domain}' VALUES target '{target}' for {sink} would emit \
-         sensitive data; use leak_sensitive(...) explicitly"
+        "emitter '{emitter}' in domain '{domain}' VALUES target '{target}' for {connector} would \
+         emit sensitive data; use leak_sensitive(...) explicitly"
     )]
     SensitiveEmitterValue {
         domain: DomainName,
         emitter: ModelName,
-        sink: &'static str,
+        connector: &'static str,
         target: String,
     },
     /// An emitter whose sink keeps one value per header name writes one literal name twice, so
@@ -348,13 +348,13 @@ pub(crate) enum RegistryError {
     /// published. The header is named as the sink's header model records it.
     #[error(
         "emitter '{emitter}' in domain '{domain}' writes header '{header}' at INVOKE #{earlier} \
-         and again at #{later}, but {sink} emitters keep one value per header name, so the later \
-         write would replace the earlier one on every record"
+         and again at #{later}, but {connector} emitters keep one value per header name, so the \
+         later write would replace the earlier one on every record"
     )]
     ReplacedHeaderWrite {
         domain: DomainName,
         emitter: ModelName,
-        sink: EmitSinkKind,
+        connector: EmitterEntityKind,
         header: String,
         earlier: usize,
         later: usize,

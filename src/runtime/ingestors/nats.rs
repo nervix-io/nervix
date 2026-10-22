@@ -15,12 +15,12 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_nats::{NatsSource, NatsSourcePlan};
+use nervix_connector_nats::{NatsIngestor, NatsIngestorPlan};
 
 use super::{
     super::*,
     IngestorStartError,
-    source::{BrokerSourceStart, SourceStart},
+    connector::{BrokerIngestorStart, IngestorStart},
 };
 
 impl NatsIngestorStartPlan {
@@ -28,7 +28,7 @@ impl NatsIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
         let NatsIngestorStartPlan {
             client,
             subject,
@@ -39,8 +39,8 @@ impl NatsIngestorStartPlan {
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        BrokerSourceStart {
-            connector: NatsSourcePlan::new(resolved.entries, subject, queue_group),
+        BrokerIngestorStart {
+            connector: NatsIngestorPlan::new(resolved.entries, subject, queue_group),
             instances,
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,
@@ -52,7 +52,7 @@ impl NatsIngestorStartPlan {
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "nats",
         }
-        .open::<NatsSource>(ingestor)
+        .open::<NatsIngestor>(ingestor)
         .await
     }
 }

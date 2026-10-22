@@ -12,7 +12,7 @@ use syn::{
     visit::{self, Visit},
 };
 
-use super::{SourceError, SourceSite, arguments, fragment, test_only};
+use super::{IngestorError, IngestorSite, arguments, fragment, test_only};
 
 /// Tooling and the four harness crates do not configure a running Nervix product.
 fn product(path: &str) -> bool {
@@ -30,7 +30,7 @@ fn product(path: &str) -> bool {
 pub(super) fn scan(
     path: &str,
     file: &syn::File,
-) -> Result<Vec<SourceSite>, error_stack::Report<SourceError>> {
+) -> Result<Vec<IngestorSite>, error_stack::Report<IngestorError>> {
     if !product(path) {
         return Ok(Vec::new());
     }
@@ -169,8 +169,8 @@ impl<'ast> Visit<'ast> for Declarations {
 struct Tunables<'a> {
     path: &'a str,
     declarations: Declarations,
-    sites: BTreeSet<SourceSite>,
-    problem: Option<SourceError>,
+    sites: BTreeSet<IngestorSite>,
+    problem: Option<IngestorError>,
 }
 
 fn constant(meta: &Meta) -> bool {
@@ -239,7 +239,7 @@ fn literal(arguments: &syn::punctuated::Punctuated<Expr, syn::Token![,]>) -> boo
 impl Tunables<'_> {
     fn site(&mut self, span: proc_macro2::Span) {
         let start = span.start();
-        self.sites.insert(SourceSite {
+        self.sites.insert(IngestorSite {
             path: self.path.into(),
             line: start.line,
             column: start.column,
@@ -256,7 +256,7 @@ impl Tunables<'_> {
             return true;
         }
         let start = values[0].0.span().start();
-        self.problem = Some(SourceError::ConstantContract {
+        self.problem = Some(IngestorError::ConstantContract {
             path: self.path.into(),
             line: start.line,
             column: start.column,

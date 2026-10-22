@@ -39,10 +39,11 @@ use chrono::DateTime;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome, RejectedSinkRecord,
-    RowRequest, RowRequestLimits, RowSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
-    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
-    client_tls_paths, optional_client_config_value,
+    EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterOpenError,
+    EmitterRecordPosition, EmitterStartResult, EmitterWriteError, EmitterWriteResult,
+    MappedEmitterMember, MappedEmitterRows, MeasuredRequest, PerRecordOutcome,
+    RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits, client_tls_paths,
+    optional_client_config_value,
 };
 use nervix_models::{ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, PostgresTableName};
 use nervix_primitives::time::Instant;
@@ -97,11 +98,11 @@ pub struct PostgresConnection(PoolConnection<Postgres>);
 #[async_trait]
 pub trait PostgresConnections: Send + Sync + 'static {
     /// Borrow one connection for one operation, with the host's pool wait recorded around it.
-    async fn connection(&self) -> SinkPublishResult<PostgresConnection>;
+    async fn connection(&self) -> EmitterWriteResult<PostgresConnection>;
 }
 
 /// What one Postgres emitter inserts with, from its typed sink plan.
-pub struct PostgresSinkConfig {
+pub struct PostgresEmitterConfig {
     pub table: PostgresTableName,
     pub conflict_action: PostgresConflictAction,
     /// The emitter's `BATCH` limits, which bound the rows and the measured bytes of every insert.
@@ -117,7 +118,7 @@ pub enum PostgresConflictAction {
 }
 
 /// The Postgres sink, which binds each mapped column as one text array of an `unnest` insert.
-pub struct PostgresSink {
+pub struct PostgresEmitter {
     connections: Box<dyn PostgresConnections>,
     table: PostgresTableName,
     conflict_action: PostgresConflictAction,
@@ -184,7 +185,7 @@ impl PostgresWriteError {
         }
     }
 
-    fn into_report(report: Report<Self>) -> Report<SinkPublishError> {
+    fn into_report(report: Report<Self>) -> Report<EmitterWriteError> {
         let reason = match report.current_context() {
             Self::Server { code } => {
                 let code = code.as_deref().unwrap_or("unknown");
@@ -197,7 +198,9 @@ impl PostgresWriteError {
             Self::Pool { reason } => Some(reason.clone()),
             error => Some(error.to_string()),
         };
-        let report = report.change_context(SinkPublishError::Publish { sink: POSTGRES });
+        let report = report.change_context(EmitterWriteError::Publish {
+            connector: POSTGRES,
+        });
         match reason {
             Some(reason) => report.attach_printable(reason),
             None => report,
@@ -215,12 +218,12 @@ impl PostgresPool {
     pub async fn open(
         config: &[ClientConfigEntry],
         bounds: ClientPoolBounds,
-    ) -> SinkStartResult<Self> {
+    ) -> EmitterStartResult<Self> {
         let Some(addr) = optional_client_config_value(config, "addr") else {
-            return Err(
-                Report::new(SinkStartError::InvalidConfiguration { sink: POSTGRES })
-                    .attach_printable("missing Postgres client config key 'addr'"),
-            );
+            return Err(Report::new(EmitterOpenError::InvalidConfiguration {
+                connector: POSTGRES,
+            })
+            .attach_printable("missing Postgres client config key 'addr'"));
         };
         let options = connect_options(addr, config)?;
         {
@@ -236,24 +239,24 @@ impl PostgresPool {
                 .map(Self);
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
-                Err(source) => Err(Report::new(SinkStartError::Initialize { sink: POSTGRES })
-                    .attach_printable(source.to_string())),
+                Err(source) => Err(Report::new(EmitterOpenError::Initialize {
+                    connector: POSTGRES,
+                })
+                .attach_printable(source.to_string())),
             }
         }
     }
 
     /// Borrow one connection, which returns to the pool when the borrow is dropped.
-    pub async fn connection(&self) -> SinkPublishResult<PostgresConnection> {
+    pub async fn connection(&self) -> EmitterWriteResult<PostgresConnection> {
         {
             let mapping_input = self.0.acquire().await.map(PostgresConnection);
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
-                Err(source) => {
-                    Err(
-                        Report::new(SinkPublishError::NotInitialized { sink: POSTGRES })
-                            .attach_printable(source.to_string()),
-                    )
-                }
+                Err(source) => Err(Report::new(EmitterWriteError::NotInitialized {
+                    connector: POSTGRES,
+                })
+                .attach_printable(source.to_string())),
             }
         }
     }
@@ -264,10 +267,15 @@ impl PostgresPool {
 /// The URL carries the endpoint, the user and the database explicitly, and selects one of two TLS
 /// policies. Mounted files are the client's TLS-file interface: an opportunistic fallback and an
 /// encrypted connection without peer verification are both refused rather than silently allowed.
-fn connect_options(addr: &str, config: &[ClientConfigEntry]) -> SinkStartResult<PgConnectOptions> {
+fn connect_options(
+    addr: &str,
+    config: &[ClientConfigEntry],
+) -> EmitterStartResult<PgConnectOptions> {
     let invalid = |reason: String| {
-        Report::new(SinkStartError::InvalidConfiguration { sink: POSTGRES })
-            .attach_printable(reason)
+        Report::new(EmitterOpenError::InvalidConfiguration {
+            connector: POSTGRES,
+        })
+        .attach_printable(reason)
     };
     let url = Url::parse(addr).map_err(|source| invalid(format!("invalid addr: {source}")))?;
     if url.scheme() != "postgres" && url.scheme() != "postgresql" {
@@ -328,7 +336,7 @@ fn connect_options(addr: &str, config: &[ClientConfigEntry]) -> SinkStartResult<
     Ok(options)
 }
 
-impl PostgresSink {
+impl PostgresEmitter {
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -336,11 +344,11 @@ impl PostgresSink {
         )
     )]
     pub fn new(
-        config: PostgresSinkConfig,
+        config: PostgresEmitterConfig,
         connections: Box<dyn PostgresConnections>,
-        _host: SinkHost,
-    ) -> SinkStartResult<Self> {
-        let PostgresSinkConfig {
+        _host: EmitterHost,
+    ) -> EmitterStartResult<Self> {
+        let PostgresEmitterConfig {
             table,
             conflict_action,
             batch,
@@ -420,7 +428,11 @@ impl PostgresSink {
 
     /// The one statement every insert of a write executes: it binds one text array per mapped
     /// column, however many rows the insert carries, and casts each to the column's declared type.
-    fn insert_sql(&self, columns: &[String], column_types: &[String]) -> SinkPublishResult<String> {
+    fn insert_sql(
+        &self,
+        columns: &[String],
+        column_types: &[String],
+    ) -> EmitterWriteResult<String> {
         let param_refs = (1..=columns.len())
             .map(|index| format!("${index}::text[]"))
             .collect::<Vec<_>>()
@@ -500,9 +512,9 @@ impl PostgresSink {
         connection: &mut PostgresConnection,
         inserts: &UnnestInserts,
         written: Range<usize>,
-        rows: &MappedSinkRows<'_>,
-        members: &[MappedSinkMember],
-        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
+        rows: &MappedEmitterRows<'_>,
+        members: &[MappedEmitterMember],
+        outcome: &mut PerRecordOutcome<EmitterRecordPosition>,
     ) -> error_stack::Result<(), PostgresWriteError> {
         let error = match self.insert(connection, inserts, written.clone()).await {
             Ok(_) => {
@@ -518,7 +530,7 @@ impl PostgresSink {
         }
         if written.len() == 1 {
             let member = members[written.start];
-            outcome.reject(RejectedSinkRecord::external(
+            outcome.reject(RejectedEmitterMember::external(
                 rows.position(member),
                 rows.occurred_at(member),
                 error.current_context().record_reason(),
@@ -534,7 +546,7 @@ impl PostgresSink {
             match self.insert(connection, inserts, index..alone).await {
                 Ok(_) => outcome.deliver(rows.position(member)),
                 Err(error) if error.current_context().is_record_error() => {
-                    outcome.reject(RejectedSinkRecord::external(
+                    outcome.reject(RejectedEmitterMember::external(
                         rows.position(member),
                         rows.occurred_at(member),
                         error.current_context().record_reason(),
@@ -599,15 +611,15 @@ impl PostgresSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for PostgresSink {
+impl EmitterLifecycle for PostgresEmitter {
     /// Each insert completes before the publish returns, so the pool holds nothing.
-    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
-        Ok(SinkFinish::NothingHeld)
+    async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
+        Ok(EmitterFinish::NothingHeld)
     }
 }
 
 #[async_trait]
-impl RowSink for PostgresSink {
+impl RowEmitter for PostgresEmitter {
     /// Writes the rows of every carrier in `unnest` inserts of at most `MAX MESSAGES` rows whose
     /// statement and bound arrays measure at most `MAX SIZE` bytes.
     ///
@@ -615,7 +627,10 @@ impl RowSink for PostgresSink {
     /// of the client get through between inserts. The metadata lookup runs on the first insert's
     /// borrow, and a refused insert isolates its rows on the connection it ran on, so no step of
     /// an insert waits on the pool once the insert has its connection.
-    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
+    async fn publish(
+        &mut self,
+        rows: MappedEmitterRows<'_>,
+    ) -> PerRecordOutcome<EmitterRecordPosition> {
         let members = rows.members();
         let mut outcome = PerRecordOutcome::with_capacity(members.len());
         let mut carriers = Vec::with_capacity(rows.carriers.len());
@@ -624,8 +639,10 @@ impl RowSink for PostgresSink {
                 Ok(columns) => carriers.push(columns),
                 Err(error) => {
                     outcome.fail(
-                        Report::new(SinkPublishError::Publish { sink: POSTGRES })
-                            .attach_printable(error.to_string()),
+                        Report::new(EmitterWriteError::Publish {
+                            connector: POSTGRES,
+                        })
+                        .attach_printable(error.to_string()),
                     );
                     return outcome;
                 }
@@ -733,7 +750,7 @@ impl UnnestInserts {
     fn bind(
         sql: String,
         carriers: &[MappedTextColumns<'_>],
-        members: &[MappedSinkMember],
+        members: &[MappedEmitterMember],
         column_count: usize,
     ) -> Self {
         let mut columns = Vec::with_capacity(column_count);
@@ -1076,14 +1093,14 @@ fn float_text(value: f64) -> Option<String> {
 mod tests {
     use arrow_array::builder::{BinaryBuilder, ListBuilder};
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
-    use nervix_connector::MappedSinkCarrier;
+    use nervix_connector::MappedEmitterCarrier;
     use nervix_primitives::sync::StdArc;
 
     use super::*;
 
     #[test]
     fn invalid_conflict_target_keeps_its_typed_cause_at_the_host_boundary() {
-        let failure = PostgresSink::conflict_target_sql(&[String::new()])
+        let failure = PostgresEmitter::conflict_target_sql(&[String::new()])
             .expect_err("a target column must be named");
         let report = PostgresWriteError::into_report(failure);
         assert!(report.contains::<PostgresWriteError>());
@@ -1162,8 +1179,8 @@ mod tests {
             String::new(),
             &[columns],
             &[
-                MappedSinkMember { carrier: 0, row: 0 },
-                MappedSinkMember { carrier: 0, row: 2 },
+                MappedEmitterMember { carrier: 0, row: 0 },
+                MappedEmitterMember { carrier: 0, row: 2 },
             ],
             names.len(),
         );
@@ -1229,7 +1246,7 @@ mod tests {
     /// it, so a scenario's `MAX SIZE` can be written to the byte.
     #[test]
     fn measures_the_statement_and_the_arrays_the_driver_encodes() {
-        let sink = PostgresSink {
+        let connector = PostgresEmitter {
             connections: Box::new(NoConnections),
             table: PostgresTableName::parse("limit_a_t0192a1b2c3d4e5f60718293a4b5c6d7e")
                 .expect("the test table name is valid"),
@@ -1241,7 +1258,7 @@ mod tests {
             }),
         };
         let names = ["seq".to_string(), "note".to_string()];
-        let sql = sink
+        let sql = connector
             .insert_sql(&names, &["bigint".to_string(), "text".to_string()])
             .expect("the insert statement builds");
         let schema = StdArc::new(Schema::new(vec![
@@ -1257,7 +1274,7 @@ mod tests {
         )
         .expect("the mapped batch should build");
         let columns = MappedTextColumns::new(&batch, &names).expect("columns should be mapped");
-        let members = [0, 1, 2].map(|row| MappedSinkMember { carrier: 0, row });
+        let members = [0, 1, 2].map(|row| MappedEmitterMember { carrier: 0, row });
 
         let inserts = UnnestInserts::bind(sql, &[columns], &members, names.len());
 
@@ -1354,7 +1371,7 @@ mod tests {
             .for_each(|case| {
                 let generated = &case.columns;
                 let rows = case.rows();
-                let sink = PostgresSink {
+                let connector = PostgresEmitter {
                     connections: Box::new(NoConnections),
                     table: PostgresTableName::parse("events").assured("the table name is valid"),
                     conflict_action: PostgresConflictAction::None,
@@ -1369,7 +1386,7 @@ mod tests {
                     .map(GeneratedColumn::name)
                     .collect::<Vec<_>>();
                 let types = vec!["text".to_string(); names.len()];
-                let sql = sink
+                let sql = connector
                     .insert_sql(&names, &types)
                     .assured("the insert statement builds");
                 let mut fields = Vec::with_capacity(generated.len());
@@ -1384,7 +1401,7 @@ mod tests {
                 let columns =
                     MappedTextColumns::new(&batch, &names).assured("text columns are mapped");
                 let members = (0..rows)
-                    .map(|row| MappedSinkMember { carrier: 0, row })
+                    .map(|row| MappedEmitterMember { carrier: 0, row })
                     .collect::<Vec<_>>();
                 let inserts = UnnestInserts::bind(sql, &[columns], &members, names.len());
                 for start in 0..rows {
@@ -1422,16 +1439,16 @@ mod tests {
 
     #[async_trait]
     impl PostgresConnections for NoConnections {
-        async fn connection(&self) -> SinkPublishResult<PostgresConnection> {
-            Err(
-                Report::new(SinkPublishError::NotInitialized { sink: POSTGRES })
-                    .attach_printable("pool-acquire-detail"),
-            )
+        async fn connection(&self) -> EmitterWriteResult<PostgresConnection> {
+            Err(Report::new(EmitterWriteError::NotInitialized {
+                connector: POSTGRES,
+            })
+            .attach_printable("pool-acquire-detail"))
         }
     }
 
-    fn sink_without_connections() -> PostgresSink {
-        PostgresSink {
+    fn emitter_without_connections() -> PostgresEmitter {
+        PostgresEmitter {
             connections: Box::new(NoConnections),
             table: PostgresTableName::parse("events").expect("the test table name is valid"),
             conflict_action: PostgresConflictAction::None,
@@ -1445,8 +1462,8 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn pool_failure_keeps_the_acquire_diagnostic_at_the_host_boundary() {
-        let sink = sink_without_connections();
-        let Err(error) = sink.borrow().await else {
+        let connector = emitter_without_connections();
+        let Err(error) = connector.borrow().await else {
             panic!("the test pool has no connection");
         };
         assert!(matches!(
@@ -1462,7 +1479,7 @@ mod tests {
     /// a whole with the pool's cause and answers for none of its rows.
     #[nervix_primitives::test]
     async fn a_write_without_a_connection_answers_no_row_and_keeps_the_acquire_diagnostic() {
-        let mut sink = sink_without_connections();
+        let mut connector = emitter_without_connections();
         let batch = RecordBatch::try_new(
             StdArc::new(Schema::new(vec![Field::new("seq", DataType::Int64, false)])),
             vec![StdArc::new(Int64Array::from(vec![1, 2]))],
@@ -1470,10 +1487,10 @@ mod tests {
         .expect("the test batch matches its schema");
         let target_columns = ["seq".to_string()];
         let selected_rows = [0, 1];
-        let outcome = sink
-            .publish(MappedSinkRows {
+        let outcome = connector
+            .publish(MappedEmitterRows {
                 target_columns: &target_columns,
-                carriers: vec![MappedSinkCarrier {
+                carriers: vec![MappedEmitterCarrier {
                     batch_index: 0,
                     batch: &batch,
                     selected_rows: &selected_rows,

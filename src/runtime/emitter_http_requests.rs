@@ -17,7 +17,7 @@
 )]
 
 use async_trait::async_trait;
-use nervix_connector::{HttpRequestSink, SinkLifecycle, SinkRecordPosition};
+use nervix_connector::{EmitterLifecycle, EmitterRecordPosition, HttpRequestEmitter};
 
 use super::{
     emitter_encoding::{PendingRowPayload, encode_pending_broker_payloads},
@@ -33,14 +33,14 @@ pub(super) enum HttpRequestBody {
 }
 
 /// An HTTP sink and the body the host prepares each of its requests with.
-pub(super) struct PreparedRequestSink {
-    sink: Box<dyn HttpRequestSink>,
+pub(super) struct PreparedRequestEmitter {
+    connector: Box<dyn HttpRequestEmitter>,
     body: HttpRequestBody,
 }
 
-impl PreparedRequestSink {
-    pub(super) fn new(sink: Box<dyn HttpRequestSink>, body: HttpRequestBody) -> Self {
-        Self { sink, body }
+impl PreparedRequestEmitter {
+    pub(super) fn new(connector: Box<dyn HttpRequestEmitter>, body: HttpRequestBody) -> Self {
+        Self { connector, body }
     }
 }
 
@@ -49,7 +49,7 @@ impl HttpRequestBody {
     /// row order. A row whose body cannot be encoded is rejected here and prepares no request.
     async fn prepare_pending(
         &self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         batches: &mut [EmitterPublishBatch],
     ) -> EmitterRuntimeResult<Vec<PreparedPayload<PreparedHttpRequest>>> {
         let mut prepared = Vec::new();
@@ -62,7 +62,7 @@ impl HttpRequestBody {
             }
             let bodies = self.bodies(context, batch, pending_rows).await?;
             for PendingRowBody { row_index, body } in bodies {
-                let position = SinkRecordPosition {
+                let position = EmitterRecordPosition {
                     batch_index,
                     row_index,
                 };
@@ -97,7 +97,7 @@ impl HttpRequestBody {
     /// The body of each of `pending_rows` of `batch`: the codec's bytes, or no content.
     async fn bodies(
         &self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         batch: &EmitterPublishBatch,
         pending_rows: Vec<usize>,
     ) -> EmitterRuntimeResult<Vec<PendingRowBody>> {
@@ -139,13 +139,13 @@ struct PendingRowBody {
 }
 
 #[async_trait]
-impl EmitterSink for PreparedRequestSink {
-    fn lifecycle(&self) -> &dyn SinkLifecycle {
-        &*self.sink
+impl EmitterConnector for PreparedRequestEmitter {
+    fn lifecycle(&self) -> &dyn EmitterLifecycle {
+        &*self.connector
     }
 
-    fn lifecycle_mut(&mut self) -> &mut dyn SinkLifecycle {
-        &mut *self.sink
+    fn lifecycle_mut(&mut self) -> &mut dyn EmitterLifecycle {
+        &mut *self.connector
     }
 
     /// Prepares a request for every row no retained request carries yet, and sends every retained
@@ -153,7 +153,7 @@ impl EmitterSink for PreparedRequestSink {
     /// exactly as they were first sent, followed by the ones prepared now.
     async fn publish_batches(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         publication: EmitterPublication<'_>,
     ) -> EmitterRuntimeResult<()> {
         let EmitterPublication {
@@ -168,7 +168,7 @@ impl EmitterSink for PreparedRequestSink {
         }
         let PreparedWrite { records, payloads } = requests.next_write();
         let request_count = records.len();
-        let outcome = self.sink.publish(records).await;
+        let outcome = self.connector.publish(records).await;
         let outcome = context.received_outcome(request_count, outcome);
         requests
             .answers(batches, payloads, outcome)?
@@ -186,8 +186,8 @@ mod tests {
     use std::collections::VecDeque;
 
     use nervix_connector::{
-        PerRecordOutcome, SinkFinish, SinkFinishResult, SinkHttpRequest, SinkPublishError,
-        SinkRecordId,
+        EmitterFinish, EmitterFinishResult, EmitterHttpRequest, EmitterRecordId, EmitterWriteError,
+        PerRecordOutcome,
     };
     use nervix_models::{
         CodecWireFormat, CreateCodec, CreateWireSchema, HttpApplicationHeaders, HttpBodyMode,
@@ -198,7 +198,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        runtime::test_fixtures::{input_schema, named, sink_context},
+        runtime::test_fixtures::{emitter_context, input_schema, named},
         runtime_schema::compile_codec,
     };
 
@@ -223,24 +223,24 @@ mod tests {
     }
 
     /// An HTTP sink that keeps every request it was handed and answers each write from a script.
-    struct ScriptedHttpSink {
+    struct ScriptedHttpEmitter {
         writes: Arc<Mutex<Vec<Vec<SentRequest>>>>,
         answers: VecDeque<Answer>,
     }
 
     #[async_trait]
-    impl SinkLifecycle for ScriptedHttpSink {
-        async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
-            Ok(SinkFinish::NothingHeld)
+    impl EmitterLifecycle for ScriptedHttpEmitter {
+        async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
+            Ok(EmitterFinish::NothingHeld)
         }
     }
 
     #[async_trait]
-    impl HttpRequestSink for ScriptedHttpSink {
+    impl HttpRequestEmitter for ScriptedHttpEmitter {
         async fn publish(
             &mut self,
-            requests: Vec<SinkHttpRequest>,
-        ) -> PerRecordOutcome<SinkRecordId> {
+            requests: Vec<EmitterHttpRequest>,
+        ) -> PerRecordOutcome<EmitterRecordId> {
             let mut sent = Vec::with_capacity(requests.len());
             for request in &requests {
                 sent.push(SentRequest {
@@ -264,7 +264,9 @@ mod tests {
                 .expect("the test scripts an answer for every write it makes");
             match answer {
                 Answer::Lose => {
-                    outcome.fail(Report::new(SinkPublishError::Publish { sink: "scripted" }));
+                    outcome.fail(Report::new(EmitterWriteError::Publish {
+                        connector: "scripted",
+                    }));
                 }
                 Answer::DeliverAll => {
                     for request in &requests {
@@ -385,10 +387,10 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_retry_resends_the_prepared_requests_unchanged_before_preparing_new_rows() {
-        let context = sink_context();
+        let context = emitter_context();
         let writes = Arc::new(Mutex::new(Vec::new()));
-        let mut sink = PreparedRequestSink::new(
-            Box::new(ScriptedHttpSink {
+        let mut connector = PreparedRequestEmitter::new(
+            Box::new(ScriptedHttpEmitter {
                 writes: writes.clone(),
                 answers: VecDeque::from([Answer::Lose, Answer::DeliverAll]),
             }),
@@ -399,7 +401,7 @@ mod tests {
         let mut requests = PreparedPayloads::default();
         let mut payloads = PreparedPayloads::default();
 
-        let lost = sink
+        let lost = connector
             .publish_batches(
                 &context,
                 publication(
@@ -418,18 +420,19 @@ mod tests {
         // A batch buffered after the lost write is prepared after the requests it retained.
         let (second, second_completions) = batch(&[3]);
         batches.push(second);
-        sink.publish_batches(
-            &context,
-            publication(
-                &mut batches,
-                &mut requests,
-                &mut payloads,
-                &mut PreparedPayloads::default(),
-                &mut PreparedPayloads::default(),
-            ),
-        )
-        .await
-        .expect("the retry is delivered");
+        connector
+            .publish_batches(
+                &context,
+                publication(
+                    &mut batches,
+                    &mut requests,
+                    &mut payloads,
+                    &mut PreparedPayloads::default(),
+                    &mut PreparedPayloads::default(),
+                ),
+            )
+            .await
+            .expect("the retry is delivered");
 
         let sent = |value: i64| SentRequest {
             method: "POST".to_string(),
@@ -450,10 +453,10 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_bodyless_request_carries_no_content_and_a_rejection_resolves_only_its_row() {
-        let context = sink_context();
+        let context = emitter_context();
         let writes = Arc::new(Mutex::new(Vec::new()));
-        let mut sink = PreparedRequestSink::new(
-            Box::new(ScriptedHttpSink {
+        let mut connector = PreparedRequestEmitter::new(
+            Box::new(ScriptedHttpEmitter {
                 writes: writes.clone(),
                 answers: VecDeque::from([Answer::RejectFirst]),
             }),
@@ -464,18 +467,19 @@ mod tests {
         let mut requests = PreparedPayloads::default();
         let mut payloads = PreparedPayloads::default();
 
-        sink.publish_batches(
-            &context,
-            publication(
-                &mut batches,
-                &mut requests,
-                &mut payloads,
-                &mut PreparedPayloads::default(),
-                &mut PreparedPayloads::default(),
-            ),
-        )
-        .await
-        .expect("a rejection resolves its row and the other row is delivered");
+        connector
+            .publish_batches(
+                &context,
+                publication(
+                    &mut batches,
+                    &mut requests,
+                    &mut payloads,
+                    &mut PreparedPayloads::default(),
+                    &mut PreparedPayloads::default(),
+                ),
+            )
+            .await
+            .expect("a rejection resolves its row and the other row is delivered");
 
         let written = writes.lock().clone();
         let [write] = written.as_slice() else {
@@ -496,7 +500,7 @@ mod tests {
         body: HttpRequestBody,
         batch: EmitterPublishBatch,
     ) -> Option<PublishReport> {
-        let context = sink_context();
+        let context = emitter_context();
         let fault_injection = ConfiguredFaultInjection::default();
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -507,8 +511,8 @@ mod tests {
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
         };
-        let mut sink = EmitterSinkState::opened(Box::new(PreparedRequestSink::new(
-            Box::new(ScriptedHttpSink {
+        let mut connector = EmitterConnectorState::opened(Box::new(PreparedRequestEmitter::new(
+            Box::new(ScriptedHttpEmitter {
                 writes: Arc::new(Mutex::new(Vec::new())),
                 answers: VecDeque::from([Answer::RejectFirst]),
             }),
@@ -519,7 +523,8 @@ mod tests {
         buffer
             .push(&context, batch)
             .expect("the configured buffer takes the batch");
-        sink.flush_all("HTTP", &context, &mut control, &mut buffer)
+        connector
+            .flush_all("HTTP", &context, &mut control, &mut buffer)
             .await
             .expect("the flush resolves both requests")
     }

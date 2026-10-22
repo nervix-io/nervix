@@ -245,14 +245,14 @@ Start Nervix with `--otel-enabled` and keep the default OTLP endpoint when `just
 ## Connector Crates
 
 [Connector Crates And The Connector Contract](./connector-contract.md) is the architecture
-reference for ownership, source and sink lifecycle, and the cross-layer checklist for adding an
+reference for ownership, ingestor and emitter lifecycle, and the cross-layer checklist for adding an
 integration. The notes here identify the repository locations and validation commands.
 
 The shared contract is in `crates/connector`, and each external integration is in
 `crates/connectors/<name>`. The server's `src/runtime/ingestors` and emitter modules compose the
 typed plans with those crates. Keep driver dependencies in their integration crates; the server
 test harness may name a driver in `[dev-dependencies]` to provision or inspect an external system.
-The node's own endpoint source lives in `src/runtime/ingestors/endpoint.rs` because it has no
+The node's own endpoint ingestor lives in `src/runtime/ingestors/endpoint.rs` because it has no
 external driver. Follow the architecture chapter's [integration checklist](./connector-contract.md#adding-an-integration)
 when extending this layout.
 
@@ -390,7 +390,7 @@ complete report carrier. [Errors And Diagnostics](errors-and-diagnostics.md) own
 rules and the current carriers. `just validate-typed-errors` separately guards textual
 `Result<_, String>` source, including inactive forms.
 
-The JSON output records resolved APIs, spans, owner variants, expansions, source contracts,
+The JSON output records resolved APIs, spans, owner variants, expansions, ingestor contracts,
 compiled configurations and generated/external exclusions. It is generated evidence under
 `target/`, not an approval database. Partial selections are inventories; the required diagnostic
 gate needs the complete matrix and complete current compiler/Cargo evidence, including zero.

@@ -42,7 +42,7 @@ pub(super) fn mode<'src>()
 }
 pub(super) fn queue_body<'src>(
     context: EmitterContext,
-) -> impl Parser<'src, &'src [Token], ParsedDestination<SqsQueueSink>, extra::Err<ParseError<'src>>>
+) -> impl Parser<'src, &'src [Token], ParsedDestination<SqsQueueEmitter>, extra::Err<ParseError<'src>>>
 + Clone {
     encoded_destination(
         context,
@@ -52,7 +52,7 @@ pub(super) fn queue_body<'src>(
             .then(sqs_fifo_group_clause().or_not())
             .then_ignore(kw(Identifier::Mode))
             .then(mode())
-            .map(|(((client, queue), fifo_group), mode)| SqsQueueSink {
+            .map(|(((client, queue), fifo_group), mode)| SqsQueueEmitter {
                 client,
                 queue,
                 fifo_group,

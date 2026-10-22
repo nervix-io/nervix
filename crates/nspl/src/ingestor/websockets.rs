@@ -15,7 +15,9 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{WebsocketsConnectionSource, WebsocketsEndpointSource, WebsocketsIngestMode};
+use nervix_models::{
+    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
+};
 
 use super::{
     delivery::{no_ack, push_quiesce_clause},
@@ -28,13 +30,13 @@ use crate::{
 
 /// `FROM <client> MODE NO ACK ON QUIESCE BUFFER …|DROP`.
 pub(super) fn connection_body<'src>()
--> impl Parser<'src, &'src [Token], WebsocketsConnectionSource, extra::Err<ParseError<'src>>> + Clone
+-> impl Parser<'src, &'src [Token], WebsocketsConnectionIngestor, extra::Err<ParseError<'src>>> + Clone
 {
     client_ref()
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(WebsocketsIngestMode::NoAck))
         .then(push_quiesce_clause())
-        .map(|((client, mode), quiesce)| WebsocketsConnectionSource {
+        .map(|((client, mode), quiesce)| WebsocketsConnectionIngestor {
             client,
             mode,
             quiesce,
@@ -44,14 +46,14 @@ pub(super) fn connection_body<'src>()
 
 /// The body of an ingestor of a WebSockets endpoint this cluster serves.
 pub(super) fn endpoint_body<'src>()
--> impl Parser<'src, &'src [Token], WebsocketsEndpointSource, extra::Err<ParseError<'src>>> + Clone
+-> impl Parser<'src, &'src [Token], WebsocketsEndpointIngestor, extra::Err<ParseError<'src>>> + Clone
 {
     intake().map(
         |EndpointIntake {
              endpoint,
              mode,
              quiesce,
-         }| WebsocketsEndpointSource {
+         }| WebsocketsEndpointIngestor {
             endpoint,
             mode,
             quiesce,

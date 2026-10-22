@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Context, Expansion, SourceSpan};
+use crate::{Context, Expansion, IngestorSpan};
 
 /// One resolved pattern inside one authored body.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -17,7 +17,7 @@ pub struct AuditCandidate {
     /// The owner's declared execution contract, or recurring reachability from one.
     #[serde(deserialize_with = "Option::deserialize")]
     pub context: Option<Context>,
-    pub span: SourceSpan,
+    pub span: IngestorSpan,
     pub expansion: Vec<Expansion>,
     pub pattern: AuditPattern,
 }
@@ -52,7 +52,7 @@ pub enum AuditPattern {
     DuplicatedBranch {
         construct: Construct,
         statement: String,
-        occurrences: Vec<SourceSpan>,
+        occurrences: Vec<IngestorSpan>,
     },
     /// A function's whole body passes its parameters unchanged to one local call.
     ForwardingWrapper {
@@ -80,7 +80,7 @@ pub enum AuditPattern {
 #[serde(deny_unknown_fields)]
 pub struct KeyedOperation {
     pub operation: String,
-    pub span: SourceSpan,
+    pub span: IngestorSpan,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

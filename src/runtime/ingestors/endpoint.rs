@@ -18,17 +18,18 @@
 use async_trait::async_trait;
 use error_stack::ResultExt as _;
 use nervix_connector::{
-    SourceAckPolicy, SourceConnector, SourceHost, SourceHostServices as _, SourcePlan, SourceResult,
+    IngestorAckPolicy, IngestorConnector, IngestorHost, IngestorHostServices as _, IngestorPlan,
+    IngestorResult,
 };
 
 use super::{
     super::*,
-    IngestorStartError, SourceStartError,
-    source::{RuntimeSourceHost, SourceInstance, SourceStart, run_request_source},
+    IngestorConnectorStartError, IngestorStartError,
+    connector::{IngestorInstance, IngestorStart, RuntimeIngestorHost, run_request_source},
 };
 
 /// The routes one endpoint ingestor receives requests on.
-pub(in crate::runtime) struct EndpointSourcePlan {
+pub(in crate::runtime) struct EndpointIngestorPlan {
     runtime: Runtime,
     routes: Vec<HttpRouteKey>,
     mode: EndpointRequestPlan,
@@ -40,7 +41,7 @@ pub(in crate::runtime) struct EndpointSourcePlan {
 /// A request is admitted and dispatched by the host on the request path, so the source reads
 /// nothing itself. Starting it binds its routes; closing it, or dropping it when its task ends any
 /// other way, unbinds them, so a stopped ingestor's routes never keep receiving requests.
-pub(in crate::runtime) struct EndpointSource {
+pub(in crate::runtime) struct EndpointIngestor {
     runtime: Runtime,
     routes: Vec<HttpRouteKey>,
     mode: EndpointRequestPlan,
@@ -49,10 +50,10 @@ pub(in crate::runtime) struct EndpointSource {
 }
 
 #[async_trait]
-impl SourceConnector for EndpointSource {
-    type Plan = EndpointSourcePlan;
+impl IngestorConnector for EndpointIngestor {
+    type Plan = EndpointIngestorPlan;
 
-    async fn open(plan: &Self::Plan, _instance_index: u64) -> SourceResult<Self> {
+    async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
         Ok(Self {
             runtime: plan.runtime.clone(),
             routes: plan.routes.clone(),
@@ -61,13 +62,13 @@ impl SourceConnector for EndpointSource {
         })
     }
 
-    async fn close(&mut self) -> SourceResult<()> {
+    async fn close(&mut self) -> IngestorResult<()> {
         self.unbind();
         Ok(())
     }
 }
 
-impl EndpointSource {
+impl EndpointIngestor {
     /// Binds every route to `intake`, so the requests arriving on it enter the host.
     fn bind(&mut self, intake: EndpointIngestBinding) {
         let identity = DomainNodeRef::node_in(
@@ -93,16 +94,16 @@ impl EndpointSource {
     }
 }
 
-impl Drop for EndpointSource {
+impl Drop for EndpointIngestor {
     fn drop(&mut self) {
         self.unbind();
     }
 }
 
-impl SourceInstance for EndpointSource {
+impl IngestorInstance for EndpointIngestor {
     fn start(
         mut self: Box<Self>,
-        host: RuntimeSourceHost,
+        host: RuntimeIngestorHost,
         shutdown: watch::Receiver<bool>,
     ) -> BoxFuture<'static, ()> {
         // Requests may arrive as soon as the ingestor's start returns, so the routes are bound
@@ -110,7 +111,7 @@ impl SourceInstance for EndpointSource {
         let request = EndpointRequestPolicy::from(&self.mode);
         self.bind(host.request_intake(request));
         host.mark_ready();
-        Box::pin(run_request_source(*self, SourceHost::new(host), shutdown))
+        Box::pin(run_request_source(*self, IngestorHost::new(host), shutdown))
     }
 }
 
@@ -120,7 +121,7 @@ impl EndpointIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
         let EndpointIngestorStartPlan { endpoint, mode } = self;
         let route = {
             let Some(execution) = runtime.inner.executions.get(&ingestor.domain) else {
@@ -134,15 +135,18 @@ impl EndpointIngestorStartPlan {
             execution.endpoint_routes.get(&endpoint).cloned()
         };
         let Some(route) = route else {
-            return Err(ingestor
-                .source_start_failure(SourceStartError::EndpointNotInstantiated { endpoint }));
+            return Err(ingestor.connector_start_failure(
+                IngestorConnectorStartError::EndpointNotInstantiated { endpoint },
+            ));
         };
         if let EndpointRequestPlan::Ack { retry_after, .. } = &mode
             && route.endpoint_type == EndpointType::Websockets
         {
             let Some(protocol) = &route.signaling_protocol else {
-                return Err(ingestor.source_start_failure(
-                    SourceStartError::EndpointAcknowledgementProtocolMissing { endpoint },
+                return Err(ingestor.connector_start_failure(
+                    IngestorConnectorStartError::EndpointAcknowledgementProtocolMissing {
+                        endpoint,
+                    },
                 ));
             };
             for outcome in EndpointRequestOutcome::replies() {
@@ -152,8 +156,10 @@ impl EndpointIngestorStartPlan {
                 };
                 protocol
                     .encode_acknowledgement(reply.value())
-                    .change_context_lazy(|| SourceStartError::EndpointAcknowledgementEncoding {
-                        endpoint: endpoint.clone(),
+                    .change_context_lazy(|| {
+                        IngestorConnectorStartError::EndpointAcknowledgementEncoding {
+                            endpoint: endpoint.clone(),
+                        }
                     })
                     .change_context_lazy(|| ingestor.initialize_failure())?;
             }
@@ -167,21 +173,22 @@ impl EndpointIngestorStartPlan {
             })
             .collect();
 
-        let acknowledgement = SourceAckPolicy::None;
-        let plan = SourcePlan {
-            connector: EndpointSourcePlan {
+        let acknowledgement = IngestorAckPolicy::None;
+        let plan = IngestorPlan {
+            connector: EndpointIngestorPlan {
                 runtime: runtime.clone(),
                 routes,
                 mode,
             },
-            capabilities: ingestor.source_capabilities(NonZeroU64::MIN, acknowledgement.support()),
+            capabilities: ingestor
+                .ingestor_capabilities(NonZeroU64::MIN, acknowledgement.support()),
             acknowledgement,
         };
-        let source = EndpointSource::open(&plan.connector, 0)
+        let source = EndpointIngestor::open(&plan.connector, 0)
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let instance: Box<dyn SourceInstance> = Box::new(source);
-        Ok(SourceStart {
+        let instance: Box<dyn IngestorInstance> = Box::new(source);
+        Ok(IngestorStart {
             instances: vec![instance],
             companions: Vec::new(),
             // Requests never pass through the source loop's intake: the request path admits
@@ -213,9 +220,9 @@ pub(super) mod tests {
         ClusterNodeName, ClusterSchedule, CodecJaqFormat, CodecJaqTransformations, CodecName,
         CodecWireFormat, CreateCodec, CreateEndpoint, CreateJsonWireSchema, CreateRelay,
         CreateSchema, CreateVhost, DomainConfig, DomainPace, DomainState, DomainStatus,
-        EndpointIngestMode, EndpointName, HttpEndpointSource, JsonType, OutputBranch, ParseAsType,
-        ProcessorOutputs, RelayBranching, RelayName, SchemaField, SchemaName, VhostName,
-        WireSchemaField, WireSchemaName,
+        EndpointIngestMode, EndpointName, HttpEndpointIngestor, JsonType, OutputBranch,
+        ParseAsType, ProcessorOutputs, RelayBranching, RelayName, SchemaField, SchemaName,
+        VhostName, WireSchemaField, WireSchemaName,
     };
     use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
     use nonzero_ext::nonzero;
@@ -325,7 +332,7 @@ pub(super) mod tests {
                                 .with_branch(OutputBranch::Unbranched),
                             input: nervix_models::IngestorInput::Transport(
                                 nervix_models::TransportIngestorInput {
-                                    source: IngestSource::from(HttpEndpointSource {
+                                    source: IngestorEntity::from(HttpEndpointIngestor {
                                         endpoint,
                                         mode: EndpointIngestMode::NoAck,
                                         quiesce: IngestQuiesceMode::EndpointBuffer {

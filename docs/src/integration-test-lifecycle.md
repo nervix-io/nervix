@@ -253,7 +253,7 @@ interrupted publication and bounded cleanup, and the materialized publication li
 pass its libtest accounting and record exactly one qualifying process observation in both
 diagnostic selections. The tracked locks' conformance checks of `nervix-primitives` run the same
 way, each in a fresh process in both selections. They record no evidence file, because the
-primitive crate sits below the crate that owns evidence: a finding reaches a sink that aborts the
+primitive crate sits below the crate that owns evidence: a finding reaches a emitter that aborts the
 check, and the lane fails on that ending.
 
 Test dependencies start through one suite-owned environment. If Docker creates a named container
@@ -963,7 +963,7 @@ The MQTT changed-address restart scenario waits for the post-restart marker with
 delivery window. Its persistent QoS 1 source may replay the pre-restart marker before that row;
 broker receipt does not establish that its source acknowledgement reached the broker before the
 node stopped. The OTEL metric scenario observes one successful export from each concrete emitter
-owner before checking Collector output. HTTP intake acceptance does not establish sink export,
+owner before checking Collector output. HTTP intake acceptance does not establish emitter export,
 and the per-owner counters retain exact progress assertions for both HTTP and gRPC.
 
 The OTEL Collector content wait keeps its ten-second bound, from the step's start to the text's

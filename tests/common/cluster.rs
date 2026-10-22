@@ -2519,21 +2519,22 @@ impl Cluster {
         self.fault_injection.clear_emitter_fault(emitter);
     }
 
-    pub(crate) fn fail_sink_client_unavailable_on_all_nodes(&self, emitter: &str) {
-        self.fault_injection.fail_sink_client_unavailable(emitter);
+    pub(crate) fn fail_emitter_client_unavailable_on_all_nodes(&self, emitter: &str) {
+        self.fault_injection
+            .fail_emitter_client_unavailable(emitter);
     }
 
-    pub(crate) fn clear_sink_client_fault_on_all_nodes(&self, emitter: &str) {
-        self.fault_injection.clear_sink_client_fault(emitter);
+    pub(crate) fn clear_emitter_client_fault_on_all_nodes(&self, emitter: &str) {
+        self.fault_injection.clear_emitter_client_fault(emitter);
     }
 
-    pub(crate) fn stall_emitter_sink_after_resolving_on_all_nodes(
+    pub(crate) fn stall_emitter_connector_after_resolving_on_all_nodes(
         &self,
         emitter: &str,
         resolved: usize,
     ) {
         self.fault_injection
-            .stall_emitter_sink_after_resolving(emitter, resolved);
+            .stall_emitter_connector_after_resolving(emitter, resolved);
     }
 
     pub(crate) fn fail_next_schedule_publication_on_all_nodes(&self, domain: &str) {

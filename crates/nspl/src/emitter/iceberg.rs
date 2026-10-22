@@ -25,7 +25,7 @@ pub(super) fn commit_each<'src>()
         .then(byte_size_lit())
 }
 pub(super) fn table_body<'src>()
--> impl Parser<'src, &'src [Token], ParsedDestination<IcebergTableSink>, extra::Err<ParseError<'src>>>
+-> impl Parser<'src, &'src [Token], ParsedDestination<IcebergTableEmitter>, extra::Err<ParseError<'src>>>
 + Clone {
     values_destination(
         client_ref()
@@ -47,7 +47,7 @@ pub(super) fn table_body<'src>()
                         mode,
                     ),
                     values,
-                )| IcebergTableSink {
+                )| IcebergTableEmitter {
                     client,
                     table,
                     location,

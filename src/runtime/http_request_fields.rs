@@ -121,12 +121,12 @@ pub(in crate::runtime) struct CompiledHttpRequestFields {
 /// record the route keeps read, and report, the original input, and then with the requests it
 /// admitted until they complete, so that a later rejection reports it as well.
 #[derive(Clone)]
-pub(in crate::runtime) struct SourceRecords {
+pub(in crate::runtime) struct IngestorRecords {
     batch: Arc<RuntimeRecordBatch>,
     metadata: RecordMetadataColumns,
 }
 
-impl SourceRecords {
+impl IngestorRecords {
     pub(in crate::runtime) fn of(batch: &RelayRecordBatch) -> Self {
         Self {
             batch: batch.batch.clone(),
@@ -168,7 +168,7 @@ pub(in crate::runtime) enum HttpRequestInput {
     /// The emitter encodes finalized codec records, which its route built from these source rows,
     /// one for each published row in order.
     Source {
-        records: SourceRecords,
+        records: IngestorRecords,
         rows: Vec<usize>,
     },
 }
@@ -268,7 +268,7 @@ impl AdmittedHttpRequests {
         Self {
             fields,
             sources: HttpRequestInput::Source {
-                records: SourceRecords::of(source),
+                records: IngestorRecords::of(source),
                 rows,
             },
             materialized_state: HashMap::default(),
@@ -394,7 +394,7 @@ impl CompiledHttpRequestFields {
     /// Compiles the request fields of the HTTP emitter `emitter` against `schemas`.
     pub(in crate::runtime) fn compile(
         emitter: &EmitterName,
-        sink: &HttpSinkPlan,
+        connector: &HttpEmitterPlan,
         request: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
         schemas: HttpRequestSchemas,
         context: RuntimeVmCompileContext<'_>,
@@ -503,7 +503,7 @@ impl CompiledHttpRequestFields {
                 lookup_hash_maps,
                 error_sites: CompiledMessageErrorSites::new(),
             },
-            origin: sink.origin.clone(),
+            origin: connector.origin.clone(),
             body,
             sites,
             positions,
@@ -989,12 +989,12 @@ mod tests {
         (batch, completions)
     }
 
-    struct HttpSinkTestPlan {
-        sink: HttpSinkPlan,
+    struct HttpEmitterTestPlan {
+        connector: HttpEmitterPlan,
         request: nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     }
 
-    fn sink(method: &str, path: &str, header_writes: &str) -> HttpSinkTestPlan {
+    fn connector(method: &str, path: &str, header_writes: &str) -> HttpEmitterTestPlan {
         use nervix_models::{Assignment, AssignmentTarget};
 
         let construction = RouteConstruction {
@@ -1016,8 +1016,8 @@ mod tests {
             SemanticScopePolicy::read_write("message", HTTP_REQUEST_NAMESPACE),
         )
         .expect("the test request fields must lower");
-        HttpSinkTestPlan {
-            sink: HttpSinkPlan {
+        HttpEmitterTestPlan {
+            connector: HttpEmitterPlan {
                 client: EmitterClientSpec {
                     name: named("api"),
                     config: ResolvedClientConfig::default(),
@@ -1030,7 +1030,7 @@ mod tests {
     }
 
     fn compile(
-        plan: &HttpSinkTestPlan,
+        plan: &HttpEmitterTestPlan,
         output: Option<Arc<CompiledSchema>>,
     ) -> CompiledHttpRequestFields {
         let source = source_schema();
@@ -1043,7 +1043,7 @@ mod tests {
         });
         CompiledHttpRequestFields::compile(
             &named("deliver"),
-            &plan.sink,
+            &plan.connector,
             &plan.request,
             HttpRequestSchemas {
                 input: RuntimeVmSchema {
@@ -1068,14 +1068,14 @@ mod tests {
         let materialized = HashMap::default();
         let lookups = HashMap::default();
         let branching = ResolvedBranching::unbranched();
-        let plan = sink(
+        let plan = connector(
             "input.divisor",
             "'/events'",
             "INVOKE write_header('X-Test', 'value')",
         );
         let report = CompiledHttpRequestFields::compile(
             &named("deliver"),
-            &plan.sink,
+            &plan.connector,
             &plan.request,
             HttpRequestSchemas {
                 input: RuntimeVmSchema {
@@ -1120,7 +1120,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn each_row_is_rejected_at_its_first_failed_field_and_the_rest_keep_their_requests() {
         let compiled = compile(
-            &sink(
+            &connector(
                 "input.method",
                 "concat(input.path, repeat('a', input.padding))",
                 "INVOKE write_header('X-Id', input.id), write_header(input.header_name, \
@@ -1323,7 +1323,7 @@ mod tests {
             ("payload", ParseAsType::String),
         ]);
         let compiled = compile(
-            &sink(
+            &connector(
                 "'PUT'",
                 "concat('/v1/', output.payload, '/', id)",
                 "INVOKE write_header('X-Source', input.method), write_header('X-Message', \
@@ -1339,7 +1339,7 @@ mod tests {
                 ..Row::valid("third")
             },
         ]);
-        let records = SourceRecords::of(&source);
+        let records = IngestorRecords::of(&source);
         let mut messages = Vec::new();
         let mut completions = Vec::new();
         for (id, payload) in [("first", "FIRST"), ("third", "a#b")] {

@@ -18,7 +18,7 @@ const STABLE_READ_DELAY: Duration = Duration::from_millis(500);
 
 /// The database a batch scenario writes to, named as its `<sink>` examples column spells it.
 #[derive(Debug, Clone, Copy)]
-enum DatabaseSink {
+enum DatabaseEmitter {
     ClickHouse,
     Postgres,
     MySql,
@@ -36,7 +36,7 @@ enum BatchTableRule {
     RejectsPoisonNotes,
 }
 
-impl DatabaseSink {
+impl DatabaseEmitter {
     fn parse(name: &str) -> Self {
         match name {
             "ClickHouse" => Self::ClickHouse,
@@ -570,19 +570,23 @@ fn mysql_inserted_rows(statement: &[u8]) -> u64 {
 #[given(expr = "the {string} batch table {string} recording its writes exists")]
 async fn batch_table_recording_writes_exists(
     world: &mut ScenarioWorld,
-    sink: String,
+    connector: String,
     table: String,
 ) {
     let table = expand_placeholders(world, &table);
-    DatabaseSink::parse(&sink)
+    DatabaseEmitter::parse(&connector)
         .create_table(world, &table, BatchTableRule::RecordsWrites)
         .await;
 }
 
 #[given(expr = "the {string} batch table {string} keyed by seq exists")]
-async fn batch_table_keyed_by_seq_exists(world: &mut ScenarioWorld, sink: String, table: String) {
+async fn batch_table_keyed_by_seq_exists(
+    world: &mut ScenarioWorld,
+    connector: String,
+    table: String,
+) {
     let table = expand_placeholders(world, &table);
-    DatabaseSink::parse(&sink)
+    DatabaseEmitter::parse(&connector)
         .create_table(world, &table, BatchTableRule::KeyedBySeq)
         .await;
 }
@@ -590,11 +594,11 @@ async fn batch_table_keyed_by_seq_exists(world: &mut ScenarioWorld, sink: String
 #[given(expr = "the {string} batch table {string} rejecting poison notes exists")]
 async fn batch_table_rejecting_poison_notes_exists(
     world: &mut ScenarioWorld,
-    sink: String,
+    connector: String,
     table: String,
 ) {
     let table = expand_placeholders(world, &table);
-    DatabaseSink::parse(&sink)
+    DatabaseEmitter::parse(&connector)
         .create_table(world, &table, BatchTableRule::RejectsPoisonNotes)
         .await;
 }
@@ -603,12 +607,12 @@ async fn batch_table_rejecting_poison_notes_exists(
 async fn batch_table_records_writes(
     world: &mut ScenarioWorld,
     duration: String,
-    sink: String,
+    connector: String,
     table: String,
     expected: String,
 ) {
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
-    let sink = DatabaseSink::parse(&sink);
+    let connector = DatabaseEmitter::parse(&connector);
     let table = expand_placeholders(world, &table);
     let expected = expected
         .split(',')
@@ -622,33 +626,33 @@ async fn batch_table_records_writes(
     let deadline = Instant::now() + duration;
     loop {
         nervix_primitives::task::consume_budget().await;
-        let observed = sink.recorded_writes(world, &table).await;
+        let observed = connector.recorded_writes(world, &table).await;
         if observed == expected {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for {sink:?} table {table} to record writes of {expected:?} rows; \
-             observed {observed:?}"
+            "timed out waiting for {connector:?} table {table} to record writes of {expected:?} \
+             rows; observed {observed:?}"
         );
         nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
     nervix_primitives::time::sleep(STABLE_READ_DELAY).await;
-    let observed = sink.recorded_writes(world, &table).await;
+    let observed = connector.recorded_writes(world, &table).await;
     assert_eq!(
         observed, expected,
-        "{sink:?} table {table} recorded another write after the expected ones"
+        "{connector:?} table {table} recorded another write after the expected ones"
     );
 }
 
 #[then(expr = "the {string} batch table {string} eventually holds exactly these rows")]
 async fn batch_table_holds_exactly_these_rows(
     world: &mut ScenarioWorld,
-    sink: String,
+    connector: String,
     table: String,
     #[step] step: &Step,
 ) {
-    let sink = DatabaseSink::parse(&sink);
+    let connector = DatabaseEmitter::parse(&connector);
     let table = expand_placeholders(world, &table);
     let mut columns = BTreeSet::new();
     let mut expected = Vec::new();
@@ -668,44 +672,44 @@ async fn batch_table_holds_exactly_these_rows(
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         nervix_primitives::task::consume_budget().await;
-        let observed = sink.rows(world, &table, &columns).await;
+        let observed = connector.rows(world, &table, &columns).await;
         if observed == expected {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for {sink:?} table {table} to hold exactly {expected:?}; observed \
-             {observed:?}"
+            "timed out waiting for {connector:?} table {table} to hold exactly {expected:?}; \
+             observed {observed:?}"
         );
         nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
     nervix_primitives::time::sleep(STABLE_READ_DELAY).await;
-    let observed = sink.rows(world, &table, &columns).await;
+    let observed = connector.rows(world, &table, &columns).await;
     assert_eq!(
         observed, expected,
-        "{sink:?} table {table} changed after it held exactly the expected rows"
+        "{connector:?} table {table} changed after it held exactly the expected rows"
     );
 }
 
 #[then(expr = "the {string} batch table {string} eventually holds {int} rows")]
 async fn batch_table_holds_rows(
     world: &mut ScenarioWorld,
-    sink: String,
+    connector: String,
     table: String,
     expected: u64,
 ) {
-    let sink = DatabaseSink::parse(&sink);
+    let connector = DatabaseEmitter::parse(&connector);
     let table = expand_placeholders(world, &table);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         nervix_primitives::task::consume_budget().await;
-        let observed = sink.row_count(world, &table).await;
+        let observed = connector.row_count(world, &table).await;
         if observed == expected {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for {sink:?} table {table} to hold {expected} rows; observed \
+            "timed out waiting for {connector:?} table {table} to hold {expected} rows; observed \
              {observed}"
         );
         nervix_primitives::time::sleep(Duration::from_millis(100)).await;

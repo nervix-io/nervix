@@ -25,14 +25,14 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+mod ingestor;
 mod signaling;
-mod source;
 
+pub use ingestor::{
+    WebsocketIngestor, WebsocketIngestorMessage, WebsocketIngestorPlan, WebsocketIngestorPlanError,
+};
 pub use signaling::{
-    CompiledSignalingProtocol, SignalingDataSink, SignalingFrameEncodeError,
+    CompiledSignalingProtocol, SignalingDataEmitter, SignalingFrameEncodeError,
     SignalingProtobufDescriptors, SignalingProtocolCompileError, WebsocketSignalingError,
     WebsocketSignalingSession,
-};
-pub use source::{
-    WebsocketSource, WebsocketSourceMessage, WebsocketSourcePlan, WebsocketSourcePlanError,
 };

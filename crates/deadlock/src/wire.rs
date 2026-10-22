@@ -18,9 +18,9 @@ use std::{
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::deadlock::{
-    Access, ActiveCycle, BlockedAttempt, BlockedThread, BoundedText, DiagnosticSelection, LockKind,
-    LockSite, SourceSite, StressConfiguration, StressOutOfBounds, TrackedLockId, TrackedThreadId,
-    WaitedLock,
+    Access, ActiveCycle, BlockedAttempt, BlockedThread, BoundedText, DiagnosticSelection,
+    IngestorSite, LockKind, LockSite, StressConfiguration, StressOutOfBounds, TrackedLockId,
+    TrackedThreadId, WaitedLock,
 };
 use rkyv::{Archive, Deserialize, Serialize, rancor, util::AlignedVec};
 
@@ -452,8 +452,8 @@ impl From<Access> for AccessWire {
     }
 }
 
-impl From<&SourceSite> for SiteWire {
-    fn from(site: &SourceSite) -> Self {
+impl From<&IngestorSite> for SiteWire {
+    fn from(site: &IngestorSite) -> Self {
         Self {
             file: TextWire::from(&site.file),
             line: site.line,
@@ -584,7 +584,7 @@ impl TryFrom<WaitedLockWire> for WaitedLock {
         let site = match wire.site {
             Some(site) => Some(LockSite {
                 kind: LockKind::from(site.kind),
-                constructed_at: SourceSite::try_from(site.constructed_at)?,
+                constructed_at: IngestorSite::try_from(site.constructed_at)?,
             }),
             None => None,
         };
@@ -611,7 +611,7 @@ impl TryFrom<AttemptWire> for BlockedAttempt {
     fn try_from(wire: AttemptWire) -> Result<Self, Self::Error> {
         Ok(Self {
             access: Access::from(wire.access),
-            at: SourceSite::try_from(wire.at)?,
+            at: IngestorSite::try_from(wire.at)?,
         })
     }
 }
@@ -625,7 +625,7 @@ impl From<AccessWire> for Access {
     }
 }
 
-impl TryFrom<SiteWire> for SourceSite {
+impl TryFrom<SiteWire> for IngestorSite {
     type Error = EvidenceOutOfBounds;
 
     fn try_from(wire: SiteWire) -> Result<Self, Self::Error> {

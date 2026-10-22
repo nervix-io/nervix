@@ -73,8 +73,8 @@ Each class also holds at most 1,024 jobs waiting for a worker; a job beyond that
 the work that submitted it reports the refusal as its own failure. The one exception is work the
 node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
 place instead, while its payload stays counted in the buffer. So does the unfolding of a poll a
-paced source handed over, and of a payload a NATS, ZeroMQ or Syslog source read without an
-acknowledgement, and an Iceberg commit's read of the staged files its sink already accepted.
+paced ingestor handed over, and of a payload a NATS, ZeroMQ or Syslog source read without an
+acknowledgement, and an Iceberg commit's read of the staged files its emitter already accepted.
 Holding one of those source loops pushes back into its transport, so a node whose
 extension workers stay full delays polls and lets those transports buffer or drop at their own
 bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
@@ -134,7 +134,7 @@ not pay for a window's state, and a window width does not bound a correlator.
   buffers. `MAX BATCH SIZE` only clamps a batch and never grows one: the batch a route emits is
   roughly arrival rate × interval, up to the byte cap. Larger batches reduce per-batch cost only
   at boundaries that work per batch; see the [flush tuning guidance](nspl-overview.md) for which
-  sinks those are. `FLUSH IMMEDIATE` minimizes configured wait but still micro-batches.
+  emitters those are. `FLUSH IMMEDIATE` minimizes configured wait but still micro-batches.
 - Cluster interconnect carries each relay batch as one Arrow IPC body with a fixed 32 MiB limit.
   It reserves one unadmitted batch and one terminal outcome per active logical channel. Channels
   are concrete-branch local, so waiting work in one branch does not consume another branch's

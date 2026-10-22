@@ -118,10 +118,10 @@ pub struct FaultInjection {
 struct FaultInjectionState {
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
     failed_ingestors: DashMap<String, (), RandomState>,
-    unavailable_sink_clients: DashMap<String, (), RandomState>,
+    unavailable_emitter_clients: DashMap<String, (), RandomState>,
     /// One-shot, emitter-scoped sink stalls: the next write of the emitter keeps the sink's answers
     /// for this many of its records, and the answers for the rest are lost.
-    stalled_emitter_sinks: DashMap<String, usize, RandomState>,
+    stalled_emitter_connectors: DashMap<String, usize, RandomState>,
     failed_schedule_publications: DashMap<String, (), RandomState>,
     /// One-shot, domain-scoped rejections consumed before any entity gate engages.
     failed_entity_gate_engagements: DashMap<DomainName, (), RandomState>,
@@ -433,8 +433,8 @@ impl Default for FaultInjection {
             inner: Arc::new(FaultInjectionState {
                 emitter_faults: DashMap::default(),
                 failed_ingestors: DashMap::default(),
-                unavailable_sink_clients: DashMap::default(),
-                stalled_emitter_sinks: DashMap::default(),
+                unavailable_emitter_clients: DashMap::default(),
+                stalled_emitter_connectors: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
                 handoff_engagement_transport_failures: DashMap::default(),
@@ -1069,15 +1069,15 @@ impl FaultInjection {
             .remove(&ingestor.to_ascii_lowercase());
     }
 
-    pub fn fail_sink_client_unavailable(&self, emitter: &str) {
+    pub fn fail_emitter_client_unavailable(&self, emitter: &str) {
         self.inner
-            .unavailable_sink_clients
+            .unavailable_emitter_clients
             .insert(emitter.to_ascii_lowercase(), ());
     }
 
-    pub fn clear_sink_client_fault(&self, emitter: &str) {
+    pub fn clear_emitter_client_fault(&self, emitter: &str) {
         self.inner
-            .unavailable_sink_clients
+            .unavailable_emitter_clients
             .remove(&emitter.to_ascii_lowercase());
     }
 
@@ -1087,9 +1087,9 @@ impl FaultInjection {
     /// `resolved` records in the order it handed them over, as it does from a broker that stops
     /// answering after it accepted the rest. The write then fails the way an unanswered one does,
     /// so the emitter cannot tell which of the other records landed.
-    pub fn stall_emitter_sink_after_resolving(&self, emitter: &str, resolved: usize) {
+    pub fn stall_emitter_connector_after_resolving(&self, emitter: &str, resolved: usize) {
         self.inner
-            .stalled_emitter_sinks
+            .stalled_emitter_connectors
             .insert(emitter.to_ascii_lowercase(), resolved);
     }
 
@@ -2031,9 +2031,9 @@ impl FaultInjection {
             bound = "one keyed presence read with no retained guard"
         )
     )]
-    pub(crate) fn sink_client_is_unavailable(&self, emitter: &EmitterName) -> bool {
+    pub(crate) fn emitter_client_is_unavailable(&self, emitter: &EmitterName) -> bool {
         self.inner
-            .unavailable_sink_clients
+            .unavailable_emitter_clients
             .contains_key(&emitter.as_str().to_ascii_lowercase())
     }
 
@@ -2048,9 +2048,9 @@ impl FaultInjection {
             bound = "one keyed removal; no guard survives the operation"
         )
     )]
-    pub(crate) fn take_emitter_sink_stall(&self, emitter: &EmitterName) -> Option<usize> {
+    pub(crate) fn take_emitter_connector_stall(&self, emitter: &EmitterName) -> Option<usize> {
         self.inner
-            .stalled_emitter_sinks
+            .stalled_emitter_connectors
             .remove(&emitter.as_str().to_ascii_lowercase())
             .map(|(_, resolved)| resolved)
     }

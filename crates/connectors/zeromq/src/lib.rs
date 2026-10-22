@@ -23,49 +23,52 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
-mod source;
+mod ingestor;
 
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
-mod sink_tests;
+mod emitter_tests;
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
+pub use ingestor::{
+    ZeroMqIngestor, ZeroMqIngestorError, ZeroMqIngestorMessage, ZeroMqIngestorPlan,
+};
 use nervix_connector::{
-    ConfiguredDeadline, PerRecordOutcome, RecordSink, SinkFinish, SinkFinishResult, SinkHost,
-    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId, SinkStartError,
-    SinkStartResult, client_config_value, optional_client_config_value,
+    ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle,
+    EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError,
+    EmitterWriteResult, PerRecordOutcome, RecordEmitter, client_config_value,
+    optional_client_config_value,
 };
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::time::{Instant, timeout};
-pub use source::{ZeroMqSource, ZeroMqSourceError, ZeroMqSourceMessage, ZeroMqSourcePlan};
 use zeromq::{PushSocket, Socket, SocketSend, ZmqMessage};
 
 const ZEROMQ: &str = "zeromq";
 
 /// What one ZeroMQ sink publishes through: the entries its client configures its socket with.
-pub struct ZeroMqSinkConfig {
+pub struct ZeroMqEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
 }
 
-pub struct ZeroMqSink {
+pub struct ZeroMqEmitter {
     socket: PushSocket,
     /// The client's `timeout_ms`, which bounds each send, where it sets one.
     send_timeout: Option<ConfiguredDeadline>,
 }
 
-impl ZeroMqSink {
-    pub async fn new(config: ZeroMqSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
+impl ZeroMqEmitter {
+    pub async fn new(config: ZeroMqEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
         Self::open(&config.config).await
     }
 
     /// Opens the PUSH socket `config` declares. The sink reports nothing to its host, so opening it
     /// needs only its client's entries. Both deadline keys are read before the socket opens, so a
     /// value that breaks the deadline rule fails the start whether the socket binds or connects.
-    async fn open(config: &[ClientConfigEntry]) -> SinkStartResult<Self> {
+    async fn open(config: &[ClientConfigEntry]) -> EmitterStartResult<Self> {
         let connect_timeout = Self::connect_timeout(config)?;
         let send_timeout = Self::send_timeout(config)?;
         let socket = Self::push_socket_from_config(config, connect_timeout).await?;
@@ -78,7 +81,7 @@ impl ZeroMqSink {
     async fn push_socket_from_config(
         config: &[ClientConfigEntry],
         connect_timeout: ConfiguredDeadline,
-    ) -> SinkStartResult<PushSocket> {
+    ) -> EmitterStartResult<PushSocket> {
         let addr = Self::addr_from_config(config)?;
         let bind = Self::bind_from_config(config);
         let mut socket = PushSocket::new();
@@ -97,7 +100,7 @@ impl ZeroMqSink {
         socket: &mut PushSocket,
         addr: &str,
         connect_timeout: ConfiguredDeadline,
-    ) -> SinkStartResult<()> {
+    ) -> EmitterStartResult<()> {
         match timeout(connect_timeout.bound(), socket.connect(addr)).await {
             Ok(connected) => connected.map_err(Self::start_error),
             Err(_) => Err(Self::connect_elapsed(connect_timeout)),
@@ -106,25 +109,27 @@ impl ZeroMqSink {
 
     /// The deadline the client's `connect_timeout_ms` sets on connecting to the peer, its ZMTP
     /// handshake included.
-    fn connect_timeout(config: &[ClientConfigEntry]) -> SinkStartResult<ConfiguredDeadline> {
+    fn connect_timeout(config: &[ClientConfigEntry]) -> EmitterStartResult<ConfiguredDeadline> {
         ConfiguredDeadline::connect(config)
-            .change_context(SinkStartError::InvalidConfiguration { sink: ZEROMQ })
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: ZEROMQ })
     }
 
     /// The deadline the client's `timeout_ms` sets on each send, where it sets one.
-    fn send_timeout(config: &[ClientConfigEntry]) -> SinkStartResult<Option<ConfiguredDeadline>> {
+    fn send_timeout(
+        config: &[ClientConfigEntry],
+    ) -> EmitterStartResult<Option<ConfiguredDeadline>> {
         ConfiguredDeadline::timeout(config)
-            .change_context(SinkStartError::InvalidConfiguration { sink: ZEROMQ })
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: ZEROMQ })
     }
 
     /// The failure of a connection that ran out of the client's `connect_timeout_ms`, with the
     /// elapsed deadline beneath it. Its message is attached last, so it leads the report the
     /// emitter shows.
-    fn connect_elapsed(deadline: ConfiguredDeadline) -> Report<SinkStartError> {
+    fn connect_elapsed(deadline: ConfiguredDeadline) -> Report<EmitterOpenError> {
         let elapsed = deadline.elapsed("connecting to the ZeroMQ peer");
         let message = elapsed.to_string();
         Report::new(elapsed)
-            .change_context(SinkStartError::Initialize { sink: ZEROMQ })
+            .change_context(EmitterOpenError::Initialize { connector: ZEROMQ })
             .attach_printable(message)
     }
 
@@ -133,7 +138,7 @@ impl ZeroMqSink {
     /// The driver returns a peer to its round robin only when a send to it completes, so this
     /// socket never writes to that connection again and a message a timed-out send left partly
     /// written is never continued; the host opens a new socket after the failed publish.
-    async fn send(&mut self, payload: Vec<u8>) -> SinkPublishResult<()> {
+    async fn send(&mut self, payload: Vec<u8>) -> EmitterWriteResult<()> {
         let send_timeout = self.send_timeout;
         let send = self.socket.send(ZmqMessage::from(payload));
         let Some(deadline) = send_timeout else {
@@ -147,15 +152,15 @@ impl ZeroMqSink {
 
     /// The failure of a send that ran out of the client's `timeout_ms`, with the elapsed deadline
     /// beneath it. Its message is attached last, so it leads the report the emitter shows.
-    fn send_elapsed(deadline: ConfiguredDeadline) -> Report<SinkPublishError> {
+    fn send_elapsed(deadline: ConfiguredDeadline) -> Report<EmitterWriteError> {
         let elapsed = deadline.elapsed("sending a message to the ZeroMQ peer");
         let message = elapsed.to_string();
         Report::new(elapsed)
-            .change_context(SinkPublishError::Publish { sink: ZEROMQ })
+            .change_context(EmitterWriteError::Publish { connector: ZEROMQ })
             .attach_printable(message)
     }
 
-    fn addr_from_config(config: &[ClientConfigEntry]) -> SinkStartResult<String> {
+    fn addr_from_config(config: &[ClientConfigEntry]) -> EmitterStartResult<String> {
         {
             let mapping_input = client_config_value(config, "addr", "ZeroMQ");
             match mapping_input {
@@ -163,7 +168,9 @@ impl ZeroMqSink {
                 Err(error) => Err({
                     let message = error.current_context().to_string();
                     error
-                        .change_context(SinkStartError::InvalidConfiguration { sink: ZEROMQ })
+                        .change_context(EmitterOpenError::InvalidConfiguration {
+                            connector: ZEROMQ,
+                        })
                         .attach_printable(message)
                 }),
             }
@@ -177,8 +184,9 @@ impl ZeroMqSink {
         }
     }
 
-    fn start_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
-        Report::new(SinkStartError::Initialize { sink: ZEROMQ }).attach_printable(error.to_string())
+    fn start_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
+        Report::new(EmitterOpenError::Initialize { connector: ZEROMQ })
+            .attach_printable(error.to_string())
     }
 
     #[cfg_attr(
@@ -186,24 +194,25 @@ impl ZeroMqSink {
         nervix::dispatch(reason = "formats the typed external ZeroMQ driver failure; no \
                                    internal runtime ownership is inferred")
     )]
-    fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
-        Report::new(SinkPublishError::Publish { sink: ZEROMQ }).attach_printable(error.to_string())
+    fn publish_error(error: impl std::fmt::Display) -> Report<EmitterWriteError> {
+        Report::new(EmitterWriteError::Publish { connector: ZEROMQ })
+            .attach_printable(error.to_string())
     }
 }
 
 #[async_trait]
-impl SinkLifecycle for ZeroMqSink {
+impl EmitterLifecycle for ZeroMqEmitter {
     /// A send that completes has written and flushed its frame to a peer's socket, and what a
     /// timed-out send left belongs to a record its publish failed, so the socket holds no record a
     /// publish reported delivered.
-    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
-        Ok(SinkFinish::NothingHeld)
+    async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
+        Ok(EmitterFinish::NothingHeld)
     }
 }
 
 #[async_trait]
-impl RecordSink for ZeroMqSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
+impl RecordEmitter for ZeroMqEmitter {
+    async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
             nervix_primitives::task::consume_budget().await;

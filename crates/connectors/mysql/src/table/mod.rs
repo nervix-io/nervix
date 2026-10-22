@@ -40,10 +40,10 @@ use mysql_async::{
     prelude::Queryable as _,
 };
 use nervix_connector::{
-    MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome, RejectedSinkRecord,
-    RowRequest, RowRequestLimits, RowSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
-    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
-    optional_client_config_value,
+    EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterOpenError,
+    EmitterRecordPosition, EmitterStartResult, EmitterWriteError, EmitterWriteResult,
+    MappedEmitterMember, MappedEmitterRows, MeasuredRequest, PerRecordOutcome,
+    RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits, optional_client_config_value,
 };
 use nervix_models::{ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, MySqlTableName};
 use nervix_primitives::{sync::atomic::Ordering, time::Instant};
@@ -109,11 +109,11 @@ impl MySqlConnection {
 #[async_trait]
 pub trait MySqlConnections: Send + Sync + 'static {
     /// Borrow for one insert and its row isolation, with the host's pool wait recorded around it.
-    async fn connection(&self) -> SinkPublishResult<MySqlConnection>;
+    async fn connection(&self) -> EmitterWriteResult<MySqlConnection>;
 }
 
 /// What one MySQL emitter inserts with, from its typed sink plan.
-pub struct MySqlSinkConfig {
+pub struct MySqlEmitterConfig {
     pub table: MySqlTableName,
     pub conflict_action: MySqlConflictAction,
     /// The emitter's `BATCH` limits, which bound the rows and the measured bytes of every insert.
@@ -129,7 +129,7 @@ pub enum MySqlConflictAction {
 }
 
 /// The MySQL sink, which binds each mapped row as the parameters of one multi-row insert.
-pub struct MySqlSink {
+pub struct MySqlEmitter {
     connections: Box<dyn MySqlConnections>,
     table: MySqlTableName,
     conflict_action: MySqlConflictAction,
@@ -183,7 +183,7 @@ impl MySqlWriteError {
         }
     }
 
-    fn into_report(report: Report<Self>) -> Report<SinkPublishError> {
+    fn into_report(report: Report<Self>) -> Report<EmitterWriteError> {
         let reason = match report.current_context() {
             Self::MissingInsertColumn | Self::MissingUpdateColumn => {
                 Some(report.current_context().to_string())
@@ -195,7 +195,7 @@ impl MySqlWriteError {
             Self::Execute(error) => Some(format!("MySQL insert failed: {error}")),
             Self::Pool { reason } => Some(reason.clone()),
         };
-        let report = report.change_context(SinkPublishError::Publish { sink: MYSQL });
+        let report = report.change_context(EmitterWriteError::Publish { connector: MYSQL });
         match reason {
             Some(reason) => report.attach_printable(reason),
             None => report,
@@ -252,9 +252,9 @@ impl MySqlPool {
     pub async fn open(
         config: &[ClientConfigEntry],
         bounds: ClientPoolBounds,
-    ) -> SinkStartResult<Self> {
-        let invalid = || Report::new(SinkStartError::InvalidConfiguration { sink: MYSQL });
-        let connect = || Report::new(SinkStartError::Initialize { sink: MYSQL });
+    ) -> EmitterStartResult<Self> {
+        let invalid = || Report::new(EmitterOpenError::InvalidConfiguration { connector: MYSQL });
+        let connect = || Report::new(EmitterOpenError::Initialize { connector: MYSQL });
         let Some(addr) = optional_client_config_value(config, "addr") else {
             return Err(invalid().attach_printable("missing MySQL client config key 'addr'"));
         };
@@ -300,21 +300,23 @@ impl MySqlPool {
     }
 
     /// Borrow one connection, which returns to the pool when the borrow is dropped.
-    pub async fn connection(&self) -> SinkPublishResult<MySqlConnection> {
+    pub async fn connection(&self) -> EmitterWriteResult<MySqlConnection> {
         {
             let mapping_input = self.pool.get_conn().await.map(MySqlConnection);
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
-                Err(source) => Err(
-                    Report::new(SinkPublishError::NotInitialized { sink: MYSQL })
-                        .attach_printable(source.to_string()),
-                ),
+                Err(source) => {
+                    Err(
+                        Report::new(EmitterWriteError::NotInitialized { connector: MYSQL })
+                            .attach_printable(source.to_string()),
+                    )
+                }
             }
         }
     }
 }
 
-impl MySqlSink {
+impl MySqlEmitter {
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -322,11 +324,11 @@ impl MySqlSink {
         )
     )]
     pub fn new(
-        config: MySqlSinkConfig,
+        config: MySqlEmitterConfig,
         connections: Box<dyn MySqlConnections>,
-        _host: SinkHost,
-    ) -> SinkStartResult<Self> {
-        let MySqlSinkConfig {
+        _host: EmitterHost,
+    ) -> EmitterStartResult<Self> {
+        let MySqlEmitterConfig {
             table,
             conflict_action,
             batch,
@@ -344,7 +346,7 @@ impl MySqlSink {
     }
 
     /// The statement every insert of a write executes, around the placeholders of its rows.
-    fn insert_statement(&self, columns: &[String]) -> SinkPublishResult<MultiRowInsert> {
+    fn insert_statement(&self, columns: &[String]) -> EmitterWriteResult<MultiRowInsert> {
         let quoted_columns = columns
             .iter()
             .map(|column| Self::quote_ident(column))
@@ -413,19 +415,22 @@ impl MySqlSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for MySqlSink {
+impl EmitterLifecycle for MySqlEmitter {
     /// Each insert completes before the publish returns, so the pool holds nothing.
-    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
-        Ok(SinkFinish::NothingHeld)
+    async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
+        Ok(EmitterFinish::NothingHeld)
     }
 }
 
 #[async_trait]
-impl RowSink for MySqlSink {
+impl RowEmitter for MySqlEmitter {
     /// Writes the rows of every carrier in multi-row inserts of at most `MAX MESSAGES` rows and as
     /// many as fit the placeholders one statement binds, whose statement and bound values measure
     /// at most `MAX SIZE` bytes.
-    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
+    async fn publish(
+        &mut self,
+        rows: MappedEmitterRows<'_>,
+    ) -> PerRecordOutcome<EmitterRecordPosition> {
         let members = rows.members();
         let mut outcome = PerRecordOutcome::with_capacity(members.len());
         let mut carriers = Vec::with_capacity(rows.carriers.len());
@@ -434,7 +439,7 @@ impl RowSink for MySqlSink {
                 Ok(columns) => carriers.push(columns),
                 Err(error) => {
                     outcome.fail(
-                        Report::new(SinkPublishError::Publish { sink: MYSQL })
+                        Report::new(EmitterWriteError::Publish { connector: MYSQL })
                             .attach_printable(error.to_string()),
                     );
                     return outcome;
@@ -444,12 +449,11 @@ impl RowSink for MySqlSink {
         let column_count = rows.target_columns.len();
         let Some(rows_per_statement) = MultiRowInsert::rows_per_statement(column_count) else {
             outcome.fail(
-                Report::new(SinkPublishError::Misconfigured { sink: MYSQL }).attach_printable(
-                    format!(
+                Report::new(EmitterWriteError::Misconfigured { connector: MYSQL })
+                    .attach_printable(format!(
                         "a MySQL insert of {column_count} columns binds more than the \
                          {MAX_PLACEHOLDERS} placeholders one statement accepts"
-                    ),
-                ),
+                    )),
             );
             return outcome;
         };
@@ -518,7 +522,7 @@ impl RowSink for MySqlSink {
                         match connection.insert(&statement, 1, params).await {
                             Ok(_) => outcome.deliver(rows.position(member)),
                             Err(error) if error.current_context().is_record_error() => {
-                                outcome.reject(RejectedSinkRecord::external(
+                                outcome.reject(RejectedEmitterMember::external(
                                     rows.position(member),
                                     rows.occurred_at(member),
                                     error.current_context().record_reason(),
@@ -533,7 +537,7 @@ impl RowSink for MySqlSink {
                 }
                 Err(error) if error.current_context().is_record_error() => {
                     let member = members[written.start];
-                    outcome.reject(RejectedSinkRecord::external(
+                    outcome.reject(RejectedEmitterMember::external(
                         rows.position(member),
                         rows.occurred_at(member),
                         error.current_context().record_reason(),
@@ -621,7 +625,7 @@ struct BoundValues {
 impl BoundValues {
     fn bind(
         carriers: &[MappedMySqlColumns<'_>],
-        members: &[MappedSinkMember],
+        members: &[MappedEmitterMember],
         column_count: usize,
     ) -> Self {
         let mut values = Vec::with_capacity(
@@ -976,7 +980,7 @@ mod tests {
 
     #[test]
     fn invalid_insert_clause_keeps_its_typed_cause_at_the_host_boundary() {
-        let failure = MySqlSink::conflict_clause(&[], MySqlConflictAction::DoUpdate)
+        let failure = MySqlEmitter::conflict_clause(&[], MySqlConflictAction::DoUpdate)
             .expect_err("an update needs mapped values");
         let report = MySqlWriteError::into_report(failure);
         assert!(report.contains::<MySqlWriteError>());
@@ -1101,16 +1105,16 @@ mod tests {
 
     #[async_trait]
     impl MySqlConnections for NoConnections {
-        async fn connection(&self) -> SinkPublishResult<MySqlConnection> {
+        async fn connection(&self) -> EmitterWriteResult<MySqlConnection> {
             Err(
-                Report::new(SinkPublishError::NotInitialized { sink: MYSQL })
+                Report::new(EmitterWriteError::NotInitialized { connector: MYSQL })
                     .attach_printable("pool-acquire-detail"),
             )
         }
     }
 
-    fn test_sink(conflict_action: MySqlConflictAction) -> MySqlSink {
-        MySqlSink {
+    fn test_emitter(conflict_action: MySqlConflictAction) -> MySqlEmitter {
+        MySqlEmitter {
             connections: Box::new(NoConnections),
             table: MySqlTableName::parse("limit_a_t0192a1b2c3d4e5f60718293a4b5c6d7e")
                 .expect("the test table name is valid"),
@@ -1125,8 +1129,8 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn connection_pool_failure_keeps_the_acquire_diagnostic_at_the_host_boundary() {
-        let sink = test_sink(MySqlConflictAction::None);
-        let error = match sink.connection().await {
+        let connector = test_emitter(MySqlConflictAction::None);
+        let error = match connector.connection().await {
             Ok(_) => panic!("the test pool has no connection"),
             Err(error) => error,
         };
@@ -1162,13 +1166,13 @@ mod tests {
         .expect("the mapped batch should build");
         let names = ["seq".to_string(), "note".to_string()];
         let columns = MappedMySqlColumns::new(&batch, &names).expect("columns should be mapped");
-        let members = [0, 1, 2, 3].map(|row| MappedSinkMember { carrier: 0, row });
+        let members = [0, 1, 2, 3].map(|row| MappedEmitterMember { carrier: 0, row });
         for conflict_action in [
             MySqlConflictAction::None,
             MySqlConflictAction::DoNothing,
             MySqlConflictAction::DoUpdate,
         ] {
-            let statement = test_sink(conflict_action)
+            let statement = test_emitter(conflict_action)
                 .insert_statement(&names)
                 .expect("the insert statement builds");
             let values = BoundValues::bind(std::slice::from_ref(&columns), &members, names.len());
@@ -1185,7 +1189,7 @@ mod tests {
                 assert_eq!(statement.measure(&values, range), expected, "{sql}");
             }
         }
-        let statement = test_sink(MySqlConflictAction::None)
+        let statement = test_emitter(MySqlConflictAction::None)
             .insert_statement(&names)
             .expect("the insert statement builds");
         let values = BoundValues::bind(&[columns], &members, names.len());
@@ -1224,7 +1228,7 @@ mod tests {
         .expect("the mapped batch should build");
         let names = ["seq".to_string()];
         let columns = MappedMySqlColumns::new(&batch, &names).expect("columns should be mapped");
-        let members = [2, 0, 1].map(|row| MappedSinkMember { carrier: 0, row });
+        let members = [2, 0, 1].map(|row| MappedEmitterMember { carrier: 0, row });
         let mut values = BoundValues::bind(&[columns], &members, names.len());
 
         assert_eq!(values.take(1..3), vec![Value::Int(1), Value::Int(2)]);

@@ -15,7 +15,7 @@
 
 use error_stack::ResultExt as _;
 use nervix_connector::{
-    SinkAcknowledgements, SinkRetryDelay,
+    EmitterRecordAcknowledgements, EmitterRetryDelay,
     physical_time::{PhysicalDeadline, PhysicalDeadlineCapability},
 };
 
@@ -35,22 +35,22 @@ pub(super) struct EmitterRetryDeferral<'a> {
 #[derive(Default)]
 pub(super) struct EmitterAcknowledgements {
     pub(super) runtime: AckSet,
-    pub(super) sink: Option<SinkAcknowledgements>,
+    pub(super) connector: Option<EmitterRecordAcknowledgements>,
 }
 
 impl EmitterAcknowledgements {
     fn is_empty(&self) -> bool {
         self.runtime.is_empty()
             && self
-                .sink
+                .connector
                 .as_ref()
-                .is_none_or(SinkAcknowledgements::is_empty)
+                .is_none_or(EmitterRecordAcknowledgements::is_empty)
     }
 
     fn extend(&mut self, further: Self) {
         self.runtime = AckSet::merged([std::mem::take(&mut self.runtime), further.runtime]);
-        if further.sink.is_some() {
-            self.sink = further.sink;
+        if further.connector.is_some() {
+            self.connector = further.connector;
         }
     }
 }
@@ -59,7 +59,7 @@ impl From<AckSet> for EmitterAcknowledgements {
     fn from(runtime: AckSet) -> Self {
         Self {
             runtime,
-            sink: None,
+            connector: None,
         }
     }
 }
@@ -67,7 +67,7 @@ impl From<AckSet> for EmitterAcknowledgements {
 impl AcknowledgementKeepalive for EmitterAcknowledgements {
     fn keep_alive(&self) {
         self.runtime.ack_alive();
-        if let Some(acks) = &self.sink {
+        if let Some(acks) = &self.connector {
             acks.keep_alive();
         }
     }
@@ -195,7 +195,7 @@ impl EmitterRetrySchedule {
     /// disappearing.
     pub(super) fn defer(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         deferral: EmitterRetryDeferral<'_>,
     ) {
         let EmitterRetryDeferral {
@@ -229,7 +229,7 @@ impl EmitterRetrySchedule {
 /// A delay whose end the monotonic clock cannot represent asks for an attempt that could never be
 /// scheduled, so it contributes nothing and the declared backoff alone decides the wait.
 fn emitter_minimum_retry_delay(error: &Report<EmitterRuntimeError>) -> Duration {
-    let Some(attachment) = error.downcast_ref::<SinkRetryDelay>() else {
+    let Some(attachment) = error.downcast_ref::<EmitterRetryDelay>() else {
         return Duration::ZERO;
     };
     let delay = attachment.0;
@@ -257,12 +257,12 @@ pub(super) fn emitter_retry_delay(
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use nervix_connector::{ParsedRetryPolicy, SinkPublishError};
+    use nervix_connector::{EmitterWriteError, ParsedRetryPolicy};
 
     use super::*;
     use crate::runtime::{
-        emitter_publishing::sink_publish_failure,
-        test_fixtures::{input_batch, sink_context},
+        emitter_publishing::emitter_publish_failure,
+        test_fixtures::{emitter_context, input_batch},
     };
 
     #[nervix_primitives::test]
@@ -289,9 +289,9 @@ mod tests {
             backoff: Duration::from_millis(10),
             max_backoff: Duration::from_millis(100),
         });
-        let error = sink_publish_failure(
-            Report::new(SinkPublishError::Publish { sink: "test" })
-                .attach(SinkRetryDelay(Duration::from_secs(2))),
+        let error = emitter_publish_failure(
+            Report::new(EmitterWriteError::Publish { connector: "test" })
+                .attach(EmitterRetryDelay(Duration::from_secs(2))),
         );
 
         assert_eq!(
@@ -307,9 +307,9 @@ mod tests {
             backoff: Duration::from_millis(10),
             max_backoff: Duration::from_millis(100),
         });
-        let error = sink_publish_failure(
-            Report::new(SinkPublishError::Publish { sink: "test" })
-                .attach(SinkRetryDelay(Duration::MAX)),
+        let error = emitter_publish_failure(
+            Report::new(EmitterWriteError::Publish { connector: "test" })
+                .attach(EmitterRetryDelay(Duration::MAX)),
         );
 
         assert_eq!(
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn an_active_retry_replaces_the_ordinary_cadence_wake() {
-        let context = sink_context();
+        let context = emitter_context();
         let mut buffer = EmitterBatchBuffer::default();
         buffer.set_flush_policy(RuntimeFlushPolicy::Each {
             interval: Duration::from_secs(60),
@@ -392,14 +392,14 @@ mod tests {
     async fn retry_schedule_heartbeats_acks_added_by_a_force_drain() {
         let (existing, mut existing_completion) = AckSet::root();
         let (force_drained, mut force_completion) = AckSet::root();
-        let (sink_retained, mut sink_completion) = AckSet::root();
+        let (emitter_retained, mut emitter_completion) = AckSet::root();
         let mut retry = EmitterRetrySchedule::default();
         retry
             .schedule(Duration::from_secs(30), existing, false)
             .expect("the fixture backoff fits the monotonic clock range");
         retry.include_acks(EmitterAcknowledgements {
             runtime: force_drained,
-            sink: Some(SinkAcknowledgements::new(sink_retained)),
+            connector: Some(EmitterRecordAcknowledgements::new(emitter_retained)),
         });
         retry.ack_alive_at = Some(
             PhysicalDeadlineCapability::operational()
@@ -418,7 +418,7 @@ mod tests {
             AckProgress::Alive
         );
         assert_eq!(
-            sink_completion.wait_for_progress().await,
+            emitter_completion.wait_for_progress().await,
             AckProgress::Alive
         );
     }

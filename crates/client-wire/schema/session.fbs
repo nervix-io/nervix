@@ -59,7 +59,7 @@ table Fingerprint {
 
 /// A byte range of the NSPL source text a request carried. Offsets are UTF-8 byte offsets on
 /// character boundaries of that text, and `start` is not after `end`.
-struct SourceSpan {
+struct IngestorSpan {
   start: uint;
   end: uint;
 }
@@ -68,7 +68,7 @@ struct SourceSpan {
 table Diagnostic {
   message: string (required);
   /// Absent when the problem has no location in the request's source text.
-  span: SourceSpan;
+  span: IngestorSpan;
 }
 
 /// How clients reach the cluster leader.
@@ -546,7 +546,7 @@ enum ModelChangeAspect : ubyte {
   ReordererMaxTime,
   EmitterInput,
   EmitterInputWhere,
-  EmitterSink,
+  EmitterConnector,
   EmitterClient,
   EmitterCodec,
   EmitterCollectPolicy,

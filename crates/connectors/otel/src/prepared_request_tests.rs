@@ -18,32 +18,32 @@ fn config(entries: &[(&str, &str)]) -> Vec<ClientConfigEntry> {
 /// Host services the sink under test never calls.
 struct SilentHost;
 
-impl nervix_connector::SinkTransientErrorStatus for SilentHost {
+impl nervix_connector::EmitterTransientErrorStatus for SilentHost {
     fn record_transient_error(&self, _reason: String, _retry_after: Duration) {}
 
     fn clear_transient_error(&self) {}
 }
 
-impl nervix_connector::SinkEventReporter for SilentHost {
+impl nervix_connector::EmitterEventReporter for SilentHost {
     fn report_error(&self, _message: String) {}
 }
 
-impl nervix_connector::SinkStagingDirectory for SilentHost {
+impl nervix_connector::EmitterStagingDirectory for SilentHost {
     fn staging_directory(&self) -> std::path::PathBuf {
         std::env::temp_dir()
     }
 }
 
-impl nervix_connector::SinkBoundedExecution for SilentHost {
+impl nervix_connector::EmitterBoundedExecution for SilentHost {
     fn executor(&self) -> nervix_execution::Executor {
         nervix_execution::Executor::default()
     }
 }
 
-impl nervix_connector::SinkGeneralErrorHandler for SilentHost {
+impl nervix_connector::EmitterGeneralErrorHandler for SilentHost {
     fn handle_general_error(
         &self,
-        _acks: &nervix_connector::SinkAcknowledgements,
+        _acks: &nervix_connector::EmitterRecordAcknowledgements,
         _reason: String,
     ) {
     }
@@ -53,12 +53,12 @@ const MAPPED_COLUMNS: [&str; 2] = ["time", "body"];
 
 /// A logs sink mapping `time` and `body`, with one resource attribute and a scope, that sends to
 /// `endpoint` over `protocol`.
-async fn logs_sink(
+async fn logs_emitter(
     endpoint: &str,
     protocol: &str,
     compression: Option<&str>,
     batch: Option<EmitterBatchPolicy>,
-) -> OtelSink {
+) -> OtelEmitter {
     let mut entries = vec![("endpoint", endpoint), ("protocol", protocol)];
     if let Some(compression) = compression {
         entries.push(("compression", compression));
@@ -75,8 +75,8 @@ async fn logs_sink(
         ),
         arrow_schema::Field::new("body", DataType::Utf8, true),
     ]));
-    OtelSink::new(
-        OtelSinkConfig {
+    OtelEmitter::new(
+        OtelEmitterConfig {
             config: config(&entries),
             dns,
             signal: OtelSignal::Logs,
@@ -93,7 +93,7 @@ async fn logs_sink(
             }),
             mapped_schema,
         },
-        SinkHost::new(SilentHost),
+        EmitterHost::new(SilentHost),
     )
     .unwrap_or_else(|error| panic!("the test logs sink configuration is valid: {error:?}"))
 }
@@ -131,25 +131,26 @@ fn batch_limits(max_messages: u32, max_size: u64) -> EmitterBatchPolicy {
 
 /// Prepares every row of `batch` as batch 3 of the host's buffer, the one carrier the host hands a
 /// preparation.
-async fn prepare_all(sink: &mut OtelSink, batch: &RecordBatch) -> RowRequestPreparation {
+async fn prepare_all(connector: &mut OtelEmitter, batch: &RecordBatch) -> RowRequestPreparation {
     let target_columns = MAPPED_COLUMNS.map(String::from);
     let selected_rows = (0..batch.num_rows()).collect::<Vec<_>>();
-    sink.prepare(MappedSinkRows {
-        target_columns: &target_columns,
-        carriers: vec![MappedSinkCarrier {
-            batch_index: 3,
-            batch,
-            selected_rows: &selected_rows,
-            occurred_at: Timestamp::from_unix_nanos(42),
-            acknowledgements: None,
-        }],
-    })
-    .await
-    .unwrap_or_else(|error| panic!("preparing mapped rows succeeds: {error:?}"))
+    connector
+        .prepare(MappedEmitterRows {
+            target_columns: &target_columns,
+            carriers: vec![MappedEmitterCarrier {
+                batch_index: 3,
+                batch,
+                selected_rows: &selected_rows,
+                occurred_at: Timestamp::from_unix_nanos(42),
+                acknowledgements: None,
+            }],
+        })
+        .await
+        .unwrap_or_else(|error| panic!("preparing mapped rows succeeds: {error:?}"))
 }
 
-fn position(row_index: usize) -> SinkRecordPosition {
-    SinkRecordPosition {
+fn position(row_index: usize) -> EmitterRecordPosition {
+    EmitterRecordPosition {
         batch_index: 3,
         row_index,
     }
@@ -204,7 +205,7 @@ fn bodies(records: &[LogRecord]) -> Vec<String> {
 
 #[nervix_primitives::test]
 async fn prepared_requests_divide_records_by_count_and_share_one_observed_time() {
-    let mut sink = logs_sink(
+    let mut connector = logs_emitter(
         "http://127.0.0.1:9",
         "http/protobuf",
         None,
@@ -213,7 +214,7 @@ async fn prepared_requests_divide_records_by_count_and_share_one_observed_time()
     .await;
     let batch = mapped_logs(&[Some("a"), Some("b"), Some("c"), Some("d"), Some("e")]);
 
-    let preparation = prepare_all(&mut sink, &batch).await;
+    let preparation = prepare_all(&mut connector, &batch).await;
 
     assert!(preparation.rejected.is_empty());
     let requests = &preparation.requests;
@@ -247,10 +248,10 @@ async fn prepared_requests_divide_records_by_count_and_share_one_observed_time()
 
 #[nervix_primitives::test]
 async fn a_request_prepared_without_batch_carries_every_record_of_the_batch() {
-    let mut sink = logs_sink("http://127.0.0.1:9", "http/protobuf", None, None).await;
+    let mut connector = logs_emitter("http://127.0.0.1:9", "http/protobuf", None, None).await;
     let batch = mapped_logs(&[Some("a"), Some("b"), Some("c")]);
 
-    let preparation = prepare_all(&mut sink, &batch).await;
+    let preparation = prepare_all(&mut connector, &batch).await;
 
     assert!(preparation.rejected.is_empty());
     let [request] = preparation.requests.as_slice() else {
@@ -262,7 +263,7 @@ async fn a_request_prepared_without_batch_carries_every_record_of_the_batch() {
 
 #[nervix_primitives::test]
 async fn preparation_halves_a_candidate_above_max_size_and_refuses_an_oversized_record() {
-    let mut unbounded = logs_sink(
+    let mut unbounded = logs_emitter(
         "http://127.0.0.1:9",
         "http/protobuf",
         None,
@@ -282,7 +283,7 @@ async fn preparation_halves_a_candidate_above_max_size_and_refuses_an_oversized_
         });
     let pair_size = u64::try_from(pair.body.len()).assured("a test request fits in u64");
     // A limit one byte below the pair's request admits each record alone, but not both.
-    let mut sink = logs_sink(
+    let mut connector = logs_emitter(
         "http://127.0.0.1:9",
         "http/protobuf",
         None,
@@ -292,7 +293,7 @@ async fn preparation_halves_a_candidate_above_max_size_and_refuses_an_oversized_
     let oversized = "x".repeat(usize::try_from(pair_size).assured("small"));
     let batch = mapped_logs(&[Some("aaaa"), Some("bbbb"), Some(oversized.as_str())]);
 
-    let preparation = prepare_all(&mut sink, &batch).await;
+    let preparation = prepare_all(&mut connector, &batch).await;
 
     assert_eq!(
         preparation.requests.iter().map(members).collect::<Vec<_>>(),
@@ -327,7 +328,7 @@ async fn preparation_halves_a_candidate_above_max_size_and_refuses_an_oversized_
 
 #[nervix_primitives::test]
 async fn preparation_refuses_a_record_whose_values_are_invalid_and_carries_the_rest() {
-    let mut sink = logs_sink(
+    let mut connector = logs_emitter(
         "http://127.0.0.1:9",
         "http/protobuf",
         None,
@@ -336,7 +337,7 @@ async fn preparation_refuses_a_record_whose_values_are_invalid_and_carries_the_r
     .await;
     let batch = mapped_logs(&[Some("a"), None, Some("c")]);
 
-    let preparation = prepare_all(&mut sink, &batch).await;
+    let preparation = prepare_all(&mut connector, &batch).await;
 
     let [request] = preparation.requests.as_slice() else {
         panic!("the valid records share one request");
@@ -463,13 +464,13 @@ fn gunzip(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// The requests prepared from `batch`, as the host hands them to the sink.
-fn handed_over(preparation: &RowRequestPreparation) -> Vec<SinkRowRequest> {
+fn handed_over(preparation: &RowRequestPreparation) -> Vec<EmitterRowRequest> {
     preparation
         .requests
         .iter()
         .enumerate()
-        .map(|(index, request)| SinkRowRequest {
-            id: SinkRecordId::new(index),
+        .map(|(index, request)| EmitterRowRequest {
+            id: EmitterRecordId::new(index),
             body: request.body.clone(),
             occurred_at: Timestamp::from_unix_nanos(7),
         })
@@ -491,7 +492,7 @@ async fn publish_sends_each_prepared_request_unchanged_over_http_and_answers_for
         (503, Vec::new()),
     ])
     .await;
-    let mut sink = logs_sink(
+    let mut connector = logs_emitter(
         &endpoint,
         "http/protobuf",
         Some("gzip"),
@@ -499,26 +500,29 @@ async fn publish_sends_each_prepared_request_unchanged_over_http_and_answers_for
     )
     .await;
     let batch = mapped_logs(&[Some("a"), Some("b"), Some("c"), Some("d")]);
-    let preparation = prepare_all(&mut sink, &batch).await;
+    let preparation = prepare_all(&mut connector, &batch).await;
 
-    let outcome = sink.publish(handed_over(&preparation)).await.into_parts();
+    let outcome = connector
+        .publish(handed_over(&preparation))
+        .await
+        .into_parts();
 
     assert_eq!(
         outcome.delivered,
-        vec![SinkRecordId::new(0)],
+        vec![EmitterRecordId::new(0)],
         "a partial_success acknowledges the whole request"
     );
     let [refused] = outcome.rejected.as_slice() else {
         panic!("the request the receiver refused with 400 is rejected");
     };
-    assert_eq!(refused.id, SinkRecordId::new(1));
+    assert_eq!(refused.id, EmitterRecordId::new(1));
     assert_eq!(refused.error.occurred_at, Timestamp::from_unix_nanos(7));
     let failure = outcome
         .infrastructure_error
         .expect("a 503 leaves the request and the ones after it unanswered");
     assert_eq!(
         failure.current_context(),
-        &SinkPublishError::Publish { sink: OTEL }
+        &EmitterWriteError::Publish { connector: OTEL }
     );
     let received = received.lock();
     assert_eq!(received.len(), 3, "the request after the 503 is never sent");
@@ -610,7 +614,7 @@ async fn publish_sends_each_prepared_request_unchanged_over_grpc_and_answers_for
             Err(GrpcStatus::unavailable("try again")),
         ])
         .await;
-        let mut sink = logs_sink(
+        let mut connector = logs_emitter(
             &endpoint,
             "grpc",
             compression,
@@ -618,21 +622,24 @@ async fn publish_sends_each_prepared_request_unchanged_over_grpc_and_answers_for
         )
         .await;
         let batch = mapped_logs(&[Some("a"), Some("b"), Some("c"), Some("d")]);
-        let preparation = prepare_all(&mut sink, &batch).await;
+        let preparation = prepare_all(&mut connector, &batch).await;
 
-        let outcome = sink.publish(handed_over(&preparation)).await.into_parts();
+        let outcome = connector
+            .publish(handed_over(&preparation))
+            .await
+            .into_parts();
 
-        assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+        assert_eq!(outcome.delivered, vec![EmitterRecordId::new(0)]);
         let [refused] = outcome.rejected.as_slice() else {
             panic!("the request refused with INVALID_ARGUMENT is rejected");
         };
-        assert_eq!(refused.id, SinkRecordId::new(1));
+        assert_eq!(refused.id, EmitterRecordId::new(1));
         let failure = outcome
             .infrastructure_error
             .expect("UNAVAILABLE leaves the request and the ones after it unanswered");
         assert_eq!(
             failure.current_context(),
-            &SinkPublishError::Publish { sink: OTEL }
+            &EmitterWriteError::Publish { connector: OTEL }
         );
         let received = received.lock();
         assert_eq!(
@@ -683,8 +690,8 @@ async fn a_prepared_grpc_export_reaches_its_receiver_after_a_negative_dns_answer
     .await
     .assured("the fixture DNS configuration is valid");
     let named_endpoint = endpoint.replacen("127.0.0.1", name, 1);
-    let mut sink = logs_sink(&endpoint, "grpc", None, None).await;
-    sink.client.transport = OtelSink::transport_from_config(
+    let mut connector = logs_emitter(&endpoint, "grpc", None, None).await;
+    connector.client.transport = OtelEmitter::transport_from_config(
         &config(&[
             ("endpoint", &named_endpoint),
             ("protocol", "grpc"),
@@ -694,9 +701,12 @@ async fn a_prepared_grpc_export_reaches_its_receiver_after_a_negative_dns_answer
     )
     .assured("a named endpoint constructs a lazy gRPC channel");
     let batch = mapped_logs(&[Some("dns-recovery-record")]);
-    let preparation = prepare_all(&mut sink, &batch).await;
+    let preparation = prepare_all(&mut connector, &batch).await;
 
-    let failed = sink.publish(handed_over(&preparation)).await.into_parts();
+    let failed = connector
+        .publish(handed_over(&preparation))
+        .await
+        .into_parts();
     assert!(failed.infrastructure_error.is_some());
     assert!(failed.delivered.is_empty());
     assert!(failed.rejected.is_empty());
@@ -713,14 +723,16 @@ async fn a_prepared_grpc_export_reaches_its_receiver_after_a_negative_dns_answer
     );
     let deadline = nervix_primitives::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let outcome =
-            nervix_primitives::time::timeout_at(deadline, sink.publish(handed_over(&preparation)))
-                .await
-                .assured("the prepared export recovers within the existing public ten-second bound")
-                .into_parts();
+        let outcome = nervix_primitives::time::timeout_at(
+            deadline,
+            connector.publish(handed_over(&preparation)),
+        )
+        .await
+        .assured("the prepared export recovers within the existing public ten-second bound")
+        .into_parts();
         assert!(outcome.rejected.is_empty());
         if outcome.infrastructure_error.is_none() {
-            assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+            assert_eq!(outcome.delivered, vec![EmitterRecordId::new(0)]);
             break;
         }
         assert!(outcome.delivered.is_empty());
@@ -753,7 +765,7 @@ fn a_grpc_export_without_an_answer_is_retried_whatever_code_tonic_reports() {
         };
         assert_eq!(
             error.current_context(),
-            &SinkPublishError::Publish { sink: OTEL }
+            &EmitterWriteError::Publish { connector: OTEL }
         );
     }
 }
@@ -776,7 +788,7 @@ fn a_grpc_answer_is_classified_by_the_otlp_retryable_codes() {
         };
         assert_eq!(
             error.current_context(),
-            &SinkPublishError::Publish { sink: OTEL },
+            &EmitterWriteError::Publish { connector: OTEL },
             "{code:?} answered by the receiver is retried"
         );
     }
@@ -797,7 +809,7 @@ fn a_grpc_answer_is_classified_by_the_otlp_retryable_codes() {
         };
         assert_eq!(
             error.current_context(),
-            &SinkPublishError::Misconfigured { sink: OTEL },
+            &EmitterWriteError::Misconfigured { connector: OTEL },
             "{code:?} answered by the receiver is not retried"
         );
     }

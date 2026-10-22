@@ -25,7 +25,7 @@ use std::num::NonZeroUsize;
 use ahash::HashSet;
 use error_stack::Report;
 use nervix_connector::{
-    RustlsClientConfigSource, client_tls_paths, install_rustls_crypto_provider, read_tls_file,
+    RustlsClientConfigProvider, client_tls_paths, install_rustls_crypto_provider, read_tls_file,
 };
 use nervix_models::DeadlineKey;
 use nervix_primitives::sync::StdArc;
@@ -393,7 +393,7 @@ impl SyslogClientConfig {
     ) -> error_stack::Result<StdArc<rustls::ClientConfig>, SyslogConfigError> {
         {
             let mapping_input =
-                RustlsClientConfigSource::new(&self.entries).build_with_default_roots();
+                RustlsClientConfigProvider::new(&self.entries).build_with_default_roots();
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(error) => Err({

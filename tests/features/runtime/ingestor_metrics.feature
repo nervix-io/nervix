@@ -193,7 +193,7 @@ Feature: Ingestor metrics
       | 1            |
       | 3            |
 
-  Scenario Outline: DESCRIBE INGESTOR reports a size-triggered batch for rapid <branch_strategy> <source_kind> input
+  Scenario Outline: DESCRIBE INGESTOR reports a size-triggered batch for rapid <branch_strategy> <entity_kind> input
     Given Redis is running
     And MQTT is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -241,7 +241,7 @@ Feature: Ingestor metrics
         START;
       """
     Then within "5s" node "node-1" eventually reports describe ingestor "ingestor_metrics_source" as "status: running"
-    When 10 JSON messages with user id 42 are rapidly published to "<source_kind>" input "<input>"
+    When 10 JSON messages with user id 42 are rapidly published to "<entity_kind>" input "<input>"
     Then within "10s" node "node-1" eventually reports describe ingestor "ingestor_metrics_source" as "messages_total sent relay=notifications physical_node=node-1 total=10"
     And the last command output metric "messages_total" "sent" relay "notifications" on any physical node has numeric values
       """
@@ -282,7 +282,7 @@ Feature: Ingestor metrics
       """
 
     Examples:
-      | cluster_size | branch_strategy | relay_branching                        | output_branching                                                     | source_kind | source_head  | source_clause                                              | input                     |
+      | cluster_size | branch_strategy | relay_branching                        | output_branching                                                     | entity_kind | source_head  | source_clause                                              | input                     |
       | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK | notifications_{{test_id}} |
       | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK | notifications_{{test_id}} |
       | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | MQTT        | MQTT TOPIC   | mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK    | notifications_{{test_id}} |

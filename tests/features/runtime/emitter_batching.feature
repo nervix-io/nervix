@@ -277,7 +277,7 @@ Feature: Emitter batching configuration
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ZEROMQ PUSH EMITTER event_sink FROM outgoing
+      CREATE ZEROMQ PUSH EMITTER event_emitter FROM outgoing
         TO sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -285,7 +285,7 @@ Feature: Emitter batching configuration
       """
     When these NSPL commands are executed on the leader node
       """
-      ALTER ZEROMQ PUSH EMITTER event_sink SET BATCH MAX MESSAGES 500 MAX SIZE 1MiB;
+      ALTER ZEROMQ PUSH EMITTER event_emitter SET BATCH MAX MESSAGES 500 MAX SIZE 1MiB;
       """
     Then the last command output contains
       """
@@ -293,11 +293,11 @@ Feature: Emitter batching configuration
       """
     When these NSPL commands are executed on the leader node
       """
-      SHOW CREATE EMITTER event_sink;
+      SHOW CREATE EMITTER event_emitter;
       """
     Then the last command output contains
       """
-      CREATE ATTACHED ZEROMQ PUSH EMITTER event_sink
+      CREATE ATTACHED ZEROMQ PUSH EMITTER event_emitter
         FROM outgoing
         TO sink
           MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
@@ -310,7 +310,7 @@ Feature: Emitter batching configuration
       """
     When these NSPL commands are executed on the leader node
       """
-      ALTER ZEROMQ PUSH EMITTER event_sink SET BATCH MAX MESSAGES 20 MAX SIZE 64KiB;
+      ALTER ZEROMQ PUSH EMITTER event_emitter SET BATCH MAX MESSAGES 20 MAX SIZE 64KiB;
       """
     Then the last command output contains
       """
@@ -318,7 +318,7 @@ Feature: Emitter batching configuration
       """
     When these NSPL commands are executed on the leader node
       """
-      DESCRIBE EMITTER event_sink;
+      DESCRIBE EMITTER event_emitter;
       """
     Then the last command output contains
       """
@@ -326,7 +326,7 @@ Feature: Emitter batching configuration
       """
     When these NSPL commands are executed on the leader node
       """
-      ALTER ZEROMQ PUSH EMITTER event_sink DROP BATCH;
+      ALTER ZEROMQ PUSH EMITTER event_emitter DROP BATCH;
       """
     Then the last command output contains
       """
@@ -334,7 +334,7 @@ Feature: Emitter batching configuration
       """
     When these NSPL commands are executed on the leader node
       """
-      DESCRIBE EMITTER event_sink;
+      DESCRIBE EMITTER event_emitter;
       """
     Then the last command output contains
       """
@@ -342,7 +342,7 @@ Feature: Emitter batching configuration
       """
     When these NSPL commands fail with "emitter batching is not configured"
       """
-      ALTER ZEROMQ PUSH EMITTER event_sink DROP BATCH;
+      ALTER ZEROMQ PUSH EMITTER event_emitter DROP BATCH;
       """
 
     Examples:

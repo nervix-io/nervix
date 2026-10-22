@@ -597,7 +597,7 @@ Feature: Emitter publishing modes
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ZEROMQ PUSH EMITTER event_sink FROM outgoing
+      CREATE ZEROMQ PUSH EMITTER event_emitter FROM outgoing
         TO sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -605,7 +605,7 @@ Feature: Emitter publishing modes
       """
     When these NSPL commands are executed on the leader node
       """
-      ALTER ZEROMQ PUSH EMITTER event_sink
+      ALTER ZEROMQ PUSH EMITTER event_emitter
         SET MODE NO ACK RETRY POLICY BACKOFF 20ms MAX 200ms;
       """
     Then the last command output contains
@@ -614,7 +614,7 @@ Feature: Emitter publishing modes
       """
     When these NSPL commands are executed on the leader node
       """
-      SHOW CREATE EMITTER event_sink;
+      SHOW CREATE EMITTER event_emitter;
       """
     Then the last command output contains
       """
@@ -652,25 +652,25 @@ Feature: Emitter publishing modes
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ZEROMQ PUSH EMITTER event_sink FROM outgoing
+      CREATE ZEROMQ PUSH EMITTER event_emitter FROM outgoing
         TO sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    And emitter "event_sink" enters stall mode
+    And emitter "event_emitter" enters stall mode
     When http payload is posted to node "node-1" with host "http-{{test_id}}-set-mode-timeout.example.com" path "/events"
       """
       {"seq":1}
       """
-    Then within "5s" DESCRIBE EMITTER "event_sink" on the leader node contains
+    Then within "5s" DESCRIBE EMITTER "event_emitter" on the leader node contains
       """
       transient error: fault injector stalled emitter publish
       """
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
     When these NSPL commands fail with "timed out draining domain"
       """
-      ALTER ZEROMQ PUSH EMITTER event_sink
+      ALTER ZEROMQ PUSH EMITTER event_emitter
         SET MODE NO ACK RETRY POLICY BACKOFF 20ms MAX 200ms;
       """
     Then the last command error contains
@@ -679,20 +679,20 @@ Feature: Emitter publishing modes
       """
     When these NSPL commands are executed on the leader node
       """
-      SHOW CREATE EMITTER event_sink;
+      SHOW CREATE EMITTER event_emitter;
       """
     Then the last command output contains
       """
       MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
       """
-    When emitter "event_sink" leaves stall mode
+    When emitter "event_emitter" leaves stall mode
     Then within "5s" the observed broker receives payloads
       """
       "seq":1
       """
     When these NSPL commands are executed on the leader node
       """
-      ALTER ZEROMQ PUSH EMITTER event_sink
+      ALTER ZEROMQ PUSH EMITTER event_emitter
         SET MODE NO ACK RETRY POLICY BACKOFF 20ms MAX 200ms;
       """
     Then the last command output contains
@@ -701,7 +701,7 @@ Feature: Emitter publishing modes
       """
     When these NSPL commands are executed on the leader node
       """
-      SHOW CREATE EMITTER event_sink;
+      SHOW CREATE EMITTER event_emitter;
       """
     Then the last command output contains
       """

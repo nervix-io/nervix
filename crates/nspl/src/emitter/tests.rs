@@ -11,11 +11,11 @@
 )]
 
 use nervix_models::{
-    ClickHouseSink, ClickHouseTableSink, FlushPolicy, HttpRequestSink, HttpSink, IcebergSink,
-    IcebergTableSink, KafkaSink, MongoDbCollectionSink, MongoDbSink, MqttSink, MySqlSink,
-    MySqlTableSink, NatsSink, OtelLogsSink, OtelMetricsSink, OtelSink, PostgresSink,
-    PostgresTableSink, PulsarSink, RabbitMqSink, RedisSink, SqsQueueSink, SqsSink, SyslogSink,
-    ZeroMqSink,
+    ClickHouseEmitter, ClickHouseTableEmitter, FlushPolicy, HttpEmitter, HttpRequestEmitter,
+    IcebergEmitter, IcebergTableEmitter, KafkaEmitter, MongoDbCollectionEmitter, MongoDbEmitter,
+    MqttEmitter, MySqlEmitter, MySqlTableEmitter, NatsEmitter, OtelEmitter, OtelLogsEmitter,
+    OtelMetricsEmitter, PostgresEmitter, PostgresTableEmitter, PulsarEmitter, RabbitMqEmitter,
+    RedisEmitter, SqsEmitter, SqsQueueEmitter, SyslogEmitter, ZeroMqEmitter,
 };
 
 use super::*;
@@ -50,10 +50,10 @@ fn fields_named_like_the_request_clauses_stay_in_the_http_request() {
     )
     .expect("bare method and path fields complete their expressions");
 
-    let EmitSink::Http(HttpSink::Request(HttpRequestSink { method, path, .. })) =
-        parsed.sink.as_ref()
+    let EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter { method, path, .. })) =
+        parsed.connector.as_ref()
     else {
-        panic!("the sink must be HTTP, got {:?}", parsed.sink);
+        panic!("the sink must be HTTP, got {:?}", parsed.connector);
     };
     assert_eq!(
         method,
@@ -79,14 +79,14 @@ fn fields_named_like_keywords_stay_in_a_fifo_group_and_values() {
          concat(input.mode, mode) MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s",
     ))
     .expect("a bare mode completes the group before MODE");
-    let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+    let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
         fifo_group: Some(nervix_models::SqsFifoGroup::Expression(group)),
         ..
-    })) = parsed.sink.as_ref()
+    })) = parsed.connector.as_ref()
     else {
         panic!(
             "the sink must be SQS with a group expression, got {:?}",
-            parsed.sink
+            parsed.connector
         );
     };
     assert_eq!(
@@ -100,10 +100,11 @@ fn fields_named_like_keywords_stay_in_a_fifo_group_and_values() {
          MESSAGES 100 MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
     )
     .expect("values named like keywords stay in their entries");
-    let EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink { values, .. })) =
-        parsed.sink.as_ref()
+    let EmitterEntity::ClickHouse(ClickHouseEmitter::Table(ClickHouseTableEmitter {
+        values, ..
+    })) = parsed.connector.as_ref()
     else {
-        panic!("the sink must be ClickHouse, got {:?}", parsed.sink);
+        panic!("the sink must be ClickHouse, got {:?}", parsed.connector);
     };
     let expressions = values
         .iter()
@@ -124,10 +125,10 @@ fn a_path_opening_with_a_parenthesis_still_begins_after_the_method() {
     )
     .expect("PATH takes an expression, so the parenthesis after it opens that expression");
 
-    let EmitSink::Http(HttpSink::Request(HttpRequestSink { method, path, .. })) =
-        parsed.sink.as_ref()
+    let EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter { method, path, .. })) =
+        parsed.connector.as_ref()
     else {
-        panic!("the sink must be HTTP, got {:?}", parsed.sink);
+        panic!("the sink must be HTTP, got {:?}", parsed.connector);
     };
     assert_eq!(
         method,
@@ -142,7 +143,7 @@ fn a_path_opening_with_a_parenthesis_still_begins_after_the_method() {
 
 #[test]
 fn http_emitter_requires_ordered_request_and_body_clauses() {
-    for sink in [
+    for connector in [
         "HTTP REQUEST EMITTER emit FROM p99 TO api PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms \
          MAX 30s WITHOUT BODY",
         "HTTP REQUEST EMITTER emit FROM p99 TO api METHOD 'GET' MODE ACK RETRY POLICY BACKOFF \
@@ -164,8 +165,9 @@ fn http_emitter_requires_ordered_request_and_body_clauses() {
         "HTTP REQUEST EMITTER emit FROM p99 TO api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s WITHOUT BODY BATCH MAX MESSAGES 2 MAX SIZE 1MiB",
     ] {
-        let source =
-            format!("CREATE {sink} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;");
+        let source = format!(
+            "CREATE {connector} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+        );
         assert!(parse_create_emitter(&source).is_err(), "{source}");
     }
 }
@@ -184,7 +186,7 @@ fn http_emitter_completion_follows_clause_order() {
 }
 
 #[test]
-fn http_alter_sink_roundtrips_both_explicit_body_selections() {
+fn http_alter_emitter_roundtrips_both_explicit_body_selections() {
     for body in ["ENCODE USING body_codec", "WITHOUT BODY"] {
         let source = format!(
             "ALTER HTTP REQUEST EMITTER send SET TO api METHOD input.method PATH input.path MODE \
@@ -241,7 +243,9 @@ fn parses_otel_logs_traces_and_metric_shapes() {
          'checkout'} SCOPE 'nervix/audit' VERSION '1.0'",
     ))
     .expect("OTEL logs emitter should parse");
-    let EmitSink::Otel(OtelSink::Logs(OtelLogsSink { mappings, .. })) = logs.sink.as_ref() else {
+    let EmitterEntity::Otel(OtelEmitter::Logs(OtelLogsEmitter { mappings, .. })) =
+        logs.connector.as_ref()
+    else {
         panic!("expected OTEL logs sink");
     };
     assert_eq!(mappings.attributes.len(), 1);
@@ -259,8 +263,8 @@ fn parses_otel_logs_traces_and_metric_shapes() {
     ))
     .expect("OTEL traces emitter should parse");
     assert!(matches!(
-        traces.sink.as_ref(),
-        EmitSink::Otel(OtelSink::Traces(_))
+        traces.connector.as_ref(),
+        EmitterEntity::Otel(OtelEmitter::Traces(_))
     ));
 
     let gauge = parse_create_emitter(&otel_emitter(
@@ -270,8 +274,8 @@ fn parses_otel_logs_traces_and_metric_shapes() {
     ))
     .expect("OTEL gauge emitter should parse");
     assert!(matches!(
-        gauge.sink.as_ref(),
-        EmitSink::Otel(OtelSink::Metrics(OtelMetricsSink {
+        gauge.connector.as_ref(),
+        EmitterEntity::Otel(OtelEmitter::Metrics(OtelMetricsEmitter {
             metric: OtelMetric {
                 kind: OtelMetricKind::Gauge,
                 ..
@@ -287,8 +291,8 @@ fn parses_otel_logs_traces_and_metric_shapes() {
     ))
     .expect("OTEL sum emitter should parse");
     assert!(matches!(
-        sum.sink.as_ref(),
-        EmitSink::Otel(OtelSink::Metrics(OtelMetricsSink {
+        sum.connector.as_ref(),
+        EmitterEntity::Otel(OtelEmitter::Metrics(OtelMetricsEmitter {
             metric: OtelMetric {
                 kind: OtelMetricKind::Sum {
                     monotonic: true,
@@ -308,8 +312,8 @@ fn parses_otel_logs_traces_and_metric_shapes() {
     ))
     .expect("OTEL histogram emitter should parse");
     assert!(matches!(
-        histogram.sink.as_ref(),
-        EmitSink::Otel(OtelSink::Metrics(OtelMetricsSink {
+        histogram.connector.as_ref(),
+        EmitterEntity::Otel(OtelEmitter::Metrics(OtelMetricsEmitter {
             metric: OtelMetric {
                 kind: OtelMetricKind::Histogram {
                     temporality: OtelAggregationTemporality::Cumulative,
@@ -322,7 +326,7 @@ fn parses_otel_logs_traces_and_metric_shapes() {
 }
 
 #[test]
-fn rejects_invalid_otel_sink_clause_surfaces() {
+fn rejects_invalid_otel_emitter_clause_surfaces() {
     assert!(
         parse_create_emitter(
             "CREATE OTEL LOGS EMITTER telemetry FROM telemetry_relay TO otel_main  MODE ACK RETRY \
@@ -375,11 +379,11 @@ fn otel_completion_stays_within_the_selected_signal_grammar() {
 #[test]
 fn parses_alter_emitter_operations_in_written_order() {
     let parsed = parse_alter_emitter(
-        "ALTER ZEROMQ PUSH EMITTER event_sink ADD FROM backup WHERE input.kind = 'backup', ALTER \
-         FROM backup SET WHERE input.kind = 'current', ALTER FROM backup DROP WHERE, DROP FROM \
-         backup, SET TO sink_b MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING \
-         event_codec, SET CLIENT sink_c, SET ENCODE USING event_codec, DROP ENCODE, SET COLLECT \
-         FOR 10ms MAX BATCH SIZE 1MiB, DROP COLLECT, SET DETACHED, SET FLUSH IMMEDIATE;",
+        "ALTER ZEROMQ PUSH EMITTER event_emitter ADD FROM backup WHERE input.kind = 'backup', \
+         ALTER FROM backup SET WHERE input.kind = 'current', ALTER FROM backup DROP WHERE, DROP \
+         FROM backup, SET TO emitter_b MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE \
+         USING event_codec, SET CLIENT emitter_c, SET ENCODE USING event_codec, DROP ENCODE, SET \
+         COLLECT FOR 10ms MAX BATCH SIZE 1MiB, DROP COLLECT, SET DETACHED, SET FLUSH IMMEDIATE;",
     )
     .expect("kinded ALTER should parse");
 
@@ -405,7 +409,7 @@ fn parses_alter_emitter_operations_in_written_order() {
         AlterEmitterOperation::SetTo {
             ref destination,
             ..
-        } if matches!(destination.as_ref(), EmitSink::ZeroMq(_))
+        } if matches!(destination.as_ref(), EmitterEntity::ZeroMq(_))
     ));
     assert!(matches!(
         parsed.operations[5],
@@ -436,9 +440,9 @@ fn parses_alter_emitter_operations_in_written_order() {
 }
 
 #[test]
-fn parses_alter_emitter_direct_sink_values_and_iceberg_commit_policy() {
+fn parses_alter_emitter_direct_emitter_values_and_iceberg_commit_policy() {
     let direct = parse_alter_emitter(
-        "ALTER POSTGRES TABLE EMITTER event_sink SET TO postgres_main TABLE 'events' MODE ACK \
+        "ALTER POSTGRES TABLE EMITTER event_emitter SET TO postgres_main TABLE 'events' MODE ACK \
          RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'seq' = concat(input.kind, ','), 'value' = \
          input.value } , SET BATCH MAX MESSAGES 100 MAX SIZE 1MiB, SET FLUSH EACH 1s MAX BATCH \
          SIZE 1MiB;",
@@ -447,7 +451,7 @@ fn parses_alter_emitter_direct_sink_values_and_iceberg_commit_policy() {
     assert_eq!(direct.operations.len(), 3);
 
     let iceberg = parse_alter_emitter(
-        "ALTER ICEBERG TABLE EMITTER event_sink SET COMMIT EACH 30s MAX SIZE 64MiB;",
+        "ALTER ICEBERG TABLE EMITTER event_emitter SET COMMIT EACH 30s MAX SIZE 64MiB;",
     )
     .expect("Iceberg commit policy should parse");
     assert_eq!(
@@ -459,7 +463,7 @@ fn parses_alter_emitter_direct_sink_values_and_iceberg_commit_policy() {
     );
 
     let replace_iceberg = parse_alter_emitter(
-        "ALTER ICEBERG TABLE EMITTER event_sink SET TO s3_main TABLE 'events' LOCATION \
+        "ALTER ICEBERG TABLE EMITTER event_emitter SET TO s3_main TABLE 'events' LOCATION \
          's3://warehouse/events' CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK \
          RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'value' = input.value } ;",
     )
@@ -471,7 +475,7 @@ fn parses_alter_emitter_direct_sink_values_and_iceberg_commit_policy() {
             ..
         }] if matches!(
             destination.as_ref(),
-            EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
+            EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
                 commit_each,
                 max_commit_size,
                 ..
@@ -482,15 +486,15 @@ fn parses_alter_emitter_direct_sink_values_and_iceberg_commit_policy() {
 
 #[test]
 fn rejects_alter_emitter_without_operations_or_complete_flush_policy() {
-    assert!(parse_alter_emitter("ALTER ZEROMQ PUSH EMITTER event_sink;").is_err());
+    assert!(parse_alter_emitter("ALTER ZEROMQ PUSH EMITTER event_emitter;").is_err());
     assert!(
-        parse_alter_emitter("ALTER ZEROMQ PUSH EMITTER event_sink SET FLUSH EACH 1s;").is_err()
+        parse_alter_emitter("ALTER ZEROMQ PUSH EMITTER event_emitter SET FLUSH EACH 1s;").is_err()
     );
 }
 
 #[test]
 fn alter_emitter_completion_comes_from_its_operation_grammar() {
-    let suggestions = suggest_alter_emitter("ALTER ZEROMQ PUSH EMITTER event_sink ", usize::MAX);
+    let suggestions = suggest_alter_emitter("ALTER ZEROMQ PUSH EMITTER event_emitter ", usize::MAX);
     for expected in ["ADD FROM", "ALTER FROM", "SET TO", "DROP FROM"] {
         assert!(
             suggestions.contains(&expected.to_string()),
@@ -514,9 +518,9 @@ fn batch_policy(max_messages: u64, max_size: &str) -> EmitterBatchPolicy {
     }
 }
 
-fn complete_codec_emitter(sink: &str) -> String {
+fn complete_codec_emitter(connector: &str) -> String {
     format!(
-        "CREATE {sink} ENCODE USING my_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
+        "CREATE {connector} ENCODE USING my_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
          ERROR LOG;"
     )
 }
@@ -541,7 +545,10 @@ fn native_client_emitter_constructs_output_and_round_trips() {
                   SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
     assert_canonical_emitter_roundtrip(source, "CLIENT ACK");
     let parsed = parse_create_emitter(source).expect("native client output parses");
-    assert!(matches!(parsed.sink.as_ref(), EmitSink::Client(_)));
+    assert!(matches!(
+        parsed.connector.as_ref(),
+        EmitterEntity::Client(_)
+    ));
     assert!(matches!(parsed.body.body, EmitterBody::Client));
     assert!(parsed.batch.is_some());
 }
@@ -581,7 +588,7 @@ fn native_client_emitter_completion_stays_on_its_grammar_branch() {
 
 #[test]
 fn every_publishing_mode_body_parses_and_canonical_round_trips() {
-    for sink in [
+    for connector in [
         "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s",
         "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE ACK SEQUENTIAL ACK \
@@ -610,10 +617,10 @@ fn every_publishing_mode_body_parses_and_canonical_round_trips() {
          250ms MAX 30s",
         "SENTRY EVENT EMITTER emit FROM p99 TO broker MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
     ] {
-        assert_canonical_emitter_roundtrip(&complete_codec_emitter(sink), sink);
+        assert_canonical_emitter_roundtrip(&complete_codec_emitter(connector), connector);
     }
 
-    for sink in [
+    for connector in [
         "CLICKHOUSE TABLE EMITTER emit FROM p99 TO db TABLE 'events' MODE ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
         "POSTGRES TABLE EMITTER emit FROM p99 TO db TABLE 'events' MODE ACK RETRY POLICY BACKOFF \
@@ -637,9 +644,10 @@ fn every_publishing_mode_body_parses_and_canonical_round_trips() {
          MAX 30s VALUES { 'time' = input.time, 'count' = input.count, 'bucket_counts' = \
          input.bucket_counts, 'explicit_bounds' = input.explicit_bounds } ",
     ] {
-        let source =
-            format!("CREATE {sink} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;");
-        assert_canonical_emitter_roundtrip(&source, sink);
+        let source = format!(
+            "CREATE {connector} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+        );
+        assert_canonical_emitter_roundtrip(&source, connector);
     }
 }
 
@@ -675,7 +683,7 @@ fn rejects_missing_incomplete_or_foreign_publishing_modes() {
 }
 
 #[test]
-fn publishing_mode_completion_stays_within_the_selected_sink() {
+fn publishing_mode_completion_stays_within_the_selected_emitter() {
     let before_mode = "CREATE KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' ";
     let suggestions = suggest_create_emitter(before_mode, before_mode.len());
     assert_eq!(suggestions, vec!["MODE".to_string()]);
@@ -749,8 +757,8 @@ fn parses_sqs_fifo_group_forms() {
     ))
     .expect("SQS FIFO FROM BRANCH mode should parse");
     assert!(matches!(
-        from_branch.sink.as_ref(),
-        EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+        from_branch.connector.as_ref(),
+        EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
             queue,
             fifo_group: Some(nervix_models::SqsFifoGroup::FromBranch),
             ..
@@ -769,8 +777,8 @@ fn parses_sqs_fifo_group_forms() {
     ))
     .expect("SQS FIFO expression mode should parse");
     assert!(matches!(
-        expression.sink.as_ref(),
-        EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+        expression.connector.as_ref(),
+        EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
             fifo_group: Some(nervix_models::SqsFifoGroup::Expression(_)),
             ..
         }))
@@ -778,7 +786,7 @@ fn parses_sqs_fifo_group_forms() {
 }
 
 #[test]
-fn rejects_fifo_group_on_non_sqs_sink() {
+fn rejects_fifo_group_on_non_sqs_emitter() {
     let source = complete_codec_emitter(
         "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' FIFO GROUP FROM BRANCH MODE \
          NO ACK RETRY POLICY BACKOFF 250ms MAX 30s",
@@ -789,9 +797,9 @@ fn rejects_fifo_group_on_non_sqs_sink() {
 #[test]
 fn parses_alter_emitter_publishing_and_attachment_modes() {
     let parsed = parse_alter_emitter(
-        "ALTER KAFKA TOPIC EMITTER event_sink SET MODE ACK PARALLEL MAX 32 ACK TIMEOUT 10s RETRY \
-         POLICY BACKOFF 250ms MAX 30s, SET DETACHED, SET TO sink_b TOPIC 'events' MODE NO ACK \
-         RETRY POLICY BACKOFF 1s MAX 1m ENCODE USING event_codec;",
+        "ALTER KAFKA TOPIC EMITTER event_emitter SET MODE ACK PARALLEL MAX 32 ACK TIMEOUT 10s \
+         RETRY POLICY BACKOFF 250ms MAX 30s, SET DETACHED, SET TO emitter_b TOPIC 'events' MODE \
+         NO ACK RETRY POLICY BACKOFF 1s MAX 1m ENCODE USING event_codec;",
     )
     .expect("kinded ALTER mode operations should parse");
 
@@ -818,8 +826,8 @@ fn parses_alter_emitter_publishing_and_attachment_modes() {
     ));
 
     let request_ack = parse_alter_emitter(
-        "ALTER POSTGRES TABLE EMITTER database_sink SET MODE ACK RETRY POLICY BACKOFF 250ms MAX \
-         30s;",
+        "ALTER POSTGRES TABLE EMITTER database_emitter SET MODE ACK RETRY POLICY BACKOFF 250ms \
+         MAX 30s;",
     )
     .expect("request/response ACK mode should parse without a confirmation window");
     assert!(matches!(
@@ -866,7 +874,7 @@ fn parses_create_emitter_kafka() {
         parsed.body.body.codec().map(|codec| codec.as_str()),
         Some("my_codec")
     );
-    let EmitSink::Kafka(KafkaSink::Topic(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::Kafka(KafkaEmitter::Topic(destination)) = parsed.connector.as_ref() else {
         panic!("expected Kafka Topic");
     };
     assert_eq!(
@@ -968,9 +976,9 @@ fn parses_create_emitter_sentry() {
 
     let parsed = parse_create_emitter(input).expect("parse should succeed");
 
-    assert_eq!(parsed.sink.transport_label(), "SENTRY EVENT");
+    assert_eq!(parsed.connector.transport_label(), "SENTRY EVENT");
     assert_eq!(
-        parsed.sink.client().map(|client| client.as_str()),
+        parsed.connector.client().map(|client| client.as_str()),
         Some("sentry_main")
     );
 }
@@ -1017,7 +1025,9 @@ fn parses_create_emitter_clickhouse() {
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
     assert_eq!(parsed.body.body, EmitterBody::Values);
-    let EmitSink::ClickHouse(ClickHouseSink::Table(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::ClickHouse(ClickHouseEmitter::Table(destination)) =
+        parsed.connector.as_ref()
+    else {
         panic!("expected ClickHouse Table");
     };
     assert_eq!(
@@ -1079,10 +1089,11 @@ fn clickhouse_values_keep_an_array_value_whole() {
 
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-    let EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink { values, .. })) =
-        parsed.sink.as_ref()
+    let EmitterEntity::ClickHouse(ClickHouseEmitter::Table(ClickHouseTableEmitter {
+        values, ..
+    })) = parsed.connector.as_ref()
     else {
-        panic!("expected a ClickHouse sink, got {:?}", parsed.sink);
+        panic!("expected a ClickHouse sink, got {:?}", parsed.connector);
     };
     assert_eq!(
         values,
@@ -1146,7 +1157,8 @@ fn parses_create_emitter_iceberg() {
 
     assert_eq!(parsed.body.body, EmitterBody::Values);
     assert_eq!(parsed.mode, AckMode::Detached);
-    let EmitSink::Iceberg(IcebergSink::Table(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::Iceberg(IcebergEmitter::Table(destination)) = parsed.connector.as_ref()
+    else {
         panic!("expected Iceberg Table");
     };
     assert_eq!(
@@ -1201,7 +1213,8 @@ fn parses_create_emitter_iceberg_gcs() {
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-    let EmitSink::Iceberg(IcebergSink::Table(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::Iceberg(IcebergEmitter::Table(destination)) = parsed.connector.as_ref()
+    else {
         panic!("expected Iceberg Table");
     };
     assert_eq!(
@@ -1256,7 +1269,8 @@ fn parses_create_emitter_iceberg_azure_blob() {
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-    let EmitSink::Iceberg(IcebergSink::Table(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::Iceberg(IcebergEmitter::Table(destination)) = parsed.connector.as_ref()
+    else {
         panic!("expected Iceberg Table");
     };
     assert_eq!(
@@ -1414,7 +1428,7 @@ fn rejects_iceberg_same_client_catalog_syntax() {
 }
 
 #[test]
-fn iceberg_catalog_context_suggestions_do_not_leak_sink_keywords() {
+fn iceberg_catalog_context_suggestions_do_not_leak_emitter_keywords() {
     let input = "CREATE ICEBERG TABLE EMITTER to_iceberg FROM notifications TO s3_client TABLE \
                  'notifications' LOCATION 's3://bucket/table' CATALOG ";
     let suggestions = suggest_create_emitter(input, input.len());
@@ -1448,7 +1462,8 @@ fn parses_create_emitter_postgres() {
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
     assert_eq!(parsed.body.body, EmitterBody::Values);
-    let EmitSink::Postgres(PostgresSink::Table(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::Postgres(PostgresEmitter::Table(destination)) = parsed.connector.as_ref()
+    else {
         panic!("expected Postgres Table");
     };
     assert_eq!(
@@ -1495,9 +1510,10 @@ fn parses_postgres_emitter_on_conflict_do_update() {
     "#;
 
     let parsed = parse_create_emitter(input).expect("parse should succeed");
-    let EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
-        conflict_action, ..
-    })) = parsed.sink.as_ref()
+    let EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
+        conflict_action,
+        ..
+    })) = parsed.connector.as_ref()
     else {
         panic!("expected postgres emitter sink");
     };
@@ -1524,9 +1540,10 @@ fn parses_postgres_emitter_on_conflict_do_nothing_without_target() {
     "#;
 
     let parsed = parse_create_emitter(input).expect("parse should succeed");
-    let EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
-        conflict_action, ..
-    })) = parsed.sink.as_ref()
+    let EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
+        conflict_action,
+        ..
+    })) = parsed.connector.as_ref()
     else {
         panic!("expected postgres emitter sink");
     };
@@ -1683,7 +1700,7 @@ fn parses_create_emitter_mysql() {
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
     assert_eq!(parsed.body.body, EmitterBody::Values);
-    let EmitSink::MySql(MySqlSink::Table(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::MySql(MySqlEmitter::Table(destination)) = parsed.connector.as_ref() else {
         panic!("expected MySql Table");
     };
     assert_eq!(
@@ -1730,9 +1747,9 @@ fn parses_mysql_emitter_on_conflict_do_update() {
     "#;
 
     let parsed = parse_create_emitter(input).expect("parse should succeed");
-    let EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
+    let EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter {
         conflict_action, ..
-    })) = parsed.sink.as_ref()
+    })) = parsed.connector.as_ref()
     else {
         panic!("expected mysql emitter sink");
     };
@@ -1754,9 +1771,9 @@ fn parses_mysql_emitter_on_conflict_do_nothing() {
     "#;
 
     let parsed = parse_create_emitter(input).expect("parse should succeed");
-    let EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
+    let EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter {
         conflict_action, ..
-    })) = parsed.sink.as_ref()
+    })) = parsed.connector.as_ref()
     else {
         panic!("expected mysql emitter sink");
     };
@@ -1859,7 +1876,8 @@ fn parses_create_emitter_mongodb() {
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
     assert_eq!(parsed.body.body, EmitterBody::Values);
-    let EmitSink::MongoDb(MongoDbSink::Collection(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::MongoDb(MongoDbEmitter::Collection(destination)) = parsed.connector.as_ref()
+    else {
         panic!("expected MongoDb Collection");
     };
     assert_eq!(
@@ -1907,9 +1925,10 @@ fn parses_mongodb_emitter_on_conflict_do_update() {
     "#;
 
     let parsed = parse_create_emitter(input).expect("parse should succeed");
-    let EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
-        conflict_action, ..
-    })) = parsed.sink.as_ref()
+    let EmitterEntity::MongoDb(MongoDbEmitter::Collection(MongoDbCollectionEmitter {
+        conflict_action,
+        ..
+    })) = parsed.connector.as_ref()
     else {
         panic!("expected mongodb emitter sink");
     };
@@ -1936,9 +1955,10 @@ fn parses_mongodb_emitter_on_conflict_do_nothing() {
     "#;
 
     let parsed = parse_create_emitter(input).expect("parse should succeed");
-    let EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
-        conflict_action, ..
-    })) = parsed.sink.as_ref()
+    let EmitterEntity::MongoDb(MongoDbEmitter::Collection(MongoDbCollectionEmitter {
+        conflict_action,
+        ..
+    })) = parsed.connector.as_ref()
     else {
         panic!("expected mongodb emitter sink");
     };
@@ -2064,7 +2084,7 @@ fn rejects_mongodb_emitter_without_batch_clause() {
 fn emitter_heads_complete_the_declared_connector_and_entity() {
     let input = "CREATE ";
     let suggestions = suggest_create_emitter(input, input.len());
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         assert!(
             suggestions.contains(&format!("{} EMITTER", kind.phrase())),
             "{kind}: {suggestions:?}"
@@ -2090,7 +2110,7 @@ fn parses_create_emitter_pulsar() {
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-    let EmitSink::Pulsar(PulsarSink::Topic(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::Pulsar(PulsarEmitter::Topic(destination)) = parsed.connector.as_ref() else {
         panic!("expected Pulsar Topic");
     };
     assert_eq!(
@@ -2169,8 +2189,8 @@ fn suggests_encode_using_as_compound_keyword() {
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(suggestions.contains(&"ENCODE USING".to_string()));
 
-    let before_sink = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 ";
-    let suggestions = suggest_create_emitter(before_sink, before_sink.len());
+    let before_emitter = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 ";
+    let suggestions = suggest_create_emitter(before_emitter, before_emitter.len());
     assert!(!suggestions.contains(&"ENCODE USING".to_string()));
 }
 
@@ -2184,7 +2204,7 @@ fn a_kinded_emitter_completes_its_client_reference() {
 }
 
 #[test]
-fn sentry_sink_completion_context_does_not_leak_transport_qualifiers() {
+fn sentry_emitter_completion_context_does_not_leak_transport_qualifiers() {
     let client_input = "CREATE SENTRY EVENT EMITTER emit FROM errors TO ";
     let client_suggestions = suggest_create_emitter(client_input, client_input.len());
     assert!(client_suggestions.contains(&"ref:client".to_string()));
@@ -2225,7 +2245,7 @@ fn parses_create_emitter_mqtt() {
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-    let EmitSink::Mqtt(MqttSink::Topic(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::Mqtt(MqttEmitter::Topic(destination)) = parsed.connector.as_ref() else {
         panic!("expected Mqtt Topic");
     };
     assert_eq!(
@@ -2250,7 +2270,7 @@ fn parses_create_emitter_nats() {
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-    let EmitSink::Nats(NatsSink::Subject(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::Nats(NatsEmitter::Subject(destination)) = parsed.connector.as_ref() else {
         panic!("expected Nats Subject");
     };
     assert_eq!(
@@ -2276,7 +2296,8 @@ fn parses_create_emitter_rabbitmq() {
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-    let EmitSink::RabbitMq(RabbitMqSink::Queue(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(destination)) = parsed.connector.as_ref()
+    else {
         panic!("expected RabbitMq Queue");
     };
     assert_eq!(
@@ -2301,7 +2322,7 @@ fn parses_create_emitter_redis() {
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-    let EmitSink::Redis(RedisSink::PubSub(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::Redis(RedisEmitter::PubSub(destination)) = parsed.connector.as_ref() else {
         panic!("expected Redis PubSub");
     };
     assert_eq!(
@@ -2326,7 +2347,7 @@ fn parses_create_emitter_zeromq() {
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-    let EmitSink::ZeroMq(ZeroMqSink::Push(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::ZeroMq(ZeroMqEmitter::Push(destination)) = parsed.connector.as_ref() else {
         panic!("expected ZeroMq Push");
     };
     assert_eq!(
@@ -2346,7 +2367,8 @@ fn parses_create_emitter_syslog_with_only_no_ack() {
     "#;
 
     let parsed = parse_create_emitter(input).expect("parse should succeed");
-    let EmitSink::Syslog(SyslogSink::Collector(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::Syslog(SyslogEmitter::Collector(destination)) = parsed.connector.as_ref()
+    else {
         panic!("expected Syslog Collector");
     };
     assert_eq!(
@@ -2354,7 +2376,7 @@ fn parses_create_emitter_syslog_with_only_no_ack() {
         nervix_models::ClientName::try_from("syslog_out").expect("valid client identifier")
     );
     assert!(matches!(
-        parsed.sink.publishing(),
+        parsed.connector.publishing(),
         EmitterPublishing::NoAck { .. }
     ));
 }
@@ -2371,7 +2393,7 @@ fn rejects_syslog_ack_mode_and_header_invocations() {
     );
 
     // Header capability is rejected semantically because route construction is shared by all
-    // encoded sinks; the parser still preserves the structured invocation for validation.
+    // encoded emitters; the parser still preserves the structured invocation for validation.
     let parsed = parse_create_emitter(
         "CREATE SYSLOG COLLECTOR EMITTER e FROM events TO c MODE NO ACK RETRY POLICY BACKOFF 1s \
          MAX 30s ENCODE USING codec INHERIT ALL INVOKE write_header('x', 'y') FLUSH IMMEDIATE ON \
@@ -2402,7 +2424,7 @@ fn parses_create_emitter_sqs() {
     let tokens = to_tokens(input);
     let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-    let EmitSink::Sqs(SqsSink::Queue(destination)) = parsed.sink.as_ref() else {
+    let EmitterEntity::Sqs(SqsEmitter::Queue(destination)) = parsed.connector.as_ref() else {
         panic!("expected Sqs Queue");
     };
     assert_eq!(
@@ -2472,7 +2494,7 @@ fn rejects_invalid_emitter_route_construction() {
 }
 
 #[test]
-fn does_not_leak_sink_suggestions_inside_filter_map_program() {
+fn does_not_leak_emitter_suggestions_inside_filter_map_program() {
     let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
                  NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec WHERE ";
     let suggestions = suggest_create_emitter(input, input.len());
@@ -2481,7 +2503,7 @@ fn does_not_leak_sink_suggestions_inside_filter_map_program() {
 }
 
 #[test]
-fn emitter_filter_map_context_suggests_invoke_without_sink_leakage() {
+fn emitter_filter_map_context_suggests_invoke_without_emitter_leakage() {
     let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
                  NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ";
     let suggestions = suggest_create_emitter(input, input.len());
@@ -2492,7 +2514,7 @@ fn emitter_filter_map_context_suggests_invoke_without_sink_leakage() {
 }
 
 #[test]
-fn pulsar_sink_context_does_not_offer_other_transport_keywords() {
+fn pulsar_emitter_context_does_not_offer_other_transport_keywords() {
     let input = "CREATE ATTACHED PULSAR TOPIC EMITTER emit FROM p99 TO pulsar1 ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert!(suggestions.contains(&"TOPIC".to_string()));
@@ -2502,8 +2524,8 @@ fn pulsar_sink_context_does_not_offer_other_transport_keywords() {
 }
 
 #[test]
-fn every_sink_family_accepts_an_optional_batch_clause_and_round_trips_it() {
-    let codec_sinks = [
+fn every_emitter_family_accepts_an_optional_batch_clause_and_round_trips_it() {
+    let codec_emitters = [
         "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s",
         "PULSAR TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK RETRY POLICY \
@@ -2524,40 +2546,41 @@ fn every_sink_family_accepts_an_optional_batch_clause_and_round_trips_it() {
          250ms MAX 30s",
         "SENTRY EVENT EMITTER emit FROM p99 TO broker MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
     ];
-    for sink in codec_sinks {
-        let omitted = complete_codec_emitter(sink);
+    for connector in codec_emitters {
+        let omitted = complete_codec_emitter(connector);
         let parsed = parse_create_emitter(&omitted).expect("an emitter without BATCH parses");
-        assert_eq!(parsed.batch, None, "`{sink}` without BATCH");
-        assert_canonical_emitter_roundtrip(&omitted, sink);
+        assert_eq!(parsed.batch, None, "`{connector}` without BATCH");
+        assert_canonical_emitter_roundtrip(&omitted, connector);
 
         let batched = format!(
-            "CREATE {sink} ENCODE USING my_codec BATCH MAX MESSAGES 500 MAX SIZE 1MiB FLUSH \
+            "CREATE {connector} ENCODE USING my_codec BATCH MAX MESSAGES 500 MAX SIZE 1MiB FLUSH \
              IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         );
         let parsed = parse_create_emitter(&batched).expect("an emitter with BATCH parses");
         assert_eq!(
             parsed.batch,
             Some(batch_policy(500, "1MiB")),
-            "`{sink}` with BATCH"
+            "`{connector}` with BATCH"
         );
-        assert_canonical_emitter_roundtrip(&batched, sink);
+        assert_canonical_emitter_roundtrip(&batched, connector);
     }
 
-    let direct_sinks = [
+    let direct_emitters = [
         "OTEL LOGS EMITTER emit FROM p99 TO otel_main  MODE ACK RETRY POLICY BACKOFF 250ms MAX \
          30s VALUES { 'time' = input.time, 'body' = input.body } ",
         "ICEBERG TABLE EMITTER emit FROM p99 TO store TABLE 'events' LOCATION \
          's3://bucket/events' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s VALUES { 'id' = input.id } ",
     ];
-    for sink in direct_sinks {
+    for connector in direct_emitters {
         for batch in ["", " BATCH MAX MESSAGES 1000 MAX SIZE 3MiB"] {
             let source = format!(
-                "CREATE {sink}{batch} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+                "CREATE {connector}{batch} FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR \
+                 LOG;"
             );
             let parsed = parse_create_emitter(&source).expect("the direct emitter parses");
             assert_eq!(parsed.batch.is_some(), !batch.is_empty(), "`{source}`");
-            assert_canonical_emitter_roundtrip(&source, sink);
+            assert_canonical_emitter_roundtrip(&source, connector);
         }
     }
 }
@@ -2619,7 +2642,7 @@ fn batch_clause_requires_both_limits() {
 #[test]
 fn parses_and_renders_alter_emitter_batch_operations() {
     let alter = parse_alter_emitter(
-        "ALTER ZEROMQ PUSH EMITTER event_sink SET BATCH MAX MESSAGES 250 MAX SIZE 512KiB, DROP \
+        "ALTER ZEROMQ PUSH EMITTER event_emitter SET BATCH MAX MESSAGES 250 MAX SIZE 512KiB, DROP \
          BATCH;",
     )
     .expect("batch operations parse");
@@ -2636,7 +2659,7 @@ fn parses_and_renders_alter_emitter_batch_operations() {
     let canonical = alter.to_canonical_nspl().expect("batch operations render");
     assert_eq!(
         canonical,
-        "ALTER ZEROMQ PUSH EMITTER event_sink SET BATCH MAX MESSAGES 250 MAX SIZE 512KiB, DROP \
+        "ALTER ZEROMQ PUSH EMITTER event_emitter SET BATCH MAX MESSAGES 250 MAX SIZE 512KiB, DROP \
          BATCH;"
     );
     assert_eq!(
@@ -2648,10 +2671,10 @@ fn parses_and_renders_alter_emitter_batch_operations() {
 #[test]
 fn rejects_malformed_alter_emitter_batch_operations() {
     for source in [
-        "ALTER ZEROMQ PUSH EMITTER event_sink SET BATCH;",
-        "ALTER ZEROMQ PUSH EMITTER event_sink SET BATCH MAX MESSAGES 0 MAX SIZE 1MiB;",
-        "ALTER ZEROMQ PUSH EMITTER event_sink SET BATCH MAX MESSAGES 10;",
-        "ALTER ZEROMQ PUSH EMITTER event_sink DROP BATCH MAX MESSAGES 10 MAX SIZE 1MiB;",
+        "ALTER ZEROMQ PUSH EMITTER event_emitter SET BATCH;",
+        "ALTER ZEROMQ PUSH EMITTER event_emitter SET BATCH MAX MESSAGES 0 MAX SIZE 1MiB;",
+        "ALTER ZEROMQ PUSH EMITTER event_emitter SET BATCH MAX MESSAGES 10;",
+        "ALTER ZEROMQ PUSH EMITTER event_emitter DROP BATCH MAX MESSAGES 10 MAX SIZE 1MiB;",
     ] {
         assert!(
             parse_alter_emitter(source).is_err(),
@@ -2696,12 +2719,12 @@ fn completes_the_flush_policy_after_the_batch_clause() {
 
 #[test]
 fn completes_alter_emitter_batch_operations() {
-    let set = "ALTER ZEROMQ PUSH EMITTER event_sink SET ";
+    let set = "ALTER ZEROMQ PUSH EMITTER event_emitter SET ";
     let set_suggestions = suggest_alter_emitter(set, set.len());
     assert!(set_suggestions.contains(&"BATCH MAX MESSAGES".to_string()));
     assert!(set_suggestions.contains(&"FLUSH EACH".to_string()));
 
-    let drop = "ALTER ZEROMQ PUSH EMITTER event_sink DROP ";
+    let drop = "ALTER ZEROMQ PUSH EMITTER event_emitter DROP ";
     let drop_suggestions = suggest_alter_emitter(drop, drop.len());
     assert!(drop_suggestions.contains(&"BATCH".to_string()));
     assert!(drop_suggestions.contains(&"ENCODE".to_string()));

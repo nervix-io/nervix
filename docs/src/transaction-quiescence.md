@@ -115,7 +115,7 @@ execution and every producer still attached.
 When a model alteration pauses an ingestor and gates a shared downstream relay, the coordinator
 first engages an ingestor-only admission hold on every node. It force-flushes the current graph
 and waits for those ingestors' route work and admitted ACK roots while the relay gates remain
-open. A partial branch batch can therefore reach its relay and acknowledging sink. The full
+open. A partial branch batch can therefore reach its relay and acknowledging emitter. The full
 subgraph hold is engaged before the intake hold is released, so admission never reopens between
 the two phases. Both phases share the alteration's physical deadline and retain separate exact
 coordination identities. Failure releases the attempted holds and keeps the committed contract;
@@ -191,7 +191,7 @@ displayed graph.
 
 The topology includes shared admission gates, branch coverage, hard-group members, moved owners,
 and the source and destination of each move. Every affected node, edge, gate, and effect retains
-the operation numbers that contributed to it. This is why a change to an emitter sink, for
+the operation numbers that contributed to it. This is why a change to an emitter emitter, for
 example, can show a changed emitter, upstream gate, force-flushed work, and replacement activation
 as different roles rather than as one ambiguous list of “affected nodes.”
 

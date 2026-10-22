@@ -28,8 +28,8 @@ use strum::AsRefStr;
 
 use crate::{
     BranchKeyFingerprint, ClusterNodeName, CommandExecutionReference, CreateWasmProcessor,
-    DomainName, IngestSource, KafkaOffsetMode, KafkaSource, Model, ModelKind, ModelName, NodeRef,
-    ResolvedBranching, SchemaFingerprint, UniquelyKindedModel, WasmSavedStateRejection,
+    DomainName, IngestorEntity, KafkaIngestor, KafkaOffsetMode, Model, ModelKind, ModelName,
+    NodeRef, ResolvedBranching, SchemaFingerprint, UniquelyKindedModel, WasmSavedStateRejection,
     WasmStateGeneration, WasmStateGenerations, WasmStateRecoveries, WasmStateRecoveryAdmission,
     WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase, WasmStateResetReason,
     WasmStateResetScope,
@@ -521,7 +521,7 @@ impl ScheduledNode {
         }
         if let Model::Ingestor(ingestor) = self.config.as_ref()
             && let crate::IngestorInput::Transport(input) = &ingestor.input
-            && let IngestSource::Kafka(KafkaSource::Topic(topic)) = &input.source
+            && let IngestorEntity::Kafka(KafkaIngestor::Topic(topic)) = &input.source
             && topic.offset_mode == KafkaOffsetMode::Domain
         {
             components.push(OwnershipStateComponent::KafkaOffsets);

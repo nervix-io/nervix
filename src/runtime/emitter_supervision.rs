@@ -424,7 +424,7 @@ impl Runtime {
             domain: domain.clone(),
             emitter: emitter.name.clone(),
         };
-        let resolved = emitter.sink.clone().resolve_clients(|client| {
+        let resolved = emitter.connector.clone().resolve_clients(|client| {
             self.resolve_client_config(domain, client.config.mount.as_ref(), &client.config.entries)
                 .change_context_lazy(|| EmitterStartError::ResolveClient {
                     client: client.name.clone(),
@@ -447,7 +447,7 @@ pub(super) struct EmitterTaskRegistration {
 }
 
 impl EmitterTaskRegistration {
-    pub(super) fn new(context: &EmitterSinkContext) -> Self {
+    pub(super) fn new(context: &EmitterConnectorContext) -> Self {
         Self {
             runtime: context.runtime.clone(),
             key: DomainNodeRef::node_in(
@@ -485,8 +485,8 @@ mod tests {
     use std::time::Duration;
 
     use nervix_models::{
-        AckMode, CreateEmitter, CreateRelay, DomainSchedule, EmitSink, ErrorPolicies,
-        ProcessorInputs, RelayBranching, RetryPolicy, ZeroMqPushSink, ZeroMqSink,
+        AckMode, CreateEmitter, CreateRelay, DomainSchedule, EmitterEntity, ErrorPolicies,
+        ProcessorInputs, RelayBranching, RetryPolicy, ZeroMqEmitter, ZeroMqPushEmitter,
     };
     use nervix_primitives::{
         sync::{atomic::AtomicBool, mpsc, oneshot, watch},
@@ -506,15 +506,17 @@ mod tests {
             body: nervix_models::EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-                mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
-                    retry_policy: RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+            connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+                ZeroMqPushEmitter {
+                    mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                        retry_policy: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
                     },
+                    client: named("sink"),
                 },
-                client: named("sink"),
-            }))),
+            ))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),

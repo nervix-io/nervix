@@ -92,7 +92,7 @@ fn quickstart() -> TestGraph {
         pill("relay:high_value_orders"),
         pill("relay:routine_orders"),
         card("emitter:redis_high_value"),
-        card("client_sink:redis_local"),
+        card("client_emitter:redis_local"),
     ];
     let edges = vec![
         flow("client:kafka_local", "ingestor:kafka_orders"),
@@ -102,8 +102,8 @@ fn quickstart() -> TestGraph {
         flow("junction:route_orders", "relay:high_value_orders"),
         flow("junction:route_orders", "relay:routine_orders"),
         flow("relay:high_value_orders", "emitter:redis_high_value"),
-        flow("emitter:redis_high_value", "client_sink:redis_local"),
-        flow("emitter:redis_orders", "client_sink:redis_local"),
+        flow("emitter:redis_high_value", "client_emitter:redis_local"),
+        flow("emitter:redis_orders", "client_emitter:redis_local"),
     ];
     TestGraph { items, edges }
 }

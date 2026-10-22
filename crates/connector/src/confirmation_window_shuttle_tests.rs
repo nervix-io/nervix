@@ -44,7 +44,9 @@ use super::{
         settings,
     },
 };
-use crate::sink::{PerRecordOutcomeParts, SinkPublishError, SinkPublishResult, SinkRecordId};
+use crate::emitter::{
+    EmitterRecordId, EmitterWriteError, EmitterWriteResult, PerRecordOutcomeParts,
+};
 
 const CHECK_TASK_JOINS: &str =
     "a check task that panics fails the execution before its join returns";
@@ -94,7 +96,7 @@ async fn give(sender: oneshot::Sender<BrokerAnswer>, answer: BrokerAnswer, given
 /// One record a check handed over, its verdict, and the flag its broker task sets once the window
 /// can read the record's answer.
 struct Handed {
-    record: SinkRecordId,
+    record: EmitterRecordId,
     verdict: ScriptedVerdict,
     given: Arc<AtomicBool>,
 }
@@ -111,7 +113,7 @@ struct CheckedPublish {
 /// A record a checked publish handed over, and whether its answer had been given when the publish
 /// began to end.
 struct EndedRecord {
-    record: SinkRecordId,
+    record: EmitterRecordId,
     verdict: ScriptedVerdict,
     given_before_the_end: bool,
 }
@@ -125,7 +127,7 @@ struct Settlements {
 
 /// How a checked publish ended, and which answers had been given when it began to end.
 struct Settled {
-    outcome: PerRecordOutcomeParts<SinkRecordId>,
+    outcome: PerRecordOutcomeParts<EmitterRecordId>,
     records: Vec<EndedRecord>,
 }
 
@@ -145,8 +147,8 @@ impl CheckedPublish {
 
     /// Hands the next record over. A broker task of its own gives the record's answer, `verdict`,
     /// concurrently with the rest of the publish.
-    async fn hand_over(&mut self, verdict: ScriptedVerdict) -> SinkPublishResult<()> {
-        let record = SinkRecordId::new(self.handed.len());
+    async fn hand_over(&mut self, verdict: ScriptedVerdict) -> EmitterWriteResult<()> {
+        let record = EmitterRecordId::new(self.handed.len());
         let (sender, receiver) = oneshot::channel();
         let given = Arc::new(AtomicBool::new(false));
         self.held.fetch_add(1, Ordering::SeqCst);
@@ -184,7 +186,7 @@ impl CheckedPublish {
     }
 
     /// Ends the publish with `failure` and waits for every broker task.
-    async fn end_with(self, failure: Report<SinkPublishError>) -> Settled {
+    async fn end_with(self, failure: Report<EmitterWriteError>) -> Settled {
         let records = self.ending_records();
         let outcome = self.window.fail(failure);
         Self::settled(outcome.into_parts(), records, self.brokers).await
@@ -198,7 +200,7 @@ impl CheckedPublish {
     }
 
     async fn settled(
-        outcome: PerRecordOutcomeParts<SinkRecordId>,
+        outcome: PerRecordOutcomeParts<EmitterRecordId>,
         records: Vec<EndedRecord>,
         brokers: Vec<JoinHandle<()>>,
     ) -> Settled {
@@ -268,8 +270,8 @@ impl Settled {
     }
 
     /// How often the outcome settled each record it settled.
-    fn settlements(&self) -> BTreeMap<SinkRecordId, Settlements> {
-        let mut settlements = BTreeMap::<SinkRecordId, Settlements>::new();
+    fn settlements(&self) -> BTreeMap<EmitterRecordId, Settlements> {
+        let mut settlements = BTreeMap::<EmitterRecordId, Settlements>::new();
         for delivered in &self.outcome.delivered {
             settlements.entry(*delivered).or_default().delivered += 1;
         }
@@ -279,7 +281,7 @@ impl Settled {
         settlements
     }
 
-    fn failure(&self) -> &Report<SinkPublishError> {
+    fn failure(&self) -> &Report<EmitterWriteError> {
         self.outcome
             .infrastructure_error
             .as_ref()
@@ -346,7 +348,7 @@ fn answers_racing_a_full_window_settle_each_record_exactly_once() {
         delivered.sort();
         assert_eq!(
             delivered,
-            [0, 2, 4].map(SinkRecordId::new),
+            [0, 2, 4].map(EmitterRecordId::new),
             "every confirmed record is delivered exactly once"
         );
         let mut rejected = Vec::new();
@@ -356,7 +358,7 @@ fn answers_racing_a_full_window_settle_each_record_exactly_once() {
         rejected.sort();
         assert_eq!(
             rejected,
-            [1, 3].map(SinkRecordId::new),
+            [1, 3].map(EmitterRecordId::new),
             "every refused record is rejected exactly once"
         );
         settled.assert_given_answers_settled();
@@ -406,7 +408,7 @@ fn driver_backpressure_settles_below_max_in_flight() {
         assert!(settled.outcome.infrastructure_error.is_none());
         let mut delivered = settled.outcome.delivered.clone();
         delivered.sort();
-        assert_eq!(delivered, [0, 2, 4].map(SinkRecordId::new));
+        assert_eq!(delivered, [0, 2, 4].map(EmitterRecordId::new));
         let mut rejected: Vec<_> = settled
             .outcome
             .rejected
@@ -414,7 +416,7 @@ fn driver_backpressure_settles_below_max_in_flight() {
             .map(|record| record.id)
             .collect();
         rejected.sort();
-        assert_eq!(rejected, [1, 3].map(SinkRecordId::new));
+        assert_eq!(rejected, [1, 3].map(EmitterRecordId::new));
         settled.assert_given_answers_settled();
     });
 }
@@ -491,7 +493,7 @@ fn a_failed_oldest_answer_settles_the_younger_answers_given_before_it() {
         };
         assert_eq!(
             failure.downcast_ref::<FailedAnswerOf>(),
-            Some(&FailedAnswerOf(SinkRecordId::new(0))),
+            Some(&FailedAnswerOf(EmitterRecordId::new(0))),
             "the oldest record's failed answer ends the publish"
         );
 

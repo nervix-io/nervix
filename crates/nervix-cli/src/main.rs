@@ -41,7 +41,7 @@ use nervix_client_core::{
     CommandDisposition, CommandExecutionReference, CommandOutcome, ConnectDns, ConnectOptions,
     Diagnostic, DomainClockAttachDisposition, DomainClockAttachOutcome,
     DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockEvent, DomainName,
-    LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan, StatementDisposition, StatementOutcome,
+    IngestorSpan, LeaderRedirect, NoticeLevel, ServerEvent, StatementDisposition, StatementOutcome,
     SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
     SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionLifecycle,
     TransactionStatus,
@@ -1755,7 +1755,7 @@ fn print_diagnostics(source_id: &str, source: &str, diagnostics: &[Diagnostic]) 
 
 /// The byte range of `source` a diagnostic underlines: its span, when the span lies within the
 /// source and both of its ends fall on character boundaries.
-fn diagnostic_range(source: &str, span: Option<SourceSpan>) -> Option<Range<usize>> {
+fn diagnostic_range(source: &str, span: Option<IngestorSpan>) -> Option<Range<usize>> {
     let span = span?;
     let start: usize = span.start().arch_into();
     let end: usize = span.end().arch_into();
@@ -1842,12 +1842,12 @@ mod tests {
     #[test]
     fn event_line_queue_bounds_records_and_bytes_without_waiting_for_the_printer() {
         let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
-        let sink = EventLineSender::new(sender);
+        let connector = EventLineSender::new(sender);
         for _ in 0..EVENT_BUFFER_RECORDS {
-            sink.push("é".repeat(EVENT_LINE_BYTES));
+            connector.push("é".repeat(EVENT_LINE_BYTES));
         }
-        sink.push("one more line".to_string());
-        assert_eq!(sink.take_dropped(), 1);
+        connector.push("one more line".to_string());
+        assert_eq!(connector.take_dropped(), 1);
         let mut retained_bytes = 0;
         for _ in 0..EVENT_BUFFER_RECORDS {
             let line = receiver
@@ -1863,16 +1863,16 @@ mod tests {
     #[test]
     fn draining_events_resets_the_visible_gap_after_a_full_queue() {
         let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(2);
-        let sink = EventLineSender::new(sender);
-        sink.push("first".to_string());
-        sink.push("second".to_string());
-        sink.push("dropped".to_string());
+        let connector = EventLineSender::new(sender);
+        connector.push("first".to_string());
+        connector.push("second".to_string());
+        connector.push("dropped".to_string());
 
-        drain_event_queue(&mut receiver, &sink);
+        drain_event_queue(&mut receiver, &connector);
 
         assert!(receiver.try_recv().is_err());
         assert_eq!(
-            sink.take_dropped(),
+            connector.take_dropped(),
             0,
             "the gap was reported during the drain"
         );
@@ -1881,15 +1881,15 @@ mod tests {
     #[test]
     fn an_event_gap_clamps_and_a_closed_printer_discards_new_lines() {
         let (sender, receiver) = nervix_primitives::sync::mpsc::channel(1);
-        let sink = EventLineSender::new(sender);
-        sink.push("retained".to_string());
-        sink.dropped.store(u64::MAX, Ordering::Relaxed);
-        sink.push("overflow".to_string());
-        assert_eq!(sink.take_dropped(), u64::MAX);
+        let connector = EventLineSender::new(sender);
+        connector.push("retained".to_string());
+        connector.dropped.store(u64::MAX, Ordering::Relaxed);
+        connector.push("overflow".to_string());
+        assert_eq!(connector.take_dropped(), u64::MAX);
 
         drop(receiver);
-        sink.push("printer stopped".to_string());
-        assert_eq!(sink.take_dropped(), 0);
+        connector.push("printer stopped".to_string());
+        assert_eq!(connector.take_dropped(), 0);
     }
 
     #[test]
@@ -2500,8 +2500,8 @@ mod tests {
         assert_eq!(rendered, "[events] server ERROR: relay 'orders' failed");
     }
 
-    fn span(start: u32, end: u32) -> Option<SourceSpan> {
-        Some(SourceSpan::new(start, end).assured("the test span starts before it ends"))
+    fn span(start: u32, end: u32) -> Option<IngestorSpan> {
+        Some(IngestorSpan::new(start, end).assured("the test span starts before it ends"))
     }
 
     #[test]

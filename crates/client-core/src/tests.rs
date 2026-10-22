@@ -36,10 +36,10 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     AttachDisposition, AttachOutcome, ClientFrame, ClientMessage, ClientRequest,
     CommandDisposition, Diagnostic, DomainInfo, DomainList, DomainsObserved, EncodedFrame,
-    LeaderEndpoints, LeaderRedirect, Leadership, LeadershipObserved, NoticeLevel, OutcomeOrigin,
-    Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected, RequestRejection, RowSchema,
-    ServerFrame, ServerNotice, SessionEndReason, SessionEnding, SessionLimitSettings,
-    SessionLimits, SourceSpan, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
+    IngestorSpan, LeaderEndpoints, LeaderRedirect, Leadership, LeadershipObserved, NoticeLevel,
+    OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected, RequestRejection,
+    RowSchema, ServerFrame, ServerNotice, SessionEndReason, SessionEnding, SessionLimitSettings,
+    SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
     SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
     SubscriptionType, UnknownOutcomeCause, UnsubscribeDisposition, UnsubscribeOutcome,
     UploadDisposition, UploadFailure, UploadReply, VerifiedFrame, WireDecodeError,
@@ -60,7 +60,7 @@ use crate::{
     ServerEvent, SubscriptionEvent, SubscriptionRequest, TlsRequirement,
     connection::{GrpcConnector, ServerDirectory},
     exchange::{
-        EventQueue, EventQueueError, EventSinks, Exchange, ExchangeReader, ExchangeRequests,
+        EventQueue, EventQueueError, EventTargets, Exchange, ExchangeReader, ExchangeRequests,
         PendingReplies, ReaderFlow, RegisteredRequest, SERVER_NOTICE_BYTES, SESSION_LIMITS,
         SUBSCRIPTION_EVENT_BYTES, SUBSCRIPTION_RETAINED_BYTES, SUBSCRIPTIONS_RETAINED_IN_FULL,
         SessionEvents,
@@ -275,12 +275,12 @@ fn detached_exchange(
     frames: mpsc::Sender<EncodedFrame<ClientFrame>>,
     pending: Arc<Mutex<PendingReplies>>,
 ) -> Exchange {
-    let sinks = SessionEvents::new().sinks;
-    let generation = sinks.begin_generation();
+    let emitters = SessionEvents::new().emitters;
+    let generation = emitters.begin_generation();
     Exchange {
         requests: Arc::new(ExchangeRequests { frames, pending }),
         reader: nervix_primitives::task::spawn(std::future::ready(())),
-        sinks,
+        emitters,
         generation,
         channel: Channel::from_static("http://127.0.0.1:9").connect_lazy(),
     }
@@ -298,11 +298,11 @@ fn client_reaching(
 ) -> Client {
     let connector = GrpcConnector::new(ConnectOptions::default())
         .assured("options without credentials build no authorization metadata");
-    let sinks = exchange.sinks.clone();
+    let emitters = exchange.emitters.clone();
     let events = SessionEvents {
-        leadership: sinks.leadership.subscribe(),
-        domains: nervix_primitives::sync::Mutex::new(sinks.domains.subscribe()),
-        sinks,
+        leadership: emitters.leadership.subscribe(),
+        domains: nervix_primitives::sync::Mutex::new(emitters.domains.subscribe()),
+        emitters,
     };
     Client::assemble(exchange, events, connector, session_domain, servers)
 }
@@ -382,9 +382,9 @@ impl Loopback {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
         let mut replacement = detached_exchange(frames, pending.clone());
-        let sinks = self.client.inner.events.sinks.clone();
-        replacement.generation = sinks.begin_generation();
-        replacement.sinks = sinks;
+        let emitters = self.client.inner.events.emitters.clone();
+        replacement.generation = emitters.begin_generation();
+        replacement.emitters = emitters;
         self.requests = requests;
         self.pending = pending;
         self.client.install(replacement).await;
@@ -407,7 +407,7 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
     let (leadership, observed_leadership) = watch::channel(None);
     let (domains, observed_domains) = watch::channel(None);
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
-    let sinks = EventSinks {
+    let emitters = EventTargets {
         subscriptions: subscriptions.clone(),
         desired: crate::subscriptions::DesiredSubscriptions::new(),
         notices: notices.clone(),
@@ -417,8 +417,8 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
         producers: crate::producer::ProducerRegistry::default(),
         consumers: crate::consumer::DesiredConsumers::default(),
     };
-    let generation = sinks.begin_generation();
-    let reader = ExchangeReader::new(pending.clone(), sinks, generation);
+    let generation = emitters.begin_generation();
+    let reader = ExchangeReader::new(pending.clone(), emitters, generation);
     ReaderFixture {
         reader,
         pending,
@@ -1037,7 +1037,7 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
     let subscriptions = EventQueue::new(10, 128);
     let (leadership, _) = watch::channel(None);
     let (domains, _) = watch::channel(None);
-    let sinks = EventSinks {
+    let emitters = EventTargets {
         subscriptions,
         desired: crate::subscriptions::DesiredSubscriptions::new(),
         notices: notices.clone(),
@@ -1047,7 +1047,7 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
         producers: crate::producer::ProducerRegistry::default(),
         consumers: crate::consumer::DesiredConsumers::default(),
     };
-    let generation = sinks.begin_generation();
+    let generation = emitters.begin_generation();
     notices.push(
         &generation,
         ServerEvent {
@@ -1449,9 +1449,9 @@ async fn observations_keep_only_their_latest_value() {
 async fn the_client_reads_the_latest_observations_of_its_exchange() {
     let client = test_client("tenant");
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
-    let sinks = client.inner.events.sinks.clone();
-    let generation = sinks.begin_generation();
-    let mut reader = ExchangeReader::new(pending, sinks, generation);
+    let emitters = client.inner.events.emitters.clone();
+    let generation = emitters.begin_generation();
+    let mut reader = ExchangeReader::new(pending, emitters, generation);
     assert_eq!(client.leadership(), None);
 
     let observed = LeadershipObserved {
@@ -1573,7 +1573,7 @@ fn wire_outcomes_convert_into_public_outcomes() {
     );
     refused.diagnostics = vec![Diagnostic {
         message: "bad token".to_string(),
-        span: Some(SourceSpan::new(3, 7).assured("the span starts before it ends")),
+        span: Some(IngestorSpan::new(3, 7).assured("the span starts before it ends")),
     }];
     refused.transaction = Some(open_transaction("tx-1", 2));
     let description = ResourceDescription {
@@ -1931,7 +1931,7 @@ async fn a_create_subscription_statement_is_sent_as_a_subscribe_request() {
         .client
         .inner
         .events
-        .sinks
+        .emitters
         .close_generation(&generation);
     let interrupted = loopback
         .client
@@ -1966,7 +1966,7 @@ async fn subscription_diagnostics_address_the_query_the_caller_passed() {
                 diagnostics: vec![
                     Diagnostic {
                         message: "unknown relay".to_string(),
-                        span: Some(SourceSpan::new(28, 33).assured("the span is ordered")),
+                        span: Some(IngestorSpan::new(28, 33).assured("the span is ordered")),
                     },
                     Diagnostic {
                         message: "no location".to_string(),
@@ -2163,7 +2163,7 @@ async fn an_acknowledged_subscription_retries_restoration_on_the_replacement_exc
             opened_reply(subscription("live", 2)),
         )
         .await;
-    let mut changed = loopback.client.inner.events.sinks.desired.watch();
+    let mut changed = loopback.client.inner.events.emitters.desired.watch();
     nervix_primitives::time::timeout(DEADLINE, async {
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -2202,7 +2202,12 @@ async fn subscription_events_follow_the_next_session_when_nothing_awaits_restora
         .generation
         .clone();
     loopback.pending.lock().close();
-    loopback.client.inner.events.sinks.close_generation(&ended);
+    loopback
+        .client
+        .inner
+        .events
+        .emitters
+        .close_generation(&ended);
     nervix_primitives::task::yield_now().await;
 
     loopback.replace_exchange().await;
@@ -2228,7 +2233,7 @@ async fn subscription_events_follow_the_next_session_when_nothing_awaits_restora
         .await
         .generation
         .clone();
-    loopback.client.inner.events.sinks.subscriptions.push(
+    loopback.client.inner.events.emitters.subscriptions.push(
         &current,
         SubscriptionEvent::DeliveryLost(nervix_client_wire::SubscriptionDeliveryLost {
             subscription: subscription("live", 1),
@@ -2272,7 +2277,7 @@ async fn a_session_lost_before_create_acknowledgement_does_not_restore_the_reque
         .client
         .inner
         .events
-        .sinks
+        .emitters
         .close_generation(&generation);
     assert!(creating.await.assured("the create task completes").is_err());
     let name = SubscriptionName::parse("live").assured("the test name is valid");
@@ -2318,7 +2323,7 @@ async fn a_session_lost_during_unsubscribe_releases_the_name_on_the_next_exchang
         .client
         .inner
         .events
-        .sinks
+        .emitters
         .close_generation(&generation);
     let deleted = deleting
         .await
@@ -2749,8 +2754,8 @@ async fn list_domains_is_served_from_a_domain_list_request() {
 #[nervix_primitives::test]
 async fn event_streams_end_with_a_session_that_no_known_server_can_reopen() {
     let client = test_client("tenant_a");
-    client.inner.events.sinks.subscriptions.close_current();
-    client.inner.events.sinks.notices.close_current();
+    client.inner.events.emitters.subscriptions.close_current();
+    client.inner.events.emitters.notices.close_current();
     let subscription_error = client
         .next_subscription()
         .await
@@ -2796,7 +2801,12 @@ async fn an_acknowledged_subscription_that_no_known_server_can_restore_ends_afte
         .generation
         .clone();
     loopback.pending.lock().close();
-    loopback.client.inner.events.sinks.close_generation(&ended);
+    loopback
+        .client
+        .inner
+        .events
+        .emitters
+        .close_generation(&ended);
 
     let SubscriptionEvent::Interrupted(interrupted) = loopback
         .client
@@ -2826,7 +2836,7 @@ async fn the_client_reports_a_notice_gap_once_and_returns_the_notices_after_it()
         level: NoticeLevel::Warning,
         message: message.to_string(),
     };
-    let notices = &client.inner.events.sinks.notices;
+    let notices = &client.inner.events.emitters.notices;
     notices.push(&generation, notice("dropped"), 1);
     notices.push(&generation, notice("too large"), SERVER_NOTICE_BYTES + 1);
     notices.push(&generation, notice("after the gap"), 1);

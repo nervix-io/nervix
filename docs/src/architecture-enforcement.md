@@ -82,7 +82,7 @@ counts retain their product-debt scope: directory components named `tests`, `ben
 file size and function complexity but are excluded from cast/field debt. Test-only items are excluded from those two
 syntax counts. Other inactive configuration branches remain visible. These exclusions belong
 to these counts; they do not exempt a file from the primitive, manifest, clock or language
-provenance validators, which own their broader authored-source contracts.
+provenance validators, which own their broader authored-ingestor contracts.
 
 The stable source parser reads original Rust text and walks cast expressions and attributes
 attached to actual struct fields, retaining token locations even beside Unicode comments.
@@ -305,7 +305,7 @@ compiled it.
 | `key_allocation` | A borrowed lookup handed an owned copy of its key, or an `entry` handed a copy that a hit discards. | Borrowed keys, owned insertion keys, `Copy` values, shared-handle clones and formatted keys. |
 | `borrowed_copy` | An owned copy whose only use is a borrow, such as `&value.clone()` or `text.to_string().len()`. | Copies that are moved, `Copy` values, shared-handle clones and text formatted from another value. |
 | `duplicated_branch` | A call or assignment that every branch of one exhaustive `if` chain or `match` repeats, with the same resolved callees, generic arguments and type. | An `if` without `else`, exits, constructed values, and arms that dispatch one spelling over differently typed bindings. |
-| `forwarding_wrapper` | A synchronous function whose whole body passes its parameters unchanged and in order to one local function, with its caller count and whether it carries a source contract, implements a trait method or calls into another file. | Transformed, reordered or partial arguments, library callees and constructors. |
+| `forwarding_wrapper` | A synchronous function whose whole body passes its parameters unchanged and in order to one local function, with its caller count and whether it carries a ingestor contract, implements a trait method or calls into another file. | Transformed, reordered or partial arguments, library callees and constructors. |
 | `discarded_error` | `Result::ok`, `unwrap_or`, `unwrap_or_default`, `is_ok`, `is_err`, an `unwrap_or_else`, `map_err` or `or_else` closure that ignores its failure, an `Err(_)` arm, `if let Ok` without `else` and `let Ok(..) = .. else`, when the failure carries information. | Unit, uninhabited and zero-sized failures, and failures handed on. |
 | `disguised_clamp` | Checked primitive-integer or `Duration` arithmetic, or a checked integer conversion, whose absence falls back through `unwrap_or`, `unwrap_or_default` or `unwrap_or_else`. | Overflow decided by its own statement. |
 | `relocated_acquisition` | A synchronization acquisition outside the files the textual lock counter read, written by a commit that lowered that count. | Acquisitions in the counter's files, and ones no lowering commit wrote. |

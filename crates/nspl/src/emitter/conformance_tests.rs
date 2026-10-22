@@ -18,9 +18,9 @@
 use std::collections::BTreeMap;
 
 use nervix_models::{
-    CreateEmitter, EmitSinkKind, EmitterBatchContractError, EmitterBatchLegality, EmitterBody,
-    EmitterBodyForm, EmitterPublishingModeKind, EnvelopeClauseKind, Model, OptionDeclaration,
-    OptionForm, OptionValue, SinkReference, SinkReferenceKind,
+    CreateEmitter, EmitterBatchContractError, EmitterBatchLegality, EmitterBody, EmitterBodyForm,
+    EmitterEntityKind, EmitterPublishingModeKind, EmitterReference, EmitterReferenceKind,
+    EnvelopeClauseKind, Model, OptionDeclaration, OptionForm, OptionValue,
 };
 use strum::IntoEnumIterator as _;
 
@@ -46,11 +46,11 @@ fn first_example(option: &OptionDeclaration) -> &'static str {
 }
 
 /// The declared reference, locator and required entity options, before MODE.
-fn reference(kind: EmitSinkKind) -> String {
+fn reference(kind: EmitterEntityKind) -> String {
     let declared = kind.capabilities();
     let mut words = vec![match declared.reference {
-        SinkReferenceKind::Schema => "SCHEMA outgoing".to_owned(),
-        SinkReferenceKind::Client(_) | SinkReferenceKind::StorageClient(_) => {
+        EmitterReferenceKind::Schema => "SCHEMA outgoing".to_owned(),
+        EmitterReferenceKind::Client(_) | EmitterReferenceKind::StorageClient(_) => {
             "destination_client".to_owned()
         }
     }];
@@ -100,7 +100,7 @@ fn batching(legality: EmitterBatchLegality) -> Vec<bool> {
 
 /// One emitter statement of an entity, rendered from what its entity declares.
 struct Generated {
-    kind: EmitSinkKind,
+    kind: EmitterEntityKind,
     /// An option written after the destination's required options.
     option: Option<&'static str>,
     mode: &'static str,
@@ -112,7 +112,7 @@ struct Generated {
 
 impl Generated {
     /// An emitter of `kind` in its first declared publishing mode and its first body.
-    fn of(kind: EmitSinkKind) -> Self {
+    fn of(kind: EmitterEntityKind) -> Self {
         let declared = kind.capabilities();
         let Some(mode) = declared.publishing_modes.first() else {
             panic!("{kind} declares no publishing mode");
@@ -178,7 +178,7 @@ impl Generated {
         let Some(Model::Emitter(emitter)) = created_model(&text) else {
             panic!("the grammar refuses what {} declares: {text}", self.kind);
         };
-        assert_eq!(emitter.sink.kind(), self.kind, "{text}");
+        assert_eq!(emitter.connector.kind(), self.kind, "{text}");
         emitter
     }
 
@@ -206,7 +206,7 @@ fn wrote(body: &EmitterBody, written: &str) -> bool {
 /// Every option any emitter entity declares, written in each of its forms, by its keywords.
 fn every_option_example() -> BTreeMap<&'static str, Vec<&'static str>> {
     let mut examples: BTreeMap<&'static str, Vec<&'static str>> = BTreeMap::new();
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         for option in kind.capabilities().options {
             let written = examples.entry(option.keywords).or_default();
             for example in option.examples() {
@@ -221,7 +221,7 @@ fn every_option_example() -> BTreeMap<&'static str, Vec<&'static str>> {
 
 #[test]
 fn every_destination_writes_the_declared_locator_and_required_options() {
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         let declared = kind.capabilities();
         let destination = reference(kind);
         if let Some(locator) = declared.locator {
@@ -245,7 +245,7 @@ fn every_destination_writes_the_declared_locator_and_required_options() {
 
 #[test]
 fn every_declared_mode_body_and_batching_parses_into_its_kind() {
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         let declared = kind.capabilities();
         for mode in declared.publishing_modes {
             for body in bodies(declared.body) {
@@ -258,7 +258,7 @@ fn every_declared_mode_body_and_batching_parses_into_its_kind() {
                     };
                     let emitter = generated.parse();
                     let text = generated.text();
-                    assert_eq!(emitter.sink.publishing().kind(), *mode, "{text}");
+                    assert_eq!(emitter.connector.publishing().kind(), *mode, "{text}");
                     assert!(wrote(&emitter.body, body), "{text}");
                     assert_eq!(emitter.batch.is_some(), batched, "{text}");
                     assert!(emitter.validate_batch().is_ok(), "{text}");
@@ -270,10 +270,10 @@ fn every_declared_mode_body_and_batching_parses_into_its_kind() {
 
 #[test]
 fn a_declared_storage_reference_is_preserved_for_planning() {
-    for kind in EmitSinkKind::all() {
-        if let SinkReferenceKind::StorageClient(_) = kind.capabilities().reference {
+    for kind in EmitterEntityKind::all() {
+        if let EmitterReferenceKind::StorageClient(_) = kind.capabilities().reference {
             let emitter = Generated::of(kind).parse();
-            let SinkReference::StorageClient(client) = emitter.sink.reference() else {
+            let EmitterReference::StorageClient(client) = emitter.connector.reference() else {
                 panic!("{kind} must retain a storage client reference");
             };
             assert_eq!(client.as_str(), "destination_client");
@@ -283,7 +283,7 @@ fn a_declared_storage_reference_is_preserved_for_planning() {
 
 #[test]
 fn every_declared_option_parses_in_each_of_its_forms() {
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         for option in kind.capabilities().options {
             if option.is_required() {
                 continue;
@@ -301,7 +301,7 @@ fn every_declared_option_parses_in_each_of_its_forms() {
 
 #[test]
 fn a_batch_larger_than_the_declared_maximum_is_refused_by_the_batching_contract() {
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         let declared = kind.capabilities();
         let (EmitterBatchLegality::Required {
             maximum: Some(maximum),
@@ -340,7 +340,7 @@ fn a_batch_larger_than_the_declared_maximum_is_refused_by_the_batching_contract(
 
 #[test]
 fn a_publishing_mode_the_entity_does_not_declare_is_refused() {
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         let declared = kind.capabilities();
         let mut declared_spellings = Vec::new();
         for mode in declared.publishing_modes {
@@ -363,7 +363,7 @@ fn a_publishing_mode_the_entity_does_not_declare_is_refused() {
 
 #[test]
 fn a_body_the_entity_does_not_declare_is_refused() {
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         for body in refused_bodies(kind.capabilities().body) {
             let generated = Generated {
                 body,
@@ -376,7 +376,7 @@ fn a_body_the_entity_does_not_declare_is_refused() {
 
 #[test]
 fn a_batching_clause_the_entity_does_not_admit_is_refused() {
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         match kind.capabilities().batch {
             EmitterBatchLegality::Required { .. } => Generated {
                 batch: None,
@@ -396,7 +396,7 @@ fn a_batching_clause_the_entity_does_not_admit_is_refused() {
 #[test]
 fn an_option_only_another_entity_declares_is_refused() {
     let examples = every_option_example();
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         let declared = kind.capabilities();
         for (keywords, written) in &examples {
             if declared.option(keywords).is_some() {
@@ -415,7 +415,7 @@ fn an_option_only_another_entity_declares_is_refused() {
 
 #[test]
 fn an_envelope_clause_or_property_the_entity_does_not_declare_is_refused() {
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         let declared = kind.capabilities();
         for clause in EnvelopeClauseKind::iter() {
             if declared.envelope.contains(&clause) {
@@ -439,7 +439,7 @@ fn an_envelope_clause_or_property_the_entity_does_not_declare_is_refused() {
 
 #[test]
 fn completion_offers_exactly_the_declared_publishing_modes() {
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         let declared = kind.capabilities();
         let mut spellings = Vec::new();
         for mode in declared.publishing_modes {
@@ -451,7 +451,7 @@ fn completion_offers_exactly_the_declared_publishing_modes() {
 
 #[test]
 fn completion_after_the_destination_offers_exactly_the_optional_options_and_the_mode() {
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         let declared = kind.capabilities();
         // An expression can go on after its last word, so completion after a destination that
         // ends in one offers the expression's continuations too.

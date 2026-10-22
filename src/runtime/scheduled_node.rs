@@ -201,8 +201,8 @@ impl ScheduledNodeTask {
 mod tests {
     use nervix_models::{
         CreateClientKafka, CreateIngestor, FlushPolicy, GeneralErrorPolicy, IngestQuiesceMode,
-        IngestSource, KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaSource,
-        KafkaTopicSource, Model, OutputBranch, ParseAsType, ProcessorOutputs,
+        IngestorEntity, KafkaConsumerGroupName, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode,
+        KafkaTopicIngestor, Model, OutputBranch, ParseAsType, ProcessorOutputs,
     };
     use nonzero_ext::nonzero;
 
@@ -215,7 +215,7 @@ mod tests {
                 .with_flush_policy(FlushPolicy::Immediate)
                 .with_branch(OutputBranch::Unbranched),
             input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-                source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+                source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                     client: named("kafka"),
                     topic: named("events"),
                     offset_mode,

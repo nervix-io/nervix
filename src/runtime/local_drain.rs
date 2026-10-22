@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** The admitted-work view shared by shutdown and backup, the intake boundary a
 //!   terminating node closes, the force-flush generations that release its buffered work while
-//!   downstream relays and sinks stay alive, and the proof of a completed local drain.
+//!   downstream relays and emitters stay alive, and the proof of a completed local drain.
 //! - **Depends on.** Ingestor quiesce controls, generator activity, relay boundary fan-outs, node
 //!   quiesce counters, emitter publishing state, in-flight acknowledgement roots and the domain
 //!   force-flush coordinator.

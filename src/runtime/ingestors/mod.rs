@@ -23,6 +23,7 @@
 
 use super::{ingestor_start::RetiringIngestorInput, *};
 
+mod connector;
 pub(in crate::runtime) mod endpoint;
 pub(in crate::runtime) mod http;
 pub(in crate::runtime) mod kafka;
@@ -32,7 +33,6 @@ pub(in crate::runtime) mod prometheus;
 pub(in crate::runtime) mod pulsar;
 pub(in crate::runtime) mod rabbitmq;
 pub(in crate::runtime) mod redis_pubsub;
-mod source;
 pub(in crate::runtime) mod sqs;
 pub(in crate::runtime) mod syslog;
 pub(in crate::runtime) mod websockets;
@@ -42,7 +42,7 @@ pub(in crate::runtime) mod zeromq;
 ///
 /// Every failure names the ingestor, or the domain and codec it binds. A failure to initialize the
 /// ingestor's source is [`IngestorStartError::Initialize`], with the cause beneath it: a
-/// [`SourceStartError`], or the report of the client configuration, connector plan, source
+/// [`IngestorConnectorStartError`], or the report of the client configuration, connector plan, source
 /// instance or domain cadence that failed.
 #[derive(Debug, Error)]
 pub(crate) enum IngestorStartError {
@@ -77,7 +77,7 @@ pub(crate) enum IngestorStartError {
 /// or opened on this node. Startup wraps it in [`IngestorStartError::Initialize`]; retirement
 /// wraps it in [`RuntimeError::RetireIngestorSource`].
 #[derive(Debug, Error)]
-pub(crate) enum SourceStartError {
+pub(crate) enum IngestorConnectorStartError {
     #[error("failed to resolve the source's client configuration")]
     ClientConfiguration,
     #[error("the node DNS resolver is not installed")]
@@ -125,13 +125,13 @@ impl Runtime {
             return Ok(());
         };
         match &input.source {
-            SourceStartPlan::Mqtt(source) => {
+            IngestorConnectorPlan::Mqtt(source) => {
                 let replacement = match retirement.replacement.as_deref() {
                     Some(IngestorStartPlan {
                         input: IngestorInputPlan::Transport(input),
                         ..
                     }) => {
-                        if let SourceStartPlan::Mqtt(source) = &input.source {
+                        if let IngestorConnectorPlan::Mqtt(source) = &input.source {
                             Some(source)
                         } else {
                             None
@@ -143,13 +143,13 @@ impl Runtime {
                     .retire_before(self, &retirement.previous.ingestor, replacement)
                     .await
             }
-            SourceStartPlan::Pulsar(source) => {
+            IngestorConnectorPlan::Pulsar(source) => {
                 let replacement = match retirement.replacement.as_deref() {
                     Some(IngestorStartPlan {
                         input: IngestorInputPlan::Transport(input),
                         ..
                     }) => {
-                        if let SourceStartPlan::Pulsar(source) = &input.source {
+                        if let IngestorConnectorPlan::Pulsar(source) = &input.source {
                             Some(source)
                         } else {
                             None
@@ -165,17 +165,17 @@ impl Runtime {
                 }
                 Ok(())
             }
-            SourceStartPlan::Http(_)
-            | SourceStartPlan::Kafka(_)
-            | SourceStartPlan::Nats(_)
-            | SourceStartPlan::RabbitMq(_)
-            | SourceStartPlan::RedisPubSub(_)
-            | SourceStartPlan::Prometheus(_)
-            | SourceStartPlan::ZeroMq(_)
-            | SourceStartPlan::Sqs(_)
-            | SourceStartPlan::Endpoint(_)
-            | SourceStartPlan::Websockets(_)
-            | SourceStartPlan::Syslog(_) => Ok(()),
+            IngestorConnectorPlan::Http(_)
+            | IngestorConnectorPlan::Kafka(_)
+            | IngestorConnectorPlan::Nats(_)
+            | IngestorConnectorPlan::RabbitMq(_)
+            | IngestorConnectorPlan::RedisPubSub(_)
+            | IngestorConnectorPlan::Prometheus(_)
+            | IngestorConnectorPlan::ZeroMq(_)
+            | IngestorConnectorPlan::Sqs(_)
+            | IngestorConnectorPlan::Endpoint(_)
+            | IngestorConnectorPlan::Websockets(_)
+            | IngestorConnectorPlan::Syslog(_) => Ok(()),
         }
     }
 
@@ -209,19 +209,19 @@ impl Runtime {
             }
         };
         let source = match source {
-            SourceStartPlan::Http(plan) => plan.compose(self, ingestor).await?,
-            SourceStartPlan::Kafka(plan) => plan.compose(self, ingestor).await?,
-            SourceStartPlan::Pulsar(plan) => plan.compose(self, ingestor).await?,
-            SourceStartPlan::Mqtt(plan) => plan.compose(self, ingestor).await?,
-            SourceStartPlan::Nats(plan) => plan.compose(self, ingestor).await?,
-            SourceStartPlan::RabbitMq(plan) => plan.compose(self, ingestor).await?,
-            SourceStartPlan::RedisPubSub(plan) => plan.compose(self, ingestor).await?,
-            SourceStartPlan::Prometheus(plan) => plan.compose(self, ingestor).await?,
-            SourceStartPlan::ZeroMq(plan) => plan.compose(self, ingestor).await?,
-            SourceStartPlan::Sqs(plan) => plan.compose(self, ingestor).await?,
-            SourceStartPlan::Endpoint(plan) => plan.compose(self, ingestor).await?,
-            SourceStartPlan::Websockets(plan) => plan.compose(self, ingestor).await?,
-            SourceStartPlan::Syslog(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::Http(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::Kafka(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::Pulsar(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::Mqtt(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::Nats(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::RabbitMq(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::RedisPubSub(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::Prometheus(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::ZeroMq(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::Sqs(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::Endpoint(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::Websockets(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::Syslog(plan) => plan.compose(self, ingestor).await?,
         };
         self.host_source(ingestor, quiesce, dependencies, codec, source);
         Ok(())
@@ -236,10 +236,11 @@ impl Runtime {
 mod tests {
     use nervix_models::{
         ClientPoolBounds, CreateClientMqtt, CreateClientRedis, CreateClientSqs, CreateClientZeroMq,
-        HttpRequestSource, HttpSource, MqttIngestMode, MqttQos, MqttSession, MqttSource,
-        MqttTopicSource, PrometheusQuerySource, PrometheusSource, RabbitMqIngestMode,
-        RabbitMqQueueSource, RabbitMqSource, RedisPubSubIngestMode, RedisPubSubSource, RedisSource,
-        SqsIngestMode, SqsQueueSource, SqsSource, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqSource,
+        HttpIngestor, HttpRequestIngestor, MqttIngestMode, MqttIngestor, MqttQos, MqttSession,
+        MqttTopicIngestor, PrometheusIngestor, PrometheusQueryIngestor, RabbitMqIngestMode,
+        RabbitMqIngestor, RabbitMqQueueIngestor, RedisIngestor, RedisPubSubIngestMode,
+        RedisPubSubIngestor, SqsIngestMode, SqsIngestor, SqsQueueIngestor, ZeroMqIngestMode,
+        ZeroMqIngestor, ZeroMqPullIngestor,
     };
 
     use super::*;
@@ -257,7 +258,7 @@ mod tests {
     /// `client_model` with a JSON codec into the relay `events`.
     fn planned_source_ingestor(
         domain: &DomainName,
-        source: IngestSource,
+        source: IngestorEntity,
         client_model: Model,
     ) -> EntrypointPlans {
         let ingestor = CreateIngestor {
@@ -324,7 +325,7 @@ mod tests {
         let client_name: ClientName = named("upstream");
         let plans = planned_source_ingestor(
             &domain,
-            IngestSource::Http(HttpSource::Request(HttpRequestSource {
+            IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
                 client: client_name.clone(),
                 every: "1s"
                     .parse()
@@ -390,7 +391,7 @@ mod tests {
                 "failed to bind an ingestor or reingestor of domain 'sales'",
             ),
             (
-                Report::new(SourceStartError::SignalingProtocolMissing {
+                Report::new(IngestorConnectorStartError::SignalingProtocolMissing {
                     protocol: named("handshake"),
                 })
                 .change_context(initialize()),
@@ -398,7 +399,7 @@ mod tests {
                  protocol 'handshake'",
             ),
             (
-                Report::new(SourceStartError::EndpointNotInstantiated {
+                Report::new(IngestorConnectorStartError::EndpointNotInstantiated {
                     endpoint: named("events_endpoint"),
                 })
                 .change_context(initialize()),
@@ -406,7 +407,7 @@ mod tests {
                  'events_endpoint' is not instantiated",
             ),
             (
-                Report::new(SourceStartError::KafkaDomainOffsetsNotAuthoritative)
+                Report::new(IngestorConnectorStartError::KafkaDomainOffsetsNotAuthoritative)
                     .change_context(initialize()),
                 "failed to initialize ingestor 'source' in domain 'sales': Kafka DOMAIN offsets \
                  are not authoritative on this node",
@@ -427,7 +428,7 @@ mod tests {
             .assured("the fixture cadence is a positive duration");
         for (source, client_model) in [
             (
-                IngestSource::Http(HttpSource::Request(HttpRequestSource {
+                IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
                     client: client_name.clone(),
                     every: cadence,
                     mode: nervix_models::HttpRequestIngestMode::NoAck,
@@ -440,7 +441,7 @@ mod tests {
                 }),
             ),
             (
-                IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
+                IngestorEntity::Prometheus(PrometheusIngestor::Query(PrometheusQueryIngestor {
                     client: client_name.clone(),
                     query: "up".to_string(),
                     max_body_size: None,
@@ -455,7 +456,7 @@ mod tests {
                 }),
             ),
             (
-                IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
+                IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(RabbitMqQueueIngestor {
                     client: client_name.clone(),
                     queue: named("events"),
                     instances: NonZeroU64::MIN,
@@ -475,7 +476,7 @@ mod tests {
                 }),
             ),
             (
-                IngestSource::Sqs(SqsSource::Queue(SqsQueueSource {
+                IngestorEntity::Sqs(SqsIngestor::Queue(SqsQueueIngestor {
                     client: client_name.clone(),
                     queue: named("events"),
                     instances: NonZeroU64::MIN,
@@ -495,7 +496,7 @@ mod tests {
                 }),
             ),
             (
-                IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
+                IngestorEntity::Redis(RedisIngestor::PubSub(RedisPubSubIngestor {
                     client: client_name.clone(),
                     channel: named("events"),
                     mode: RedisPubSubIngestMode::NoAck,
@@ -510,7 +511,7 @@ mod tests {
                 }),
             ),
             (
-                IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
+                IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
                     client: client_name.clone(),
                     topic: nervix_models::MqttTopicFilter::parse("events")
                         .expect("valid topic filter"),
@@ -536,16 +537,24 @@ mod tests {
                 panic!("the fixture ingestor reads a transport");
             };
             let result = match transport.source.clone() {
-                SourceStartPlan::Http(source) => source.compose(&runtime, &plan.ingestor).await,
-                SourceStartPlan::Prometheus(source) => {
+                IngestorConnectorPlan::Http(source) => {
                     source.compose(&runtime, &plan.ingestor).await
                 }
-                SourceStartPlan::RabbitMq(source) => source.compose(&runtime, &plan.ingestor).await,
-                SourceStartPlan::RedisPubSub(source) => {
+                IngestorConnectorPlan::Prometheus(source) => {
                     source.compose(&runtime, &plan.ingestor).await
                 }
-                SourceStartPlan::Mqtt(source) => source.compose(&runtime, &plan.ingestor).await,
-                SourceStartPlan::Sqs(source) => source.compose(&runtime, &plan.ingestor).await,
+                IngestorConnectorPlan::RabbitMq(source) => {
+                    source.compose(&runtime, &plan.ingestor).await
+                }
+                IngestorConnectorPlan::RedisPubSub(source) => {
+                    source.compose(&runtime, &plan.ingestor).await
+                }
+                IngestorConnectorPlan::Mqtt(source) => {
+                    source.compose(&runtime, &plan.ingestor).await
+                }
+                IngestorConnectorPlan::Sqs(source) => {
+                    source.compose(&runtime, &plan.ingestor).await
+                }
                 _ => panic!("the fixture only includes sources that resolve names"),
             };
             let Err(report) = result else {
@@ -559,8 +568,8 @@ mod tests {
             assert_eq!(ingestor.as_str(), "source");
             assert!(
                 matches!(
-                    report.downcast_ref::<SourceStartError>(),
-                    Some(SourceStartError::NodeDnsUnavailable)
+                    report.downcast_ref::<IngestorConnectorStartError>(),
+                    Some(IngestorConnectorStartError::NodeDnsUnavailable)
                 ),
                 "the missing resolver must be the typed cause: {report:?}"
             );
@@ -588,9 +597,9 @@ mod tests {
     async fn compose_zeromq_source(
         runtime: &Runtime,
         client: CreateClientZeroMq,
-    ) -> error_stack::Result<source::SourceStart, IngestorStartError> {
+    ) -> error_stack::Result<connector::IngestorStart, IngestorStartError> {
         let domain: DomainName = named("sales");
-        let pull = IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
+        let pull = IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(ZeroMqPullIngestor {
             client: client.name.clone(),
             mode: ZeroMqIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,
@@ -602,7 +611,7 @@ mod tests {
         let IngestorInputPlan::Transport(transport) = &plan.input else {
             panic!("the fixture ingestor reads a transport");
         };
-        let SourceStartPlan::ZeroMq(zeromq) = transport.source.clone() else {
+        let IngestorConnectorPlan::ZeroMq(zeromq) = transport.source.clone() else {
             panic!("the fixture ingestor reads a ZeroMQ client");
         };
         zeromq.compose(runtime, &plan.ingestor).await

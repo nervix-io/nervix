@@ -16,8 +16,9 @@ use std::ops::Range;
 
 use nervix_client_wire::{
     AttachDisposition, AttachOutcome, CommandDisposition as WireCommandDisposition, CommandOutcome,
-    Diagnostic, ExecutionReferenceConflict, LeaderEndpoints, LeaderRedirect as WireLeaderRedirect,
-    OutcomeOrigin, SourceSpan, StatementDisposition, StatementOutcome, UnknownOutcomeCause,
+    Diagnostic, ExecutionReferenceConflict, IngestorSpan, LeaderEndpoints,
+    LeaderRedirect as WireLeaderRedirect, OutcomeOrigin, StatementDisposition, StatementOutcome,
+    UnknownOutcomeCause,
 };
 use nervix_consensus::CommandExecutionRequestConflict;
 use nervix_models::CommandExecutionReference;
@@ -176,10 +177,10 @@ fn wire_diagnostic(diagnostic: CommandDiagnostic) -> Diagnostic {
 /// The span as the wire carries it. Every source a session executes arrived in a frame the
 /// session limits hold below four gibibytes, so a span beyond that, or one that runs backwards,
 /// names no location in the request and is sent without one.
-fn wire_span(span: Range<usize>) -> Option<SourceSpan> {
+fn wire_span(span: Range<usize>) -> Option<IngestorSpan> {
     let start = u32::try_from(span.start).ok()?;
     let end = u32::try_from(span.end).ok()?;
-    SourceSpan::new(start, end).ok()
+    IngestorSpan::new(start, end).ok()
 }
 
 /// The outcome an attach request is answered with.

@@ -769,7 +769,7 @@ A failed acknowledgement resolves negatively exactly once. The sweep and report 
 the exact delivery generation's guard, so a report that arrives first keeps the acknowledgement
 pending, and a terminal outcome or the delivery's own failure that resolves it first leaves the
 sweep nothing to fail. The source attempt fails with it and redelivers the record along the current
-routes, so a sink that already completed the record can receive it again. A report or outcome that
+routes, so a emitter that already completed the record can receive it again. A report or outcome that
 arrives after its acknowledgement failed finds no entry and is rejected at `debug`.
 
 Every node on a record's path applies the same bound. A relay owner that routed a record to the
@@ -1580,7 +1580,7 @@ frame and owning-node answer reaches the other end whole, a chunk of the largest
 damaged bytes fail with the typed decode failure or decode to a frame the codec keeps whole. They
 check each frame alone. Putting a delivery's chunks back together stays with the serving loop, and
 no property splits a delivery at arbitrary bytes. `client-emitter-deliveries` holds the Arrow IPC
-stream those chunks carry, from the sink that writes it to the client library that decodes it.
+stream those chunks carry, from the emitter that writes it to the client library that decodes it.
 
 ## Domain Clock Progress
 

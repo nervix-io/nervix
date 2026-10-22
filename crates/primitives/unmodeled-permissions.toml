@@ -145,7 +145,7 @@ reason = "Each record must change in the same scheduling step as the operation i
 items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
 limit = "The counts observe the source loop and never synchronize it; the quiesce control and the acknowledgement roots under test are modeled."
 owner = "The source host-loop Shuttle checks."
-path = "src/runtime/ingestors/source_shuttle_tests.rs"
+path = "src/runtime/ingestors/connector_shuttle_tests.rs"
 reason = "Each count must change in the same scheduling step as the dispatch, resolution or confirmation it counts, so counting adds no scheduling point."
 
 [[permission]]

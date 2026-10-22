@@ -24,7 +24,7 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
-mod source;
+mod ingestor;
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
@@ -36,10 +36,14 @@ use std::{io, net::SocketAddr};
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
+pub use ingestor::{
+    RedisPubSubIngestor, RedisPubSubIngestorError, RedisPubSubIngestorMessage,
+    RedisPubSubIngestorPlan,
+};
 use nervix_connector::{
-    ConfiguredDeadline, PerRecordOutcome, RecordSink, ServiceUrl, SinkFinish, SinkFinishResult,
-    SinkHost, SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId, SinkStartResult,
-    client_tls_paths, optional_client_config_value, read_tls_file,
+    ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle,
+    EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError, PerRecordOutcome,
+    RecordEmitter, ServiceUrl, client_tls_paths, optional_client_config_value, read_tls_file,
 };
 use nervix_dns::{
     DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver, HOOK_LOOKUP_BUDGET,
@@ -50,9 +54,6 @@ use redis::{
     AsyncCommands, AsyncConnectionConfig, Client as RedisClient, ClientTlsConfig,
     ErrorKind as RedisErrorKind, RedisFuture, ServerErrorKind,
     TlsCertificates as RedisTlsCertificates, io::AsyncDNSResolver,
-};
-pub use source::{
-    RedisPubSubSource, RedisPubSubSourceError, RedisPubSubSourceMessage, RedisPubSubSourcePlan,
 };
 use thiserror::Error;
 
@@ -326,18 +327,18 @@ impl RedisPoolHandle {
 }
 
 /// What one Redis sink publishes to: the pool it borrows from and the channel it writes.
-pub struct RedisSinkConfig {
+pub struct RedisEmitterConfig {
     pub pool: RedisPoolHandle,
     pub channel: RedisChannelName,
 }
 
-pub struct RedisSink {
+pub struct RedisEmitter {
     pool: RedisPoolHandle,
     channel: RedisChannelName,
 }
 
-impl RedisSink {
-    pub fn new(config: RedisSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
+impl RedisEmitter {
+    pub fn new(config: RedisEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
         Ok(Self {
             pool: config.pool,
             channel: config.channel,
@@ -354,7 +355,7 @@ impl RedisSink {
     async fn connection<'pool>(
         pool: &'pool RedisCommandPool,
         handle: &RedisPoolHandle,
-    ) -> Result<RedisPooledConnection<'pool>, Report<SinkPublishError>> {
+    ) -> Result<RedisPooledConnection<'pool>, Report<EmitterWriteError>> {
         let mut borrow = std::pin::pin!(pool.connections.get());
         let mut waiting = None;
         let connection = std::future::poll_fn(|context| {
@@ -389,22 +390,23 @@ impl RedisSink {
                       ownership is inferred"
         )
     )]
-    fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
-        Report::new(SinkPublishError::Publish { sink: REDIS }).attach_printable(error.to_string())
+    fn publish_error(error: impl std::fmt::Display) -> Report<EmitterWriteError> {
+        Report::new(EmitterWriteError::Publish { connector: REDIS })
+            .attach_printable(error.to_string())
     }
 
     fn publish_pool_error(
         error: bb8::RunError<redis::RedisError>,
         connect_timeout: ConfiguredDeadline,
-    ) -> Report<SinkPublishError> {
+    ) -> Report<EmitterWriteError> {
         match error {
             bb8::RunError::User(source) => redis_pool_error(source, connect_timeout)
-                .change_context(SinkPublishError::Publish { sink: REDIS }),
+                .change_context(EmitterWriteError::Publish { connector: REDIS }),
             bb8::RunError::TimedOut => {
                 // The emitter shows the message a sink attached, so the deadline leads.
                 let elapsed = connect_timeout.elapsed("checking out a Redis command connection");
                 Report::new(elapsed)
-                    .change_context(SinkPublishError::Publish { sink: REDIS })
+                    .change_context(EmitterWriteError::Publish { connector: REDIS })
                     .attach_printable(elapsed.to_string())
             }
         }
@@ -412,16 +414,16 @@ impl RedisSink {
 }
 
 #[async_trait]
-impl SinkLifecycle for RedisSink {
+impl EmitterLifecycle for RedisEmitter {
     /// Each `PUBLISH` is answered before the publish returns, so the client holds nothing.
-    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
-        Ok(SinkFinish::NothingHeld)
+    async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
+        Ok(EmitterFinish::NothingHeld)
     }
 }
 
 #[async_trait]
-impl RecordSink for RedisSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
+impl RecordEmitter for RedisEmitter {
+    async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let pool = self.pool.pool();
         for record in records {
@@ -491,9 +493,9 @@ mod tests {
         ));
         let disconnected = redis::RedisError::from((RedisErrorKind::Io, "connection interrupted"));
 
-        assert!(RedisSink::is_record_failure(&rejected));
-        assert!(!RedisSink::is_record_failure(&ambiguous));
-        assert!(!RedisSink::is_record_failure(&disconnected));
+        assert!(RedisEmitter::is_record_failure(&rejected));
+        assert!(!RedisEmitter::is_record_failure(&ambiguous));
+        assert!(!RedisEmitter::is_record_failure(&disconnected));
     }
 
     #[nervix_primitives::test]
@@ -543,12 +545,12 @@ mod tests {
             .await
             .expect_err("an absent name cannot open a command connection");
         assert!(DnsLookupError::find_in(&source).is_some(), "{source:?}");
-        let sink_error = RedisSink::publish_pool_error(
+        let emitter_error = RedisEmitter::publish_pool_error(
             bb8::RunError::User(source.clone()),
             default_connect_timeout(),
         );
         assert!(matches!(
-            sink_error
+            emitter_error
                 .frames()
                 .find_map(|frame| frame.downcast_ref::<RedisClientError>()),
             Some(RedisClientError::Resolve {
@@ -645,10 +647,10 @@ mod tests {
             value: "1000".to_string(),
         }])
         .expect("one second is a valid deadline");
-        let error = RedisSink::publish_pool_error(bb8::RunError::TimedOut, connect_timeout);
+        let error = RedisEmitter::publish_pool_error(bb8::RunError::TimedOut, connect_timeout);
         assert!(matches!(
             error.current_context(),
-            SinkPublishError::Publish { sink: REDIS }
+            EmitterWriteError::Publish { connector: REDIS }
         ));
         let elapsed = error
             .frames()

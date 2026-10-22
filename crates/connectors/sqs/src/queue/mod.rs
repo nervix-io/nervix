@@ -26,7 +26,7 @@
 )]
 
 mod connection;
-mod source;
+mod ingestor;
 
 use std::fmt::Debug;
 
@@ -42,21 +42,21 @@ use aws_sdk_sqs::{
 };
 use connection::{FailedRequest, SqsTrust};
 use error_stack::{Report, ResultExt as _};
+pub use ingestor::{
+    SqsIngestor, SqsIngestorError, SqsIngestorMessage, SqsIngestorPlan, SqsIngestorPosition,
+    SqsMessageAttributes,
+};
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    ConfiguredDeadline, PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish,
-    SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId,
-    SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
+    ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle,
+    EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError,
+    PerRecordOutcome, RecordEmitter, RejectedEmitterMember, client_config_value, client_tls_paths,
     optional_client_config_value, read_tls_file,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp};
 use nervix_primitives::time::Instant;
 use nervix_simd_kernels::{XmlChars, XmlCharsError};
-pub use source::{
-    SqsMessageAttributes, SqsSource, SqsSourceError, SqsSourceMessage, SqsSourcePlan,
-    SqsSourcePosition,
-};
 use thiserror::Error;
 
 const SQS: &str = "sqs";
@@ -71,7 +71,7 @@ pub enum SqsPublishingMode {
 }
 
 /// What one SQS sink sends to: its client entries, queue name and request shape.
-pub struct SqsSinkConfig {
+pub struct SqsEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub queue: nervix_models::SqsQueueName,
     pub mode: SqsPublishingMode,
@@ -79,7 +79,7 @@ pub struct SqsSinkConfig {
     pub dns: DnsResolver,
 }
 
-pub struct SqsSink {
+pub struct SqsEmitter {
     client: SqsClient,
     queue_url: String,
     mode: SqsPublishingMode,
@@ -121,7 +121,7 @@ type SqsRecordResult<T> = Result<T, Report<SqsRecordError>>;
 
 #[derive(Debug)]
 struct PreparedSqsRecord {
-    record: SinkRecordId,
+    record: EmitterRecordId,
     occurred_at: Timestamp,
     body: String,
     attributes: HashMap<String, MessageAttributeValue>,
@@ -130,11 +130,11 @@ struct PreparedSqsRecord {
 }
 
 impl PreparedSqsRecord {
-    fn new(record: SinkRecord) -> SqsRecordResult<Self> {
+    fn new(record: EmitterRecord) -> SqsRecordResult<Self> {
         const ENCODED_IN_MEMORY: &str =
             "every term counts bytes of a record this node already holds in memory";
 
-        let SinkRecord {
+        let EmitterRecord {
             id: record,
             key: _,
             payload,
@@ -156,7 +156,7 @@ impl PreparedSqsRecord {
         // per name and SQS counts those, after the writes have collapsed.
         let mut attributes = HashMap::with_capacity(headers.len());
         for (name, value) in headers {
-            SqsSink::validate_attribute(&name, &value)?;
+            SqsEmitter::validate_attribute(&name, &value)?;
             let attribute = MessageAttributeValue::builder()
                 .data_type("String")
                 .string_value(&value)
@@ -174,7 +174,7 @@ impl PreparedSqsRecord {
             }));
         }
         if let Some(group_id) = group_id.as_deref() {
-            SqsSink::validate_group_id(group_id)?;
+            SqsEmitter::validate_group_id(group_id)?;
         }
         let body_bytes = body.len();
         let mut attribute_bytes = 0_usize;
@@ -222,14 +222,14 @@ impl PreparedSqsRecord {
         })
     }
 
-    fn rejected(&self, reason: String) -> RejectedSinkRecord<SinkRecordId> {
-        RejectedSinkRecord::external(self.record, self.occurred_at, reason)
+    fn rejected(&self, reason: String) -> RejectedEmitterMember<EmitterRecordId> {
+        RejectedEmitterMember::external(self.record, self.occurred_at, reason)
     }
 }
 
-impl SqsSink {
-    pub async fn new(config: SqsSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
-        let SqsSinkConfig {
+impl SqsEmitter {
+    pub async fn new(config: SqsEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+        let SqsEmitterConfig {
             config,
             queue,
             mode,
@@ -247,7 +247,7 @@ impl SqsSink {
     async fn client_from_config(
         config: &[ClientConfigEntry],
         dns: DnsResolver,
-    ) -> SinkStartResult<SqsClient> {
+    ) -> EmitterStartResult<SqsClient> {
         let endpoint = Self::config_value(config, "endpoint")?;
         let region = optional_client_config_value(config, "region")
             .unwrap_or("us-east-1")
@@ -260,7 +260,7 @@ impl SqsSink {
             .to_string();
 
         let request_timeout = ConfiguredDeadline::timeout(config)
-            .change_context(SinkStartError::InvalidConfiguration { sink: SQS })?
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: SQS })?
             .map(ConfiguredDeadline::bound);
 
         let mut loader = aws_config::defaults(BehaviorVersion::latest())
@@ -291,7 +291,9 @@ impl SqsSink {
                         Err(error) => Err({
                             let message = error.current_context().to_string();
                             error
-                                .change_context(SinkStartError::InvalidConfiguration { sink: SQS })
+                                .change_context(EmitterOpenError::InvalidConfiguration {
+                                    connector: SQS,
+                                })
                                 .attach_printable(message)
                         }),
                     }
@@ -304,7 +306,7 @@ impl SqsSink {
         Ok(SqsClient::new(&sdk_config))
     }
 
-    async fn queue_url(client: &SqsClient, queue: &str) -> SinkStartResult<String> {
+    async fn queue_url(client: &SqsClient, queue: &str) -> EmitterStartResult<String> {
         let response = match client.get_queue_url().queue_name(queue).send().await {
             Ok(response) => response,
             Err(error) => return Err(Self::queue_lookup_error(queue, &error)),
@@ -315,26 +317,26 @@ impl SqsSink {
     fn queue_lookup_error<R: Debug + 'static>(
         queue: &str,
         error: &SdkError<GetQueueUrlError, R>,
-    ) -> Report<SinkStartError> {
+    ) -> Report<EmitterOpenError> {
         let failure = FailedRequest::new(error);
         let missing = error
             .as_service_error()
             .is_some_and(GetQueueUrlError::is_queue_does_not_exist);
         if missing {
-            return Report::new(SinkStartError::MissingExternalEntity {
-                sink: SQS,
+            return Report::new(EmitterOpenError::MissingExternalEntity {
+                connector: SQS,
                 kind: "SQS queue",
                 name: queue.to_string(),
             })
             .attach_printable(failure.description());
         }
         failure.report(
-            SinkStartError::Initialize { sink: SQS },
+            EmitterOpenError::Initialize { connector: SQS },
             "SQS GetQueueUrl failed",
         )
     }
 
-    fn require_queue_url(queue: &str, queue_url: Option<String>) -> SinkStartResult<String> {
+    fn require_queue_url(queue: &str, queue_url: Option<String>) -> EmitterStartResult<String> {
         match queue_url {
             Some(queue_url) => Ok(queue_url),
             None => Err(Self::start_error(format!("SQS queue '{queue}' has no URL"))),
@@ -344,7 +346,7 @@ impl SqsSink {
     async fn publish_single(
         &self,
         records: Vec<PreparedSqsRecord>,
-        outcome: &mut PerRecordOutcome<SinkRecordId>,
+        outcome: &mut PerRecordOutcome<EmitterRecordId>,
     ) {
         for record in records {
             nervix_primitives::task::consume_budget().await;
@@ -371,7 +373,7 @@ impl SqsSink {
                 }
                 Err(error) => {
                     outcome.fail(FailedRequest::new(&error).report(
-                        SinkPublishError::Publish { sink: SQS },
+                        EmitterWriteError::Publish { connector: SQS },
                         "SQS SendMessage failed",
                     ));
                     return;
@@ -383,7 +385,7 @@ impl SqsSink {
     async fn publish_batches(
         &self,
         records: Vec<PreparedSqsRecord>,
-        outcome: &mut PerRecordOutcome<SinkRecordId>,
+        outcome: &mut PerRecordOutcome<EmitterRecordId>,
     ) {
         for records in Self::batch_chunks(records) {
             nervix_primitives::task::consume_budget().await;
@@ -414,7 +416,7 @@ impl SqsSink {
                 Ok(response) => response,
                 Err(error) => {
                     outcome.fail(FailedRequest::new(&error).report(
-                        SinkPublishError::Publish { sink: SQS },
+                        EmitterWriteError::Publish { connector: SQS },
                         "SQS SendMessageBatch failed",
                     ));
                     return;
@@ -466,7 +468,7 @@ impl SqsSink {
     fn apply_batch_response(
         records: &[PreparedSqsRecord],
         response: &aws_sdk_sqs::operation::send_message_batch::SendMessageBatchOutput,
-        outcome: &mut PerRecordOutcome<SinkRecordId>,
+        outcome: &mut PerRecordOutcome<EmitterRecordId>,
     ) -> Option<String> {
         let mut accounted = vec![false; records.len()];
         let mut infrastructure_reasons = Vec::new();
@@ -636,7 +638,7 @@ impl SqsSink {
         Ok(())
     }
 
-    fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
+    fn config_value(config: &[ClientConfigEntry], key: &str) -> EmitterStartResult<String> {
         {
             let mapping_input = client_config_value(config, key, "SQS");
             match mapping_input {
@@ -644,15 +646,16 @@ impl SqsSink {
                 Err(error) => Err({
                     let message = error.current_context().to_string();
                     error
-                        .change_context(SinkStartError::InvalidConfiguration { sink: SQS })
+                        .change_context(EmitterOpenError::InvalidConfiguration { connector: SQS })
                         .attach_printable(message)
                 }),
             }
         }
     }
 
-    fn start_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
-        Report::new(SinkStartError::Initialize { sink: SQS }).attach_printable(error.to_string())
+    fn start_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
+        Report::new(EmitterOpenError::Initialize { connector: SQS })
+            .attach_printable(error.to_string())
     }
 
     #[cfg_attr(
@@ -660,22 +663,23 @@ impl SqsSink {
         nervix::dispatch(reason = "formats the typed external SQS SDK failure; no internal \
                                    runtime ownership is inferred")
     )]
-    fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
-        Report::new(SinkPublishError::Publish { sink: SQS }).attach_printable(error.to_string())
+    fn publish_error(error: impl std::fmt::Display) -> Report<EmitterWriteError> {
+        Report::new(EmitterWriteError::Publish { connector: SQS })
+            .attach_printable(error.to_string())
     }
 }
 
 #[async_trait]
-impl SinkLifecycle for SqsSink {
+impl EmitterLifecycle for SqsEmitter {
     /// Each send is answered before the publish returns, so the client holds nothing.
-    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
-        Ok(SinkFinish::NothingHeld)
+    async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
+        Ok(EmitterFinish::NothingHeld)
     }
 }
 
 #[async_trait]
-impl RecordSink for SqsSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
+impl RecordEmitter for SqsEmitter {
+    async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let mut prepared = Vec::with_capacity(records.len());
         for record in records {
@@ -684,7 +688,7 @@ impl RecordSink for SqsSink {
             let occurred_at = record.occurred_at;
             match PreparedSqsRecord::new(record) {
                 Ok(record) => prepared.push(record),
-                Err(error) => outcome.reject(RejectedSinkRecord::external(
+                Err(error) => outcome.reject(RejectedEmitterMember::external(
                     record_id,
                     occurred_at,
                     error.to_string(),
@@ -733,9 +737,9 @@ mod tests {
         ]
     }
 
-    fn record(index: usize, payload: Vec<u8>) -> SinkRecord {
-        SinkRecord::new(
-            SinkRecordId::new(index),
+    fn record(index: usize, payload: Vec<u8>) -> EmitterRecord {
+        EmitterRecord::new(
+            EmitterRecordId::new(index),
             None,
             payload,
             Vec::new(),
@@ -935,11 +939,11 @@ mod tests {
             GetQueueUrlError::QueueDoesNotExist(QueueDoesNotExist::builder().build()),
             (),
         );
-        let missing = SqsSink::queue_lookup_error("missing-queue", &missing);
+        let missing = SqsEmitter::queue_lookup_error("missing-queue", &missing);
         assert!(matches!(
             missing.current_context(),
-            SinkStartError::MissingExternalEntity {
-                sink: SQS,
+            EmitterOpenError::MissingExternalEntity {
+                connector: SQS,
                 kind: "SQS queue",
                 name,
             } if name == "missing-queue"
@@ -948,10 +952,10 @@ mod tests {
         let refused = SdkError::<GetQueueUrlError, ()>::dispatch_failure(ConnectorError::io(
             "connection refused".into(),
         ));
-        let connection = SqsSink::queue_lookup_error("orders", &refused);
+        let connection = SqsEmitter::queue_lookup_error("orders", &refused);
         assert_eq!(
             connection.current_context(),
-            &SinkStartError::Initialize { sink: SQS }
+            &EmitterOpenError::Initialize { connector: SQS }
         );
         let message = connection
             .frames()
@@ -962,15 +966,15 @@ mod tests {
         );
 
         assert_eq!(
-            SqsSink::require_queue_url("orders", Some("queue-url".to_string()))
+            SqsEmitter::require_queue_url("orders", Some("queue-url".to_string()))
                 .expect("a returned queue URL should be accepted"),
             "queue-url"
         );
-        let no_url = SqsSink::require_queue_url("orders", None)
+        let no_url = SqsEmitter::require_queue_url("orders", None)
             .expect_err("a successful response without a queue URL must fail");
         assert_eq!(
             no_url.current_context(),
-            &SinkStartError::Initialize { sink: SQS }
+            &EmitterOpenError::Initialize { connector: SQS }
         );
     }
 
@@ -1017,7 +1021,7 @@ mod tests {
         records.push(prepared(SQS_MAX_REQUEST_BYTES));
         records.push(prepared(2));
 
-        let chunks = SqsSink::batch_chunks(records);
+        let chunks = SqsEmitter::batch_chunks(records);
         let records = chunks
             .iter()
             .flatten()
@@ -1028,8 +1032,8 @@ mod tests {
             chunks.iter().map(Vec::len).collect::<Vec<_>>(),
             [10, 1, 1, 1]
         );
-        assert_eq!(records[0], SinkRecordId::new(0));
-        assert_eq!(records[10], SinkRecordId::new(10));
+        assert_eq!(records[0], EmitterRecordId::new(0));
+        assert_eq!(records[10], EmitterRecordId::new(10));
     }
 
     #[test]
@@ -1041,7 +1045,7 @@ mod tests {
             prepared_in_group(3, "beta"),
         ];
 
-        let chunks = SqsSink::batch_chunks(records);
+        let chunks = SqsEmitter::batch_chunks(records);
         let records = chunks
             .iter()
             .map(|chunk| {
@@ -1136,7 +1140,7 @@ mod tests {
             }
         }
 
-        fn record(&self, index: usize) -> SinkRecord {
+        fn record(&self, index: usize) -> EmitterRecord {
             let mut record = record(index, self.body().into_bytes());
             record.headers = self.headers();
             if let Some(group) = self.group() {
@@ -1195,7 +1199,7 @@ mod tests {
                     .iter()
                     .map(|record| record.record)
                     .collect::<Vec<_>>();
-                let chunks = SqsSink::batch_chunks(accepted);
+                let chunks = SqsEmitter::batch_chunks(accepted);
                 let mut chunked = Vec::new();
                 let mut previous: Option<HeldRequest> = None;
                 for chunk in &chunks {
@@ -1267,18 +1271,18 @@ mod tests {
                 .expect("the test response names every required field");
         let mut outcome = PerRecordOutcome::empty();
 
-        let infrastructure = SqsSink::apply_batch_response(&records, &response, &mut outcome)
+        let infrastructure = SqsEmitter::apply_batch_response(&records, &response, &mut outcome)
             .expect("an entry the service failed on its side and an omitted entry are retried");
         let outcome = outcome.into_parts();
 
-        assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+        assert_eq!(outcome.delivered, vec![EmitterRecordId::new(0)]);
         assert_eq!(
             outcome
                 .rejected
                 .iter()
                 .map(|rejected| rejected.id)
                 .collect::<Vec<_>>(),
-            vec![SinkRecordId::new(1)]
+            vec![EmitterRecordId::new(1)]
         );
         assert!(infrastructure.contains("SQS batch entry failed with ServiceUnavailable"));
         assert!(infrastructure.contains("SQS omitted a result for batch entry m3"));
@@ -1286,27 +1290,27 @@ mod tests {
 
     #[test]
     fn only_definitive_per_entry_failures_are_record_rejections() {
-        assert!(SqsSink::is_record_failure(
+        assert!(SqsEmitter::is_record_failure(
             true,
             "InvalidMessageContents",
             Some("message contains an invalid character")
         ));
-        assert!(SqsSink::is_record_failure(
+        assert!(SqsEmitter::is_record_failure(
             true,
             "InvalidParameterValue",
             Some("MessageGroupId contains an invalid character")
         ));
-        assert!(!SqsSink::is_record_failure(
+        assert!(!SqsEmitter::is_record_failure(
             true,
             "InvalidParameterValue",
             Some("ContentBasedDeduplication is not enabled")
         ));
-        assert!(!SqsSink::is_record_failure(
+        assert!(!SqsEmitter::is_record_failure(
             false,
             "ThrottlingException",
             None
         ));
-        assert!(!SqsSink::is_record_failure(
+        assert!(!SqsEmitter::is_record_failure(
             true,
             "UnknownSenderFault",
             None
@@ -1315,16 +1319,16 @@ mod tests {
 
     #[test]
     fn fifo_group_ids_accept_branch_json_and_reject_invalid_values() {
-        assert!(SqsSink::validate_group_id(r#"{"tenant":"acme"}"#).is_ok());
-        assert!(SqsSink::validate_group_id("").is_err());
-        assert!(SqsSink::validate_group_id(&"x".repeat(129)).is_err());
-        assert!(SqsSink::validate_group_id("contains space").is_err());
+        assert!(SqsEmitter::validate_group_id(r#"{"tenant":"acme"}"#).is_ok());
+        assert!(SqsEmitter::validate_group_id("").is_err());
+        assert!(SqsEmitter::validate_group_id(&"x".repeat(129)).is_err());
+        assert!(SqsEmitter::validate_group_id("contains space").is_err());
     }
 
     #[nervix_primitives::test]
     async fn client_timeout_bounds_each_request_while_sdk_retries_stay_disabled() {
         let fixture = Fixture::start().await;
-        let client = SqsSink::client_from_config(&client_config("275"), fixture.dns())
+        let client = SqsEmitter::client_from_config(&client_config("275"), fixture.dns())
             .await
             .expect("SQS client config should be valid");
         let timeout = client
@@ -1354,7 +1358,7 @@ mod tests {
     async fn client_rejects_an_invalid_request_timeout() {
         let fixture = Fixture::start().await;
         for value in ["later", "0"] {
-            let error = SqsSink::client_from_config(&client_config(value), fixture.dns())
+            let error = SqsEmitter::client_from_config(&client_config(value), fixture.dns())
                 .await
                 .expect_err("invalid SQS timeout should fail client initialization");
 

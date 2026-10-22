@@ -22,36 +22,37 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
-mod sink;
+mod emitter;
 
 use async_trait::async_trait;
+pub use emitter::{HttpEmitter, HttpEmitterConfig};
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
-    ClientConfigResult, HttpClientConfig, IngestMessageHeaders, PacedSourceConnector,
-    RetainedIngestHeaders, SourceConnector, SourceError, SourcePoll, SourcePollMessage,
-    SourceResult, client_config_value, optional_client_config_value, physical_time::actual_utc_now,
+    ClientConfigResult, HttpClientConfig, IngestMessageHeaders, IngestorConnector, IngestorError,
+    IngestorPoll, IngestorPollMessage, IngestorResult, PacedIngestorConnector,
+    RetainedIngestHeaders, client_config_value, optional_client_config_value,
+    physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp};
 use reqwest::{Client as HttpClient, Method, StatusCode, header::HeaderMap};
-pub use sink::{HttpSink, HttpSinkConfig};
 use thiserror::Error;
 
 const HTTP: &str = "http";
 
-pub struct HttpSourcePlan {
+pub struct HttpIngestorPlan {
     pub config: Vec<ClientConfigEntry>,
     pub dns: DnsResolver,
 }
 
-pub struct HttpSource {
+pub struct HttpIngestor {
     client: HttpClient,
     endpoint: String,
     method: Method,
 }
 
 #[derive(Debug, Error)]
-pub enum HttpSourceError {
+pub enum HttpIngestorError {
     #[error("invalid HTTP method")]
     InvalidMethod,
     #[error("failed to send HTTP source request")]
@@ -76,17 +77,17 @@ impl IngestMessageHeaders for HttpResponseHeaders<'_> {
 }
 
 #[async_trait]
-impl SourceConnector for HttpSource {
-    type Plan = HttpSourcePlan;
+impl IngestorConnector for HttpIngestor {
+    type Plan = HttpIngestorPlan;
 
-    async fn open(plan: &Self::Plan, _instance_index: u64) -> SourceResult<Self> {
+    async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
         let endpoint = Self::endpoint_from_config(&plan.config)
-            .change_context(SourceError::Open { connector: HTTP })?;
+            .change_context(IngestorError::Open { connector: HTTP })?;
         let method = Self::method_from_config(&plan.config)
-            .change_context(SourceError::Open { connector: HTTP })?;
+            .change_context(IngestorError::Open { connector: HTTP })?;
         let client = HttpClientConfig::new(&plan.config, "HTTP", &plan.dns)
             .build()
-            .change_context(SourceError::Open { connector: HTTP })?;
+            .change_context(IngestorError::Open { connector: HTTP })?;
         Ok(Self {
             client,
             endpoint,
@@ -96,29 +97,29 @@ impl SourceConnector for HttpSource {
 }
 
 #[async_trait]
-impl PacedSourceConnector for HttpSource {
-    async fn poll(&mut self, _scheduled_at: Timestamp) -> SourceResult<SourcePoll> {
+impl PacedIngestorConnector for HttpIngestor {
+    async fn poll(&mut self, _scheduled_at: Timestamp) -> IngestorResult<IngestorPoll> {
         let response = self
             .client
             .request(self.method.clone(), self.endpoint.as_str())
             .send()
             .await
             .map_err(|source| {
-                Report::new(HttpSourceError::Request).attach_printable(source.to_string())
+                Report::new(HttpIngestorError::Request).attach_printable(source.to_string())
             })
-            .change_context(SourceError::Read { connector: HTTP })?;
+            .change_context(IngestorError::Read { connector: HTTP })?;
         if response.status() == StatusCode::NO_CONTENT {
-            return Ok(SourcePoll {
+            return Ok(IngestorPoll {
                 messages: Vec::new(),
                 failures: Vec::new(),
                 observed_at: actual_utc_now(),
             });
         }
         if !response.status().is_success() {
-            return Err(Report::new(HttpSourceError::ResponseStatus {
+            return Err(Report::new(HttpIngestorError::ResponseStatus {
                 status: response.status(),
             })
-            .change_context(SourceError::Read { connector: HTTP }));
+            .change_context(IngestorError::Read { connector: HTTP }));
         }
 
         let headers = RetainedIngestHeaders::capture(&HttpResponseHeaders(response.headers()));
@@ -126,11 +127,11 @@ impl PacedSourceConnector for HttpSource {
             .bytes()
             .await
             .map_err(|source| {
-                Report::new(HttpSourceError::ResponseBody).attach_printable(source.to_string())
+                Report::new(HttpIngestorError::ResponseBody).attach_printable(source.to_string())
             })
-            .change_context(SourceError::Read { connector: HTTP })?;
-        Ok(SourcePoll {
-            messages: vec![SourcePollMessage {
+            .change_context(IngestorError::Read { connector: HTTP })?;
+        Ok(IngestorPoll {
+            messages: vec![IngestorPollMessage {
                 payload: payload.to_vec(),
                 headers,
             }],
@@ -140,15 +141,17 @@ impl PacedSourceConnector for HttpSource {
     }
 }
 
-impl HttpSource {
+impl HttpIngestor {
     fn endpoint_from_config(config: &[ClientConfigEntry]) -> ClientConfigResult<String> {
         client_config_value(config, "endpoint", "HTTP")
     }
 
-    fn method_from_config(config: &[ClientConfigEntry]) -> Result<Method, Report<HttpSourceError>> {
+    fn method_from_config(
+        config: &[ClientConfigEntry],
+    ) -> Result<Method, Report<HttpIngestorError>> {
         let method = optional_client_config_value(config, "method").unwrap_or("GET");
         Method::from_bytes(method.as_bytes())
-            .map_err(|_| Report::new(HttpSourceError::InvalidMethod))
+            .map_err(|_| Report::new(HttpIngestorError::InvalidMethod))
     }
 }
 
@@ -219,11 +222,11 @@ mod tests {
             value: "https://example.com/api".to_string(),
         }];
         assert_eq!(
-            HttpSource::endpoint_from_config(&config).expect("endpoint"),
+            HttpIngestor::endpoint_from_config(&config).expect("endpoint"),
             "https://example.com/api"
         );
         assert_eq!(
-            HttpSource::method_from_config(&config).expect("default method"),
+            HttpIngestor::method_from_config(&config).expect("default method"),
             Method::GET
         );
 
@@ -232,7 +235,7 @@ mod tests {
             value: "POST".to_string(),
         }];
         assert_eq!(
-            HttpSource::method_from_config(&post).expect("post method"),
+            HttpIngestor::method_from_config(&post).expect("post method"),
             Method::POST
         );
 
@@ -240,9 +243,9 @@ mod tests {
             key: "method".to_string(),
             value: "NOT A METHOD".to_string(),
         }];
-        assert!(HttpSource::method_from_config(&invalid).is_err());
+        assert!(HttpIngestor::method_from_config(&invalid).is_err());
         assert!(
-            HttpSource::endpoint_from_config(&[])
+            HttpIngestor::endpoint_from_config(&[])
                 .expect_err("missing HTTP endpoint")
                 .to_string()
                 .contains("missing HTTP client config key 'endpoint'")

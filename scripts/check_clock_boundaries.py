@@ -136,7 +136,7 @@ def main() -> int:
     actual_utc_owner = ROOT / PHYSICAL_TIME_OWNER
     actual_utc_consumers = {
         ROOT / "crates/connectors/http/src/request/mod.rs",
-        ROOT / "crates/connectors/http/src/request/sink.rs",
+        ROOT / "crates/connectors/http/src/request/emitter.rs",
         ROOT / "crates/connectors/iceberg/src/table/mod.rs",
         ROOT / "crates/connectors/otel/src/lib.rs",
         ROOT / "crates/connectors/prometheus/src/query/mod.rs",

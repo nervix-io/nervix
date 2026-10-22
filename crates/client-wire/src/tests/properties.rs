@@ -22,7 +22,7 @@ use nervix_models::{
 
 use super::fixtures::reference;
 use crate::{
-    Diagnostic, LeaderEndpoints, LeaderRedirect, RequestId, SourceSpan, SubscriptionHandle,
+    Diagnostic, IngestorSpan, LeaderEndpoints, LeaderRedirect, RequestId, SubscriptionHandle,
 };
 
 mod events;
@@ -135,7 +135,7 @@ impl<'a> WireValues<'a> {
                         .between(u64::from(start)..=u64::from(u32::MAX)),
                 )
                 .verified("a bounded u32 position");
-                Some(SourceSpan::new(start, end).verified("end was drawn at or above start"))
+                Some(IngestorSpan::new(start, end).verified("end was drawn at or above start"))
             } else {
                 None
             };

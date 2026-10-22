@@ -5,7 +5,7 @@ Feature: MQTT name resolution
   in order, and verifies an `mqtts` broker's certificate against that host. These scenarios point
   every node at a DNS fixture the scenario controls.
 
-  Scenario Outline: MQTT sources and sinks reach a broker named by the node DNS fixture over <scheme>
+  Scenario Outline: MQTT sources and emitters reach a broker named by the node DNS fixture over <scheme>
     Given MQTT is running
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
@@ -146,7 +146,7 @@ Feature: MQTT name resolution
       | 1            |
       | 3            |
 
-  Scenario Outline: MQTT sources and sinks reconnect once their broker name resolves again after <answer>
+  Scenario Outline: MQTT sources and emitters reconnect once their broker name resolves again after <answer>
     Given MQTT is running
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started

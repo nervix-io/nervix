@@ -15,11 +15,11 @@ Feature: Placement policies
         TO placement_stage_one INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE JUNCTION corridor_middle FROM placement_stage_one UNBRANCHED
         TO placement_stage_two INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage_two UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage_two UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT corridor_policy
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         PREFER COLOCATION
         RANK 3;
       START;
@@ -27,7 +27,7 @@ Feature: Placement policies
       """
     Then the last command output contains
       """
-      CREATE PLACEMENT corridor_policy FROM corridor_source TO corridor_sink PREFER COLOCATION RANK 3;
+      CREATE PLACEMENT corridor_policy FROM corridor_source TO corridor_emitter PREFER COLOCATION RANK 3;
       """
     When these NSPL commands are executed on the leader node
       """
@@ -71,11 +71,11 @@ Feature: Placement policies
       """
     And the last command output contains
       """
-      covered: corridor_source, placement_stage_one, corridor_middle, placement_stage_two, corridor_sink
+      covered: corridor_source, placement_stage_one, corridor_middle, placement_stage_two, corridor_emitter
       """
     And the last command output contains
       """
-      witness: corridor_source -> placement_stage_one -> corridor_middle -> placement_stage_two -> corridor_sink
+      witness: corridor_source -> placement_stage_one -> corridor_middle -> placement_stage_two -> corridor_emitter
       """
     When these NSPL commands are executed on the leader node
       """
@@ -114,11 +114,11 @@ Feature: Placement policies
         TO placement_stage_one INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE JUNCTION corridor_middle FROM placement_stage_one UNBRANCHED
         TO placement_stage_two INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage_two UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage_two UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT keep_corridor_local
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         REQUIRE COLOCATION
         RANK 1;
       START;
@@ -128,14 +128,14 @@ Feature: Placement policies
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage_one" owner equals placeholder "corridor_owner"
     And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_middle" owner equals placeholder "corridor_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage_two" owner equals placeholder "corridor_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "corridor_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "corridor_owner"
     When these NSPL commands are executed on the leader node
       """
       DESCRIBE DOMAIN;
       """
     Then the last command output contains
       """
-      members: corridor_middle, corridor_sink, corridor_source, placement_stage_one, placement_stage_two
+      members: corridor_middle, corridor_emitter, corridor_source, placement_stage_one, placement_stage_two
       """
     And the last command output contains
       """
@@ -202,7 +202,7 @@ Feature: Placement policies
       CREATE RELAY control_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE JUNCTION control_source FROM control_input UNBRANCHED
         TO control_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -210,7 +210,7 @@ Feature: Placement policies
         TO control_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT prefer_local
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         PREFER COLOCATION;
       COMMIT;
       START;
@@ -218,7 +218,7 @@ Feature: Placement policies
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "source_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner equals placeholder "source_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "source_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "source_owner"
     And the last cluster status owner for scheduled "junction" "control_source" is saved as placeholder "control_owner"
     And the last cluster status owner for scheduled "relay" "control_stage" is saved as placeholder "control_stage_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "control_stage" owner different from placeholder "control_owner"
@@ -237,11 +237,11 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT spread_corridor
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         SUGGEST SEPARATION;
       COMMIT;
       START;
@@ -250,7 +250,7 @@ Feature: Placement policies
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "source_owner"
     And the last cluster status owner for scheduled "relay" "placement_stage" is saved as placeholder "stage_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner different from placeholder "source_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner different from placeholder "stage_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner different from placeholder "stage_owner"
 
   Scenario: Changing a soft placement policy does not migrate existing assignments
     Given the production sticky scheduler is configured
@@ -265,11 +265,11 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT existing_soft_policy
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         SUGGEST SEPARATION;
       COMMIT;
       START;
@@ -277,9 +277,9 @@ Feature: Placement policies
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "original_source_owner"
     And the last cluster status owner for scheduled "relay" "placement_stage" is saved as placeholder "original_stage_owner"
-    And the last cluster status owner for scheduled "junction" "corridor_sink" is saved as placeholder "original_sink_owner"
+    And the last cluster status owner for scheduled "junction" "corridor_emitter" is saved as placeholder "original_sink_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner different from placeholder "original_source_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner different from placeholder "original_stage_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner different from placeholder "original_stage_owner"
     When these NSPL commands are executed on the leader node
       """
       ALTER PLACEMENT existing_soft_policy SET POLICY PREFER COLOCATION;
@@ -287,9 +287,9 @@ Feature: Placement policies
       """
     Then within "5s" node "node-1" eventually reports scheduled "junction" "corridor_source" owner equals placeholder "original_source_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner equals placeholder "original_stage_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "original_sink_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "original_sink_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner different from placeholder "original_source_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner different from placeholder "original_stage_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner different from placeholder "original_stage_owner"
 
   Scenario Outline: A stronger rank overrides a claim and equal-rank policy claims conflict
     Given the production sticky scheduler is configured
@@ -303,16 +303,16 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT keep_local
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         REQUIRE COLOCATION
         RANK 2;
       CREATE PLACEMENT carve_out
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         NEUTRAL
         RANK 1;
       DESCRIBE PLACEMENT keep_local;
@@ -351,7 +351,7 @@ Feature: Placement policies
       """
     Then the last command output contains
       """
-      CREATE PLACEMENT carve_out FROM corridor_source TO corridor_sink NEUTRAL RANK 1;
+      CREATE PLACEMENT carve_out FROM corridor_source TO corridor_emitter NEUTRAL RANK 1;
       """
 
     Examples:
@@ -481,11 +481,11 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT managed_corridor
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         REQUIRE COLOCATION
         RANK 3;
       ALTER PLACEMENT managed_corridor
@@ -497,15 +497,15 @@ Feature: Placement policies
       """
     Then the last command output contains
       """
-      CREATE PLACEMENT renamed_corridor FROM corridor_source TO corridor_sink PREFER COLOCATION;
+      CREATE PLACEMENT renamed_corridor FROM corridor_source TO corridor_emitter PREFER COLOCATION;
       """
     When these NSPL commands fail
       """
-      DROP JUNCTION corridor_sink;
+      DROP JUNCTION corridor_emitter;
       """
     Then the last command error contains
       """
-      corridor_sink
+      corridor_emitter
       """
     And the last command error contains
       """
@@ -514,7 +514,7 @@ Feature: Placement policies
     When these NSPL commands are executed on the leader node
       """
       DROP PLACEMENT renamed_corridor;
-      DROP JUNCTION corridor_sink;
+      DROP JUNCTION corridor_emitter;
       SHOW PLACEMENTS;
       """
     Then the last command output does not contain
@@ -550,14 +550,14 @@ Feature: Placement policies
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
     When these NSPL commands fail
       """
       CREATE PLACEMENT bad_rank
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         REQUIRE COLOCATION
         RANK 0;
       """
@@ -569,7 +569,7 @@ Feature: Placement policies
       """
       CREATE PLACEMENT unknown_member
         FROM missing_runtime_node
-        TO corridor_sink
+        TO corridor_emitter
         REQUIRE COLOCATION;
       """
     Then the last command error contains
@@ -580,7 +580,7 @@ Feature: Placement policies
       """
       CREATE PLACEMENT endpoint_member
         FROM endpoint_source
-        TO corridor_sink
+        TO corridor_emitter
         REQUIRE COLOCATION;
       """
     Then the last command error contains
@@ -610,7 +610,7 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       SHOW CLUSTER STATUS;
@@ -633,7 +633,7 @@ Feature: Placement policies
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "consolidated_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "consolidated_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "consolidated_owner"
 
   @command_completion
   Scenario: A disconnected standalone command resumes by execution reference
@@ -876,15 +876,15 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT keep_corridor_local
-        FROM corridor_source TO corridor_sink REQUIRE COLOCATION RANK 1;
+        FROM corridor_source TO corridor_emitter REQUIRE COLOCATION RANK 1;
       START;
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "drained_group_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "drained_group_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "drained_group_owner"
     When these NSPL commands are executed on the leader node
       """
       DRAIN NODE {{drained_group_owner}};
@@ -892,7 +892,7 @@ Feature: Placement policies
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "relocated_group_owner"
     And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_source" owner different from placeholder "drained_group_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "relocated_group_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "relocated_group_owner"
 
   Scenario: Failover relocates a REQUIRE COLOCATION group atomically
     Given the production sticky scheduler is configured
@@ -906,18 +906,18 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT keep_corridor_local
-        FROM corridor_source TO corridor_sink REQUIRE COLOCATION RANK 1;
+        FROM corridor_source TO corridor_emitter REQUIRE COLOCATION RANK 1;
       START;
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "failed_group_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "failed_group_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "failed_group_owner"
     And a node other than placeholder "failed_group_owner" is saved as placeholder "failover_query_node"
     When node "{{failed_group_owner}}" is stopped
     Then node "{{failover_query_node}}" eventually observes a stable leader
     And within "20s" node "{{failover_query_node}}" eventually reports scheduled "junction" "corridor_source" owner different from placeholder "failed_group_owner"
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "failover_group_owner"
-    And within "5s" node "{{failover_query_node}}" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "failover_group_owner"
+    And within "5s" node "{{failover_query_node}}" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "failover_group_owner"

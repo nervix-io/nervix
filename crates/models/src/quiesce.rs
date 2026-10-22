@@ -223,7 +223,7 @@ declare_model_change_aspects! {
     ReordererMaxTime => Dynamic, None, false;
     EmitterInput => DomainPause, None, false;
     EmitterInputWhere => EntityPause, None, false;
-    EmitterSink => EntityPause, None, false;
+    EmitterConnector => EntityPause, None, false;
     EmitterClient => EntityPause, None, false;
     EmitterCodec => EntityPause, None, false;
     EmitterCollectPolicy => EntityPause, None, false;
@@ -1294,7 +1294,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         name: base_name,
         from: base_from,
         body: base_body,
-        sink: base_sink,
+        connector: base_emitter,
         batch: base_batch,
         flush_policy: base_flush_policy,
         error_policies: base_error_policies,
@@ -1306,7 +1306,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         name: candidate_name,
         from: candidate_from,
         body: candidate_body,
-        sink: candidate_sink,
+        connector: candidate_emitter,
         batch: candidate_batch,
         flush_policy: candidate_flush_policy,
         error_policies: candidate_error_policies,
@@ -1326,11 +1326,11 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     if base_from.r#where != candidate_from.r#where {
         changes.push(ModelChangeAspect::EmitterInputWhere);
     }
-    if base_sink.client() != candidate_sink.client() {
+    if base_emitter.client() != candidate_emitter.client() {
         changes.push(ModelChangeAspect::EmitterClient);
     }
-    if !base_sink.same_definition(candidate_sink) {
-        changes.push(ModelChangeAspect::EmitterSink);
+    if !base_emitter.same_definition(candidate_emitter) {
+        changes.push(ModelChangeAspect::EmitterConnector);
     }
     if base_body != candidate_body {
         changes.push(ModelChangeAspect::EmitterCodec);
@@ -1341,7 +1341,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     if base_mode != candidate_mode {
         changes.push(ModelChangeAspect::EmitterMode);
     }
-    if base_sink.publishing() != candidate_sink.publishing() {
+    if base_emitter.publishing() != candidate_emitter.publishing() {
         changes.push(ModelChangeAspect::EmitterPublishingMode);
     }
     if base_construction != candidate_construction {
@@ -1389,13 +1389,14 @@ mod tests {
 
     use crate::{
         AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
-        CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
-        EmitterBody, EndpointIngestMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
-        HttpEndpointSource, HttpSource, IngestSource, IngestTimestampSource, InputCollectPolicy,
-        Literal, MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
-        MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, NatsSink, NatsSubjectSink,
-        ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
-        RelayBranching, RetryPolicy, ZeroMqPushSink, ZeroMqSink,
+        CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer,
+        EmitterBody, EmitterEntity, EndpointIngestMode, ErrorPolicies, FlushPolicy,
+        GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor, IngestTimestampSource,
+        IngestorEntity, InputCollectPolicy, Literal, MaterializedRelayState,
+        MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
+        ModelChangeAspect, ModelKind, NatsEmitter, NatsSubjectEmitter, ProcessorInputWhere,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
+        RetryPolicy, ZeroMqEmitter, ZeroMqPushEmitter,
     };
 
     fn named<N>(raw: &str) -> N
@@ -1481,15 +1482,17 @@ mod tests {
             body: EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-                mode: crate::ZeroMqPushPublishingMode::NoAck {
-                    retry_policy: RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+            connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+                ZeroMqPushEmitter {
+                    mode: crate::ZeroMqPushPublishingMode::NoAck {
+                        retry_policy: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
                     },
+                    client: named("sink"),
                 },
-                client: named("sink"),
-            }))),
+            ))),
             batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "1s".to_string(),
@@ -1548,7 +1551,7 @@ mod tests {
                 },
             )]),
             input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                source: IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+                source: IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
                     endpoint: named("ingress_a"),
                     mode: EndpointIngestMode::NoAck,
                     quiesce: crate::IngestQuiesceMode::EndpointBuffer {
@@ -1849,15 +1852,17 @@ mod tests {
         assert_eq!(dynamic.dynamic_updates().len(), 1);
 
         let mut client = base.clone();
-        client.sink = Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-            mode: crate::ZeroMqPushPublishingMode::NoAck {
-                retry_policy: crate::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+        client.connector = Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+            ZeroMqPushEmitter {
+                mode: crate::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: crate::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
                 },
+                client: named("emitter_two"),
             },
-            client: named("sink_two"),
-        })));
+        )));
         assert_single_aspect(
             Model::Emitter(base.clone()),
             Model::Emitter(client),
@@ -1865,21 +1870,23 @@ mod tests {
             QuiesceLevel::EntityPause,
         );
 
-        let mut sink = base.clone();
-        sink.sink = Box::new(EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
-            mode: crate::NatsSubjectPublishingMode::NoAck {
-                retry_policy: crate::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+        let mut connector = base.clone();
+        connector.connector = Box::new(EmitterEntity::Nats(NatsEmitter::Subject(
+            NatsSubjectEmitter {
+                mode: crate::NatsSubjectPublishingMode::NoAck {
+                    retry_policy: crate::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
                 },
+                client: named("sink"),
+                subject: named("events"),
             },
-            client: named("sink"),
-            subject: named("events"),
-        })));
+        )));
         assert_single_aspect(
             Model::Emitter(base.clone()),
-            Model::Emitter(sink),
-            ModelChangeAspect::EmitterSink,
+            Model::Emitter(connector),
+            ModelChangeAspect::EmitterConnector,
             QuiesceLevel::EntityPause,
         );
 
@@ -1941,7 +1948,9 @@ mod tests {
         );
 
         let mut publishing_mode = base.clone();
-        let EmitSink::ZeroMq(ZeroMqSink::Push(destination)) = publishing_mode.sink.as_mut() else {
+        let EmitterEntity::ZeroMq(ZeroMqEmitter::Push(destination)) =
+            publishing_mode.connector.as_mut()
+        else {
             panic!("expected ZeroMQ");
         };
         destination.mode = crate::ZeroMqPushPublishingMode::NoAck {
@@ -1993,13 +2002,14 @@ mod tests {
                     let crate::IngestorInput::Transport(input) = &mut candidate.input else {
                         panic!("the fixture ingestor reads an endpoint");
                     };
-                    input.source = IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
-                        endpoint: named("ingress_b"),
-                        mode: EndpointIngestMode::NoAck,
-                        quiesce: crate::IngestQuiesceMode::EndpointBuffer {
-                            max_size: "1MiB".to_string(),
-                        },
-                    }));
+                    input.source =
+                        IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
+                            endpoint: named("ingress_b"),
+                            mode: EndpointIngestMode::NoAck,
+                            quiesce: crate::IngestQuiesceMode::EndpointBuffer {
+                                max_size: "1MiB".to_string(),
+                            },
+                        }));
                     candidate
                 },
                 ModelChangeAspect::IngestorSource,

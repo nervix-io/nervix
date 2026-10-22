@@ -12,20 +12,21 @@ use std::num::NonZeroUsize;
 use meticulous::OptionExt as _;
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_models::{
-    ChoiceRequirement, ClickHouseSinkEntity, ClientConfigOwner, ClientPooling, ClientSinkEntity,
-    ClientSourceEntity, ConnectorKind, EmitSinkKind, EmitterBatchLegality, EmitterBody,
-    EmitterBodyForm, EmitterPublishingModeKind, EnvelopeClauseKind, ExternalName, HttpSinkEntity,
-    HttpSourceEntity, IcebergSinkEntity, IcebergStorageBackend, IngestDeliveryKind,
-    IngestQuiesceKind, IngestSourceKind, KafkaConsumerGroupName, KafkaSinkEntity,
-    KafkaSourceEntity, KafkaTopicName, LocatorDeclaration, LocatorName, MongoDbSinkEntity,
-    MqttSinkEntity, MqttSourceEntity, MqttTopicFilter, MySqlSinkEntity, NatsQueueGroupName,
-    NatsSinkEntity, NatsSourceEntity, NatsSubjectName, OptionDeclaration, OptionForm,
-    OptionPresence, OtelSinkEntity, PostgresSinkEntity, PrometheusSourceEntity, PulsarSinkEntity,
-    PulsarSourceEntity, PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName,
-    RabbitMqSinkEntity, RabbitMqSourceEntity, RedisChannelName, RedisSinkEntity, RedisSourceEntity,
-    RuntimeCapability, SentrySinkEntity, SinkReferenceKind, SqsQueueName, SqsSinkEntity,
-    SqsSourceEntity, SyslogSinkEntity, SyslogSourceEntity, WebsocketsSourceEntity,
-    ZeroMqSinkEntity, ZeroMqSourceEntity,
+    ChoiceRequirement, ClickHouseEmitterEntity, ClientConfigOwner, ClientEmitterEntity,
+    ClientPooling, ClientSourceEntity, ConnectorKind, EmitterBatchLegality, EmitterBody,
+    EmitterBodyForm, EmitterEntityKind, EmitterPublishingModeKind, EmitterReferenceKind,
+    EnvelopeClauseKind, ExternalName, HttpEmitterEntity, HttpIngestorEntity, IcebergEmitterEntity,
+    IcebergStorageBackend, IngestDeliveryKind, IngestQuiesceKind, IngestorEntityKind,
+    KafkaConsumerGroupName, KafkaEmitterEntity, KafkaIngestorEntity, KafkaTopicName,
+    LocatorDeclaration, LocatorName, MongoDbEmitterEntity, MqttEmitterEntity, MqttIngestorEntity,
+    MqttTopicFilter, MySqlEmitterEntity, NatsEmitterEntity, NatsIngestorEntity, NatsQueueGroupName,
+    NatsSubjectName, OptionDeclaration, OptionForm, OptionPresence, OtelEmitterEntity,
+    PostgresEmitterEntity, PrometheusIngestorEntity, PulsarEmitterEntity, PulsarIngestorEntity,
+    PulsarSubscriptionName, PulsarTopicName, RabbitMqEmitterEntity, RabbitMqIngestorEntity,
+    RabbitMqQueueName, RedisChannelName, RedisEmitterEntity, RedisIngestorEntity,
+    RuntimeCapability, SentryEmitterEntity, SqsEmitterEntity, SqsIngestorEntity, SqsQueueName,
+    SyslogEmitterEntity, SyslogIngestorEntity, WebsocketsIngestorEntity, ZeroMqEmitterEntity,
+    ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -33,7 +34,7 @@ use super::seeded_bytes;
 
 /// The delivery modes and the quiesce modes one source pair declares, as the table below states
 /// them, each with whether it requires a choice written beside it.
-struct SourceSurface {
+struct IngestorSurface {
     delivery: &'static [(IngestDeliveryKind, bool)],
     quiesce: &'static [(IngestQuiesceKind, bool)],
     locator: Option<(&'static str, &'static str)>,
@@ -65,15 +66,15 @@ const ENDPOINT: &[(IngestQuiesceKind, bool)] = &[
     (IngestQuiesceKind::EndpointBuffer, false),
 ];
 
-fn source_surface(kind: IngestSourceKind) -> SourceSurface {
-    let unlocated = |delivery, quiesce, options| SourceSurface {
+fn source_surface(kind: IngestorEntityKind) -> IngestorSurface {
+    let unlocated = |delivery, quiesce, options| IngestorSurface {
         delivery,
         quiesce,
         locator: None,
         options,
     };
     match kind {
-        IngestSourceKind::Client(ClientSourceEntity::Producer) => unlocated(
+        IngestorEntityKind::Client(ClientSourceEntity::Producer) => unlocated(
             &[
                 (IngestDeliveryKind::AckSequential, false),
                 (IngestDeliveryKind::AckParallel, false),
@@ -81,11 +82,11 @@ fn source_surface(kind: IngestSourceKind) -> SourceSurface {
             SUSPEND,
             &[],
         ),
-        IngestSourceKind::Http(HttpSourceEntity::Request) => {
+        IngestorEntityKind::Http(HttpIngestorEntity::Request) => {
             unlocated(NO_ACK, POLLING, &[("EVERY", true)])
         }
-        IngestSourceKind::Http(HttpSourceEntity::Endpoint)
-        | IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => unlocated(
+        IngestorEntityKind::Http(HttpIngestorEntity::Endpoint)
+        | IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => unlocated(
             &[
                 (IngestDeliveryKind::NoAck, false),
                 (IngestDeliveryKind::AckRequest, false),
@@ -93,19 +94,19 @@ fn source_surface(kind: IngestSourceKind) -> SourceSurface {
             ENDPOINT,
             &[],
         ),
-        IngestSourceKind::Kafka(KafkaSourceEntity::Topic) => SourceSurface {
+        IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) => IngestorSurface {
             delivery: EVERY_DELIVERY,
             quiesce: SUSPEND,
             locator: Some(("TOPIC", "kafka_topic")),
             options: &[("OFFSET BY", true), ("INSTANCES", false)],
         },
-        IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) => SourceSurface {
+        IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => IngestorSurface {
             delivery: EVERY_DELIVERY,
             quiesce: SUSPEND,
             locator: Some(("TOPIC", "pulsar_topic")),
             options: &[("SUBSCRIPTION", true), ("INSTANCES", false)],
         },
-        IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => SourceSurface {
+        IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => IngestorSurface {
             delivery: &[
                 (IngestDeliveryKind::NoAck, false),
                 (IngestDeliveryKind::AckSequential, true),
@@ -119,40 +120,40 @@ fn source_surface(kind: IngestSourceKind) -> SourceSurface {
             locator: Some(("TOPIC", "mqtt_topic_filter")),
             options: &[("INSTANCES", false), ("SESSION", false), ("QOS", false)],
         },
-        IngestSourceKind::Nats(NatsSourceEntity::Subject) => SourceSurface {
+        IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => IngestorSurface {
             delivery: NO_ACK,
             quiesce: PUSH,
             locator: Some(("SUBJECT", "nats_subject")),
             options: &[("QUEUE GROUP", true), ("INSTANCES", true)],
         },
-        IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) => SourceSurface {
+        IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => IngestorSurface {
             delivery: &[(IngestDeliveryKind::AckSequential, false)],
             quiesce: SUSPEND,
             locator: Some(("QUEUE", "rabbitmq_queue")),
             options: &[("INSTANCES", false)],
         },
-        IngestSourceKind::Sqs(SqsSourceEntity::Queue) => SourceSurface {
+        IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => IngestorSurface {
             delivery: &[(IngestDeliveryKind::AckSequential, false)],
             quiesce: SUSPEND,
             locator: Some(("QUEUE", "sqs_queue")),
             options: &[("INSTANCES", false)],
         },
-        IngestSourceKind::Redis(RedisSourceEntity::PubSub) => SourceSurface {
+        IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => IngestorSurface {
             delivery: NO_ACK,
             quiesce: PUSH,
             locator: Some(("CHANNEL", "redis_channel")),
             options: &[],
         },
-        IngestSourceKind::Prometheus(PrometheusSourceEntity::Query) => unlocated(
+        IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => unlocated(
             NO_ACK,
             POLLING,
             &[("QUERY", true), ("MAX BODY SIZE", false), ("EVERY", true)],
         ),
-        IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull)
-        | IngestSourceKind::Syslog(SyslogSourceEntity::Listener) => {
+        IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull)
+        | IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener) => {
             unlocated(NO_ACK, FLEXIBLE, &[])
         }
-        IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
+        IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection) => {
             unlocated(NO_ACK, PUSH, &[])
         }
     }
@@ -179,7 +180,7 @@ fn locator_shape(locator: Option<LocatorDeclaration>) -> Option<(&'static str, &
 
 #[test]
 fn every_source_pair_declares_its_modes_quiesce_modes_locator_and_options() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         let expected = source_surface(kind);
         let declared = kind.capabilities();
         let mut delivery = Vec::new();
@@ -201,20 +202,20 @@ fn every_source_pair_declares_its_modes_quiesce_modes_locator_and_options() {
 }
 
 /// The publishing modes, reference, locator and options one sink pair declares.
-struct SinkSurface {
-    reference: SinkReferenceKind,
+struct EmitterSurface {
+    reference: EmitterReferenceKind,
     locator: Option<(&'static str, &'static str)>,
     options: &'static [(&'static str, bool)],
 }
 
-fn sink_surface(kind: EmitSinkKind) -> SinkSurface {
-    let client = |connector| SinkReferenceKind::Client(connector);
-    let located = |connector, keywords, label, options| SinkSurface {
+fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
+    let client = |connector| EmitterReferenceKind::Client(connector);
+    let located = |connector, keywords, label, options| EmitterSurface {
         reference: client(connector),
         locator: Some((keywords, label)),
         options,
     };
-    let unlocated = |connector, options| SinkSurface {
+    let unlocated = |connector, options| EmitterSurface {
         reference: client(connector),
         locator: None,
         options,
@@ -222,45 +223,51 @@ fn sink_surface(kind: EmitSinkKind) -> SinkSurface {
     let otel = &[("ATTRIBUTES", false), ("RESOURCE", false), ("SCOPE", false)];
     let conflict = &[("ON CONFLICT", false)];
     match kind {
-        EmitSinkKind::Client(ClientSinkEntity::Consumer) => SinkSurface {
-            reference: SinkReferenceKind::Schema,
+        EmitterEntityKind::Client(ClientEmitterEntity::Consumer) => EmitterSurface {
+            reference: EmitterReferenceKind::Schema,
             locator: None,
             options: &[],
         },
-        EmitSinkKind::Http(HttpSinkEntity::Request) => {
+        EmitterEntityKind::Http(HttpEmitterEntity::Request) => {
             unlocated(ConnectorKind::Http, &[("METHOD", true), ("PATH", true)])
         }
-        EmitSinkKind::Kafka(KafkaSinkEntity::Topic) => {
+        EmitterEntityKind::Kafka(KafkaEmitterEntity::Topic) => {
             located(ConnectorKind::Kafka, "TOPIC", "kafka_topic", &[])
         }
-        EmitSinkKind::Pulsar(PulsarSinkEntity::Topic) => {
+        EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => {
             located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
         }
-        EmitSinkKind::Mqtt(MqttSinkEntity::Topic) => {
+        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
             located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[])
         }
-        EmitSinkKind::RabbitMq(RabbitMqSinkEntity::Queue) => {
+        EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Queue) => {
             located(ConnectorKind::RabbitMq, "QUEUE", "rabbitmq_queue", &[])
         }
-        EmitSinkKind::Redis(RedisSinkEntity::PubSub) => {
+        EmitterEntityKind::Redis(RedisEmitterEntity::PubSub) => {
             located(ConnectorKind::Redis, "CHANNEL", "redis_channel", &[])
         }
-        EmitSinkKind::Nats(NatsSinkEntity::Subject) => {
+        EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => {
             located(ConnectorKind::Nats, "SUBJECT", "nats_publish_subject", &[])
         }
-        EmitSinkKind::Sqs(SqsSinkEntity::Queue) => located(
+        EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => located(
             ConnectorKind::Sqs,
             "QUEUE",
             "sqs_queue",
             &[("FIFO GROUP", false)],
         ),
-        EmitSinkKind::ZeroMq(ZeroMqSinkEntity::Push) => unlocated(ConnectorKind::ZeroMq, &[]),
-        EmitSinkKind::Sentry(SentrySinkEntity::Event) => unlocated(ConnectorKind::Sentry, &[]),
-        EmitSinkKind::Syslog(SyslogSinkEntity::Collector) => unlocated(ConnectorKind::Syslog, &[]),
-        EmitSinkKind::Otel(OtelSinkEntity::Logs | OtelSinkEntity::Traces) => {
+        EmitterEntityKind::ZeroMq(ZeroMqEmitterEntity::Push) => {
+            unlocated(ConnectorKind::ZeroMq, &[])
+        }
+        EmitterEntityKind::Sentry(SentryEmitterEntity::Event) => {
+            unlocated(ConnectorKind::Sentry, &[])
+        }
+        EmitterEntityKind::Syslog(SyslogEmitterEntity::Collector) => {
+            unlocated(ConnectorKind::Syslog, &[])
+        }
+        EmitterEntityKind::Otel(OtelEmitterEntity::Logs | OtelEmitterEntity::Traces) => {
             unlocated(ConnectorKind::Otel, otel)
         }
-        EmitSinkKind::Otel(OtelSinkEntity::Metrics) => unlocated(
+        EmitterEntityKind::Otel(OtelEmitterEntity::Metrics) => unlocated(
             ConnectorKind::Otel,
             &[
                 ("METRIC", true),
@@ -269,23 +276,23 @@ fn sink_surface(kind: EmitSinkKind) -> SinkSurface {
                 ("SCOPE", false),
             ],
         ),
-        EmitSinkKind::ClickHouse(ClickHouseSinkEntity::Table) => {
+        EmitterEntityKind::ClickHouse(ClickHouseEmitterEntity::Table) => {
             located(ConnectorKind::ClickHouse, "TABLE", "clickhouse_table", &[])
         }
-        EmitSinkKind::Postgres(PostgresSinkEntity::Table) => {
+        EmitterEntityKind::Postgres(PostgresEmitterEntity::Table) => {
             located(ConnectorKind::Postgres, "TABLE", "postgres_table", conflict)
         }
-        EmitSinkKind::MySql(MySqlSinkEntity::Table) => {
+        EmitterEntityKind::MySql(MySqlEmitterEntity::Table) => {
             located(ConnectorKind::MySql, "TABLE", "mysql_table", conflict)
         }
-        EmitSinkKind::MongoDb(MongoDbSinkEntity::Collection) => located(
+        EmitterEntityKind::MongoDb(MongoDbEmitterEntity::Collection) => located(
             ConnectorKind::MongoDb,
             "COLLECTION",
             "mongodb_collection",
             conflict,
         ),
-        EmitSinkKind::Iceberg(IcebergSinkEntity::Table) => SinkSurface {
-            reference: SinkReferenceKind::StorageClient(&[
+        EmitterEntityKind::Iceberg(IcebergEmitterEntity::Table) => EmitterSurface {
+            reference: EmitterReferenceKind::StorageClient(&[
                 ConnectorKind::S3,
                 ConnectorKind::Gcs,
                 ConnectorKind::AzureBlob,
@@ -297,9 +304,9 @@ fn sink_surface(kind: EmitSinkKind) -> SinkSurface {
 }
 
 #[test]
-fn every_sink_pair_declares_its_reference_locator_and_options_and_no_envelope_yet() {
-    for kind in EmitSinkKind::all() {
-        let expected = sink_surface(kind);
+fn every_emitter_pair_declares_its_reference_locator_and_options_and_no_envelope_yet() {
+    for kind in EmitterEntityKind::all() {
+        let expected = emitter_surface(kind);
         let declared = kind.capabilities();
         assert_eq!(declared.reference, expected.reference, "{kind}");
         assert_eq!(locator_shape(declared.locator), expected.locator, "{kind}");
@@ -310,8 +317,8 @@ fn every_sink_pair_declares_its_reference_locator_and_options_and_no_envelope_ye
 }
 
 #[test]
-fn an_iceberg_sink_declares_every_object_store_its_backend_names() {
-    let declared = EmitSinkKind::Iceberg(IcebergSinkEntity::Table).capabilities();
+fn an_iceberg_emitter_declares_every_object_store_its_backend_names() {
+    let declared = EmitterEntityKind::Iceberg(IcebergEmitterEntity::Table).capabilities();
     for backend in [
         IcebergStorageBackend::S3,
         IcebergStorageBackend::Gcs,
@@ -353,12 +360,12 @@ fn every_external_name_declares_its_label_and_an_example_its_rule_admits() {
 /// Every option an entity of either side declares.
 fn every_option() -> Vec<(String, OptionDeclaration)> {
     let mut options = Vec::new();
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         for option in kind.capabilities().options {
             options.push((format!("{kind} INGESTOR"), *option));
         }
     }
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         for option in kind.capabilities().options {
             options.push((format!("{kind} EMITTER"), *option));
         }
@@ -410,7 +417,7 @@ fn every_option_example_writes_its_keywords_and_every_default_is_a_declared_choi
 
 #[test]
 fn every_requirement_names_a_choice_its_entity_declares() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         let declared = kind.capabilities();
         let mut requirements: Vec<ChoiceRequirement> = Vec::new();
         for delivery in declared.delivery {
@@ -435,7 +442,7 @@ fn every_requirement_names_a_choice_its_entity_declares() {
 
 #[test]
 fn every_delivery_and_publishing_mode_kind_is_declared_at_most_once() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         let declared = kind.capabilities();
         for delivery in IngestDeliveryKind::iter() {
             let mut count = 0;
@@ -456,7 +463,7 @@ fn every_delivery_and_publishing_mode_kind_is_declared_at_most_once() {
             assert!(count <= 1, "{kind} declares {quiesce:?} {count} times");
         }
     }
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         let declared = kind.capabilities();
         for mode in EmitterPublishingModeKind::iter() {
             let mut count = 0;
@@ -541,7 +548,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
     };
     assert_eq!(
         named(
-            IngestSourceKind::Kafka(KafkaSourceEntity::Topic)
+            IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic)
                 .capabilities()
                 .runtime_capabilities()
         ),
@@ -559,7 +566,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
     );
     assert_eq!(
         named(
-            EmitSinkKind::Sqs(SqsSinkEntity::Queue)
+            EmitterEntityKind::Sqs(SqsEmitterEntity::Queue)
                 .capabilities()
                 .runtime_capabilities()
         ),
@@ -574,7 +581,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
     );
     assert_eq!(
         named(
-            EmitSinkKind::Http(HttpSinkEntity::Request)
+            EmitterEntityKind::Http(HttpEmitterEntity::Request)
                 .capabilities()
                 .runtime_capabilities()
         ),
@@ -600,7 +607,7 @@ fn an_envelope_clause_and_a_property_are_named_as_a_statement_writes_them() {
 
 #[test]
 fn an_mqtt_source_answers_the_session_and_quality_of_service_it_subscribes_with() {
-    let kind = IngestSourceKind::Mqtt(MqttSourceEntity::Topic);
+    let kind = IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic);
     for seed in 0..8 {
         let bytes = seeded_bytes(seed);
         let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
@@ -615,7 +622,7 @@ fn an_mqtt_source_answers_the_session_and_quality_of_service_it_subscribes_with(
         assert!(matches!(qos, "0" | "1"), "{qos}");
         assert_eq!(source.chosen("INSTANCES"), None);
     }
-    let kafka = IngestSourceKind::Kafka(KafkaSourceEntity::Topic);
+    let kafka = IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic);
     let bytes = seeded_bytes(1);
     let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
     let source = arbitrary
@@ -640,26 +647,26 @@ fn assert_generated_entities_state_what_they_declare(bytes: &[u8]) {
 /// quiesce mode its entity honors.
 fn assert_generated_ingestor_states_what_its_entity_declares(bytes: &[u8]) {
     let mut arbitrary = Arbitrary::new(bytes, Domain::Nspl);
-    let sources = IngestSourceKind::all().collect::<Vec<_>>();
+    let sources = IngestorEntityKind::all().collect::<Vec<_>>();
     let count = NonZeroUsize::new(sources.len()).assured("the vocabulary declares sources");
-    let source_kind = sources[arbitrary.entropy().index(count)];
-    let ingestor = arbitrary.create_ingestor_from(source_kind);
-    let declared = source_kind.capabilities();
-    if let Some(source) = ingestor.input.transport_source() {
+    let entity_kind = sources[arbitrary.entropy().index(count)];
+    let ingestor = arbitrary.create_ingestor_from(entity_kind);
+    let declared = entity_kind.capabilities();
+    if let Some(source) = ingestor.input.transport_entity() {
         let delivery = declared
             .declared_delivery(source.acknowledgement().kind())
-            .unwrap_or_else(|| panic!("{source_kind} names an undeclared mode: {source:?}"));
+            .unwrap_or_else(|| panic!("{entity_kind} names an undeclared mode: {source:?}"));
         for requirement in delivery.requires {
             assert_eq!(
                 source.chosen(requirement.option),
                 Some(requirement.choice),
-                "{source_kind} names a mode without its requirements: {source:?}"
+                "{entity_kind} names a mode without its requirements: {source:?}"
             );
         }
     }
     assert!(
         ingestor.input.supports_quiesce(ingestor.input.quiesce()),
-        "{source_kind} quiesces in a mode it does not honor: {:?}",
+        "{entity_kind} quiesces in a mode it does not honor: {:?}",
         ingestor.input.quiesce()
     );
 }
@@ -669,15 +676,15 @@ fn assert_generated_ingestor_states_what_its_entity_declares(bytes: &[u8]) {
 /// declared connector.
 fn assert_generated_emitter_states_what_its_entity_declares(bytes: &[u8]) {
     let mut arbitrary = Arbitrary::new(bytes, Domain::Nspl);
-    let sinks = EmitSinkKind::all().collect::<Vec<_>>();
-    let count = NonZeroUsize::new(sinks.len()).assured("the vocabulary declares sinks");
-    let sink_kind = sinks[arbitrary.entropy().index(count)];
-    let emitter = arbitrary.create_emitter_to(sink_kind);
-    let declared = sink_kind.capabilities();
+    let emitters = EmitterEntityKind::all().collect::<Vec<_>>();
+    let count = NonZeroUsize::new(emitters.len()).assured("the vocabulary declares emitters");
+    let emitter_kind = emitters[arbitrary.entropy().index(count)];
+    let emitter = arbitrary.create_emitter_to(emitter_kind);
+    let declared = emitter_kind.capabilities();
     assert!(
-        declared.accepts_publishing_mode_kind(emitter.sink.publishing().kind()),
-        "{sink_kind} names an undeclared mode: {:?}",
-        emitter.sink.publishing()
+        declared.accepts_publishing_mode_kind(emitter.connector.publishing().kind()),
+        "{emitter_kind} names an undeclared mode: {:?}",
+        emitter.connector.publishing()
     );
     let formed = match (declared.body, &emitter.body) {
         (EmitterBodyForm::Codec, EmitterBody::Codec { .. })
@@ -693,7 +700,7 @@ fn assert_generated_emitter_states_what_its_entity_declares(bytes: &[u8]) {
             _,
         ) => false,
     };
-    assert!(formed, "{sink_kind} writes {:?}", emitter.body);
+    assert!(formed, "{emitter_kind} writes {:?}", emitter.body);
     let batching = match (declared.batch, &emitter.batch) {
         (EmitterBatchLegality::Required { .. }, Some(_))
         | (EmitterBatchLegality::Optional { .. }, _)
@@ -701,17 +708,17 @@ fn assert_generated_emitter_states_what_its_entity_declares(bytes: &[u8]) {
         (EmitterBatchLegality::Required { .. }, None)
         | (EmitterBatchLegality::Unavailable { .. }, Some(_)) => false,
     };
-    assert!(batching, "{sink_kind} batches as {:?}", emitter.batch);
-    match emitter.sink.reference() {
-        nervix_models::SinkReference::Client(reference) => {
+    assert!(batching, "{emitter_kind} batches as {:?}", emitter.batch);
+    match emitter.connector.reference() {
+        nervix_models::EmitterReference::Client(reference) => {
             assert!(declared.reference.admits_client(reference.connector))
         }
-        nervix_models::SinkReference::StorageClient(_) => assert!(matches!(
+        nervix_models::EmitterReference::StorageClient(_) => assert!(matches!(
             declared.reference,
-            SinkReferenceKind::StorageClient(_)
+            EmitterReferenceKind::StorageClient(_)
         )),
-        nervix_models::SinkReference::Schema(_) => {
-            assert_eq!(declared.reference, SinkReferenceKind::Schema)
+        nervix_models::EmitterReference::Schema(_) => {
+            assert_eq!(declared.reference, EmitterReferenceKind::Schema)
         }
     }
 }

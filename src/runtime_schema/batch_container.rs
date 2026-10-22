@@ -163,7 +163,7 @@ impl CompiledCodecBatchEncoder<'_> {
                     // it is, so it must be a value the format can write.
                     native
                         .format
-                        .write_value_into(&value, &mut io::sink())
+                        .write_value_into(&value, &mut io::connector())
                         .map_err(|error| {
                             Report::new(CodecError::JaqNativeEncode {
                                 codec: codec.name.as_str().to_string(),

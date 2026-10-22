@@ -17,14 +17,14 @@
 
 use error_stack::ResultExt as _;
 use nervix_connector_pulsar::{
-    PulsarAckReceipts, PulsarSource, PulsarSourcePlan, PulsarSourceSettings,
+    PulsarAckReceipts, PulsarIngestor, PulsarIngestorPlan, PulsarIngestorSettings,
 };
 use nervix_models::ClientConfigEntry;
 
 use super::{
     super::*,
-    IngestorStartError, SourceStartError,
-    source::{BrokerSourceStart, SourceStart},
+    IngestorConnectorStartError, IngestorStartError,
+    connector::{BrokerIngestorStart, IngestorStart},
 };
 
 impl PulsarIngestorStartPlan {
@@ -32,7 +32,7 @@ impl PulsarIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
         let resolved = runtime
             .resolve_client_config(
                 &ingestor.domain,
@@ -40,10 +40,10 @@ impl PulsarIngestorStartPlan {
                 &self.client.config,
             )
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let connector = PulsarSourcePlan::connect(self.settings(&resolved.entries, ingestor))
+        let connector = PulsarIngestorPlan::connect(self.settings(&resolved.entries, ingestor))
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        BrokerSourceStart {
+        BrokerIngestorStart {
             connector,
             instances: self.instances,
             acknowledgement: self.mode.acknowledgement(),
@@ -56,7 +56,7 @@ impl PulsarIngestorStartPlan {
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "pulsar",
         }
-        .open::<PulsarSource>(ingestor)
+        .open::<PulsarIngestor>(ingestor)
         .await
     }
 
@@ -80,7 +80,7 @@ impl PulsarIngestorStartPlan {
                 self.client.mount.as_ref(),
                 &self.client.config,
             )
-            .change_context(SourceStartError::ClientConfiguration)
+            .change_context(IngestorConnectorStartError::ClientConfiguration)
             .change_context_lazy(context)?;
         let settings = self.settings(&resolved.entries, ingestor);
         if let Some(replacement) = replacement {
@@ -90,7 +90,7 @@ impl PulsarIngestorStartPlan {
                     replacement.client.mount.as_ref(),
                     &replacement.client.config,
                 )
-                .change_context(SourceStartError::ClientConfiguration)
+                .change_context(IngestorConnectorStartError::ClientConfiguration)
                 .change_context_lazy(context)?;
             let replacement_settings = replacement.settings(&replacement_config.entries, ingestor);
             let retained = settings
@@ -100,7 +100,7 @@ impl PulsarIngestorStartPlan {
                 return Ok(());
             }
         }
-        PulsarSourcePlan::remove_subscription(settings)
+        PulsarIngestorPlan::remove_subscription(settings)
             .await
             .change_context_lazy(context)
     }
@@ -112,7 +112,7 @@ impl PulsarIngestorStartPlan {
         &'a self,
         config: &'a [ClientConfigEntry],
         ingestor: &IngestorSpec,
-    ) -> PulsarSourceSettings<'a> {
+    ) -> PulsarIngestorSettings<'a> {
         // A mode without an acknowledgement tree reads one message at a time, so only an
         // acknowledged mode waits for the broker to answer what it acknowledges.
         let ack_receipts = match &self.mode {
@@ -120,7 +120,7 @@ impl PulsarIngestorStartPlan {
             nervix_models::PulsarIngestMode::AckSequential { .. }
             | nervix_models::PulsarIngestMode::AckParallel { .. } => PulsarAckReceipts::Awaited,
         };
-        PulsarSourceSettings {
+        PulsarIngestorSettings {
             config,
             topic: &self.topic,
             subscription: self.subscription.clone(),

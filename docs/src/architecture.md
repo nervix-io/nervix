@@ -30,11 +30,11 @@ has scheduler-selected replicas.
 
 The decision layer converts each committed domain schedule into one in-memory typed execution
 revision, including node identity, placement, branch and schema contracts, resources, source and
-sink plans, processor programs, and message-error routes. The runtime binds local resources and
+emitter plans, processor programs, and message-error routes. The runtime binds local resources and
 executes that revision without reading a Model. [Execution Plans](./execution-plans.md) follows
 construction, publication, incremental application, rebuilds, and recovery end to end.
 
-Each declared layer module carries a gated `nervix::layer` source contract alongside its ownership
+Each declared layer module carries a gated `nervix::layer` ingestor contract alongside its ownership
 documentation. The compiler uses that semantic owner through aliases, re-exports and source moves.
 Configuration Models cannot enter data-plane interfaces or bodies; connector engines explicitly
 declare that they consume plans. General infrastructure, including consensus persistence, may
@@ -80,10 +80,10 @@ The runtime then instantiates that schedule:
 - emitters encode records and publish them externally
 
 Ingestors and emitters meet external systems through connector crates. The server composes a
-validated typed plan with an integration-specific source or sink, and its data-plane host owns
+validated typed plan with an integration-specific source or emitter, and its data-plane host owns
 intake, routing, buffering, acknowledgements, and lifecycle. The
 [Connector Crates And The Connector Contract](./connector-contract.md) chapter defines that
-boundary, its source and sink families, delivery and commit points, special integrations, and
+boundary, its ingestor and emitter families, delivery and commit points, special integrations, and
 failure semantics. The [Ingestors](./ingestors.md) and [Emitters](./emitters.md) manuals define the
 public NSPL forms.
 

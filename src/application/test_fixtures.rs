@@ -25,11 +25,11 @@ use nervix_interconnect::{TlsConfigBundle, Transport, TransportClock};
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CommandExecutionReference, CreateDeduplicator,
     CreateEmitter, CreateIngestor, CreateJunction, CreateSchema, CreateWasmProcessor, DomainConfig,
-    DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, EmitSink, IngestSource,
-    KafkaOffsetMode, KafkaSource, KafkaTopicSource, Model, ModelKind, ModelName, NodeEndpoint,
-    NodeRef, NodeServiceUrl, PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs,
-    ScheduledNode, SchemaFingerprint, SyslogCollectorSink, SyslogSink, TransactionLifecycle,
-    TransactionPosition, WasmProcessorLimits,
+    DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, EmitterEntity,
+    IngestorEntity, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind,
+    ModelName, NodeEndpoint, NodeRef, NodeServiceUrl, PlacementGroupSchedule, ProcessorInputs,
+    ProcessorOutputs, ScheduledNode, SchemaFingerprint, SyslogCollectorEmitter, SyslogEmitter,
+    TransactionLifecycle, TransactionPosition, WasmProcessorLimits,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -364,7 +364,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             name: named(identifier_raw),
             output_routes: ProcessorOutputs::new(Vec::new()),
             input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-                source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+                source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                     client: named("kafka_main"),
                     topic: named("notifications"),
                     offset_mode: KafkaOffsetMode::Domain,
@@ -388,8 +388,8 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             name: named(identifier_raw),
             from: ProcessorInputs::new(Vec::new(), Vec::new()),
             body: nervix_models::EmitterBody::Values,
-            sink: Box::new(EmitSink::Syslog(SyslogSink::Collector(
-                SyslogCollectorSink {
+            connector: Box::new(EmitterEntity::Syslog(SyslogEmitter::Collector(
+                SyslogCollectorEmitter {
                     mode: nervix_models::SyslogCollectorPublishingMode::NoAck {
                         retry_policy: nervix_models::RetryPolicy {
                             backoff: "1s".to_string(),

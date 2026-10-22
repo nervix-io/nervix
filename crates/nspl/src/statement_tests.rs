@@ -1292,8 +1292,8 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
         &[]
     )]
 #[case::alter_emitter(
-        "ALTER ZEROMQ PUSH EMITTER event_sink SET TO sink_b MODE NO ACK RETRY POLICY BACKOFF 250ms \
-             MAX 30s ENCODE USING event_codec, SET CLIENT sink_c, SET ENCODE USING event_codec, SET COLLECT FOR 10ms MAX \
+        "ALTER ZEROMQ PUSH EMITTER event_emitter SET TO emitter_b MODE NO ACK RETRY POLICY BACKOFF 250ms \
+             MAX 30s ENCODE USING event_codec, SET CLIENT emitter_c, SET ENCODE USING event_codec, SET COLLECT FOR 10ms MAX \
              BATCH SIZE 1MiB, SET DETACHED, SET FLUSH IMMEDIATE;",
         None,
         &[]

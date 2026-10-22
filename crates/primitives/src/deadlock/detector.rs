@@ -154,16 +154,16 @@ pub(crate) fn require_installed() {
 ///
 /// `sink` runs on the findings thread and decides what a finding means for the process. It must not
 /// wait for a tracked lock, which a blocked thread may hold. A sink that panics aborts the process.
-pub fn install<Sink>(sink: Sink) -> Result<Detector, Report<InstallError>>
+pub fn install<Sink>(connector: Sink) -> Result<Detector, Report<InstallError>>
 where
     Sink: FnMut(Finding) + Send + 'static,
 {
-    install_selected(DiagnosticSelection::for_build(false), sink)
+    install_selected(DiagnosticSelection::for_build(false), connector)
 }
 
 pub fn install_selected<Sink>(
     selection: DiagnosticSelection,
-    sink: Sink,
+    connector: Sink,
 ) -> Result<Detector, Report<InstallError>>
 where
     Sink: FnMut(Finding) + Send + 'static,
@@ -183,7 +183,7 @@ where
         let handoff = Arc::clone(&handoff);
         thread::Builder::new()
             .name(FINDINGS_THREAD.to_string())
-            .spawn(move || handoff.deliver(sink))
+            .spawn(move || handoff.deliver(connector))
             .change_context(InstallError::StartFindingsThread)?
     };
     // Nothing joins the findings thread: it runs for the life of the process.
@@ -362,7 +362,7 @@ impl Handoff {
 
     /// The findings thread: deliver every report, and the count of lost ones, until the process
     /// ends.
-    fn deliver<Sink>(&self, mut sink: Sink)
+    fn deliver<Sink>(&self, mut connector: Sink)
     where
         Sink: FnMut(Finding),
     {
@@ -370,7 +370,7 @@ impl Handoff {
             while let Ok(report) = self.reports.pop() {
                 deliver_one(|| match report {
                     CycleReport::Active(report) => {
-                        sink(Finding::ActiveCycle(report.describe(Registry::global())))
+                        connector(Finding::ActiveCycle(report.describe(Registry::global())))
                     }
                     CycleReport::Potential(report) => {
                         let registry = Registry::global();
@@ -380,14 +380,14 @@ impl Handoff {
                             report.locks,
                             report.total_edges,
                         ) {
-                            sink(Finding::PotentialCycle(cycle));
+                            connector(Finding::PotentialCycle(cycle));
                         }
                     }
                 });
             }
             if let Some(lost) = self.reports.take_lost() {
                 deliver_one(|| {
-                    sink(Finding::Overflow {
+                    connector(Finding::Overflow {
                         lost,
                         source: OverflowSource::Handoff,
                     })
@@ -395,7 +395,7 @@ impl Handoff {
             }
             if let Some(lost) = Registry::global().history.take_lost() {
                 deliver_one(|| {
-                    sink(Finding::Overflow {
+                    connector(Finding::Overflow {
                         lost,
                         source: OverflowSource::OrderHistory,
                     })

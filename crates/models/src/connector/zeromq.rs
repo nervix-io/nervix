@@ -22,14 +22,15 @@ use super::{
         DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
-    entity_union::{connector_sinks, connector_sources},
+    entity_union::{connector_emitters, connector_ingestors},
 };
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, IngestAcknowledgement,
-    IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SinkBody, SinkClientReference,
-    SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind,
+    EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
+    EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
+    IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
+    IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference, IngestorReferenceKind,
+    PositionClass,
 };
 
 configured_client!(ZeroMq: unpooled, config Nervix, CreateClientZeroMq => ZeroMqConfigEntry);
@@ -38,7 +39,7 @@ configured_client!(ZeroMq: unpooled, config Nervix, CreateClientZeroMq => ZeroMq
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct ZeroMqPullSource {
+pub struct ZeroMqPullIngestor {
     pub client: ClientName,
     pub mode: ZeroMqIngestMode,
     pub quiesce: IngestQuiesceMode,
@@ -92,12 +93,12 @@ const ZEROMQ_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["The driver has no high-water mark, maximum message size or heartbeat."],
 };
 
-impl SourceEntity for ZeroMqPullSource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
+impl IngestorDeclaration for ZeroMqPullIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         headers: None,
-        metadata: SourceMetadataScope::Headers,
+        metadata: IngestorMetadataScope::Headers,
         executes_on_every_cluster_node: false,
-        reference: SourceReferenceKind::Client(ConnectorKind::ZeroMq),
+        reference: IngestorReferenceKind::Client(ConnectorKind::ZeroMq),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK],
@@ -112,9 +113,9 @@ impl SourceEntity for ZeroMqPullSource {
     };
 }
 
-impl SourceBody for ZeroMqPullSource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Client(&self.client)
+impl IngestorEntityBody for ZeroMqPullIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Client(&self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -145,15 +146,15 @@ impl ZeroMqIngestMode {
     }
 }
 
-connector_sources! {
+connector_ingestors! {
     connector ZeroMq = "ZEROMQ";
     /// What a ZeroMQ source reads.
-    pub enum ZeroMqSource;
+    pub enum ZeroMqIngestor;
     /// The alterations of the ingestors that read a ZeroMQ entity.
     pub enum ZeroMqIngestorAlteration;
     /// The entities a ZeroMQ source reads.
-    pub enum ZeroMqSourceEntity {
-        Pull(ZeroMqPullSource) = "PULL", "ZeroMQ";
+    pub enum ZeroMqIngestorEntity {
+        Pull(ZeroMqPullIngestor) = "PULL", "ZeroMQ";
     }
 }
 
@@ -161,15 +162,15 @@ connector_sources! {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct ZeroMqPushSink {
+pub struct ZeroMqPushEmitter {
     pub mode: ZeroMqPushPublishingMode,
     pub client: ClientName,
 }
 
-impl SinkEntity for ZeroMqPushSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+impl EmitterDeclaration for ZeroMqPushEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         headers: None,
-        reference: SinkReferenceKind::Client(ConnectorKind::ZeroMq),
+        reference: EmitterReferenceKind::Client(ConnectorKind::ZeroMq),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
@@ -182,9 +183,9 @@ impl SinkEntity for ZeroMqPushSink {
     };
 }
 
-impl SinkBody for ZeroMqPushSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for ZeroMqPushEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::ZeroMq,
         })
@@ -195,15 +196,15 @@ impl SinkBody for ZeroMqPushSink {
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector ZeroMq = "ZEROMQ";
     /// What a ZeroMQ sink writes.
-    pub enum ZeroMqSink;
+    pub enum ZeroMqEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum ZeroMqEmitterMode;
     /// The entities a ZeroMQ sink writes.
-    pub enum ZeroMqSinkEntity {
-        Push(ZeroMqPushSink, ZeroMqPushPublishingMode) = "PUSH";
+    pub enum ZeroMqEmitterEntity {
+        Push(ZeroMqPushEmitter, ZeroMqPushPublishingMode) = "PUSH";
     }
 }
 

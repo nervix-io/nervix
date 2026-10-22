@@ -39,7 +39,7 @@ impl RecordedAcknowledgements {
 /// One acknowledgement handover the sink holds, recording how it was resolved.
 struct RecordedHandover(StdArc<RecordedAcknowledgements>);
 
-impl SinkAcknowledgementServices for RecordedHandover {
+impl EmitterRecordAcknowledgementServices for RecordedHandover {
     fn acknowledge(&self) {
         self.0.acknowledged.fetch_add(1, Ordering::AcqRel);
     }
@@ -215,17 +215,17 @@ fn mapped_schema() -> StdArc<arrow_schema::Schema> {
 }
 
 /// A sink over `catalog`'s fixture table that stages through `executor`.
-async fn fixture_sink(catalog: StdArc<dyn Catalog>, executor: Executor) -> IcebergSink {
+async fn fixture_emitter(catalog: StdArc<dyn Catalog>, executor: Executor) -> IcebergEmitter {
     let table = create_table(catalog.as_ref()).await;
-    IcebergSink {
-        client: IcebergSinkClient {
+    IcebergEmitter {
+        client: IcebergEmitterClient {
             catalog,
             table,
             file_name_prefix: "commit-memory".to_string(),
             data_file_sequence: 0,
         },
         commit_state: IcebergCommitState::default(),
-        staged_schema: IcebergSink::staged_arrow_schema(&mapped_schema())
+        staged_schema: IcebergEmitter::staged_arrow_schema(&mapped_schema())
             .assured("the fixture's mapped columns are distinct"),
         commit_policy: IcebergCommitPolicy {
             interval: Duration::from_secs(60),
@@ -242,7 +242,7 @@ async fn fixture_sink(catalog: StdArc<dyn Catalog>, executor: Executor) -> Icebe
 
 /// Stage the rows `user_ids` as one carrier, handing the sink `acknowledgements` to resolve.
 async fn stage(
-    sink: &mut IcebergSink,
+    connector: &mut IcebergEmitter,
     user_ids: &[i64],
     acknowledgements: &StdArc<RecordedAcknowledgements>,
 ) {
@@ -256,17 +256,17 @@ async fn stage(
     .assured("the columns match the mapped schema");
     let selected_rows = (0..user_ids.len()).collect::<Vec<_>>();
     let target_columns = vec!["user_id".to_string(), "action".to_string()];
-    let outcome = sink
-        .publish(MappedSinkRows {
+    let outcome = connector
+        .publish(MappedEmitterRows {
             target_columns: &target_columns,
-            carriers: vec![MappedSinkCarrier {
+            carriers: vec![MappedEmitterCarrier {
                 batch_index: 0,
                 batch: &batch,
                 selected_rows: &selected_rows,
                 occurred_at: Timestamp::from_unix_nanos(1),
-                acknowledgements: Some(SinkAcknowledgements::new(RecordedHandover(StdArc::clone(
-                    acknowledgements,
-                )))),
+                acknowledgements: Some(EmitterRecordAcknowledgements::new(RecordedHandover(
+                    StdArc::clone(acknowledgements),
+                ))),
             }],
         })
         .await;
@@ -371,16 +371,16 @@ fn description<C>(report: &Report<C>) -> Option<String> {
 async fn a_commit_the_bulk_class_has_no_room_for_keeps_its_staged_file_and_acknowledgements() {
     let catalog: StdArc<dyn Catalog> = StdArc::new(memory_catalog().await);
     let executor = Executor::default();
-    let mut sink = fixture_sink(StdArc::clone(&catalog), executor.clone()).await;
+    let mut connector = fixture_emitter(StdArc::clone(&catalog), executor.clone()).await;
     let acknowledgements = StdArc::new(RecordedAcknowledgements::default());
-    stage(&mut sink, &[1, 2], &acknowledgements).await;
-    let staged = sink.staged_bytes;
+    stage(&mut connector, &[1, 2], &acknowledgements).await;
+    let staged = connector.staged_bytes;
     let short_by_one = staged
         .checked_sub(1)
         .assured("a staged Arrow IPC file holds at least its schema");
     let held = hold_bulk_memory_leaving(&executor, short_by_one);
 
-    let refused = sink
+    let refused = connector
         .commit()
         .await
         .err()
@@ -388,7 +388,7 @@ async fn a_commit_the_bulk_class_has_no_room_for_keeps_its_staged_file_and_ackno
 
     assert_eq!(
         refused.current_context(),
-        &SinkPublishError::Commit { sink: ICEBERG }
+        &EmitterWriteError::Commit { connector: ICEBERG }
     );
     assert_eq!(
         refused.downcast_ref::<AdmissionError>(),
@@ -403,9 +403,9 @@ async fn a_commit_the_bulk_class_has_no_room_for_keeps_its_staged_file_and_ackno
             "Iceberg commit waits for room in the bulk memory class for {staged} staged bytes"
         ))
     );
-    assert_eq!(sink.staged_bytes, staged);
-    assert_eq!(sink.staged_rows, 2);
-    for batch in &sink.staged_batches {
+    assert_eq!(connector.staged_bytes, staged);
+    assert_eq!(connector.staged_rows, 2);
+    for batch in &connector.staged_batches {
         assert!(
             batch.path.is_file(),
             "a refused commit keeps its staged file"
@@ -426,7 +426,7 @@ async fn a_commit_the_bulk_class_has_no_room_for_keeps_its_staged_file_and_ackno
     // Exactly the staged bytes are free now, and the commit's charge takes every one of them.
     drop(held);
     let held = hold_bulk_memory_leaving(&executor, staged);
-    let report = sink
+    let report = connector
         .commit()
         .await
         .assured("a class with room for exactly the staged bytes admits the commit")
@@ -437,8 +437,8 @@ async fn a_commit_the_bulk_class_has_no_room_for_keeps_its_staged_file_and_ackno
     assert_eq!(committed_user_ids(catalog.as_ref()).await, vec![1, 2]);
     assert_eq!(acknowledgements.acknowledged(), 1);
     assert_eq!(acknowledgements.rejected(), 0);
-    assert!(sink.staged_batches.is_empty());
-    assert_eq!(sink.staged_bytes, 0);
+    assert!(connector.staged_batches.is_empty());
+    assert_eq!(connector.staged_bytes, 0);
     assert_eq!(
         executor.memory(MemoryClass::Bulk).reserved_bytes,
         held.bytes(),
@@ -449,12 +449,12 @@ async fn a_commit_the_bulk_class_has_no_room_for_keeps_its_staged_file_and_ackno
 #[nervix_primitives::test]
 async fn a_staged_total_larger_than_the_bulk_class_commits_in_groups_within_one_snapshot() {
     let catalog: StdArc<dyn Catalog> = StdArc::new(memory_catalog().await);
-    let mut sink = fixture_sink(StdArc::clone(&catalog), Executor::default()).await;
+    let mut connector = fixture_emitter(StdArc::clone(&catalog), Executor::default()).await;
     let acknowledgements = StdArc::new(RecordedAcknowledgements::default());
     for user_id in [1, 2, 3] {
-        stage(&mut sink, &[user_id], &acknowledgements).await;
+        stage(&mut connector, &[user_id], &acknowledgements).await;
     }
-    let file_bytes = sink
+    let file_bytes = connector
         .staged_batches
         .iter()
         .map(|batch| batch.bytes)
@@ -468,9 +468,9 @@ async fn a_staged_total_larger_than_the_bulk_class_commits_in_groups_within_one_
         .checked_add(file_bytes / 2)
         .assured("a staged file of one row is small");
     let executor = executor_with_bulk_capacity(capacity);
-    sink.executor = executor.clone();
+    connector.executor = executor.clone();
 
-    let report = sink
+    let report = connector
         .commit()
         .await
         .assured("a staged total larger than the class is committed")
@@ -484,29 +484,29 @@ async fn a_staged_total_larger_than_the_bulk_class_commits_in_groups_within_one_
         "the two groups the class could load write their own data files into the one append"
     );
     assert_eq!(acknowledgements.acknowledged(), 3);
-    assert!(sink.staged_batches.is_empty());
+    assert!(connector.staged_batches.is_empty());
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
 #[nervix_primitives::test]
 async fn a_staged_file_larger_than_the_whole_bulk_class_commits_once_the_whole_class_is_free() {
     let catalog: StdArc<dyn Catalog> = StdArc::new(memory_catalog().await);
-    let mut sink = fixture_sink(StdArc::clone(&catalog), Executor::default()).await;
+    let mut connector = fixture_emitter(StdArc::clone(&catalog), Executor::default()).await;
     let acknowledgements = StdArc::new(RecordedAcknowledgements::default());
-    stage(&mut sink, &[1, 2, 3, 4, 5, 6, 7, 8], &acknowledgements).await;
-    let staged = sink.staged_bytes;
+    stage(&mut connector, &[1, 2, 3, 4, 5, 6, 7, 8], &acknowledgements).await;
+    let staged = connector.staged_bytes;
     let capacity = staged
         .checked_sub(1)
         .assured("a staged Arrow IPC file holds at least its schema");
     let executor = executor_with_bulk_capacity(capacity);
-    sink.executor = executor.clone();
+    connector.executor = executor.clone();
     // Other bulk work holds one byte, so the class is short of the whole of itself.
     let all_but_one = capacity
         .checked_sub(1)
         .assured("the fixture's class holds more than one byte");
     let held = hold_bulk_memory_leaving(&executor, all_but_one);
 
-    let refused = sink
+    let refused = connector
         .commit()
         .await
         .err()
@@ -514,7 +514,7 @@ async fn a_staged_file_larger_than_the_whole_bulk_class_commits_once_the_whole_c
 
     assert_eq!(
         refused.current_context(),
-        &SinkPublishError::Commit { sink: ICEBERG }
+        &EmitterWriteError::Commit { connector: ICEBERG }
     );
     assert_eq!(
         refused.downcast_ref::<AdmissionError>(),
@@ -530,8 +530,8 @@ async fn a_staged_file_larger_than_the_whole_bulk_class_commits_once_the_whole_c
              staged file of {staged} bytes"
         ))
     );
-    assert_eq!(sink.staged_bytes, staged);
-    for batch in &sink.staged_batches {
+    assert_eq!(connector.staged_bytes, staged);
+    for batch in &connector.staged_batches {
         assert!(
             batch.path.is_file(),
             "a refused commit keeps its staged file"
@@ -551,7 +551,7 @@ async fn a_staged_file_larger_than_the_whole_bulk_class_commits_once_the_whole_c
 
     // The whole class is free now, and the file is read charged with all of it.
     drop(held);
-    let report = sink
+    let report = connector
         .commit()
         .await
         .assured("a free class admits a staged file larger than itself")
@@ -565,7 +565,7 @@ async fn a_staged_file_larger_than_the_whole_bulk_class_commits_once_the_whole_c
     );
     assert_eq!(acknowledgements.acknowledged(), 1);
     assert_eq!(acknowledgements.rejected(), 0);
-    assert!(sink.staged_batches.is_empty());
+    assert!(connector.staged_batches.is_empty());
     assert_eq!(
         executor.memory(MemoryClass::Bulk).reserved_bytes,
         0,
@@ -579,17 +579,17 @@ async fn rows_staged_after_a_refused_append_are_written_before_they_are_acknowle
         inner: memory_catalog().await,
         refused: AtomicBool::new(false),
     });
-    let mut sink = fixture_sink(StdArc::clone(&catalog), Executor::default()).await;
+    let mut connector = fixture_emitter(StdArc::clone(&catalog), Executor::default()).await;
     let first = StdArc::new(RecordedAcknowledgements::default());
-    stage(&mut sink, &[1, 2], &first).await;
-    let refused = sink
+    stage(&mut connector, &[1, 2], &first).await;
+    let refused = connector
         .commit()
         .await
         .err()
         .assured("the fixture catalog refuses the first append");
     assert_eq!(
         refused.current_context(),
-        &SinkPublishError::Commit { sink: ICEBERG }
+        &EmitterWriteError::Commit { connector: ICEBERG }
     );
     assert_eq!(
         committed_user_ids(catalog.as_ref()).await,
@@ -598,8 +598,8 @@ async fn rows_staged_after_a_refused_append_are_written_before_they_are_acknowle
 
     // The host stages what its buffer gathered before it retries the commit.
     let second = StdArc::new(RecordedAcknowledgements::default());
-    stage(&mut sink, &[3], &second).await;
-    let report = sink
+    stage(&mut connector, &[3], &second).await;
+    let report = connector
         .commit()
         .await
         .assured("the catalog accepts the retried append")
@@ -610,6 +610,6 @@ async fn rows_staged_after_a_refused_append_are_written_before_they_are_acknowle
     assert_eq!(first.acknowledged(), 1);
     assert_eq!(second.acknowledged(), 1);
     assert_eq!(first.rejected() + second.rejected(), 0);
-    assert!(sink.staged_batches.is_empty());
-    assert_eq!(sink.staged_rows, 0);
+    assert!(connector.staged_batches.is_empty());
+    assert_eq!(connector.staged_rows, 0);
 }

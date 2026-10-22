@@ -26,7 +26,7 @@
 )]
 
 use error_stack::Report;
-use nervix_connector::{ClientResourceMounts, ResolvedClientConfig, SinkStartError};
+use nervix_connector::{ClientResourceMounts, EmitterOpenError, ResolvedClientConfig};
 use nervix_connector_mongodb::MongoDbClient;
 use nervix_connector_mysql::MySqlPool;
 use nervix_connector_postgres::PostgresPool;
@@ -436,7 +436,7 @@ impl Runtime {
             })
         };
         // A connector states its own start failure, and the client names which one could not open.
-        let started = |error: Report<SinkStartError>| {
+        let started = |error: Report<EmitterOpenError>| {
             error.change_context(SharedClientError::Open {
                 client: name.as_str().to_string(),
             })
@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_registration_teardown_preserves_a_replacement_sink() {
+    fn pool_registration_teardown_preserves_a_replacement_emitter() {
         let runtime = Runtime::new();
         let key = DomainNodeRef::node_in(
             domain("pool_wait"),

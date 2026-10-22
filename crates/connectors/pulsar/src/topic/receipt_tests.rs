@@ -15,7 +15,7 @@ use std::{future::Future, pin::Pin, time::Duration};
 
 use arch_into::ArchInto as _;
 use meticulous::ResultExt as _;
-use nervix_connector::{SinkFinish, SinkFinishError};
+use nervix_connector::{EmitterFinish, EmitterFinishError};
 use nervix_primitives::{runtime::Builder, sync::oneshot, time::Instant};
 
 use super::{
@@ -123,16 +123,16 @@ impl ReceiptScript {
             if unanswered > 0 {
                 assert_eq!(
                     *failure.current_context(),
-                    SinkFinishError::Unsent {
-                        sink: PULSAR.keyword(),
+                    EmitterFinishError::Unsent {
+                        connector: PULSAR.keyword(),
                         records: unanswered.arch_into(),
                     }
                 );
             } else {
                 assert_eq!(
                     *failure.current_context(),
-                    SinkFinishError::Flush {
-                        sink: PULSAR.keyword()
+                    EmitterFinishError::Flush {
+                        connector: PULSAR.keyword()
                     }
                 );
             }
@@ -153,12 +153,12 @@ impl ReceiptScript {
         } else if had_receipts {
             assert_eq!(
                 finished.assured("every retained receipt confirmed"),
-                SinkFinish::Flushed
+                EmitterFinish::Flushed
             );
         } else {
             assert_eq!(
                 finished.assured("there is no outstanding receipt or failure"),
-                SinkFinish::NothingHeld
+                EmitterFinish::NothingHeld
             );
         }
     }

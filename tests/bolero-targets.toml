@@ -971,7 +971,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/syslog/src/__fuzz__/source__tests__bolero_stream_framing_matches_the_reference_however_reads_split_it/corpus"
+corpus = "crates/connectors/syslog/src/__fuzz__/ingestor__tests__bolero_stream_framing_matches_the_reference_however_reads_split_it/corpus"
 domain_version = 1
 features = []
 id = "syslog-stream-framing"
@@ -980,8 +980,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-syslog"
 random_iterations = 256
-source = "crates/connectors/syslog/src/source_tests.rs"
-test = "source::tests::bolero_stream_framing_matches_the_reference_however_reads_split_it"
+source = "crates/connectors/syslog/src/ingestor_tests.rs"
+test = "ingestor::tests::bolero_stream_framing_matches_the_reference_however_reads_split_it"
 test_target = "lib"
 
 [[target]]
@@ -3025,7 +3025,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/kafka/src/topic/__fuzz__/topic__source__tests__bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition/corpus"
+corpus = "crates/connectors/kafka/src/topic/__fuzz__/topic__ingestor__tests__bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition/corpus"
 domain_version = 1
 features = []
 id = "kafka-partition-offsets"
@@ -3034,8 +3034,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-connector-kafka"
 random_iterations = 256
-source = "crates/connectors/kafka/src/topic/source.rs"
-test = "topic::source::tests::bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition"
+source = "crates/connectors/kafka/src/topic/ingestor.rs"
+test = "topic::ingestor::tests::bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition"
 test_target = "lib"
 
 [[target]]
@@ -3055,7 +3055,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/http/src/request/sink/__fuzz__/request__sink__request_head_tests__bolero_request_heads_carry_every_prepared_field_and_their_declared_framing/corpus"
+corpus = "crates/connectors/http/src/request/emitter/__fuzz__/request__emitter__request_head_tests__bolero_request_heads_carry_every_prepared_field_and_their_declared_framing/corpus"
 domain_version = 1
 features = []
 id = "http-request-heads"
@@ -3064,8 +3064,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-http"
 random_iterations = 256
-source = "crates/connectors/http/src/request/sink/request_head_tests.rs"
-test = "request::sink::request_head_tests::bolero_request_heads_carry_every_prepared_field_and_their_declared_framing"
+source = "crates/connectors/http/src/request/emitter/request_head_tests.rs"
+test = "request::emitter::request_head_tests::bolero_request_heads_carry_every_prepared_field_and_their_declared_framing"
 test_target = "lib"
 
 [[target]]

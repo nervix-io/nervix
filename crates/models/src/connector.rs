@@ -2,11 +2,11 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The kind of every connector, the union of source Models and the union of sink Models
+//! - **Owns.** The kind of every connector, the union of ingestor Models and the union of emitter Models
 //!   nested connector by entity, the kinds that name each connector and entity pair, the
 //!   alterations of the ingestors that read each pair, the shape of the names an external system
-//!   gives the entities a source reads, and what a pair declares whatever its statement says:
-//!   the header model of each side, the metadata namespace, where a source executes, what a sink
+//!   gives the entities a ingestor reads, and what a pair declares whatever its statement says:
+//!   the header model of each side, the metadata namespace, where a ingestor executes, what a emitter
 //!   requires of its emitter, and what a body references. Each connector's own module owns its
 //!   client Model, its entity Models, their modes and the rules its external names follow.
 //! - **Depends on.** Validated names, expressions, schema types, and the acknowledgement, retry and
@@ -15,8 +15,8 @@
 //!   crate. A capability the registry validates is declared here so that validation never names
 //!   the crate that implements it.
 //!
-//! A source or a sink is addressed by two things: the connector that serves it and the entity it
-//! consumes. `IngestSource::Redis(RedisSource::PubSub(..))` states both in its shape, so a statement
+//! A ingestor or a emitter is addressed by two things: the connector that serves it and the entity it
+//! consumes. `IngestorEntity::Redis(RedisIngestor::PubSub(..))` states both in its shape, so a statement
 //! of one pair can never hold the fields of another.
 
 #![cfg_attr(
@@ -30,11 +30,14 @@ mod client;
 mod configured_client;
 mod deadline;
 mod declaration;
+mod emitter;
 mod entity_union;
 mod external_name;
 mod header_model;
 mod http;
 mod iceberg;
+mod ingestor;
+mod ingestor_metadata;
 mod kafka;
 mod mongodb;
 mod mqtt;
@@ -48,9 +51,6 @@ mod pulsar;
 mod rabbitmq;
 mod redis;
 mod sentry;
-mod sink;
-mod source;
-mod source_metadata;
 mod sqs;
 mod syslog;
 mod websockets;
@@ -60,18 +60,18 @@ use strum::{AsRefStr, Display, EnumIter, IntoStaticStr};
 
 pub use self::{
     bounds::*, clickhouse::*, client::*, configured_client::*, deadline::*, declaration::*,
-    external_name::ExternalNameError, header_model::*, http::*, iceberg::*, kafka::*, mongodb::*,
-    mqtt::*, mysql::*, nats::*, otel::*, postgres::*, prometheus::*, pulsar::*, rabbitmq::*,
-    redis::*, sentry::*, sink::*, source::*, source_metadata::*, sqs::*, syslog::*, websockets::*,
-    zeromq::*,
+    emitter::*, external_name::ExternalNameError, header_model::*, http::*, iceberg::*,
+    ingestor::*, ingestor_metadata::*, kafka::*, mongodb::*, mqtt::*, mysql::*, nats::*, otel::*,
+    postgres::*, prometheus::*, pulsar::*, rabbitmq::*, redis::*, sentry::*, sqs::*, syslog::*,
+    websockets::*, zeromq::*,
 };
-pub(crate) use self::{entity_union::ALTERED_PAIR_CHECKED, source::AlteredIngestorSource};
+pub(crate) use self::{entity_union::ALTERED_PAIR_CHECKED, ingestor::AlteredIngestorEntity};
 
 /// The kind of external system, or of Nervix-served boundary, that a client connects to and a
-/// source or sink exchanges data with.
+/// ingestor or emitter exchanges data with.
 ///
 /// The keyword of a kind is how NSPL spells it, and it is what diagnostics name a client by and
-/// what the phrase naming a source or a sink starts with. A kind displays as its keyword.
+/// what the phrase naming a ingestor or a emitter starts with. A kind displays as its keyword.
 #[derive(
     Debug,
     Clone,
@@ -114,17 +114,17 @@ pub enum ConnectorKind {
     MySql,
     #[strum(serialize = "MONGODB")]
     MongoDb,
-    /// Iceberg tables. Its sink writes through an object-store client and commits through a
+    /// Iceberg tables. Its emitter writes through an object-store client and commits through a
     /// catalog client, so no client Model is of this kind itself.
     Iceberg,
-    /// The S3 object store an Iceberg sink writes data files to.
+    /// The S3 object store an Iceberg emitter writes data files to.
     S3,
-    /// The Google Cloud Storage object store an Iceberg sink writes data files to.
+    /// The Google Cloud Storage object store an Iceberg emitter writes data files to.
     #[strum(serialize = "GCS")]
     Gcs,
-    /// The Azure Blob Storage object store an Iceberg sink writes data files to.
+    /// The Azure Blob Storage object store an Iceberg emitter writes data files to.
     AzureBlob,
-    /// The Iceberg REST catalog an Iceberg sink commits through.
+    /// The Iceberg REST catalog an Iceberg emitter commits through.
     IcebergRest,
 }
 
@@ -135,7 +135,7 @@ impl ConnectorKind {
     }
 
     /// What every client of this connector declares. Application sessions reach the `CLIENT`
-    /// connector without a client Model, and an Iceberg sink writes through an object-store
+    /// connector without a client Model, and an Iceberg emitter writes through an object-store
     /// client and commits through a catalog client, so neither has a client of its own.
     pub const fn client(self) -> Option<ClientDeclaration> {
         match self {

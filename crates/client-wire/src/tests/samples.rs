@@ -32,9 +32,9 @@ use crate::{
     ChoiceLookupRequest, ChoiceSelection, ChoiceTarget, ChoiceValue, ClientMessage, ClientRequest,
     CloseEmitterRequest, CloseIngestorRequest, CommandDisposition, CommandOutcome, CommandRequest,
     ConsumerId, DetachDomainClockRequest, Diagnostic, EmitterBatchDecision, EncodedFrame,
-    InspectTransactionRequest, LeaderEndpoints, LeaderRedirect, OpenEmitterRequest,
+    IngestorSpan, InspectTransactionRequest, LeaderEndpoints, LeaderRedirect, OpenEmitterRequest,
     OpenIngestorRequest, OutcomeOrigin, ProducerId, ReadEmitterBatchRequest, RowBranch, RowSchema,
-    SelectDomainRequest, ServerFrame, SessionLimits, SettleEmitterBatchRequest, SourceSpan,
+    SelectDomainRequest, ServerFrame, SessionLimits, SettleEmitterBatchRequest,
     StatementDisposition, StatementOutcome, SubmitBatchRequest, SubscribeRequest,
     SubscriptionHandle, SubscriptionRowsEncoder, SubscriptionType, SuggestRequest,
     UnsubscribeRequest, WireEncodeError,
@@ -73,11 +73,11 @@ pub(crate) fn diagnostics() -> Vec<Diagnostic> {
     vec![
         Diagnostic {
             message: "unexpected token 'RELAY'".to_string(),
-            span: Some(SourceSpan::new(7, 12).assured("an ordered span")),
+            span: Some(IngestorSpan::new(7, 12).assured("an ordered span")),
         },
         Diagnostic {
             message: "an empty span marks a position".to_string(),
-            span: Some(SourceSpan::new(u32::MAX, u32::MAX).assured("an ordered span")),
+            span: Some(IngestorSpan::new(u32::MAX, u32::MAX).assured("an ordered span")),
         },
         Diagnostic {
             message: String::new(),

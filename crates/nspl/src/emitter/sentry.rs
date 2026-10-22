@@ -20,13 +20,17 @@ pub(super) fn mode<'src>()
 
 pub(super) fn event_body<'src>(
     context: EmitterContext,
-) -> impl Parser<'src, &'src [Token], ParsedDestination<SentryEventSink>, extra::Err<ParseError<'src>>>
-+ Clone {
+) -> impl Parser<
+    'src,
+    &'src [Token],
+    ParsedDestination<SentryEventEmitter>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
     encoded_destination(
         context,
         client_ref()
             .then_ignore(kw(Identifier::Mode))
             .then(mode())
-            .map(|(client, mode)| SentryEventSink { client, mode }),
+            .map(|(client, mode)| SentryEventEmitter { client, mode }),
     )
 }

@@ -46,10 +46,10 @@ use mongodb::{
     },
 };
 use nervix_connector::{
-    MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome, RejectedSinkRecord,
-    RowRequest, RowRequestLimits, RowSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
-    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
-    optional_client_config_value,
+    EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterOpenError,
+    EmitterRecordPosition, EmitterStartResult, EmitterWriteError, EmitterWriteResult,
+    MappedEmitterMember, MappedEmitterRows, MeasuredRequest, PerRecordOutcome,
+    RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits, optional_client_config_value,
 };
 use nervix_models::{
     ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, FieldPath, MongoDbCollectionName,
@@ -78,12 +78,12 @@ const GENERATED_ID_BYTES: u64 = 17;
 pub struct MongoDbClient(DriverClient);
 
 /// The node-owned client this sink writes through while its host holds the lease.
-pub trait MongoDbClientSource: Send + Sync + 'static {
-    fn client(&self) -> SinkPublishResult<MongoDbClient>;
+pub trait MongoDbClientProvider: Send + Sync + 'static {
+    fn client(&self) -> EmitterWriteResult<MongoDbClient>;
 }
 
 /// What one MongoDB emitter writes with, from its typed sink plan.
-pub struct MongoDbSinkConfig {
+pub struct MongoDbEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub collection: MongoDbCollectionName,
     pub conflict_action: MongoDbConflictAction,
@@ -101,8 +101,8 @@ pub enum MongoDbConflictAction {
 }
 
 /// The MongoDB sink, which encodes each mapped row as one BSON document.
-pub struct MongoDbSink {
-    client: Box<dyn MongoDbClientSource>,
+pub struct MongoDbEmitter {
+    client: Box<dyn MongoDbClientProvider>,
     database: String,
     collection: MongoDbCollectionName,
     conflict_action: MongoDbConflictAction,
@@ -117,8 +117,8 @@ impl MongoDbClient {
     pub async fn open(
         config: &[ClientConfigEntry],
         bounds: ClientPoolBounds,
-    ) -> SinkStartResult<Self> {
-        let invalid = || Report::new(SinkStartError::InvalidConfiguration { sink: MONGODB });
+    ) -> EmitterStartResult<Self> {
+        let invalid = || Report::new(EmitterOpenError::InvalidConfiguration { connector: MONGODB });
         let Some(addr) = optional_client_config_value(config, "addr") else {
             return Err(invalid().attach_printable("missing MongoDB client config key 'addr'"));
         };
@@ -141,7 +141,7 @@ impl MongoDbClient {
             .run_command(doc! { "ping": 1 })
             .await
             .map_err(|source| {
-                Report::new(SinkStartError::Initialize { sink: MONGODB })
+                Report::new(EmitterOpenError::Initialize { connector: MONGODB })
                     .attach_printable(format!("failed to validate connection: {source}"))
             })?;
         Ok(Self(client))
@@ -152,11 +152,11 @@ impl MongoDbClient {
 ///
 /// The database belongs to the client's configuration rather than to its connections, so it is
 /// read per user while the driver client itself is shared.
-fn database_name(config: &[ClientConfigEntry]) -> SinkStartResult<String> {
+fn database_name(config: &[ClientConfigEntry]) -> EmitterStartResult<String> {
     if let Some(database) = optional_client_config_value(config, "database") {
         return Ok(database.to_owned());
     }
-    let invalid = || Report::new(SinkStartError::InvalidConfiguration { sink: MONGODB });
+    let invalid = || Report::new(EmitterOpenError::InvalidConfiguration { connector: MONGODB });
     let missing = || invalid().attach_printable("missing MongoDB client config key 'database'");
     let Some(addr) = optional_client_config_value(config, "addr") else {
         return Err(invalid().attach_printable("missing MongoDB client config key 'addr'"));
@@ -177,12 +177,12 @@ fn is_record_write_error(code: i32) -> bool {
     matches!(code, 121 | 10334 | 11000)
 }
 
-fn safe_infrastructure_error(operation: &str) -> Report<SinkPublishError> {
-    Report::new(SinkPublishError::Publish { sink: MONGODB })
+fn safe_infrastructure_error(operation: &str) -> Report<EmitterWriteError> {
+    Report::new(EmitterWriteError::Publish { connector: MONGODB })
         .attach_printable(format!("MongoDB {operation} failed"))
 }
 
-impl MongoDbSink {
+impl MongoDbEmitter {
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -191,11 +191,11 @@ impl MongoDbSink {
         )
     )]
     pub fn new(
-        config: MongoDbSinkConfig,
-        client: Box<dyn MongoDbClientSource>,
-        _host: SinkHost,
-    ) -> SinkStartResult<Self> {
-        let MongoDbSinkConfig {
+        config: MongoDbEmitterConfig,
+        client: Box<dyn MongoDbClientProvider>,
+        _host: EmitterHost,
+    ) -> EmitterStartResult<Self> {
+        let MongoDbEmitterConfig {
             config,
             collection,
             conflict_action,
@@ -217,7 +217,7 @@ impl MongoDbSink {
     async fn provisioned_database(
         &self,
         client: &MongoDbClient,
-    ) -> SinkPublishResult<mongodb::Database> {
+    ) -> EmitterWriteResult<mongodb::Database> {
         let database = client.0.database(&self.database);
         let collection_names = database
             .list_collection_names()
@@ -226,8 +226,10 @@ impl MongoDbSink {
             .await
             .map_err(|_| safe_infrastructure_error("collection lookup request"))?;
         if collection_names.is_empty() {
-            return Err(Report::new(SinkPublishError::Publish { sink: MONGODB })
-                .attach_printable("MongoDB target collection is not provisioned"));
+            return Err(
+                Report::new(EmitterWriteError::Publish { connector: MONGODB })
+                    .attach_printable("MongoDB target collection is not provisioned"),
+            );
         }
         Ok(database)
     }
@@ -238,7 +240,7 @@ impl MongoDbSink {
         &self,
         collection: &Collection<RawDocumentBuf>,
         documents: Vec<StorableDocument>,
-        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
+        outcome: &mut PerRecordOutcome<EmitterRecordPosition>,
     ) {
         let mut stored_ends = Vec::with_capacity(documents.len());
         let mut stored = 0_u64;
@@ -306,7 +308,7 @@ impl MongoDbSink {
         &self,
         client: &MongoDbClient,
         documents: Vec<StorableDocument>,
-        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
+        outcome: &mut PerRecordOutcome<EmitterRecordPosition>,
     ) {
         let namespace = Namespace::new(&self.database, self.collection.as_str());
         let mut upserts = Vec::with_capacity(documents.len());
@@ -392,10 +394,10 @@ impl MongoDbSink {
     /// A row with a value BSON cannot hold, or whose document exceeds the server's document limit,
     /// is rejected alone before any write, so it never costs the rows around it their write.
     fn storable_documents(
-        rows: &MappedSinkRows<'_>,
-        members: &[MappedSinkMember],
+        rows: &MappedEmitterRows<'_>,
+        members: &[MappedEmitterMember],
         carriers: &[MappedBsonColumns<'_>],
-        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
+        outcome: &mut PerRecordOutcome<EmitterRecordPosition>,
     ) -> Vec<StorableDocument> {
         let mut documents = Vec::with_capacity(members.len());
         for member in members {
@@ -416,7 +418,7 @@ impl MongoDbSink {
             match StorableDocument::new(row, document) {
                 Ok(document) => documents.push(document),
                 Err(error @ UnstorableDocument::AboveDocumentLimit { .. }) => {
-                    outcome.reject(RejectedSinkRecord::external(
+                    outcome.reject(RejectedEmitterMember::external(
                         row.position,
                         row.occurred_at,
                         error.to_string(),
@@ -424,7 +426,7 @@ impl MongoDbSink {
                 }
                 Err(error @ UnstorableDocument::InvalidFieldNames) => {
                     outcome.fail(
-                        Report::new(SinkPublishError::Misconfigured { sink: MONGODB })
+                        Report::new(EmitterWriteError::Misconfigured { connector: MONGODB })
                             .attach_printable(error.to_string()),
                     );
                     return documents;
@@ -437,7 +439,7 @@ impl MongoDbSink {
     fn apply_insert_many_error(
         rows: &[WrittenRow],
         error: DriverError,
-        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
+        outcome: &mut PerRecordOutcome<EmitterRecordPosition>,
     ) {
         let ErrorKind::InsertMany(insert_error) = error.kind.as_ref() else {
             outcome.fail(safe_infrastructure_error("insert_many request"));
@@ -461,7 +463,7 @@ impl MongoDbSink {
     fn apply_insert_many_write_errors(
         rows: &[WrittenRow],
         write_errors: &[(usize, i32)],
-        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
+        outcome: &mut PerRecordOutcome<EmitterRecordPosition>,
     ) {
         let errors = write_errors.iter().copied().collect::<HashMap<_, _>>();
         let mut has_infrastructure_error = errors.len() != write_errors.len()
@@ -471,7 +473,7 @@ impl MongoDbSink {
         for (local_index, row) in rows.iter().enumerate() {
             if let Some(code) = errors.get(&local_index) {
                 if is_record_write_error(*code) {
-                    outcome.reject(RejectedSinkRecord::external(
+                    outcome.reject(RejectedEmitterMember::external(
                         row.position,
                         row.occurred_at,
                         format!("MongoDB rejected document with code {code}"),
@@ -491,7 +493,7 @@ impl MongoDbSink {
     fn apply_bulk_write_error(
         rows: &[WrittenRow],
         error: DriverError,
-        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
+        outcome: &mut PerRecordOutcome<EmitterRecordPosition>,
     ) {
         let ErrorKind::BulkWrite(bulk_error) = error.kind.as_ref() else {
             outcome.fail(safe_infrastructure_error("bulk write request"));
@@ -522,7 +524,7 @@ impl MongoDbSink {
                 continue;
             };
             if is_record_write_error(error.code) {
-                outcome.reject(RejectedSinkRecord::external(
+                outcome.reject(RejectedEmitterMember::external(
                     row.position,
                     row.occurred_at,
                     format!("MongoDB rejected document with code {}", error.code),
@@ -562,7 +564,7 @@ fn running_span(ends: &[u64], members: Range<usize>) -> u64 {
 /// when its mapping was evaluated.
 #[derive(Debug, Clone, Copy)]
 struct WrittenRow {
-    position: SinkRecordPosition,
+    position: EmitterRecordPosition,
     occurred_at: Timestamp,
 }
 
@@ -648,12 +650,14 @@ impl ConflictUpsert {
     fn new(
         document: StorableDocument,
         conflict_action: &MongoDbConflictAction,
-    ) -> SinkPublishResult<Self> {
+    ) -> EmitterWriteResult<Self> {
         let StorableDocument { row, document, .. } = document;
         let (filter, update) = match conflict_action {
             MongoDbConflictAction::None => {
-                return Err(Report::new(SinkPublishError::Publish { sink: MONGODB })
-                    .attach_printable("MongoDB bulk update requires an ON CONFLICT action"));
+                return Err(
+                    Report::new(EmitterWriteError::Publish { connector: MONGODB })
+                        .attach_printable("MongoDB bulk update requires an ON CONFLICT action"),
+                );
             }
             MongoDbConflictAction::DoNothing { target } => {
                 let filter = Self::conflict_filter(&document, target)?;
@@ -675,11 +679,13 @@ impl ConflictUpsert {
                     }
                 }
                 if set.is_empty() {
-                    return Err(Report::new(SinkPublishError::Publish { sink: MONGODB })
-                        .attach_printable(
-                            "MongoDB ON CONFLICT DO UPDATE requires at least one non-conflict \
-                             VALUES field to update",
-                        ));
+                    return Err(
+                        Report::new(EmitterWriteError::Publish { connector: MONGODB })
+                            .attach_printable(
+                                "MongoDB ON CONFLICT DO UPDATE requires at least one non-conflict \
+                                 VALUES field to update",
+                            ),
+                    );
                 }
                 (
                     filter,
@@ -693,7 +699,7 @@ impl ConflictUpsert {
         let mut measured_bytes = 0_u64;
         for part in [&filter, &update] {
             let raw = RawDocumentBuf::from_document(part).map_err(|_| {
-                Report::new(SinkPublishError::Misconfigured { sink: MONGODB })
+                Report::new(EmitterWriteError::Misconfigured { connector: MONGODB })
                     .attach_printable("MongoDB VALUES field names cannot be written as BSON")
             })?;
             let encoded = u64::try_from(raw.as_bytes().len())
@@ -710,15 +716,17 @@ impl ConflictUpsert {
         })
     }
 
-    fn conflict_filter(document: &Document, target: &[String]) -> SinkPublishResult<Document> {
+    fn conflict_filter(document: &Document, target: &[String]) -> EmitterWriteResult<Document> {
         let mut filter = Document::new();
         for field in target {
             let Some(value) = document.get(field) else {
-                return Err(Report::new(SinkPublishError::Publish { sink: MONGODB })
-                    .attach_printable(format!(
-                        "MongoDB ON CONFLICT target field '{field}' is missing from VALUES \
-                         document"
-                    )));
+                return Err(
+                    Report::new(EmitterWriteError::Publish { connector: MONGODB })
+                        .attach_printable(format!(
+                            "MongoDB ON CONFLICT target field '{field}' is missing from VALUES \
+                             document"
+                        )),
+                );
             };
             filter.insert(field.clone(), value.clone());
         }
@@ -737,16 +745,16 @@ impl ConflictUpsert {
 }
 
 #[async_trait]
-impl SinkLifecycle for MongoDbSink {
+impl EmitterLifecycle for MongoDbEmitter {
     /// Each unordered write answers for every document before the publish returns, so the
     /// client holds nothing.
-    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
-        Ok(SinkFinish::NothingHeld)
+    async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
+        Ok(EmitterFinish::NothingHeld)
     }
 }
 
 #[async_trait]
-impl RowSink for MongoDbSink {
+impl RowEmitter for MongoDbEmitter {
     /// Writes the rows of every carrier in inserts or bulk writes of at most `MAX MESSAGES`
     /// documents whose measured BSON is at most `MAX SIZE` bytes.
     #[cfg_attr(
@@ -756,7 +764,10 @@ impl RowSink for MongoDbSink {
                       effects"
         )
     )]
-    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
+    async fn publish(
+        &mut self,
+        rows: MappedEmitterRows<'_>,
+    ) -> PerRecordOutcome<EmitterRecordPosition> {
         let members = rows.members();
         let mut outcome = PerRecordOutcome::with_capacity(members.len());
         let mut carriers = Vec::with_capacity(rows.carriers.len());
@@ -765,7 +776,7 @@ impl RowSink for MongoDbSink {
                 Ok(columns) => carriers.push(columns),
                 Err(error) => {
                     outcome.fail(
-                        Report::new(SinkPublishError::Publish { sink: MONGODB })
+                        Report::new(EmitterWriteError::Publish { connector: MONGODB })
                             .attach_printable(error.to_string()),
                     );
                     return outcome;
@@ -840,13 +851,13 @@ impl UnencodableMappedValue {
     /// so the record follows `ON MESSAGE ERROR` instead of entering the host's retry loop.
     fn rejected(
         &self,
-        position: SinkRecordPosition,
+        position: EmitterRecordPosition,
         occurred_at: Timestamp,
-    ) -> RejectedSinkRecord<SinkRecordPosition> {
+    ) -> RejectedEmitterMember<EmitterRecordPosition> {
         let field = match self {
             Self::UnsupportedColumn { field, .. } | Self::UnsignedIntegerRange { field } => field,
         };
-        RejectedSinkRecord::invalid(
+        RejectedEmitterMember::invalid(
             position,
             occurred_at,
             self.to_string(),
@@ -1135,19 +1146,19 @@ mod tests {
     fn mixed_mongodb_write_results_preserve_successes_and_record_rejections() {
         let mut outcome = PerRecordOutcome::empty();
         let rows = [10, 11, 12].map(|row_index| WrittenRow {
-            position: SinkRecordPosition {
+            position: EmitterRecordPosition {
                 batch_index: 7,
                 row_index,
             },
             occurred_at: Timestamp::from_unix_nanos(3),
         });
 
-        MongoDbSink::apply_insert_many_write_errors(&rows, &[(1, 11000), (2, 91)], &mut outcome);
+        MongoDbEmitter::apply_insert_many_write_errors(&rows, &[(1, 11000), (2, 91)], &mut outcome);
 
         let outcome = outcome.into_parts();
         assert_eq!(
             outcome.delivered,
-            [SinkRecordPosition {
+            [EmitterRecordPosition {
                 batch_index: 7,
                 row_index: 10,
             }]
@@ -1155,7 +1166,7 @@ mod tests {
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(
             outcome.rejected[0].id,
-            SinkRecordPosition {
+            EmitterRecordPosition {
                 batch_index: 7,
                 row_index: 11,
             }
@@ -1265,7 +1276,7 @@ mod tests {
         };
 
         let record = rejected.rejected(
-            SinkRecordPosition {
+            EmitterRecordPosition {
                 batch_index: 2,
                 row_index: 5,
             },
@@ -1274,7 +1285,7 @@ mod tests {
 
         assert_eq!(
             record.id,
-            SinkRecordPosition {
+            EmitterRecordPosition {
                 batch_index: 2,
                 row_index: 5,
             }
@@ -1299,7 +1310,7 @@ mod tests {
 
     fn written_row(row_index: usize) -> WrittenRow {
         WrittenRow {
-            position: SinkRecordPosition {
+            position: EmitterRecordPosition {
                 batch_index: 0,
                 row_index,
             },
