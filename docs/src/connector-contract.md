@@ -711,8 +711,9 @@ A client source's plan is not a connector plan: it carries the input schema, its
 producer policy of window, ACK timeout, and retry backoff, and the endpoint contract digest producers
 attach to. It declares no header or metadata scope and supports only `SUSPEND`.
 
-The metadata boundary has distinct header, Kafka, and Syslog scopes. Kafka carries topic,
-partition, offset, and headers; Syslog carries the peer address. The scopes, and the fields of
+The metadata boundary has distinct header, WebSockets, Kafka, and Syslog scopes. WebSockets carries
+the text or binary frame kind and upgrade-response headers; Kafka carries topic, partition, offset,
+and headers; Syslog carries the peer address. The scopes, and the fields of
 each with their exact types, are declared once in the vocabulary, and each source entity names the
 scope its messages expose. Registry validation reads that declaration for the fields an ingestor's
 programs may name, the host builds its metadata columns from the same fields, and a connector's
@@ -730,6 +731,10 @@ completion resolver uses the same vocabulary source capability before the full i
 so it offers those functions only for sources that can read headers. Its emitter `INVOKE`
 completion similarly uses the vocabulary sink capability to offer `write_header` only for sinks that
 can write headers. Runtime validation remains authoritative.
+
+The host checks the WebSockets frame-label byte capacity before opening its Arrow metadata builder.
+An unaddressable row-bound estimate returns a typed metadata error through the group's opening
+operation and its general-error policy.
 
 The source host decodes consecutive payloads into one ingest group's Arrow builders. For a
 schemaful JSON codec, that group also owns mutable payload scratch and simd-json parser buffers;

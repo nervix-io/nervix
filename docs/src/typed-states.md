@@ -16,6 +16,11 @@ semantics. The state rules here apply to those systems without replacing their d
 [Execution Plans](./execution-plans.md) follows the validated values into a complete installed
 revision.
 
+Opening a WebSockets ingest metadata builder validates the frame-label byte capacity derived from
+the group's row bound and the vocabulary's frame labels. An estimate that exceeds the address space
+is a typed error before allocation; the ingest group adds the opening operation's context and
+retains the cause for its general-error policy.
+
 The Pulsar sink's running publishing choice keeps related state together: the `NO_ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
 confirmation settings. An empty receipt collection means there are no outstanding receipts,

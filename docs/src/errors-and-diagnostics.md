@@ -1309,6 +1309,11 @@ guest-requested state reset reports on its own, and an ingest group's failure to
 branch entrypoint, which the group's flush also returns to its caller. A branch whose domain
 routing can no longer be read fails the acknowledgements it was handed with that routing failure
 directly, without a policy or a runtime event.
+A WebSockets ingest metadata builder checks its frame-label capacity before allocation. A row bound
+whose byte estimate exceeds the address space returns `IngestMetadataError::WebsocketsCapacityOverflow`;
+the ingest group retains it below its `open ingest metadata` operation and the source's general-error
+policy reports that chain.
+
 Each failure reports its owner's typed context above the cause it kept:
 
 - `RouteOutputError`, which every node that buffers route output shares, for holding a route's
