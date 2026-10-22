@@ -25,8 +25,8 @@ use std::{
 use meticulous::{OptionExt as _, ResultExt as _};
 
 use super::{
-    Access, BlockedAttempt, MAX_ORDER_EDGES, MAX_ORDER_WITNESSES, OrderEdge, OrderLock,
-    OrderWitness, PotentialCycle, SourceSite, TrackedLockId, TrackedThreadId,
+    Access, BlockedAttempt, MAX_ORDER_EDGES, MAX_ORDER_HISTORY_EDGES, MAX_ORDER_WITNESSES,
+    OrderEdge, OrderLock, OrderWitness, PotentialCycle, SourceSite, TrackedLockId, TrackedThreadId,
     detector::order_enabled, registry::Registry,
 };
 use crate::{
@@ -34,11 +34,10 @@ use crate::{
     unmodeled::sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
-/// History does not grow with workload duration once these capacities are reached: lost context
-/// is delivered as an overload finding, preventing qualification.
-// One three-node materialized restore with leadership handoff needs more than 8,192 distinct
-// instance edges; its own process still has a fixed ceiling and reports any further loss.
-const HISTORY_EDGE_CAPACITY: usize = 16_384;
+/// History does not grow with workload duration once its capacities are reached: lost context is
+/// delivered as an overload finding, preventing qualification. A thread keeps at most this many
+/// live guards, a process at most `MAX_ORDER_HISTORY_EDGES` edges, and an edge at most
+/// `MAX_ORDER_WITNESSES` witnesses.
 const HELD_GUARD_CAPACITY: usize = MAX_ORDER_EDGES;
 
 /// Whether the caller's live guards are kept. Deloxide records a thread's held locks itself when
@@ -207,7 +206,7 @@ impl OrderHistory {
                     let reserved =
                         self.slots
                             .try_update(Ordering::Relaxed, Ordering::Relaxed, |slots| {
-                                if slots < HISTORY_EDGE_CAPACITY {
+                                if slots < MAX_ORDER_HISTORY_EDGES {
                                     slots.checked_add(1)
                                 } else {
                                     None

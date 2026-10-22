@@ -409,13 +409,6 @@ impl EmitterSinkContext {
                 ending = ending.as_ref(),
                 "emitter sent the records its transport client held"
             ),
-            SinkFinish::Discarded => warn!(
-                domain = self.domain.as_str(),
-                emitter = self.emitter.as_str(),
-                sink,
-                ending = ending.as_ref(),
-                "emitter closed a transport client that may still hold records it delivered"
-            ),
         }
     }
 
