@@ -16,7 +16,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::{collections::BTreeMap, num::NonZeroU64, str::FromStr as _};
+use std::{collections::BTreeMap, str::FromStr as _};
 
 use error_stack::{Report, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -216,11 +216,6 @@ pub const PROMETHEUS_DEFAULT_MAX_BODY_SIZE: PayloadSizeLimit =
         None => panic!("16 MiB fits in a 64-bit byte count"),
     };
 
-/// The most samples of one query response the host takes in as one intake batch. It decodes and
-/// routes each batch as an ingest group of its own before it takes in the next, so a large vector
-/// never becomes one batch of any size.
-pub const PROMETHEUS_SAMPLES_PER_INTAKE_BATCH: NonZeroU64 = nonzero_ext::nonzero!(1024u64);
-
 /// One PromQL query a Prometheus client evaluates on a cadence of domain time.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -259,7 +254,7 @@ const PROMETHEUS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
             holds: "samples the host takes in as one intake batch",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Items {
-                    count: PROMETHEUS_SAMPLES_PER_INTAKE_BATCH.get(),
+                    count: 1024,
                     unit: "samples",
                 },
                 overflow: BufferOverflow::Backpressure,
@@ -395,6 +390,26 @@ mod tests {
             panic!("the configuration {config:?} must be refused");
         };
         report
+    }
+
+    /// The default the declaration publishes for `MAX BODY SIZE` is the bound a statement that
+    /// leaves it out reads with.
+    #[test]
+    fn the_declared_response_bound_default_is_the_one_in_effect() {
+        let [_, max_body_size, _] = PrometheusQuerySource::CAPABILITIES.options else {
+            panic!("a query source declares QUERY, MAX BODY SIZE and EVERY");
+        };
+        assert_eq!(max_body_size.keywords, "MAX BODY SIZE");
+        let OptionPresence::Optional {
+            default: Some(default),
+        } = &max_body_size.presence
+        else {
+            panic!("MAX BODY SIZE is optional with a declared default");
+        };
+        let declared = default
+            .parse::<PayloadSizeLimit>()
+            .assured("the declared default is a size literal");
+        assert_eq!(declared, PROMETHEUS_DEFAULT_MAX_BODY_SIZE);
     }
 
     #[test]
