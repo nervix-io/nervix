@@ -7,7 +7,7 @@
         {
           "id": "baseline-3",
           "shard": 1,
-          "budget_minutes": 14,
+          "budget_minutes": 4,
           "run": ["baseline", "--nodes", "3"]
         },
         {
@@ -36,13 +36,13 @@
         {
           "id": "baseline-1",
           "shard": 1,
-          "budget_minutes": 13,
+          "budget_minutes": 3,
           "run": ["baseline", "--nodes", "1"]
         },
         {
           "id": "baseline-3",
           "shard": 1,
-          "budget_minutes": 14,
+          "budget_minutes": 4,
           "run": ["baseline", "--nodes", "3"]
         },
         {

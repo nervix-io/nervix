@@ -921,7 +921,8 @@ fn client_vhost_and_endpoint_forms_render_every_transport_and_typed_reference_co
         );
         let client = render();
         for transport in ClientTransport::ALL {
-            assert!(client.contains(&format!("data-type=\"{}\"", transport.key())));
+            assert!(client.contains(&format!("data-client-type=\"{}\"", transport.key())));
+            assert!(client.contains(&transport.label()));
         }
         signals.client.update(|draft| {
             draft.set_transport(ClientTransport::Redis);

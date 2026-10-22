@@ -34,8 +34,7 @@ Feature: Prometheus TLS resource mounts
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
         CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
-        CREATE CLIENT prom_tls
-        TYPE PROMETHEUS
+        CREATE PROMETHEUS CLIENT prom_tls
         MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{prometheus_tls_addr}}',

@@ -27,7 +27,8 @@ Usage:
   just chaos run domain-time --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
   just chaos run mixed-instability --image IMAGE [--seed N] [--duration 30m] [--policy POLICY]
       [--coverage LIST] [--plan FILE] [--max-memory-bytes N] [--max-recovery-backlog N] [--max-pending N]
-  just chaos replay RUN_DIRECTORY [--artifacts DIR] [--run-id ID] [--timeout SECONDS] [--keep]
+  just chaos replay RUN_DIRECTORY [--artifacts DIR] [--run-id ID] [--timeout SECONDS]
+      [--verifier-self-check RECORD] [--keep]
   just chaos suite list
   just chaos suite smoke|soak --image IMAGE [--image-kind KIND] [--image-revision REVISION] [--shard N]
       [--entry ID]... [--artifacts DIR] [--suite-id ID]

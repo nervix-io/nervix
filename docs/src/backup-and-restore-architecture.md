@@ -301,14 +301,18 @@ sending process:
 | Drain status | The coordinator to every live node and every node the schedule assigns the domain's work to, unary, polled every 50 ms; the coordinator answers itself in-process | Management, Liveness | 2 seconds per request, within the cut's budget | The sender is the current leader. The node applies the current cluster state, then flushes if idle, starts a confirming force-flush generation, or only observes, and reports its admitted-work counters. |
 | Capture | The coordinator to every scheduled state owner, and for a live cut every other live node too, concurrently; the coordinator answers itself in-process | Management, Shared | What remains of the cut's budget | The sender is the current leader, the node has applied the cut revision within five seconds, its runtime plan is current and the sender is still the leader. |
 | Capture inventory | The coordinator to each node, unary | Management, Shared | 5 seconds | The sender is the current leader. The reply lists that capture's sections in path order within one management message of at most 64 KiB. |
-| Section fetch | The coordinator to the node that staged a section; a streamed response with its exact length | Bulk, Snapshot | 30 seconds to open the stream, then 5 seconds without progress | The sender is the current leader and the capture's coordinator. The stage is removed as it is served, so a section is fetched once, in 1 MiB reads. |
+| Section fetch | The coordinator to the node that staged a section; a streamed response with its exact length | Bulk, Shared | 30 seconds to open the stream, then 5 seconds without progress | The sender is the current leader and the capture's coordinator. The stage is removed as it is served, so a section is fetched once, in 1 MiB reads. |
 
 The coordinator fetches a domain's sections after it resumed the domain, before it cuts the next
-one. A fetch shares the Snapshot subquota with materialized readers, replica checkpoint transfers and
-consensus snapshot transfers, so a refusal for capacity alone is retried every 50 milliseconds within
-one 30-second opening deadline; any other failure ends the backup. Each fetched section is staged on
-the coordinator, the stream is released before the copy is sealed, and its length and digest are
-checked against the inventory. Sections the coordinator staged itself are taken without a copy.
+one. A fetch takes the bulk pool's shared stream and admission rather than the Snapshot subquota
+that materialized readers, replica checkpoint transfers and consensus snapshot transfers share. The
+cut publishes new checkpoint revisions, and a replica catching up a state above the bulk budget
+holds the one Snapshot stream toward its owner for as long as that transfer takes, which on a
+loaded node outlasts the opening deadline. A refusal for capacity alone is retried every 50
+milliseconds within one 30-second opening deadline; any other failure ends the backup. Each fetched
+section is staged on the coordinator, the stream is released before the copy is sealed, and its
+length and digest are checked against the inventory. Sections the coordinator staged itself are
+taken without a copy.
 
 Once every domain is captured, the coordinator assembles the archive. Each domain's models are
 rendered as canonical text and parsed back, and must equal the committed models. Each included
@@ -860,6 +864,11 @@ keyspaces' disk allocation; until the first sweep completes they read zero.
 | Interconnect operations | The Turmoil scenarios for a fenced section fetch across a partition, window sections above the bulk budget, a bounded inventory under a held link, and a restart during transfer, with their committed seeds; [Deterministic Interconnect Simulation](./interconnect-simulation.md) lists them. |
 | Tracked locks | The restore storage owner tests and the `@restore_installation` and `@backup_wait` scenarios in the Deloxide selections, with their `stress.` twins in the stress selections; [Data-Plane Concurrency](./data-plane-concurrency.md) records what the detector does and does not see. |
 | Real processes | The external chaos soak entries for backup under load, backup cycles, backup under owner crash, leader crash and partition, a rolling restart during a backup stream, and restore into a fresh cluster; and the [restore faults](./cluster-chaos.md#restore-faults) held in staging through a SIGKILL of the coordinating leader, an isolation of that leader from its peers and the client, a SIGKILL of a state owner, and a SIGKILL of a state owner while a restore whose coordinator and client were lost awaits its failure. Each restore completes under its execution reference or fails with `START` refused and a restore under another name completes; a completed restore equals its archive, a domain resumed after its coordinator's isolation consumes exactly from its archived offset, and staging returns to zero on every node through completed sweeps. The [staging volume](./cluster-chaos.md#restore-staging-volume) entry measures three concurrent restores of guest saves above the bulk budget. [External Cluster Chaos](./cluster-chaos.md) defines them. |
+
+The bounded native recovery outline in `backup_wait.feature` holds the first cut for either two
+or twelve seconds with a ten-second client wait, on one and three nodes. An exhausted wait can
+precede the second cut without cancelling the admitted backup. A fresh client recovers its original
+execution and downloads an archive retaining both quiesced cuts and the first cut's measured hold.
 
 ### Representation Checks
 

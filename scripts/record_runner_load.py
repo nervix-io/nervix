@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 import signal
 import sys
@@ -13,6 +14,34 @@ import time
 
 # A sample every five seconds keeps an hour-long job's record small and still shows a build's peak.
 DEFAULT_INTERVAL_SECONDS = 5.0
+
+
+def frequency_sample(cpuinfo: Path = Path("/proc/cpuinfo")) -> dict[str, float | str | None]:
+    """Guest-reported MHz, not an effective physical clock measurement. Absence is not zero."""
+    try:
+        contents = cpuinfo.read_text()
+    except OSError:
+        contents = ""
+    values = []
+    for line in contents.splitlines():
+        key, _, value = line.partition(":")
+        if key.strip() == "cpu MHz":
+            values.append(float(value))
+    return {"source": "/proc/cpuinfo cpu MHz", "min_mhz": min(values) if values else None,
+            "mean_mhz": sum(values) / len(values) if values else None,
+            "max_mhz": max(values) if values else None}
+
+
+def pressure_sample(kind: str) -> float | None:
+    """Linux PSI's fraction of time at least one task waited, averaged over ten seconds."""
+    try:
+        for line in (Path("/proc/pressure") / kind).read_text().splitlines():
+            fields = line.split()
+            if fields[0] == "some":
+                return float(fields[1].removeprefix("avg10="))
+    except OSError:
+        pass
+    return None
 
 
 def cpu_counters() -> tuple[int, int, int]:
@@ -58,7 +87,10 @@ def record(csv_path: Path, summary_path: Path, interval: float, stopped: threadi
     with csv_path.open("w", newline="") as output:
         writer = csv.writer(output)
         writer.writerow(
-            ("elapsed_seconds", "cpu_utilization_pct", "steal_pct", "memory_used_mib", "swap_used_mib")
+            ("elapsed_seconds", "cpu_utilization_pct", "steal_pct", "memory_used_mib", "swap_used_mib",
+             "utc", "reported_min_mhz", "reported_mean_mhz", "reported_max_mhz",
+             "cpu_pressure_some_avg10_pct", "memory_pressure_some_avg10_pct",
+             "io_pressure_some_avg10_pct")
         )
         while not stopped.wait(interval):
             current = cpu_counters()
@@ -76,7 +108,11 @@ def record(csv_path: Path, summary_path: Path, interval: float, stopped: threadi
                     round(memory.swap_used_mib, 1),
                 )
                 rows.append(row)
-                writer.writerow(row)
+                # Frequency observations and pressure retain the same UTC/elapsed sample boundary.
+                frequency = frequency_sample()
+                writer.writerow((*row, datetime.now(timezone.utc).isoformat(),
+                                 frequency["min_mhz"], frequency["mean_mhz"], frequency["max_mhz"],
+                                 pressure_sample("cpu"), pressure_sample("memory"), pressure_sample("io")))
                 output.flush()
             previous = current
 
@@ -98,6 +134,8 @@ def record(csv_path: Path, summary_path: Path, interval: float, stopped: threadi
         f"memory: {total_mib:.0f} MiB.\n\n"
         "| Metric | Mean | Peak |\n| --- | ---: | ---: |\n"
         + "".join(metrics)
+        + "\nCSV also retains UTC timestamps, guest-reported MHz (not effective physical clocks) "
+        "and CPU, memory and I/O PSI `some avg10` percentages. Missing counters are blank.\n"
     )
 
 
