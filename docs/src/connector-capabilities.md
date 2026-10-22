@@ -34,12 +34,12 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | HTTP REQUEST | Compare `HTTP REQUEST`: options, modes. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
+| Entity | HTTP REQUEST | Compare `HTTP REQUEST`: options, modes, headers. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
 | Reference | HTTP client |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | `EVERY 1s` (duration); required |  |
-| Headers | `read_header`, `read_headers` |  |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |  |
 | Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |  |
 | Every live node | no; scheduled owner |  |
@@ -54,12 +54,12 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | HTTP ENDPOINT | Compare `HTTP REQUEST`: options, modes, reference. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
+| Entity | HTTP ENDPOINT | Compare `HTTP REQUEST`: options, modes, headers, reference. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
 | Reference | Http endpoint |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | `read_header`, `read_headers` |  |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
 | Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |  |
 | Every live node | yes |  |
@@ -79,7 +79,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers'` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |  |
-| Headers | `read_header`, `read_headers` |  |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
@@ -94,12 +94,12 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: locator, options, modes. Consumption owns a subscription and broker positions; publication uses a producer receipt. Emit locators currently use the emitter grammar’s unquoted topic, while ingest validates a quoted Pulsar name. |
+| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: locator, options, modes, headers. Consumption owns a subscription and broker positions; publication uses a producer receipt. Emit locators currently use the emitter grammar’s unquoted topic, while ingest validates a quoted Pulsar name. |
 | Reference | PULSAR client |  |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |  |
-| Headers | `read_header`, `read_headers` |  |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | Not offered: The current topic declaration exposes properties as headers but no separate typed broker metadata namespace. |  |
 | Every live node | no; scheduled owner |  |
@@ -139,7 +139,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); required |  |
-| Headers | `read_header`, `read_headers` |  |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | Not offered: The current subject declaration exposes message headers but no typed subject or JetStream metadata namespace. |  |
 | Every live node | no; scheduled owner |  |
@@ -159,7 +159,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |  |
-| Headers | `read_header`, `read_headers` |  |
+| Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | Not offered: The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace. |  |
 | Every live node | no; scheduled owner |  |
@@ -239,7 +239,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |  |
-| Headers | `read_header`, `read_headers` |  |
+| Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | Not offered: The current queue declaration exposes message attributes through headers but no separate typed receipt metadata namespace. |  |
 | Every live node | no; scheduled owner |  |
@@ -279,7 +279,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | `read_header`, `read_headers` |  |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
 | Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |  |
 | Every live node | yes |  |
@@ -337,12 +337,12 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | HTTP REQUEST | Compare `HTTP REQUEST`, `HTTP ENDPOINT`: options, modes, reference. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
+| Entity | HTTP REQUEST | Compare `HTTP REQUEST`, `HTTP ENDPOINT`: options, modes, headers, reference. Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position. |
 | Reference | HTTP client |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `METHOD 'POST'` (expression); required<br>`PATH '/events'` (expression); required |  |
-| Headers | `write_header` |  |
+| Headers | `write_header`; `sorted_by_name`, lowercase names: one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Body | ENCODE USING &lt;codec&gt; \| WITHOUT BODY |  |
 | BATCH | unavailable: send one request per record |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
@@ -363,7 +363,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Locator and validation rule | TOPIC orders (topic_name) |  |
 | Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | `write_header` |  |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
@@ -379,12 +379,12 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: locator, options, modes. Consumption owns a subscription and broker positions; publication uses a producer receipt. Emit locators currently use the emitter grammar’s unquoted topic, while ingest validates a quoted Pulsar name. |
+| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: locator, options, modes, headers. Consumption owns a subscription and broker positions; publication uses a producer receipt. Emit locators currently use the emitter grammar’s unquoted topic, while ingest validates a quoted Pulsar name. |
 | Reference | PULSAR client |  |
 | Locator and validation rule | TOPIC orders (topic_name) |  |
 | Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | `write_header` |  |
+| Headers | `write_header`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
@@ -405,7 +405,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Locator and validation rule | QUEUE orders (queue_name) |  |
 | Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | `write_header` |  |
+| Headers | `write_header`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
@@ -468,7 +468,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Locator and validation rule | SUBJECT orders (subject_name) |  |
 | Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | `write_header` |  |
+| Headers | `write_header`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
@@ -510,7 +510,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Locator and validation rule | QUEUE orders (queue_name) |  |
 | Modes (complete bodies after MODE) | SINGLE RETRY POLICY BACKOFF 1s MAX 30s<br>BATCH RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `FIFO GROUP tenant` (expression); `FIFO GROUP FROM BRANCH` (keyword choice); optional; omitted when unset |  |
-| Headers | `write_header` |  |
+| Headers | `write_header`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
 | Protocol batch maximum | 256KiB |  |

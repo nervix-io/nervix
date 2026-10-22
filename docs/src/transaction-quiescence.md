@@ -279,6 +279,13 @@ Before recording application completion, the coordinator resolves every engaged 
 that step's actual report under the transaction's mutation lease. A resume refusal leaves the step
 applying, including when its effect has a definitive failure to report. Recovery releases the pause
 before retaining the terminal result, so a completed transaction cannot strand its domain paused.
+A step whose earlier coordinator engaged the domain pause and stopped before publishing the step
+leaves that engagement only in the domain's status. The coordinator that runs the step again
+records the pause it adopts as a new `REQUESTED` and `CONFIRMED` attempt in the step's actual
+report before anything can end the step, drains it, and checks the frozen inputs against the
+domain as the pause left it. The adopted attempt is then released like any other engaged pause,
+before the step's outcome is retained, whether the step applies, fails or meets changed planning
+inputs.
 Completed effects are not repeated. If an owner timed out, inspection can show `UNCERTAIN` rather
 than falsely declaring that no gate engaged. Recovery may have to rebuild a whole domain after an
 entity swap cannot complete; the actual history then appends a `DOMAIN_PAUSE` attempt and recovery

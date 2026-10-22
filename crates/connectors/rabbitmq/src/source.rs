@@ -512,4 +512,27 @@ mod tests {
         );
         assert_eq!(RabbitMqDeliveryHeaders::header_value(&AMQPValue::Void), "");
     }
+
+    /// Both RabbitMQ QUEUE sides declare sorted by name with exact names: the AMQP field table a
+    /// sink writes keeps one value per name, the last one written, and a reader of the published
+    /// message visits the names in ascending byte order, names that differ in letter case staying
+    /// two names.
+    #[test]
+    fn written_headers_read_back_one_value_per_name_in_ascending_name_order() {
+        let mut written = Vec::new();
+        for (name, value) in [
+            ("trace", "a"),
+            ("Tenant", "x"),
+            ("trace", "b"),
+            ("tenant", "y"),
+        ] {
+            written.push((name.to_string(), value.to_string()));
+        }
+        let mut delivery = Delivery::mock(0, "".into(), "orders".into(), false, Vec::new());
+        delivery.properties = crate::RabbitMqSink::properties(&written);
+        let headers = RabbitMqDeliveryHeaders { delivery };
+        let mut visited = Vec::new();
+        headers.visit(&mut |name, value| visited.push(format!("{name}={value}")));
+        assert_eq!(visited, ["Tenant=x", "tenant=y", "trace=b"]);
+    }
 }

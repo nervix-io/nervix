@@ -132,7 +132,7 @@ impl SourceEntity for ClientProducerSource {
     /// A submitted batch carries no transport headers, so its rows expose an empty header list
     /// that no program may read.
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
+        headers: None,
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Schema,
@@ -237,7 +237,7 @@ pub struct ClientConsumerSink {
 
 impl SinkEntity for ClientConsumerSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::Schema,
         body: EmitterBodyForm::Native,
         batch: EmitterBatchLegality::Required { maximum: None },

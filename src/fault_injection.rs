@@ -50,6 +50,7 @@ mod consensus;
 mod domain_clock;
 mod domain_resume;
 mod execution;
+mod model_publication;
 mod pause;
 mod relocation_commit;
 mod restarted_voter;
@@ -60,6 +61,8 @@ pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use execution::NodeExecution;
+use model_publication::ModelPublicationRefusal;
+pub use model_publication::ModelPublicationRefusalKind;
 use pause::TestPause;
 use relocation_commit::RelocationCommitRefusal;
 use restarted_voter::StartupVoterGossip;
@@ -130,6 +133,9 @@ struct FaultInjectionState {
     /// One-shot, domain-scoped leader refusals of the next relocation commit, each keeping whether
     /// it was delivered.
     refused_relocation_commits: DashMap<DomainName, RelocationCommitRefusal, RandomState>,
+    /// One-shot, domain-scoped leader refusals of the next transaction model step publication and
+    /// of the pause release after it, each keeping how far it was delivered.
+    refused_model_publications: DashMap<DomainName, ModelPublicationRefusal, RandomState>,
     /// One-shot, domain-scoped failures consumed at the entity drain observation boundary.
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
     /// A stale drain observation on one node omits already buffered relay-owner batches.
@@ -433,6 +439,7 @@ impl Default for FaultInjection {
                 failed_entity_gate_engagements: DashMap::default(),
                 handoff_engagement_transport_failures: DashMap::default(),
                 refused_relocation_commits: DashMap::default(),
+                refused_model_publications: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
                 stale_owner_buffer_drain_reports: DashMap::default(),
                 forced_domain_drain_timeouts: DashMap::default(),

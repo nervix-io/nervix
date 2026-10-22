@@ -349,6 +349,14 @@ impl Runtime {
                     Box::pin(self.swap_scheduled_nodes(&desired.domain, desired.clone(), change))
                         .await;
                 if let Err(error) = swap_result {
+                    // A failed emitter stop reinstalls its task with the sink's held records.
+                    // Rebuilding here would tear that task down and hide its finish outcome.
+                    if matches!(
+                        error.downcast_ref::<ExecutionBuildError>(),
+                        Some(ExecutionBuildError::StopEmitter { .. })
+                    ) {
+                        return Err(error);
+                    }
                     let reason = format!("{error:#}");
                     warn!(
                         domain = desired.domain.as_str(),

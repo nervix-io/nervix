@@ -6,9 +6,9 @@
 //!   nested connector by entity, the kinds that name each connector and entity pair, the
 //!   alterations of the ingestors that read each pair, the shape of the names an external system
 //!   gives the entities a source reads, and what a pair declares whatever its statement says:
-//!   header access, the metadata namespace, where a source executes, what a sink requires of its
-//!   emitter, and what a body references. Each connector's own module owns its client Model, its
-//!   entity Models, their modes and the rules its external names follow.
+//!   the header model of each side, the metadata namespace, where a source executes, what a sink
+//!   requires of its emitter, and what a body references. Each connector's own module owns its
+//!   client Model, its entity Models, their modes and the rules its external names follow.
 //! - **Depends on.** Validated names, expressions, schema types, and the acknowledgement, retry and
 //!   batching vocabulary the entity Models share.
 //! - **Must not know.** How a connector is planned, validated, hosted or driven, or any connector
@@ -32,6 +32,7 @@ mod deadline;
 mod declaration;
 mod entity_union;
 mod external_name;
+mod header_model;
 mod http;
 mod iceberg;
 mod kafka;
@@ -58,9 +59,10 @@ use strum::{AsRefStr, Display, EnumIter, IntoStaticStr};
 
 pub use self::{
     bounds::*, clickhouse::*, client::*, configured_client::*, deadline::*, declaration::*,
-    external_name::ExternalNameError, http::*, iceberg::*, kafka::*, mongodb::*, mqtt::*, mysql::*,
-    nats::*, otel::*, postgres::*, prometheus::*, pulsar::*, rabbitmq::*, redis::*, sentry::*,
-    sink::*, source::*, source_metadata::*, sqs::*, syslog::*, websockets::*, zeromq::*,
+    external_name::ExternalNameError, header_model::*, http::*, iceberg::*, kafka::*, mongodb::*,
+    mqtt::*, mysql::*, nats::*, otel::*, postgres::*, prometheus::*, pulsar::*, rabbitmq::*,
+    redis::*, sentry::*, sink::*, source::*, source_metadata::*, sqs::*, syslog::*, websockets::*,
+    zeromq::*,
 };
 pub(crate) use self::{entity_union::ALTERED_PAIR_CHECKED, source::AlteredIngestorSource};
 

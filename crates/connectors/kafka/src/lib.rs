@@ -465,20 +465,24 @@ impl KafkaSink {
             record = record.key(key);
         }
         if !message.headers.is_empty() {
-            let owned_headers = message.headers.iter().fold(
-                OwnedHeaders::new_with_capacity(message.headers.len()),
-                |owned_headers, (key, value)| {
-                    owned_headers.insert(KafkaHeader {
-                        key,
-                        value: Some(value.as_str()),
-                    })
-                },
-            );
-            record = record.headers(owned_headers);
+            record = record.headers(Self::owned_headers(&message.headers));
         }
         self.producer
             .send(record)
             .map_err(|(source, _record)| source)
+    }
+
+    /// The record headers a record's header writes become: every write in the order written, a
+    /// repeated name once for each of its values.
+    fn owned_headers(headers: &[(String, String)]) -> OwnedHeaders {
+        let mut owned_headers = OwnedHeaders::new_with_capacity(headers.len());
+        for (key, value) in headers {
+            owned_headers = owned_headers.insert(KafkaHeader {
+                key,
+                value: Some(value.as_str()),
+            });
+        }
+        owned_headers
     }
 
     /// The broker's answer for a record whose delivery report is `report`.

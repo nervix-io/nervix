@@ -210,7 +210,7 @@ const OTEL_BOUNDS: DeclaredBounds = DeclaredBounds {
 /// What every OTEL sink declares: an export is one request the collector answers, and its fields
 /// are mapped directly rather than encoded by a codec.
 const OTEL_SINK_CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-    writes_headers: false,
+    headers: None,
     reference: SinkReferenceKind::Client(ConnectorKind::Otel),
     body: EmitterBodyForm::Values,
     batch: EmitterBatchLegality::Optional { maximum: None },

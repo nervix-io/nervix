@@ -289,7 +289,7 @@ impl EmitterExecutionPlan {
             .invoke
             .iter()
             .any(|invocation| invocation.inner.function == FunctionName::WriteHeader)
-            && !emitter.sink.capabilities().writes_headers
+            && !emitter.sink.capabilities().writes_headers()
         {
             return Err(Report::new(EmitterExecutionPlanError::Headers {
                 emitter: emitter.name.clone(),

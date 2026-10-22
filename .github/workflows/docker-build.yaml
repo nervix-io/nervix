@@ -99,6 +99,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Runner diagnostics before Build and push arch image
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: build-and-push-arch-image
+
       - name: Build and push arch image
         env:
           KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
@@ -165,6 +170,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Runner diagnostics before Build and push the diagnostic image
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: build-and-push-the-diagnostic-image
 
       - name: Build and push the diagnostic image
         env:
@@ -272,11 +282,21 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Runner diagnostics before Run benchmarks
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: run-benchmarks
+
       - name: Run benchmarks
         run: >-
           just benchmark-ci
           "${NERVIX_BENCHMARK_IMAGE}"
           "${RUNNER_TEMP}/nervix-benchmarks"
+
+      - name: Runner diagnostics before Measure ordinary primitive costs
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: measure-ordinary-primitive-costs
 
       - name: Measure ordinary primitive costs
         run: |
@@ -670,6 +690,11 @@ jobs:
             echo "llms_url=${llms_url}"
             echo "pdf_url=${pdf_url}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Runner diagnostics before Publish Book
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: publish-book
 
       - name: Publish Book
         env:

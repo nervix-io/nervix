@@ -1159,7 +1159,7 @@ Feature: HTTP emitter
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           WITHOUT BODY
         INVOKE write_header('X-Replaced', input.replacement),
-               write_header('x-replaced', 'final'),
+               write_header(lower('X-REPLACED'), 'final'),
                write_header('X-Empty', ''),
                write_header('X-Spaced', 'a  b'),
                write_header(input.header_name, input.header_value),

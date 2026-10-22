@@ -22,10 +22,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ClickHouseSink, ClickHouseSinkEntity, ClientSink, ClientSinkEntity, DeclaredBounds,
-    EnvelopeClauseKind, HttpSink, HttpSinkEntity, IcebergSink, IcebergSinkEntity, KafkaSink,
-    KafkaSinkEntity, LocatorDeclaration, MongoDbSink, MongoDbSinkEntity, MqttSink, MqttSinkEntity,
-    MySqlSink, MySqlSinkEntity, NatsSink, NatsSinkEntity, OptionDeclaration, OtelSink,
-    OtelSinkEntity, PostgresSink, PostgresSinkEntity, PropertyDeclaration, PulsarSink,
+    EnvelopeClauseKind, HeaderModel, HttpSink, HttpSinkEntity, IcebergSink, IcebergSinkEntity,
+    KafkaSink, KafkaSinkEntity, LocatorDeclaration, MongoDbSink, MongoDbSinkEntity, MqttSink,
+    MqttSinkEntity, MySqlSink, MySqlSinkEntity, NatsSink, NatsSinkEntity, OptionDeclaration,
+    OtelSink, OtelSinkEntity, PostgresSink, PostgresSinkEntity, PropertyDeclaration, PulsarSink,
     PulsarSinkEntity, RabbitMqSink, RabbitMqSinkEntity, RedisSink, RedisSinkEntity,
     RuntimeCapability, SentrySink, SentrySinkEntity, SqsSink, SqsSinkEntity, SyslogSink,
     SyslogSinkEntity, ZeroMqSink, ZeroMqSinkEntity, entity_union::entity_union,
@@ -156,8 +156,9 @@ impl EmitterBodyForm {
 /// documentation and the generated conformance tests read the same declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmitSinkCapabilities {
-    /// Whether an emitter's programs can write transport headers with `write_header`.
-    pub writes_headers: bool,
+    /// What the `write_header` calls of an emitter's record become on the message it publishes,
+    /// or `None` where its messages carry no transport headers.
+    pub headers: Option<HeaderModel>,
     /// What its body names to publish to.
     pub reference: SinkReferenceKind,
     /// How an emitter's body is formed.
@@ -182,6 +183,11 @@ pub struct EmitSinkCapabilities {
 }
 
 impl EmitSinkCapabilities {
+    /// Whether an emitter's programs can write transport headers with `write_header`.
+    pub const fn writes_headers(&self) -> bool {
+        self.headers.is_some()
+    }
+
     /// Whether an emitter may name a publishing mode of `kind`.
     ///
     /// An entity declares each kind at most once, of the ten kinds there are.

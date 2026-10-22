@@ -181,9 +181,11 @@ The schedule classifier retains Model-based change-aspect and quiescence decisio
 registry. The runtime receives typed dynamic values, affected node identities, state purges,
 and gate relays. It does not reclassify the new schedule. An entity swap that fails locally
 falls back to a full rebuild of the desired revision; the actual wider engagement is reported as
-a recovery expansion. If that rebuild also fails, application fails and the committed revision
-remains eligible for retry. A plan is complete even for a narrow change, so fallback uses the
-same desired revision rather than reconstructing one from live tasks.
+a recovery expansion. A failed emitter stop is returned instead: its task is retained with the
+sink's held records, and rebuilding would discard the stop's exact finish outcome. If a fallback
+rebuild also fails, application fails and the committed revision remains eligible for retry. A plan
+is complete even for a narrow change, so fallback uses the same desired revision rather than
+reconstructing one from live tasks.
 
 The swap sequence fences delivery before stopping an owner, prepares new local placement and
 programs, replaces relay owner and remote-consumer edges, and publishes the routing snapshot

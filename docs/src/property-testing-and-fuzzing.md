@@ -64,6 +64,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `models-domain-clock-validation` | `nervix-models` clock text and numbers read in range or fail typed; decoders refuse invalid values | arbitrary text and numbers, v1 | 256 | 64 bytes |
 | `models-durations` | `nervix-models` a duration reads back from the text `humantime` writes for it; only one within one of each unit of the longest duration may be refused as too long | every duration, v1 | 256 | 16 bytes |
 | `models-duration-text` | `nervix-models` duration text reads as `humantime` reads it or fails typed, and never panics | arbitrary duration text, v1 | 256 | 64 bytes |
+| `models-header-model-round-trip` | `nervix-models` writes carried through a header model read back per name as the model keeps them, and the model refuses exactly the literal writes that round trip would lose | repeated and case-varied header names under every layout and name rule, v1 | 256 | 64 bytes |
 | `models-json-paths` | `nervix-models` path text, JSON and archive equality | paths up to the step limit, v1 | 256 | 1024 bytes |
 | `models-json-path-validation` | `nervix-models` path text reaches a fixed point or fails typed; decoders admit the constructor's step counts | arbitrary path text, v1 | 256 | 512 bytes |
 | `models-batch-limits` | `nervix-models` message and size limit text, JSON and archive equality | every limit and unit, v1 | 256 | 64 bytes |
@@ -483,7 +484,11 @@ that run in parallel, each in a job of its own:
   `just coverage-bolero 30 <number>/<count>`: the runner tests, its share of the campaigns and the
   complete failure qualification. Only the server preparation is held to one build job; discovery
   and library builds use every core. A shard samples CPU use, steal time and used memory every five
-  seconds and adds the summary to its job summary.
+  seconds and adds the summary to its job summary. Samples also retain guest-reported MHz,
+  UTC and CPU/memory/I/O pressure. Every build step first records the shared short CPU, memory
+  access and filesystem calibration, with JSON and Markdown artifacts. The
+  [runner diagnostics contract](integration-test-lifecycle.md) owns its bounds, units and limits;
+  these measurements never change campaign budgets or decide a property verdict.
 - `bolero-fuzz-combined` downloads every shard's completion evidence, without the raw profiles, and
   runs `just combine-bolero-fuzz`. It accepts only shards 1 to N of one plan, from one workflow run
   and attempt at the tested revision and inventory. Each must be complete, must have run exactly its
