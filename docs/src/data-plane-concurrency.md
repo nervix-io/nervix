@@ -2113,6 +2113,15 @@ artifacts. The evidence observes each process up to its kill, pause, stop or the
 upstream flush barrier, and only its tracked thread-blocking locks; recovery, ledger and timing
 verdicts stay the scenarios' own, with the product's deadlines and the suite's budgets unchanged.
 
+The evidence verdict and the scenario verdict are separate. A run can retain qualifying evidence
+from every process and still fail its ledger, recovery checks or controller budget. A soak
+qualification requires both suite verdicts to pass, with every configured entry complete on the
+ordinary and diagnostic images of the same revision. The owning task records the revision, both
+immutable image digests, every shard verdict and the diagnostic process-start and evidence-file
+counts, together with failed attempts and their owning corrections. Per-process evidence qualifies
+the tracked lock activity that was recorded; the complete scenario verdict also establishes the
+delivery and recovery behavior that the external runner observes.
+
 ## Deterministic Concurrency Verification
 
 The Pulsar sink uses the shared `ConfirmationWindow` and its registered property and Shuttle
