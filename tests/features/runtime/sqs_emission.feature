@@ -23,8 +23,7 @@ Feature: SQS emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
@@ -39,8 +38,7 @@ Feature: SQS emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT sqs_main
-        TYPE SQS
+        CREATE SQS CLIENT sqs_main
         CONFIG {
           'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
@@ -106,8 +104,7 @@ Feature: SQS emission
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-poison-{{test_id}}'
@@ -121,8 +118,7 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
@@ -193,8 +189,7 @@ Feature: SQS emission
       TO SCHEMA note_event;
       CREATE RELAY notes SCHEMA note_event UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-noncharacter-{{test_id}}'
@@ -208,8 +203,7 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
@@ -277,8 +271,7 @@ Feature: SQS emission
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-fifo-{{test_id}}'
@@ -294,8 +287,7 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
@@ -366,8 +358,7 @@ Feature: SQS emission
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-fifo-kept-{{test_id}}'
@@ -383,8 +374,7 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
@@ -457,8 +447,7 @@ Feature: SQS emission
       TO SCHEMA order_event;
       CREATE RELAY orders SCHEMA order_event UNBRANCHED;
       CREATE RELAY rejected_orders SCHEMA rejected_order UNBRANCHED;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-fifo-failed-{{test_id}}'
@@ -473,8 +462,7 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'

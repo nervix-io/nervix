@@ -30,10 +30,10 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT first_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT first_api CONFIG {
         'endpoint' = '{{http_receiver.first}}', 'timeout_ms' = 60000
       };
-      CREATE CLIENT second_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
       CREATE ATTACHED EMITTER published FROM outgoing
@@ -108,10 +108,10 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT first_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT first_api CONFIG {
         'endpoint' = '{{http_receiver.first}}', 'timeout_ms' = 60000
       };
-      CREATE CLIENT second_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
       CREATE ATTACHED EMITTER published FROM outgoing
@@ -188,7 +188,7 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE ATTACHED EMITTER published FROM outgoing
@@ -375,10 +375,10 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT first_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT first_api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE CLIENT second_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE EMITTER published FROM outgoing
@@ -434,7 +434,7 @@ Feature: HTTP emitter lifecycle
       """
       BEGIN;
       DROP CLIENT second_api;
-      CREATE CLIENT second_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 6000
       };
       """
@@ -479,7 +479,7 @@ Feature: HTTP emitter lifecycle
       CREATE CODEC event_codec FROM JSON TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
       };
       CREATE KAFKA TOPIC INGESTOR source
@@ -489,7 +489,7 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
       CREATE ATTACHED EMITTER published FROM outgoing
@@ -547,7 +547,7 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
       CREATE ATTACHED EMITTER published FROM outgoing
@@ -596,7 +596,7 @@ Feature: HTTP emitter lifecycle
       CREATE CODEC event_codec FROM JSON TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
       };
       CREATE KAFKA TOPIC INGESTOR source
@@ -606,10 +606,10 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT first_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT first_api CONFIG {
         'endpoint' = '{{http_receiver.first}}', 'timeout_ms' = 60000
       };
-      CREATE CLIENT second_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
       CREATE ATTACHED EMITTER published FROM outgoing

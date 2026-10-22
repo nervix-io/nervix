@@ -13,6 +13,8 @@ as waiting for materialized state or following a new leader, remain distinct fro
 The web console applies the same distinction to structured choice lookups: an absent form
 prerequisite shows a neutral hint, and stale context offers a fresh request. A failed lookup,
 closed session channel, or unreadable reply appears as an alert.
+Client creation names its choice as a connector and presents the composed Plexus
+`<CONNECTOR> CLIENT` head; a missing choice asks the operator to choose a client connector.
 
 This chapter owns the error and diagnostic model across layers: who gives a failure its meaning,
 how a report is created, enriched, inspected and rendered, which outcomes are not failures, where a
@@ -857,8 +859,7 @@ invalid-model failure naming the node and output in its diagnostic. An ingestor 
 client of another connector, or an endpoint of another `TYPE`, than its head's entity reads is
 refused with a typed failure naming the domain, the ingestor, its connector and entity, the client
 or endpoint, and both connectors or both endpoint types, such as `KAFKA TOPIC ingestor 'orders_in'
-in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. A `TYPE
-PROMETHEUS` client's `CONFIG` is held to the keys the vocabulary declares for it when the client
+in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. A `PROMETHEUS CLIENT`'s `CONFIG` is held to the keys the vocabulary declares for it when the client
 is created. The refusal names the connector, the client and the domain, with the vocabulary's
 `PrometheusClientConfigError` beneath it naming the key. Where the key's value breaks its address
 or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
