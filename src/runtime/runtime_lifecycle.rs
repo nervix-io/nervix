@@ -580,6 +580,26 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn take_model_publication_refusal(
+        &self,
+        domain: &DomainName,
+    ) -> Option<crate::fault_injection::ModelPublicationRefusalKind> {
+        self.inner
+            .fault_injection
+            .take_model_publication_refusal(domain)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_model_pause_release_refusal(
+        &self,
+        domain: &DomainName,
+    ) -> Option<crate::fault_injection::ModelPublicationRefusalKind> {
+        self.inner
+            .fault_injection
+            .take_model_pause_release_refusal(domain)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_resource_installation_if_armed(&self, node_id: &ClusterNodeName) {
         self.inner
             .fault_injection

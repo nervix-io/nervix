@@ -111,7 +111,7 @@ const REDIS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for RedisPubSubSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
+        headers: None,
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Redis),
@@ -184,7 +184,7 @@ pub struct RedisPubSubSink {
 
 impl SinkEntity for RedisPubSubSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::Client(ConnectorKind::Redis),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },

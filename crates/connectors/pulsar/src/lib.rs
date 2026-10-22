@@ -1356,4 +1356,30 @@ mod tests {
         assert!(error.contains("tls_allow_insecure_connection"));
         assert!(error.contains("maybe"));
     }
+
+    /// PULSAR TOPIC emitters declare last wins with exact names: a record's header writes become
+    /// the producer message's properties, one per name, the last value written for it, and names
+    /// that differ in letter case stay two names.
+    #[test]
+    fn a_records_headers_become_one_property_per_name_holding_the_last_value() {
+        let mut headers = Vec::new();
+        for (name, value) in [
+            ("trace", "a"),
+            ("Tenant", "x"),
+            ("trace", "b"),
+            ("tenant", "y"),
+        ] {
+            headers.push((name.to_string(), value.to_string()));
+        }
+        let mut record = record(0, b"{}".to_vec());
+        record.headers = headers;
+        let message = PulsarSink::message(record);
+        let properties: std::collections::BTreeMap<_, _> = message.properties.into_iter().collect();
+        let expected = std::collections::BTreeMap::from([
+            ("Tenant".to_string(), "x".to_string()),
+            ("tenant".to_string(), "y".to_string()),
+            ("trace".to_string(), "b".to_string()),
+        ]);
+        assert_eq!(properties, expected);
+    }
 }

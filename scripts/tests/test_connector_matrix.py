@@ -19,7 +19,10 @@ def declarations():
             "locator": "TOPIC 'orders' (kafka_topic)", "options": [],
             "modes": ["NO ACK", "ACK SEQUENTIAL ACK TIMEOUT 5s"],
             "quiesce": ["SUSPEND"], "metadata": ["metadata.offset: I64 OPTIONAL"],
-            "headers": True, "every_node": False, "position": "replayable",
+            "headers": {"layout": "ordered_repeats", "names": "exact",
+                        "layout_meaning": "every header in the order it was written",
+                        "names_meaning": "a name matches only itself"},
+            "every_node": False, "position": "replayable",
             "confirmation": "answered",
             "bounds": {
                 "buffers": [{"holds": "messages prefetched per partition", "bound": "driver default: queued.min.messages 100000; holds the peer back when full"}],
@@ -33,7 +36,10 @@ def declarations():
             "entity": "KAFKA TOPIC", "connector": "KAFKA", "reference": "KAFKA client",
             "locator": "TOPIC orders (topic)", "options": [],
             "modes": ["NO_ACK RETRY POLICY BACKOFF 1s MAX 30s"],
-            "headers": True, "batch": "optional", "batch_maximum": None,
+            "headers": {"layout": "ordered_repeats", "names": "exact",
+                        "layout_meaning": "every header in the order it was written",
+                        "names_meaning": "a name matches only itself"},
+            "batch": "optional", "batch_maximum": None,
             "body": "ENCODE USING <codec>", "batch_transformation": False,
             "envelope": [], "properties": [],
             "bounds": {
@@ -86,8 +92,30 @@ class ConnectorMatrixTests(unittest.TestCase):
                       "messages prefetched per partition: driver default: queued.min.messages 100000",
                       "receive.message.max.bytes 100000000", "produce request: `timeout_ms`",
                       "`STALLED PEER timeout_ms`", "holds no buffer between its transport",
-                      "no client deadline key bounds a wait"]:
+                      "no client deadline key bounds a wait",
+                      "`write_header`; `ordered_repeats`, exact names: every header in the order "
+                      "it was written; a name matches only itself"]:
             self.assertIn(value, text)
+
+    def test_header_models_group_each_side_and_absent_headers_need_a_reason(self):
+        surface = declarations()
+        surface["emit"][0]["headers"] = {
+            "layout": "last_wins", "names": "lowercase",
+            "layout_meaning": "one value per name", "names_meaning": "names are lowercased"}
+        headers = matrix.header_models_table(surface)
+        self.assertIn("| `last_wins`, lowercase names | None | `KAFKA TOPIC` | one value per name; "
+                      "names are lowercased |", headers)
+        self.assertIn("| `ordered_repeats`, exact names | `KAFKA TOPIC` | None |", headers)
+        self.assertIn("headers", matrix.mirror(surface, "ingest", surface["ingest"][0], reasons()))
+        surface["emit"][0]["headers"] = None
+        self.assertIn("`KAFKA TOPIC` write no transport headers and refuse `write_header`.",
+                      matrix.side_headers(surface, "emit"))
+        with self.assertRaisesRegex(ValueError, "emit_headers"):
+            matrix.render_matrix(surface, reasons())
+        notes = reasons()
+        notes["KAFKA TOPIC"]["emit_headers"] = "This emitter writes no transport headers."
+        text = matrix.render_matrix(surface, notes)
+        self.assertIn("Not offered: This emitter writes no transport headers.", text)
 
     def test_each_absence_and_mirror_requires_a_nonempty_reason(self):
         for field in reasons()["KAFKA TOPIC"]:
@@ -157,9 +185,9 @@ class ConnectorMatrixTests(unittest.TestCase):
             root = Path(directory)
             (root / "docs/src").mkdir(parents=True)
             for path, names in {
-                "ingestors.md": ["ingest-kafka-topic", "instancing"],
-                "emitters.md": ["emit-kafka-topic"],
-                "connector-contract.md": ["position", "confirmation"],
+                "ingestors.md": ["ingest-kafka-topic", "instancing", "ingest-headers"],
+                "emitters.md": ["emit-kafka-topic", "emit-headers"],
+                "connector-contract.md": ["position", "confirmation", "headers"],
             }.items():
                 content = "Retained prose\n" + "\n".join(
                     f"<!-- connector-matrix:{name}:start -->\nstale\n<!-- connector-matrix:{name}:end -->"
@@ -169,7 +197,12 @@ class ConnectorMatrixTests(unittest.TestCase):
             self.assertEqual(len(output), 4)
             self.assertIn(surface["emit"][0]["template"], output["docs/src/emitters.md"])
             self.assertIn("`answered` | `KAFKA TOPIC`", output["docs/src/connector-contract.md"])
+            self.assertIn("| `ordered_repeats`, exact names | `KAFKA TOPIC` | `KAFKA TOPIC` |",
+                          output["docs/src/connector-contract.md"])
             self.assertIn("Retained prose", output["docs/src/ingestors.md"])
+            self.assertIn("| `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the "
+                          "order it was written; a name matches only itself |",
+                          output["docs/src/emitters.md"])
             policy["confirmation"]["queued"] = "Not declared by this export."
             with self.assertRaisesRegex(ValueError, "confirmation"):
                 matrix.documents(root, surface, reasons(), policy)

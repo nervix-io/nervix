@@ -108,6 +108,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
+| Publication-relative receipt timing | A runtime task owns the subscription read before publication and retains its receipt timestamp. The assertion bounds completion after the HTTP publishing step returns; scenario teardown cancels an unfinished reader before stopping nodes | `tests/common/runner_observation.rs`, `tests/common/raw_session.rs` and the timed subscription steps in `tests/scenarios.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
@@ -399,7 +400,42 @@ so a failed checkout does not add a second failure that obscures the original on
 existing deadlines and test budgets are unchanged.
 
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
-seconds. Every kache-backed job uses kache 1.2.1, records `doctor` output without making it a
+seconds, with UTC timestamps, guest-reported MHz and Linux PSI CPU, memory and I/O `some avg10`
+pressure. Missing VM counters are blank, not zero measurements.
+
+Every authored Rust build step in Check, Bolero and Docker Build is preceded by the shared
+`runner-diagnostics` action. It prints CPU identity/topology, allowed CPUs and visible ancestor
+cgroup quotas, exposed frequency/governor/boost controls, memory, filesystem and block-device
+information in the step log and job summary. The `runner-diagnostics-<job>-<matrix-index>-<step>`
+artifact retains JSON and Markdown with UTC, revision, run/attempt/job identity, tool versions
+and exact arguments. Compare matching tool versions, architectures and arguments;
+these are observations, not performance gates or sustained hardware benchmarks.
+
+The action installs distro-packaged [sysbench](https://github.com/akopytov/sysbench) and
+[fio](https://fio.readthedocs.io/en/latest/fio_doc.html) once per job. The tools run on one allowed
+CPU where `taskset` is available. Sysbench runs one second each of CPU work (prime limit 20,000),
+sequential memory reads and uniformly random memory reads across a 64 MiB block. Its event latency
+measures a whole block operation, not an individual hardware memory load. Fio uses one worker and
+queue depth one: 64 MiB of direct writes with `end_fsync`, 64 MiB of direct sequential reads and
+128 random direct 4 KiB reads. It touches only a private temporary file on the build filesystem.
+The write report's sync statistics and the process duration are retained; its per-I/O bandwidth
+must not be mistaken for a measurement including the final sync.
+
+Raw tool reports, wall time and process CPU time are retained separately. Sysbench invocations
+have three-second process-group guards and fio a four-second guard, all within a ten-second
+calibration allowance. Completed tool reports survive a later timeout; the supervisor kills the
+tool's process group and removes its temporary directory. Missing tools and unsupported direct
+I/O retain their actual error, with no buffered-read substitute and no global cache drops.
+
+Native actions probe the workspace filesystem. Docker's builder also runs the probe against its
+mounted `/app/target`, recording the full result in its plain BuildKit log; host workspace and
+builder storage observations are distinct. No diagnostics are added to the release image.
+Direct I/O requests still traverse the guest filesystem and storage stack and do not establish
+physical SSD latency. Reported MHz and cpufreq policy values do not measure effective physical
+clocks. Low steal alone does not show a host is fast: CPU execution, cache/memory contention and
+storage can slow work without stolen time. The samples support comparison, not a specific cause.
+
+Every kache-backed job uses kache 1.2.1, records `doctor` output without making it a
 test failure, publishes a cache report, and diagnoses its five most expensive misses with
 `why-miss`. The shared S3 cache keeps executable and test-binary outputs, with stores sized for
 the full builds: every kache-backed job and Docker image build uses a 1 TiB store ceiling. This is
@@ -517,8 +553,17 @@ task that another scenario's synchronous step stalls for longer than that margin
 hold timed on the runner task until the product deadline expires. `tests/common/injected_hold.rs`
 therefore waits for each gate, holds it for its duration and releases it on a task of its own, and
 the step that injects the holds only awaits that task. A stalled runner delays when the step learns
-of a release, never the release itself. The step still watches the controlled operation, and a
-command that ends before its gates were held fails the step with the command's own outcome.
+of a release, never the release itself. When the command is expected to outlast every hold, the
+step still watches it and reports a command that ends early with its own outcome.
+
+The bounded native backup recovery outline instead expects the client's ten-second wait to end
+with typed uncertainty while the admitted backup continues. It uses both a two-second and a
+twelve-second first hold inside the unchanged thirty-second cut budget, on one and three nodes.
+The wait may expire before the second cut is reached. The step observes its twelve-second harness
+bound from dispatch on a runtime worker, waits independently for both controlled cuts, and recovers
+through a fresh client under the original reference. The recovery orchestration also runs off the
+runner, so delayed step polling cannot restart the wait bound or leave the second cut held. The
+archive must retain both quiesced cuts and the measured first hold.
 
 The duration window outline establishes its observation boundary through a public subscription:
 it first waits for a probe branch's window to emit, then submits all four interleaved tenant rows
@@ -842,6 +887,26 @@ its tenant and sequence and arrive after the declared lower bound, inside the un
 budget. Starting a new silence window after an HTTP response would reject a valid row whose
 collection or flush deadline elapsed while the harness awaited that response. The production
 owner's timing checks retain the independent branch-deadline assertions.
+
+The WASM reset outline `Reset drains accepted buffered output once and cancels the old branch
+timer` starts a bounded receipt observation before posting the fresh alpha input. The observer
+owns the subscription session on a runtime worker and confirms its first poll before publication.
+It timestamps the next received row there, preserving that instant until the assertion reads the
+result, then returns the session for the duplicate-output check. The row must match the alpha key,
+tenant and release marker and arrive at least three seconds after that publication. Both cluster
+sizes retain the ordered pre-reset alpha/beta drain, the five-second receive budget after the
+publishing request returns and the three-second guest timer. The read remains active across that
+request; the assertion bounds its completion and teardown cancels it if a step fails. A queued
+early row cannot acquire a later timestamp merely because the runner resumes late. This
+observation measures client receipt, not server emission, and cannot
+remove scheduling delay on the observer's own runtime worker. Ordinary raw sessions still read
+only while a caller waits; their later dequeues do not supply independent receipt evidence.
+
+Paused-clock harness controls cover a valid receipt learned late, an early receipt learned late,
+a row predating publication, cancellation and a reader panic. The WASM host's isolated-store test
+separately drops an instance with an armed request, starts its fresh lifetime and checks exact
+domain-time deadlines for it and an untouched sibling. These tests and the public reset outline
+provide complementary receipt and instance-ownership evidence; they add no synchronization claim.
 
 The MQTT changed-address restart scenario waits for the post-restart marker within its bounded
 delivery window. Its persistent QoS 1 source may replay the pre-restart marker before that row;
@@ -1991,12 +2056,12 @@ scenarios in one process, their nodes contended on it and missed startup and req
 that a plain diagnostic build of the same scenarios met.
 [Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
 them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
-owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 96
+owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 98
 lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, the ten endpoint ACK
 examples in their own 15-minute invocation, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
 bounded at 40. `deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
-invocation of 51 capture, restore and checkpoint-transfer runs tagged `@deloxide_stress_restore`,
+invocation of 53 capture, restore and checkpoint-transfer runs tagged `@deloxide_stress_restore`,
 bounded at 70 minutes. Each selection has the inventory's 80-minute budget and its own CI runner.
 
 The split follows from what the disturbance costs. It barely lengthens a scenario, because the

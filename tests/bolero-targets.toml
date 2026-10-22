@@ -611,6 +611,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/src/connector/__fuzz__/connector__header_model__tests__bolero_a_header_model_refuses_exactly_the_literal_writes_a_round_trip_would_lose/corpus"
+domain_version = 1
+features = []
+id = "models-header-model-round-trip"
+invariant = "Generated header writes carried through every header model read back with each name's values in written order where the model keeps every value and the last one where it keeps one, and a model refuses exactly the literal writes such a round trip would lose: the first write whose name, as the model records names, repeats an earlier one, reported beside that name's first write."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/connector/header_model_tests.rs"
+test = "connector::header_model::tests::bolero_a_header_model_refuses_exactly_the_literal_writes_a_round_trip_would_lose"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/json_paths__bolero_json_paths_round_trip_through_every_representation/corpus"
 domain_version = 1
 features = []
