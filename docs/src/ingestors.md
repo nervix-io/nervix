@@ -1303,8 +1303,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
-| Buffers | each incoming packet, whose bound every CONNECT advertises as its Maximum Packet Size: at most 10240 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>publishes the connection reads ahead of the host: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535, and 64 more publishes, or 64 under NO ACK; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, at least 1024; when full, holds back what fills it |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>an acknowledgement's PUBACKs written to the connection: unbounded<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
+| Buffers | each incoming packet, whose bound every CONNECT advertises as its Maximum Packet Size: at most 10240 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>publishes the connection reads ahead of the host: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>an acknowledgement's PUBACKs written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
 | Driver limits | A packet above the advertised Maximum Packet Size that a broker sends anyway ends the connection with DISCONNECT Packet too large. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1332,14 +1332,15 @@ Delivery constraints:
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
 
 In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for
-is written to the connection; the broker answers none. Its connection keeps writing those
-acknowledgements and sending its keep-alive while the ingestor waits on a batch's acknowledgement
-trees, however long a downstream emitter holds them, so the broker keeps the session connected and
-delivers nothing again. The connection reads as many publishes as its Receive Maximum admits and
-64 more ahead of the ingestor, 64 under `NO ACK`. A QoS 0 publish, which a QoS 1 subscription
-receives from a publisher that sends at QoS 0, is not held back by the broker; once those fill the
-read-ahead while a batch waits, the connection stops reading, the batch's acknowledgement fails
-and the ingestor reconnects, and the broker delivers the unacknowledged QoS 1 publishes again. See
+is written to the connection, within one keep-alive interval; the broker answers none. Its
+connection keeps writing those acknowledgements and sending its keep-alive while the ingestor
+waits on a batch's acknowledgement trees, however long a downstream emitter holds them, so the
+broker keeps the session connected and delivers nothing again. The connection reads as many
+publishes as its Receive Maximum admits ahead of the ingestor, 64 under `NO ACK`. A QoS 0 publish,
+which a QoS 1 subscription receives from a publisher that sends at QoS 0, is not held back by the
+broker; once those fill the read-ahead while a batch waits, the connection stops reading, the
+batch's acknowledgement fails and the ingestor reconnects, and the broker delivers the
+unacknowledged QoS 1 publishes again. See
 [MQTT source connections](connector-contract.md#mqtt-source-connections).
 
 Every connection an MQTT ingestor opens advertises the incoming packet bound the table above

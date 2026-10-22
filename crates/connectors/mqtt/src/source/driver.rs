@@ -28,7 +28,9 @@
 //! cannot poll before the source reads again: one that ended, and one holding a publish for room
 //! in a read-ahead the source has taken nothing from since the driver published that it waits.
 //! Such a wait ends at once with a failure. A driver whose held publish the source has made room
-//! for is about to poll again, so the wait goes on.
+//! for is about to poll again, so the wait goes on, for at most one keep-alive interval: a
+//! connection whose broker stopped reading it holds the client's flush, which has no deadline of
+//! its own.
 
 #![cfg_attr(
     nervix_lint,
@@ -42,7 +44,7 @@
     )
 )]
 
-use std::{future::Future, num::NonZeroUsize};
+use std::{future::Future, num::NonZeroUsize, time::Duration};
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
@@ -53,6 +55,7 @@ use nervix_primitives::{
         watch,
     },
     task::AbortOnDropHandle,
+    time::timeout,
 };
 use rumqttc::{
     AsyncClient, ClientError, ConnectionError, Event, EventLoop, Incoming, Outgoing, Publish, QoS,
@@ -269,15 +272,20 @@ pub(super) struct MqttConnection<R = AsyncClient> {
     driver: Option<AbortOnDropHandle<Report<MqttSourceError>>>,
     /// How many acknowledgements the source requested on this connection.
     requested: u64,
+    /// The keep-alive the connection keeps to, which bounds every acknowledgement, unless the
+    /// broker disabled it.
+    keep_alive: Option<Duration>,
 }
 
 impl<R: AcknowledgementRequests> MqttConnection<R> {
     /// Starts the driver of a connection whose subscription `events` already established, with a
-    /// read-ahead of `read_ahead_capacity` publishes.
+    /// read-ahead of `read_ahead_capacity` publishes, that keeps to `keep_alive`, if the broker
+    /// keeps one.
     pub(super) fn start<E: ConnectionEvents>(
         requests: R,
         events: E,
         read_ahead_capacity: NonZeroUsize,
+        keep_alive: Option<Duration>,
     ) -> Self {
         let (read_ahead, publishes) = mpsc::channel(read_ahead_capacity.get());
         let (progress, observed) = watch::channel(DriverProgress {
@@ -299,6 +307,7 @@ impl<R: AcknowledgementRequests> MqttConnection<R> {
             progress: observed,
             driver: Some(driver),
             requested: 0,
+            keep_alive,
         }
     }
 
@@ -313,8 +322,29 @@ impl<R: AcknowledgementRequests> MqttConnection<R> {
     /// It fails as soon as the driver cannot poll before the source reads again with
     /// acknowledgements unwritten: when the connection ended, and when the driver holds a publish
     /// for room in a read-ahead the source has taken nothing from since, which only the source's
-    /// next read, after this returns, could change.
+    /// next read, after this returns, could change. It fails too once one keep-alive interval has
+    /// passed without the writes: a connection that cannot write for that long carries none of its
+    /// pings either, and its broker is about to close it.
     pub(super) async fn acknowledge(
+        &mut self,
+        positions: &[MqttSourcePosition],
+    ) -> MqttSourceResult<()> {
+        let Some(keep_alive) = self.keep_alive else {
+            return self.write_acknowledgements(positions).await;
+        };
+        let acknowledged = timeout(keep_alive, self.write_acknowledgements(positions)).await;
+        let Ok(acknowledged) = acknowledged else {
+            return Err(Report::new(MqttSourceError::AcknowledgementDeadline {
+                keep_alive,
+            }));
+        };
+        acknowledged
+    }
+
+    /// Requests the acknowledgement of every publish of `positions` that asks for one, and waits
+    /// until the event loop has written every acknowledgement requested on the connection, or the
+    /// driver cannot poll before the source reads again.
+    async fn write_acknowledgements(
         &mut self,
         positions: &[MqttSourcePosition],
     ) -> MqttSourceResult<()> {
@@ -427,6 +457,10 @@ impl<R: AcknowledgementRequests> PublishRead for MqttConnection<R> {
         Ok(publish)
     }
 }
+
+#[cfg(test)]
+#[path = "driver_tests.rs"]
+mod tests;
 
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "driver_shuttle_tests.rs"]

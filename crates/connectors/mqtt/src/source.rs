@@ -39,7 +39,7 @@ use arch_into::ArchInto as _;
 use async_trait::async_trait;
 use driver::MqttConnection;
 use error_stack::{Report, ResultExt as _};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, SourceBatch,
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
@@ -62,32 +62,21 @@ use url::{Host, Url};
 
 use crate::connection::{MqttConnectionError, MqttDialer};
 
-/// How many requests a source's client queues for its event loop when its Receive Maximum is
-/// smaller: its `SUBSCRIBE`, and the acknowledgements of one batch.
-const MIN_REQUEST_CAPACITY: usize = 1024;
-
-/// How many publishes beyond its acknowledgement window a source's Receive Maximum admits.
+/// How many publishes beyond its acknowledgement window a source connection takes from its broker
+/// before the host reads them.
 ///
-/// A broker that discards a publish above the advertised Maximum Packet Size may keep counting it
-/// against the Receive Maximum, waiting for an acknowledgement the source never sends, as EMQX
-/// does. A Receive Maximum of only the window would let one such publish hold back every later
-/// publish at quality of service 1, so the window still fills around this many of them.
-///
-/// A policy input: enough for a session to outlast the publishes it is sent above its packet bound,
-/// and few enough that the read-ahead, which holds every publish the Receive Maximum admits, stays
-/// close to the window.
-const RECEIVE_HEADROOM: u64 = 64;
-
-/// How many publishes the broker does not hold back for an acknowledgement a connection reads
-/// ahead of the host: a publish at quality of service 0, and under `NO ACK` every publish, which the
-/// client acknowledges on receipt. The broker holds back what the Receive Maximum does not admit,
-/// so a connection reads at most this many beyond its Receive Maximum.
+/// In an `ACK` mode every connection advertises its window and this many more as its Receive
+/// Maximum, and its read-ahead holds every publish the Receive Maximum admits. A broker that
+/// discards a publish above the advertised Maximum Packet Size may keep counting it against the
+/// Receive Maximum, waiting for an acknowledgement the source never sends, as EMQX does, so the
+/// window still fills around this many such publishes. Under `NO ACK` the client acknowledges every
+/// publish on receipt, the broker holds back none, and the read-ahead holds this many.
 ///
 /// A policy input: enough to keep a connection reading, and so sending its keep-alive, while the
-/// host holds its loop for a moment, and few enough to bound what a source that stops drops with
-/// its connection: the publishes in its read-ahead that ask for no acknowledgement, or that the
-/// client acknowledged on receipt.
-const READ_AHEAD_HEADROOM: NonZeroUsize = nonzero_ext::nonzero!(64_usize);
+/// host holds its loop for a moment and the broker sends what it does not hold back, such as a
+/// publish at quality of service 0, and few enough to bound what a source that stops drops with its
+/// connection.
+const HEADROOM: NonZeroU16 = nonzero_ext::nonzero!(64_u16);
 
 const MQTT: &str = "mqtt";
 /// The template a multi-instance client identity must contain, so that every instance connects
@@ -139,6 +128,12 @@ pub enum MqttSourceError {
         connector = ConnectorKind::Mqtt
     )]
     ReadAheadFull { publishes: NonZeroUsize },
+    #[error(
+        "the {connector} connection did not write the acknowledgements within its keep-alive of \
+         {keep_alive:?}",
+        connector = ConnectorKind::Mqtt
+    )]
+    AcknowledgementDeadline { keep_alive: Duration },
     #[error("the task driving the {connector} connection failed", connector = ConnectorKind::Mqtt)]
     Driver,
     #[error("MQTT batch timeout exceeds the monotonic clock range")]
@@ -293,7 +288,7 @@ impl SourceAcknowledgement {
         };
         // MQTT carries the Receive Maximum as a Two Byte Integer, so a wider one is advertised as
         // the widest one the protocol holds: the broker sends no more unacknowledged publishes.
-        let Some(admitted) = window.checked_add(RECEIVE_HEADROOM) else {
+        let Some(admitted) = window.checked_add(u64::from(HEADROOM.get())) else {
             return Self::Manual {
                 receive_maximum: NonZeroU16::MAX,
             };
@@ -312,27 +307,23 @@ impl SourceAcknowledgement {
         }
     }
 
-    /// How many requests the client queues for its event loop.
-    ///
-    /// At most one batch's acknowledgements wait to be written at once, and a batch holds at most
-    /// the Receive Maximum of publishes that ask for one, so no acknowledgement waits for room.
-    fn request_capacity(self) -> usize {
+    /// How many requests the client queues for its event loop: the most a connection queues before
+    /// its event loop takes them. A subscription, an unsubscription and a disconnection each queue
+    /// one and poll until it is written, and an acknowledgement queues one for each publish of its
+    /// batch, which holds no more of them than the Receive Maximum admits.
+    fn request_capacity(self) -> NonZeroUsize {
         match self {
-            Self::OnReceipt => MIN_REQUEST_CAPACITY,
-            Self::Manual { receive_maximum } => {
-                MIN_REQUEST_CAPACITY.max(usize::from(receive_maximum.get()))
-            }
+            Self::OnReceipt => NonZeroUsize::MIN,
+            Self::Manual { receive_maximum } => NonZeroUsize::from(receive_maximum),
         }
     }
 
     /// How many publishes a connection reads ahead of the host: every publish the Receive Maximum
-    /// admits, and the headroom for those it does not hold back.
+    /// admits, or the headroom when the client acknowledges every publish on receipt.
     fn read_ahead(self) -> NonZeroUsize {
         match self {
-            Self::OnReceipt => READ_AHEAD_HEADROOM,
-            Self::Manual { receive_maximum } => READ_AHEAD_HEADROOM
-                .checked_add(usize::from(receive_maximum.get()))
-                .assured("65,535 publishes and the headroom fit the address space"),
+            Self::OnReceipt => NonZeroUsize::from(HEADROOM),
+            Self::Manual { receive_maximum } => NonZeroUsize::from(receive_maximum),
         }
     }
 }
@@ -643,7 +634,7 @@ impl MqttSourcePlan {
         }
         MqttDialer::install(&mut options, dns);
         AsyncClient::builder(options)
-            .capacity(acknowledgement.request_capacity())
+            .capacity(acknowledgement.request_capacity().get())
             .try_build()
             .map_err(|error| Report::new(error).change_context(MqttSourceError::BuildClient))
     }
@@ -920,10 +911,19 @@ impl SourceConnector for MqttSource {
                 .await
                 .change_context(SourceError::Resume { connector: MQTT })?;
             let UnstartedConnection { client, eventloop } = connection;
+            // The CONNACK has replaced the client's own keep-alive with the broker's, if it
+            // announced one, and a keep-alive of zero is none.
+            let keep_alive = eventloop.options.keep_alive();
+            let keep_alive = if keep_alive.is_zero() {
+                None
+            } else {
+                Some(keep_alive)
+            };
             self.connection = Some(MqttConnection::start(
                 client,
                 eventloop,
                 self.plan.acknowledgement.read_ahead(),
+                keep_alive,
             ));
         }
         Ok(SourceResume::Ready)
@@ -1013,6 +1013,7 @@ impl BrokerSourceConnector for MqttSource {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use meticulous::OptionExt as _;
     use nervix_dns::{DnsLookupError, DnsLookupFailure};
     use nonzero_ext::nonzero;
 
@@ -1170,8 +1171,12 @@ mod tests {
     #[test]
     fn the_read_ahead_and_the_request_queue_hold_every_publish_the_receive_maximum_admits() {
         let on_receipt = SourceAcknowledgement::OnReceipt;
-        assert_eq!(on_receipt.read_ahead(), READ_AHEAD_HEADROOM);
-        assert_eq!(on_receipt.request_capacity(), MIN_REQUEST_CAPACITY);
+        assert_eq!(on_receipt.read_ahead().get(), 64);
+        assert_eq!(
+            on_receipt.request_capacity(),
+            NonZeroUsize::MIN,
+            "a connection that acknowledges on receipt queues one request at a time"
+        );
 
         let sequential = SourceAcknowledgement::of(Some(NonZeroU64::MIN));
         assert_eq!(
@@ -1180,11 +1185,8 @@ mod tests {
                 receive_maximum: nonzero!(65u16)
             }
         );
-        assert_eq!(
-            sequential.read_ahead().get(),
-            READ_AHEAD_HEADROOM.get() + 65
-        );
-        assert_eq!(sequential.request_capacity(), MIN_REQUEST_CAPACITY);
+        assert_eq!(sequential.read_ahead().get(), 65);
+        assert_eq!(sequential.request_capacity().get(), 65);
 
         let parallel = SourceAcknowledgement::of(Some(nonzero!(2_000u64)));
         assert_eq!(
@@ -1193,11 +1195,8 @@ mod tests {
                 receive_maximum: nonzero!(2_064u16)
             }
         );
-        assert_eq!(
-            parallel.read_ahead().get(),
-            READ_AHEAD_HEADROOM.get() + 2_064
-        );
-        assert_eq!(parallel.request_capacity(), 2_064);
+        assert_eq!(parallel.read_ahead().get(), 2_064);
+        assert_eq!(parallel.request_capacity().get(), 2_064);
 
         let wide = SourceAcknowledgement::of(Some(nonzero!(70_000u64)));
         assert_eq!(
@@ -1206,11 +1205,8 @@ mod tests {
                 receive_maximum: NonZeroU16::MAX
             }
         );
-        assert_eq!(
-            wide.read_ahead().get(),
-            READ_AHEAD_HEADROOM.get() + usize::from(u16::MAX)
-        );
-        assert_eq!(wide.request_capacity(), usize::from(u16::MAX));
+        assert_eq!(wide.read_ahead().get(), usize::from(u16::MAX));
+        assert_eq!(wide.request_capacity().get(), usize::from(u16::MAX));
     }
 
     #[test]

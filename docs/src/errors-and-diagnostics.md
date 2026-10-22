@@ -639,7 +639,9 @@ connection to the source's next read, or to an acknowledgement that finds the co
 which keeps it beneath `MqttSourceError::Acknowledge`; a task that fails without a report keeps its
 `JoinError` beneath `MqttSourceError::Driver`. An acknowledgement that meets the task holding a
 publish for room in a full read-ahead fails as `MqttSourceError::ReadAheadFull`, naming the
-read-ahead's capacity, because nothing would write it before the host reads again. A sink's event
+read-ahead's capacity, because nothing would write it before the host reads again, and one whose
+connection wrote nothing for a keep-alive interval fails as
+`MqttSourceError::AcknowledgementDeadline`, naming the keep-alive. A sink's event
 loop records the connection error's message as the emitter's transient error, which
 `DESCRIBE EMITTER` shows, and reconnects on the emitter's retry policy. None rejects a record or
 acknowledges input. A QoS 1 or 2 publish keeps the driver's `ClientError` when the client refuses

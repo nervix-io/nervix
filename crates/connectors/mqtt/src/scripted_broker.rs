@@ -11,18 +11,41 @@ use nervix_primitives::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// The control packet type of CONNECT, which the high nibble of a packet's first byte holds.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "MQTT 5 numbers CONNECT as control packet type 1")
+)]
 const CONNECT: u8 = 1;
 
 /// The control packet type of PUBLISH.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "MQTT 5 numbers PUBLISH as control packet type 3")
+)]
 const PUBLISH: u8 = 3;
 
 /// The control packet type of PUBACK.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "MQTT 5 numbers PUBACK as control packet type 4")
+)]
 const PUBACK: u8 = 4;
 
 /// The control packet type of SUBSCRIBE.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "MQTT 5 numbers SUBSCRIBE as control packet type 8")
+)]
 const SUBSCRIBE: u8 = 8;
 
 /// The most bytes a variable byte integer takes, at seven value bits each.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "an MQTT 5 Variable Byte Integer takes at most four bytes"
+    )
+)]
 const VARIABLE_INTEGER_BYTES: usize = 4;
 
 /// A broker on a loopback port that answers only what its check tells it to.

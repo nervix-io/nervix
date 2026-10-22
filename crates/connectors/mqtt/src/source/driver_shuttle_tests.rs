@@ -122,7 +122,9 @@ fn connection(
         written,
     };
     let read_ahead = NonZeroUsize::new(read_ahead).assured("a check's read-ahead holds a publish");
-    let connection = MqttConnection::start(FakeClient { requests }, events, read_ahead);
+    // The checks explore the driver's interleavings rather than its deadline, so the connection
+    // keeps no keep-alive.
+    let connection = MqttConnection::start(FakeClient { requests }, events, read_ahead, None);
     (connection, deliveries, record)
 }
 

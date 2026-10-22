@@ -2119,11 +2119,12 @@ including the host's tracked quiesce and teardown paths.
 An MQTT source connection has one mutable owner of its event loop: the driver task the source
 starts once its subscription is established. The driver hands every publish to the source through
 one bounded read-ahead, keyed by that one connection, of the publishes its Receive Maximum
-admits and 64 more, and while the read-ahead is full it holds the next publish and polls nothing. It
+admits, or 64 under `NO ACK`, and while the read-ahead is full it holds the next publish and polls nothing. It
 publishes its progress as one immutable watch value: how many acknowledgements the event loop has
 written, and whether it polls, holds a publish for room, or ended. The source's acknowledgement
 waits on that publication and on nothing else, and the wait ends without its writes as soon as
-the published value says the driver stopped polling, so neither side waits on the other. No map,
+the published value says the driver stopped polling, or once one keep-alive interval has passed,
+so neither side waits on the other. No map,
 lock or atomic is shared, and the driver's channels and watch value remain outside Deloxide's
 tracked locks; the Shuttle checks below and the public keep-alive and acknowledgement scenarios
 are their evidence.

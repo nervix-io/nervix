@@ -952,10 +952,10 @@ waiting for an acknowledgement the source never sends, as EMQX does; the 64 let 
 around that many such publishes instead of one of them holding back every later publish. The
 broker holds back no publish at QoS 0, which a subscription at QoS 1 receives from a publisher
 that sends at QoS 0, and under `NO ACK`, where the client acknowledges every publish on receipt,
-it holds back none. The read-ahead holds as many publishes as the Receive Maximum admits and 64
-more, or 64 under `NO ACK`. Once it is full, the
-task holds the next publish and polls nothing until the source reads one, so the connection's flow
-control holds the broker back, and the client sends no keep-alive until the host reads again.
+it holds back none. The read-ahead holds as many publishes as the Receive Maximum admits, or 64
+under `NO ACK`. Once it is full, the task holds the next publish and polls nothing until the
+source reads one, so the connection's flow control holds the broker back, and the client sends no
+keep-alive until the host reads again.
 
 Acknowledging a batch requests a `PUBACK` for each of its publishes at QoS 1 and returns once the
 event loop has written all of them to the connection and flushed them. The broker answers none, so
@@ -964,8 +964,12 @@ client's request queue holds, so no request waits for room. The acknowledgement 
 task that stopped polling. While the task holds a publish for room in a full read-ahead, only the
 host's next read, which follows the acknowledgement, could let it write, so the acknowledgement
 fails with `MqttSourceError::ReadAheadFull`. When the connection ended first, it fails with the
-lost connection beneath `MqttSourceError::Acknowledge`. Either failure drops the connection and the
-acknowledgements it never wrote: the host shows the failure as the ingestor's transient status and
+lost connection beneath `MqttSourceError::Acknowledge`. A connection whose broker stopped reading
+it holds the writes, and the client's flush has no deadline of its own, so the acknowledgement
+waits at most one keep-alive interval, 60 seconds unless the broker's `CONNACK` announced its own,
+and then fails with `MqttSourceError::AcknowledgementDeadline`; a broker that announces a
+keep-alive of zero leaves it unbounded, as it leaves a silent connection. Every such failure drops
+the connection and the acknowledgements it never wrote: the host shows the failure as the ingestor's transient status and
 rejects the positions, a rejection fails once its publishes' connection is gone, and the broker
 delivers again every publish the lost connection did not acknowledge once the source resumes; see
 [Confirmed acknowledgements](#confirmed-acknowledgements).

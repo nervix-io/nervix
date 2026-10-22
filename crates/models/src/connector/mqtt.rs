@@ -136,8 +136,7 @@ const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Setting(
                     "the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under \
-                     ACK SEQUENTIAL plus 64 up to 65,535, and 64 more publishes, or 64 under NO \
-                     ACK",
+                     ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK",
                 ),
                 overflow: BufferOverflow::Backpressure,
             },
@@ -145,7 +144,7 @@ const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
         DeclaredBuffer {
             holds: "SUBSCRIBE and PUBACK requests for the connection",
             bound: BufferBound::Bounded {
-                capacity: BufferCapacity::Setting("the Receive Maximum, at least 1024"),
+                capacity: BufferCapacity::Setting("the Receive Maximum, or 1 under NO ACK"),
                 overflow: BufferOverflow::Backpressure,
             },
         },
@@ -161,7 +160,7 @@ const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
         DeclaredWait {
             wait: "an acknowledgement's PUBACKs written to the connection",
-            bound: WaitBound::Unbounded,
+            bound: WaitBound::Driver("one keep-alive interval of 60 s, or the broker's"),
         },
         DeclaredWait {
             wait: "a silent connection",

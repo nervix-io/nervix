@@ -578,7 +578,7 @@ async fn a_connection_sends_its_keep_alive_while_its_source_reads_nothing() {
 }
 
 #[nervix_primitives::test]
-async fn acknowledging_more_publishes_than_the_client_queues_by_default_returns() {
+async fn a_batch_of_a_whole_window_of_publishes_is_acknowledged_without_waiting_for_room() {
     let fixture = DnsFixture::start().await;
     let broker = ScriptedBroker::start().await;
     let window = NonZeroU64::new(1_500).assured("1,500 is non-zero");
@@ -593,8 +593,8 @@ async fn acknowledging_more_publishes_than_the_client_queues_by_default_returns(
     let acknowledging = source.acknowledge(&positions);
     let Ok(acknowledged) = timeout(OBSERVATION_BUDGET, acknowledging).await else {
         panic!(
-            "acknowledging 1,500 publishes, more than the 1,024 requests a client queues by \
-             default, still waited after {OBSERVATION_BUDGET:?}"
+            "acknowledging a whole window of 1,500 publishes still waited after \
+             {OBSERVATION_BUDGET:?}"
         );
     };
     acknowledged.assured("the connection wrote every PUBACK the batch asks for");

@@ -462,14 +462,12 @@ Feature: MQTT ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_short_keepalive_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-keepalive-in-{{test_id}}'
         };
-        CREATE CLIENT mqtt_out
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_out
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-keepalive-out-{{test_id}}'
@@ -523,11 +521,11 @@ Feature: MQTT ingestion
       | 3            | 1             |
 
   # The listener lets the broker hold up to the client's own Receive Maximum of publishes in flight,
-  # so one batch takes more publishes than the client queues requests for by default, 1,024. A
+  # so one batch takes all 2,000 publishes and its acknowledgement requests a PUBACK for each. A
   # failed acknowledgement would drop the connection and count the batch's positions as transport
   # redeliveries.
-  @mqtt_parallel_acknowledgement_above_request_capacity
-  Scenario Outline: An MQTT ACK PARALLEL ingestor acknowledges a batch of more publishes than its client queues requests for by default, and reads on
+  @mqtt_parallel_acknowledgement_of_a_wide_batch
+  Scenario Outline: An MQTT ACK PARALLEL MAX 2000 ingestor acknowledges a batch of 2,000 publishes without blocking, and reads on
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -549,8 +547,7 @@ Feature: MQTT ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_short_keepalive_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-parallel-in-{{test_id}}'
