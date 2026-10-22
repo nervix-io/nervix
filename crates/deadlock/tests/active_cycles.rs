@@ -49,6 +49,12 @@ const CHILD_BOUND: Duration = Duration::from_secs(120);
 /// Every source site a finding names here is in this file.
 const THIS_FILE: &str = "active_cycles.rs";
 
+/// Per-request locks one owner's lock covers in a run: more than twice the 13,000 instance edges
+/// the three-node 40-relay materialized restore with a leadership handoff leaves in one process,
+/// nearly all of them relay admission locks taken under their peer owner's lock.
+const PER_REQUEST_LOCKS: usize = 32_768;
+const _: () = assert!(PER_REQUEST_LOCKS < nervix_primitives::deadlock::MAX_ORDER_HISTORY_EDGES);
+
 /// What the deadlock detector prints when it starts, which no output of a diagnostic process may
 /// contain.
 const DETECTOR_BANNER: &str = "▄ ▄▖▖ ▄▖▖▖▄▖▄";
@@ -96,6 +102,7 @@ fn workload() {
         "shared_order_inversion" => shared_order_inversion(),
         "mixed_order_inversion" => mixed_order_inversion(run),
         "separate_lifetimes" => separate_lifetimes(),
+        "per_request_locks_under_one_owner" => per_request_locks_under_one_owner(),
         "held_guard_overload" => held_guard_overload(),
         "witness_overload" => witness_overload(),
         "history_overload" => history_overload(),
@@ -455,6 +462,18 @@ fn separate_lifetimes() {
     }
 }
 
+/// Locks that each live for one request, taken under the lock of an owner that outlives them, as a
+/// relay admission record's lock is taken under its peer owner's. Every instance is a directed edge
+/// of its own, and ending a lock does not give its edge back.
+fn per_request_locks_under_one_owner() {
+    let owner = Mutex::new(());
+    let _owner = owner.lock();
+    for _ in 0..PER_REQUEST_LOCKS {
+        let request = Mutex::new(());
+        drop(request.lock());
+    }
+}
+
 fn held_guard_overload() {
     let locks: Vec<_> = (0..65).map(|_| Mutex::new(())).collect();
     let _held: Vec<_> = locks.iter().map(Mutex::lock).collect();
@@ -475,14 +494,13 @@ fn witness_overload() {
     thread::park();
 }
 
+/// One more per-request lock under one owner than the history keeps edges for.
 fn history_overload() {
-    // 182 choose 2 yields 16,471 directed pairs, exceeding the bounded 16,384-edge history.
-    let locks: Vec<_> = (0..182).map(|_| Mutex::new(())).collect();
-    for (index, first) in locks.iter().enumerate() {
-        for second in &locks[index + 1..] {
-            let _first = first.lock();
-            let _second = second.lock();
-        }
+    let owner = Mutex::new(());
+    let _owner = owner.lock();
+    for _ in 0..=nervix_primitives::deadlock::MAX_ORDER_HISTORY_EDGES {
+        let request = Mutex::new(());
+        drop(request.lock());
     }
     thread::park();
 }
@@ -592,6 +610,12 @@ fn runtime_active_only_reports_the_instrumented_selection() {
         nervix_primitives::deadlock::DiagnosticSelection::OrderInstrumentedActiveOnly
     );
     assert_eq!(only_cycle(&evidence).threads().len(), 1);
+}
+
+#[cfg(feature = "deloxide-order")]
+#[test]
+fn per_request_locks_under_one_owner_stay_within_the_order_history() {
+    completed("per_request_locks_under_one_owner");
 }
 
 #[cfg(feature = "deloxide-order")]
