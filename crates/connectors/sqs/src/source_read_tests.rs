@@ -25,7 +25,7 @@ use super::{
     SqsSourceResult,
 };
 use crate::connection_tests::{
-    Fixture, QUEUE, batch_request, client_config, closed_port, open_source, read_request,
+    Fixture, QUEUE, RefusedEndpoint, batch_request, client_config, open_source, read_request,
 };
 
 /// The body of the one message a stand-in answers a receive with.
@@ -265,7 +265,8 @@ async fn a_cancelled_read_waits_for_a_receive_the_service_does_not_answer_only_u
 #[nervix_primitives::test]
 async fn a_receive_that_cannot_reach_the_service_fails_the_read() {
     let fixture = Fixture::start().await;
-    let port = closed_port().await;
+    let endpoint = RefusedEndpoint::reserve();
+    let port = endpoint.port();
     let mut source = open_source(
         &client_config(&format!("http://127.0.0.1:{port}")),
         fixture.dns(),

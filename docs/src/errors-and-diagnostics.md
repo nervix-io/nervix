@@ -139,9 +139,13 @@ each with a structured message error, and at most one infrastructure failure of 
 is a report; a record in neither list stays unresolved. Branch construction keeps the outcome of
 each row. None of these builds a report or formats a message per row: the typed value becomes a
 structured message error only where a route's policy reports it, and hot paths do not allocate a
-formatted diagnostic when the variant already names the failure. A source poll is the exception
-that carries reports: it returns the report of each record it could not read beside the messages
-it could, so the rest of one external response continues through intake.
+formatted diagnostic when the variant already names the failure. A source poll and a decode are
+the exceptions that carry reports. A poll returns the report of each record it could not read
+beside the messages it could, so the rest of one external response continues through intake. An
+ingest group returns the codec's report for each payload it refuses, with that payload's place in
+its batch, beside the payloads it decoded, so the host consumes each refusal as a
+[decode rejection](#decode-rejections) while the rest of the batch continues. A refusal for room
+judged no payload and is not one of these outcomes: it fails the whole batch's dispatch.
 
 ### Fixed Outcome Boundaries
 
