@@ -25,7 +25,7 @@ use nervix_primitives::{
 use super::SyslogListenerError;
 
 /// One harness request to fail an accept on a selected listener and acknowledge that failure.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SyslogListenerFault {
     /// The exact bound address whose next accept fails.
     pub bind_addr: String,
