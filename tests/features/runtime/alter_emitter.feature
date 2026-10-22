@@ -13,11 +13,11 @@ Feature: Altering emitters
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT sink_a TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT sink_a CONFIG {
         'addr' = 'tcp://127.0.0.1:63001',
         'bind' = 'false'
       };
-      CREATE CLIENT sink_b TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT sink_b CONFIG {
         'addr' = 'tcp://127.0.0.1:63002',
         'bind' = 'false'
       };
@@ -73,7 +73,7 @@ Feature: Altering emitters
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -129,11 +129,11 @@ Feature: Altering emitters
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_a TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT sink_a CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE CLIENT sink_b TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT sink_b CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -198,11 +198,11 @@ Feature: Altering emitters
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         TO replacement INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_a TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT sink_a CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE CLIENT sink_b TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT sink_b CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };

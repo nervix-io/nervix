@@ -58,7 +58,7 @@ Feature: Pulsar subscriptions belong to their declared owner
     Then within "30s" Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" holds 1 unacknowledged message
     When these Plexus statements are executed
       """
-      CREATE CLIENT equivalent TYPE PULSAR CONFIG { 'addr' = '{{pulsar_addr}}', 'namespace' = 'public/default' };
+      CREATE PULSAR CLIENT equivalent CONFIG { 'addr' = '{{pulsar_addr}}', 'namespace' = 'public/default' };
       ALTER PULSAR TOPIC INGESTOR events
         SET FROM equivalent TOPIC 'persistent://public/default/retained_{{test_id}}' SUBSCRIPTION 'retained_{{test_id}}' <ownership> INSTANCES <instances>
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 2s ON QUIESCE SUSPEND;

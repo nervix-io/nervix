@@ -24,63 +24,63 @@ Feature: Emitter batching configuration
           ON EMITTING BATCH '{message: "batched events", extra: {records: .}}';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
 
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE CLIENT pulsar_main TYPE PULSAR CONFIG { 'addr' = 'pulsar://127.0.0.1:6650' };
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE PULSAR CLIENT pulsar_main CONFIG { 'addr' = 'pulsar://127.0.0.1:6650' };
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqp://guest:guest@127.0.0.1:5672/%2f'
       };
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG {
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG {
         'addr' = 'redis://127.0.0.1:6379/'
       };
-      CREATE CLIENT mqtt_main TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_main CONFIG {
         'addr' = 'mqtt://127.0.0.1:1883',
         'client_id' = 'emitter-batching-{{test_id}}'
       };
-      CREATE CLIENT nats_main TYPE NATS CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
-      CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG {
+      CREATE NATS CLIENT nats_main CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
+      CREATE ZEROMQ CLIENT zeromq_main CONFIG {
         'addr' = 'tcp://127.0.0.1:63002',
         'bind' = 'false'
       };
-      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+      CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9324',
         'region' = 'us-east-1'
       };
-      CREATE CLIENT sentry_main TYPE SENTRY CONFIG {
+      CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = 'http://public@127.0.0.1:8000/1',
         'timeout_ms' = 5000
       };
-      CREATE CLIENT syslog_main TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_main CONFIG {
         'protocol' = 'udp',
         'addr' = '127.0.0.1:5514'
       };
-      CREATE CLIENT otel_main TYPE OTEL CONFIG {
+      CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = 'http://127.0.0.1:4317',
         'protocol' = 'grpc',
         'timeout_ms' = 5000
       };
-      CREATE CLIENT clickhouse_main TYPE CLICKHOUSE CONFIG {
+      CREATE CLICKHOUSE CLIENT clickhouse_main CONFIG {
         'addr' = 'http://127.0.0.1:8123',
         'user' = 'default',
         'password' = 'nervix'
       };
-      CREATE CLIENT postgres_main TYPE POSTGRES POOL SIZE MIN 2 MAX 8 CONFIG {
+      CREATE POSTGRES CLIENT postgres_main POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = 'postgresql://postgres:nervix@127.0.0.1:5432/postgres?sslmode=disable'
       };
-      CREATE CLIENT mysql_main TYPE MYSQL POOL SIZE MIN 2 MAX 8 CONFIG {
+      CREATE MYSQL CLIENT mysql_main POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = 'mysql://nervix:nervix@127.0.0.1:3306/nervix'
       };
-      CREATE CLIENT mongodb_main TYPE MONGODB POOL SIZE MIN 2 MAX 8 CONFIG {
+      CREATE MONGODB CLIENT mongodb_main POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = 'mongodb://127.0.0.1:27017',
         'database' = 'nervix'
       };
-      CREATE CLIENT object_store TYPE S3 CONFIG {
+      CREATE S3 CLIENT object_store CONFIG {
         'endpoint' = 'http://127.0.0.1:9000',
         'region' = 'us-east-1',
         'access_key_id' = 'test',
         'secret_access_key' = 'test',
         'path_style_access' = true
       };
-      CREATE CLIENT iceberg_catalog TYPE ICEBERG_REST CONFIG {
+      CREATE ICEBERG_REST CLIENT iceberg_catalog CONFIG {
         'uri' = 'http://127.0.0.1:8181',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
@@ -286,7 +286,7 @@ Feature: Emitter batching configuration
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -376,11 +376,11 @@ Feature: Emitter batching configuration
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT otel_main TYPE OTEL CONFIG {
+      CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = 'http://127.0.0.1:4317',
         'protocol' = 'grpc'
       };
-      CREATE CLIENT mongodb_main TYPE MONGODB POOL SIZE MIN 1 MAX 2 CONFIG {
+      CREATE MONGODB CLIENT mongodb_main POOL SIZE MIN 1 MAX 2 CONFIG {
         'addr' = 'mongodb://127.0.0.1:27017',
         'database' = 'nervix'
       };
@@ -439,13 +439,13 @@ Feature: Emitter batching configuration
       CREATE CODEC sentry_codec FROM JSON TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON EMITTING '{message: "event"}';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9324',
         'region' = 'us-east-1'
       };
-      CREATE CLIENT sentry_main TYPE SENTRY CONFIG { 'dsn' = 'http://public@127.0.0.1:8000/1' };
-      CREATE CLIENT mongodb_main TYPE MONGODB POOL SIZE MIN 1 MAX 2 CONFIG {
+      CREATE SENTRY CLIENT sentry_main CONFIG { 'dsn' = 'http://public@127.0.0.1:8000/1' };
+      CREATE MONGODB CLIENT mongodb_main POOL SIZE MIN 1 MAX 2 CONFIG {
         'addr' = 'mongodb://127.0.0.1:27017',
         'database' = 'nervix'
       };
@@ -522,7 +522,7 @@ Feature: Emitter batching configuration
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE EMITTER bounded_events FROM events

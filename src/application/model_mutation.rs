@@ -2711,8 +2711,7 @@ mod tests {
              notification;",
             "CREATE RELAY notifications SCHEMA notification UNBRANCHED;",
             "CREATE RELAY forwarded_notifications SCHEMA notification UNBRANCHED;",
-            "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
-             };",
+            "CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };",
             "CREATE KAFKA TOPIC INGESTOR notifications_ingestor FROM kafka_main TOPIC \
              'notifications' OFFSET BY CONSUMER GROUP 'notifications_group' MODE NO ACK ON \
              QUIESCE SUSPEND DECODE USING notification_codec TIMESTAMP NOW TO notifications \
@@ -2776,8 +2775,7 @@ mod tests {
             "CREATE RELAY notifications_a SCHEMA notification UNBRANCHED;",
             "CREATE RELAY notifications_b SCHEMA notification UNBRANCHED;",
             "CREATE RELAY notifications_all SCHEMA notification UNBRANCHED;",
-            "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
-             };",
+            "CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };",
             "CREATE KAFKA TOPIC INGESTOR ingest_a FROM kafka_main TOPIC 'notifications_a' OFFSET \
              BY CONSUMER GROUP 'notifications_a_group' MODE NO ACK ON QUIESCE SUSPEND DECODE \
              USING notification_codec TIMESTAMP NOW TO notifications_a INHERIT ALL UNBRANCHED \
@@ -2838,8 +2836,7 @@ mod tests {
              transaction;",
             "CREATE RELAY inbound SCHEMA transaction UNBRANCHED;",
             "CREATE RELAY deduped SCHEMA transaction UNBRANCHED;",
-            "CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' \
-             };",
+            "CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };",
             "CREATE KAFKA TOPIC INGESTOR inbound_ingestor FROM kafka_main TOPIC 'inbound' OFFSET \
              BY CONSUMER GROUP 'inbound_group' MODE NO ACK ON QUIESCE SUSPEND DECODE USING \
              transaction_codec TIMESTAMP NOW TO inbound INHERIT ALL UNBRANCHED FLUSH EACH 100ms \

@@ -480,6 +480,12 @@ clause the grammar accepts, so documentation can show it and generated statement
 | Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg sink writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. A Prometheus client also declares every key its `CONFIG` may set and the rule each value follows; the registry holds a client to them when it is created, and the source holds its rendered configuration to them again when it opens. |
 
+Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
+composed head and canonical rendering use the vocabulary's connector kind; a console choice uses
+that same head. Pool bounds, when declared, precede the optional resource mount. WebSocket
+signaling precedes its mount. This syntax does not change which layer interprets configuration or
+how clients connect, pool or execute.
+
 A mode or a quiesce mode that needs an option choice declares it: an MQTT topic's `ACK` modes and its
 `SUSPEND` require `SESSION PERSISTENT` and `QOS 1`, the session a broker keeps messages for, and the
 source answers which choices its statement made. Whether a source can honor a quiesce mode, whether

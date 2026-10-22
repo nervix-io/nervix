@@ -18,7 +18,7 @@ records the public qualification evidence summarized below.
 
 The language parses `TO HTTP` and its ordered `METHOD`, `PATH`, `MODE ACK RETRY POLICY`, and body
 selection into semantic Models. The registry validates the complete candidate against the same
-domain's `TYPE HTTP` client, codec, exact expression types, available scopes, sensitivity, source
+domain's `HTTP CLIENT`, codec, exact expression types, available scopes, sensitivity, source
 branches, and error route. The decision layer lowers the validated model into a typed execution
 plan. A running data-plane task receives that plan; it does not read a Model or reparse NSPL.
 The server composes the HTTP connector with the emitter host. These conversions and their
@@ -38,7 +38,7 @@ TO HTTP <client>
 window or `ACK TIMEOUT`; `NO_ACK`, parallel publication, and the optional emitter `BATCH` clause
 are unavailable. The emitter still requires a route-local `FLUSH` policy. `COLLECT FOR` may gather
 input records before execution, while `FLUSH` governs when prepared work is released. Neither
-merges several records into one HTTP body. The `TYPE HTTP` client's polling `method` setting has
+merges several records into one HTTP body. The `HTTP CLIENT`'s polling `method` setting has
 no effect on the emitter's required method expression.
 
 ### A request with a codec body
@@ -49,7 +49,7 @@ operator-provisioned destination; an input with method `PATCH` and path
 `/v1/events/42?notify=true` sends that method and target. Its tenant stays outside the body.
 
 ```nspl
-CREATE CLIENT api TYPE HTTP CONFIG {
+CREATE HTTP CLIENT api CONFIG {
   'endpoint' = 'https://api.example.com',
   'timeout_ms' = 5000
 };
@@ -143,7 +143,7 @@ load a CA and a paired client certificate and key from the HTTP client's resourc
 client can, for example, bind already uploaded TLS files as follows:
 
 ```nspl
-CREATE CLIENT secure_api TYPE HTTP
+CREATE HTTP CLIENT secure_api
   MOUNT api_tls VERSION 3
   CONFIG {
     'endpoint' = 'https://api.example.com',
