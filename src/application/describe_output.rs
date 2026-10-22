@@ -1725,6 +1725,7 @@ mod tests {
             decode_rejections_total: 0,
             oversized_payloads_total: 0,
             last_decode_rejection: None,
+            oversized_payloads_total: 0,
             memory_backpressure_paused: false,
             transient_error: None,
             reconnect_backoff: None,
