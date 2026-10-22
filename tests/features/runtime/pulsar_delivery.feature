@@ -54,8 +54,8 @@ Feature: Pulsar receipt bounds and finishing accepted records
       """
       messages_total sent relay=delivery_events physical_node={{delivery_owner}} total=<message_count>
       """
-    When STOP runs while the Pulsar endpoint resumes after "2s"
-    Then STOP completed after the Pulsar endpoint resumed
+    When STOP runs while the stallable endpoint "pulsar" resumes after "2s"
+    Then STOP completed after the stallable endpoint resumed
     And within "30s" the observed broker receives exactly <message_count> sequenced Pulsar payloads
 
     Examples:

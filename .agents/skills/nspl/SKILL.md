@@ -13,7 +13,10 @@ clause order or connector options from memory.
 
 For Plexus connector choices, read [Connector Capabilities](https://docs.nervix.io/connector-capabilities.md)
 alongside the entity's Ingestors or Emitters section. Its generated tables show modes, option
-requirements, metadata types, headers, batching and the reasons ingest and emit differ.
+requirements, metadata types, each side's header model, batching and the reasons ingest and emit
+differ. Read headers the way the source's model records them, such as lowercase HTTP field names,
+and on a sink that keeps one value per header name write each literal header name once: a repeated
+literal name is refused when the statement is validated.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
@@ -488,10 +491,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; an ingestor's `NO ACK` and an emitter's
   `NO_ACK` have no in-flight ACK window and never accept `MAX`.
 - Do not promise that an emitter's `NO_ACK` survives a stop on every sink. A `STOP`, a replacement
-  or a node shutdown sends what a Kafka producer still queues and awaits the receipts of what a
-  Pulsar producer accepted within its deadline, reporting what is outstanding when it passes, and
-  MQTT QoS 0 discards what its client still holds. Choose an `ACK` mode where a stop must not lose
-  emitted records; `Emitters` → `ACK Semantics And Effective Delivery` has the rule.
+  or a node shutdown sends what a Kafka producer still queues, awaits the receipts of what a Pulsar
+  producer accepted and waits for an MQTT QoS 0 client to send what it holds, all within its
+  deadline, reporting what is outstanding when it passes. Choose an `ACK` mode where a stop must not
+  lose emitted records; `Emitters` → `ACK Semantics And Effective Delivery` has the rule.
 - Name the connector and entity in every ingestor head, such as `CREATE KAFKA TOPIC INGESTOR`,
   `CREATE HTTP ENDPOINT INGESTOR`, or `CREATE SYSLOG LISTENER INGESTOR`, and write the body after
   `FROM` without a connector keyword. Reference a client of the head's connector, and pair

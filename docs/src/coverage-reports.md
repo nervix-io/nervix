@@ -57,7 +57,7 @@ the downloaded artifact:
 | `coverage-full-runner` | The full workspace union's selection, validation and attribution |
 | `coverage-paced-simulation-python` | Paced Python drivers' deterministic open policy |
 | `coverage-release-evidence` | Required revision/check evidence accounting |
-| `coverage-kache-ci` | The shared compiler cache's remote publication contract |
+| `coverage-kache-ci` | The shared compiler cache's remote publication contract and build-runner diagnostic tooling |
 | `coverage-connector-matrix` | Plexus connector matrix rendering, generated manual regions and declaration drift checks |
 | `coverage-model-runner` | Native collector supervision, command and artifact accounting |
 | `coverage-typed-ratchet-python` | Architecture source/compiler rule runners and their qualification |

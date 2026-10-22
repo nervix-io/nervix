@@ -1529,12 +1529,50 @@ build and the existing tests, and nothing in it changes behavior.
   Shuttle, Loom, Turmoil, Chaos or Bolero evidence that covers it instead.
 - After completing requested repository changes, include a proposed Conventional Commit title and
   description in the final response. Follow Conventional Commits and select the title type from the
-  current `type-enum` in `./commitlint.config.js`. Put the title and description together in one
-  fenced code block. Keep the title and each description paragraph on a single unwrapped line; do
-  not insert manual line breaks within them because Git and GitHub handle display wrapping.
+  current `type-enum` in `./commitlint.config.js` by the meanings in [Commit Types](#commit-types).
+  Put the title and description together in one fenced code block. Keep the title and each
+  description paragraph on a single unwrapped line; do not insert manual line breaks within them
+  because Git and GitHub handle display wrapping.
 - When the user requests follow-up changes, regenerate both so the final response contains an
   updated title and description that reflect the complete resulting change instead of a stale
   earlier proposal.
+
+## Commit Types
+
+A commit or pull request title takes its type from the `type-enum` in `./commitlint.config.js`,
+and each type has exactly one meaning:
+
+- `feat` adds or extends a product feature: something a user of Nervix, a developer building on
+  it, or an operator or administrator running it can see.
+- `fix` repairs an actual product defect. A repair to a test is `test`, and a repair to CI or a
+  script is `build`; neither is ever `fix`.
+- `perf` improves the performance of the product. Faster tests are `test` and faster scripts are
+  `build`; neither is ever `perf`.
+- `refactor` changes product code without changing its functionality or its performance. A product
+  code change that also affects performance is `perf`.
+- `style` changes style, such as formatting, anywhere in the repository.
+- `test` covers anything related to tests of every kind, including new tests and fixes to existing
+  ones.
+- `build` changes scripts, `justfile` recipes, CI workflows, how Cargo is invoked, and other build
+  and CI tooling.
+- `doc` changes the published product documentation, such as the book under `docs/src`, or
+  documentation in code.
+- `chore` covers anything no other type matches, and a change whose affected part is hard to state
+  clearly.
+- `version` is the commit that changes the product version.
+- `dep` changes Cargo dependencies, typically by upgrading them.
+- `security` is the preferred type for a security issue, including a dependency upgrade.
+- `revert` reverts an earlier commit.
+- `drop` removes product functionality.
+- `agent` changes the instructions for AI agents: `AGENTS.md` and the agent instructions it
+  references, such as the skills under `.agents/skills`.
+- `bench` changes benchmarks only.
+
+Choose the most relevant type even where types intersect. A type names the change as a whole
+rather than every part it touches: a feature adds tests and is still `feat`, and a fix adds its
+reproducer and is still `fix`. Where two types describe the same change, the more specific one is
+the more relevant: an upgrade to a dependency version that fixes a vulnerability is `security`, not
+`dep`. A change to the `type-enum` keeps this section current in the same change.
 
 ## Error and Diagnostic Quality
 

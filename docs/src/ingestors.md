@@ -507,6 +507,30 @@ The `name` argument can be any expression that returns `STRING`. Both functions 
 - `RABBITMQ QUEUE` exposes AMQP message headers, converting typed AMQP values to strings
 - `SQS QUEUE` exposes message attributes, converting string, number, and binary values to strings
 
+Each of these sources declares a [header model](./connector-contract.md#header-models), which
+`DESCRIBE INGESTOR` shows as its `headers:` line. The model decides what the two functions find:
+
+<!-- connector-matrix:ingest-headers:start -->
+| Ingestor | Header model | What `read_header` and `read_headers` find |
+| --- | --- | --- |
+| `HTTP REQUEST` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| `HTTP ENDPOINT` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `PULSAR TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| `SQS QUEUE` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| `WEBSOCKETS ENDPOINT` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+
+`CLIENT PRODUCER`, `MQTT TOPIC`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` carry no transport headers and refuse `read_header` and `read_headers`.
+<!-- connector-matrix:ingest-headers:end -->
+
+`read_headers` returns a name's values in the order its model keeps them, at most one of them where
+the model keeps one value per name. A source whose model records names in lowercase is read in
+lowercase: `read_header("x-tenant")` finds the field an HTTP peer sent as `X-Tenant`, while
+`read_header("X-Tenant")` finds nothing. Every other source matches a name exactly, letter case
+included.
+
 The same captured source envelope remains available while a supported ingestor constructs an
 `ON MESSAGE ERROR SEND TO` record, so its error-route `SET` may also call `read_header` and
 `read_headers`.
@@ -519,10 +543,9 @@ SET route = read_header(lower(input.route_header))
 WHERE read_header("tenant") = output.tenant
 ```
 
-`MQTT TOPIC`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `SYSLOG LISTENER`, `ZEROMQ PULL`,
-`WEBSOCKETS CONNECTION`, and `CLIENT PRODUCER` ingestors do not support header reads. Leader-side
-validation rejects these functions for a source without header support, with a message that names
-the source's phrase, such as `MQTT TOPIC ingestors do not support read_header or read_headers`.
+Leader-side validation rejects these functions for a source that carries no transport headers, the
+sources the table above lists after it, with a message that names the source's phrase, such as
+`MQTT TOPIC ingestors do not support read_header or read_headers`.
 
 ## TLS Client Configuration
 
@@ -884,7 +907,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `EVERY 1s` (duration); required |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |
 | Every live node | no; scheduled owner |
@@ -930,7 +953,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers'` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL |
 | Every live node | no; scheduled owner |
@@ -1032,7 +1055,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | Not offered: The current topic declaration exposes properties as headers but no separate typed broker metadata namespace. |
 | Every live node | no; scheduled owner |
@@ -1149,7 +1172,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | Not offered: The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace. |
 | Every live node | no; scheduled owner |
@@ -1273,9 +1296,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | queued |
-| Buffers | SUBSCRIBE and PUBACK requests for the connection: driver default, 1024 requests; when full, holds back what fills it |
+| Buffers | each incoming packet, whose bound every CONNECT advertises as its Maximum Packet Size: at most 10240 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>SUBSCRIBE and PUBACK requests for the connection: driver default, 1024 requests; when full, holds back what fills it |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
-| Driver limits | An incoming packet above 10 KiB ends the connection. |
+| Driver limits | A packet above the advertised Maximum Packet Size that a broker sends anyway ends the connection with DISCONNECT Packet too large. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-ingest).
@@ -1293,6 +1316,14 @@ Delivery constraints:
   a quiesce change or a stop that meets a partial batch takes in the publishes it gathered at once
   rather than after its batch timeout
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
+
+Every connection an MQTT ingestor opens advertises the incoming packet bound the table above
+declares as the Maximum Packet Size of its `CONNECT`. MQTT 5 requires the broker to discard a larger
+publish for this subscriber instead of sending it, so the publish never reaches the ingestor and a
+persistent session never presents it again; the broker's own metrics, not Nervix's, show that
+discard. A broker that sends a larger packet anyway is answered with a `DISCONNECT` whose reason is
+Packet too large, and the ingestor reports the packet's size and the bound as its transient error
+and an error event before it reconnects.
 
 Without a `client_id` in the client configuration, one instance connects as
 `<domain>~<ingestor>`. Multiple instances connect as `<domain>~<ingestor>~<instance>`, with
@@ -1350,7 +1381,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); required |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | Not offered: The current subject declaration exposes message headers but no typed subject or JetStream metadata namespace. |
 | Every live node | no; scheduled owner |
@@ -1514,7 +1545,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | Not offered: The current queue declaration exposes message attributes through headers but no separate typed receipt metadata namespace. |
 | Every live node | no; scheduled owner |
@@ -1663,7 +1694,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |
 | Options in statement order | No entity-specific options. |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
 | Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |
 | Every live node | yes |
@@ -1698,7 +1729,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |
 | Options in statement order | No entity-specific options. |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
 | Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |
 | Every live node | yes |
