@@ -26,7 +26,8 @@ fn small_executor() -> Executor {
             bulk_cpu: one(),
             consensus_storage: one(),
             filesystem_storage: one(),
-            connector_storage: one(),
+            connector_storage: crate::ConnectorStorageWorkers::resolve(Some(one()))
+                .expect("one worker fits the primitive permit bound"),
             pending_jobs: one(),
         },
         budgets: MemoryBudgets::default(),
@@ -51,7 +52,8 @@ fn queued_executor(pending_jobs: usize) -> Executor {
                 bulk_cpu: one(),
                 consensus_storage: one(),
                 filesystem_storage: one(),
-                connector_storage: one(),
+                connector_storage: crate::ConnectorStorageWorkers::resolve(Some(one()))
+                    .expect("one worker fits the primitive permit bound"),
                 pending_jobs: one(),
             }
         },
@@ -73,6 +75,39 @@ async fn default_limits_validate_together() {
     assert_eq!(snapshot.consensus_storage.workers, 1);
     assert_eq!(snapshot.filesystem_storage.workers, 2);
     assert_eq!(snapshot.connector_storage.workers, 2);
+}
+
+#[test]
+fn connector_worker_capacity_is_a_validated_node_capability() {
+    use nervix_models::{NodeCapabilities, SettingClass as _, SettingDefinition as _};
+
+    use crate::ConnectorStorageWorkers;
+
+    let default = ConnectorStorageWorkers::resolve(None).expect("the default capacity is valid");
+    let explicit = ConnectorStorageWorkers::resolve(Some(NonZeroUsize::MIN))
+        .expect("one worker fits the primitive permit bound");
+    let copied = explicit;
+    assert_eq!(copied, explicit);
+    assert_eq!(default.value().get(), 2);
+    assert_eq!(explicit.value().get(), 1);
+    assert_eq!(
+        ConnectorStorageWorkers::NAME,
+        "execution-connector-storage-workers"
+    );
+    assert_eq!(
+        <ConnectorStorageWorkers as nervix_models::SettingDefinition>::Class::NAME,
+        NodeCapabilities::NAME
+    );
+    let error = ConnectorStorageWorkers::resolve(Some(NonZeroUsize::MAX))
+        .expect_err("a capability claim must fit the primitive's permit representation");
+    assert_eq!(
+        error.current_context(),
+        &ExecutionConfigError::WorkerCountTooLarge {
+            class: "connector_storage",
+            workers: usize::MAX,
+            maximum: nervix_primitives::sync::Semaphore::MAX_PERMITS,
+        }
+    );
 }
 
 #[nervix_primitives::test]

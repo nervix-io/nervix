@@ -7357,6 +7357,7 @@ dependencies = [
  "error-stack",
  "meticulous",
  "nervix-model-harness",
+ "nervix-models",
  "nervix-primitives",
  "shuttle",
  "thiserror 2.0.21",

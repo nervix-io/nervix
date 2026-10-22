@@ -3,6 +3,9 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use error_stack::Report;
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
+use nervix_primitives::sync::Semaphore;
 use thiserror::Error;
 use ubyte::ByteUnit;
 
@@ -129,7 +132,7 @@ pub struct WorkerCounts {
     pub bulk_cpu: NonZeroUsize,
     pub consensus_storage: NonZeroUsize,
     pub filesystem_storage: NonZeroUsize,
-    pub connector_storage: NonZeroUsize,
+    pub connector_storage: Setting<ConnectorStorageWorkers>,
     /// The number of jobs one class may hold waiting for a worker. Beyond it, admission is refused
     /// with typed backpressure rather than growing an unbounded queue in front of the pool.
     pub pending_jobs: NonZeroUsize,
@@ -163,9 +166,47 @@ impl Default for WorkerCounts {
             bulk_cpu: data,
             consensus_storage: NonZeroUsize::MIN,
             filesystem_storage: NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
-            connector_storage: NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
+            connector_storage: ConnectorStorageWorkers::resolve(None)
+                .assured("two connector workers fit the primitive's permit representation"),
             pending_jobs: NonZeroUsize::new(1024).unwrap_or(NonZeroUsize::MIN),
         }
+    }
+}
+
+/// Node-local capacity for synchronous connector control I/O.
+pub struct ConnectorStorageWorkers;
+
+impl SettingDefinition for ConnectorStorageWorkers {
+    type Class = NodeCapabilities;
+    type Value = NonZeroUsize;
+    type Context = ();
+    type Error = ExecutionConfigError;
+
+    const NAME: &'static str = "execution-connector-storage-workers";
+    const DERIVATION: Option<&'static str> = None;
+
+    fn default_value(_: &()) -> NonZeroUsize {
+        NonZeroUsize::new(2).verified("two connector workers are nonzero")
+    }
+
+    fn validate(value: &NonZeroUsize, _: &()) -> Result<(), Report<ExecutionConfigError>> {
+        if value.get() > Semaphore::MAX_PERMITS {
+            return Err(Report::new(ExecutionConfigError::WorkerCountTooLarge {
+                class: WorkerClassName::Storage(StorageClass::Connector).as_str(),
+                workers: value.get(),
+                maximum: Semaphore::MAX_PERMITS,
+            }));
+        }
+        Ok(())
+    }
+}
+
+impl ConnectorStorageWorkers {
+    /// Resolve the default or a local capacity claim through the same validation boundary.
+    pub fn resolve(
+        value: Option<NonZeroUsize>,
+    ) -> Result<Setting<Self>, Report<ExecutionConfigError>> {
+        Setting::resolve(value, &())
     }
 }
 
@@ -319,6 +360,12 @@ pub(crate) struct ValidatedBudgets {
 /// contradiction by waiting forever for a budget that cannot hold it.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ExecutionConfigError {
+    #[error("the {class} worker count {workers} exceeds the primitive's {maximum} permits")]
+    WorkerCountTooLarge {
+        class: &'static str,
+        workers: usize,
+        maximum: usize,
+    },
     #[error(
         "the {class} memory budget of {budget} bytes cannot hold its largest {operation} of \
          {required} bytes"

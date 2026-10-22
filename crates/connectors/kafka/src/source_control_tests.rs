@@ -197,7 +197,10 @@ async fn control_admission_preserves_refusals_and_uses_the_client_deadline_while
     let broker = cluster();
     let executor = Executor::new(ExecutionConfig {
         workers: WorkerCounts {
-            connector_storage: std::num::NonZeroUsize::MIN,
+            connector_storage: nervix_execution::ConnectorStorageWorkers::resolve(Some(
+                std::num::NonZeroUsize::MIN,
+            ))
+            .assured("one worker fits the primitive permit bound"),
             pending_jobs: std::num::NonZeroUsize::MIN,
             ..WorkerCounts::default()
         },

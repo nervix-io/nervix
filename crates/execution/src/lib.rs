@@ -14,7 +14,7 @@
 //! - **Depends on.** The primitive boundary for its atomics, semaphores and clock and for the
 //!   mechanisms that run a job: the runtime's blocking pool for storage work, and the boundary's
 //!   CPU-job mechanism, which is the same pool except in the Turmoil build. Also the byte
-//!   vocabulary its budgets are configured in.
+//!   vocabulary its budgets are configured in and the vocabulary's typed setting declarations.
 //! - **Must not know.** What a job computes. It admits, charges, runs and cancels; it decides
 //!   nothing about relays, branches, domains, peers, graphs or the cluster.
 //!
@@ -60,8 +60,8 @@ pub use crate::{
     cancellation::{Cancellation, Cancelled},
     executor::{ExecutionFailure, Executor, ExecutorSnapshot},
     limits::{
-        CpuClass, ExecutionConfig, ExecutionConfigError, MemoryBudgets, MemoryClass,
-        OperationLimits, StorageClass, WorkerCounts,
+        ConnectorStorageWorkers, CpuClass, ExecutionConfig, ExecutionConfigError, MemoryBudgets,
+        MemoryClass, OperationLimits, StorageClass, WorkerCounts,
     },
     memory::{
         AdmissionError, BudgetedBuffer, BufferLimitExceeded, ChargedBytes, MemoryBudgetSnapshot,

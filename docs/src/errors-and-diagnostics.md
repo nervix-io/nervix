@@ -1,5 +1,11 @@
 # Errors And Diagnostics
 
+Connector-storage worker capacity crosses the typed node-capability setting boundary before
+executor construction. A claim exceeding the primitive's permit representation returns
+`ExecutionConfigError::WorkerCountTooLarge` with its class, requested count and maximum; the
+nonzero semantic value already excludes an empty pool. Defaults and explicit claims use that
+same validation boundary.
+
 Setting construction preserves the definition owner's typed report. `Setting<D>::new` and
 `resolve` run the same validation for explicit and default values against typed context; an
 invalid default is a failure, and never a replacement value. The vocabulary formats no cause

@@ -127,7 +127,7 @@ impl Executor {
                 ),
                 connector_storage: WorkerPool::new(
                     StorageClass::Connector.into(),
-                    validated.workers.connector_storage,
+                    *validated.workers.connector_storage.value(),
                     validated.workers.pending_jobs,
                 ),
                 management_memory: MemoryBudget::new(

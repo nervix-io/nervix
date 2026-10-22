@@ -27,6 +27,16 @@ use rdkafka::{config::ClientConfig, consumer::StreamConsumer, error::KafkaResult
 
 use super::{GroupCommitRequest, KafkaSourceError};
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the per-consumer ordering invariant admits one control operation, so a \
+                  cancelled native mutation cannot be overtaken"
+    )
+)]
+const CONSUMER_CONTROL_TURNS: usize = 1;
+
 /// One commit's exact job and eventual coordinator answer, retained by its source instance.
 pub(super) type CommitTask = JoinHandle<Result<KafkaResult<()>, Report<ExecutionError>>>;
 
@@ -55,7 +65,7 @@ impl KafkaControl {
         Ok(Self {
             executor,
             timeout: Duration::from_millis(u64::from(milliseconds)),
-            turn: StdArc::new(Semaphore::new(1)),
+            turn: StdArc::new(Semaphore::new(CONSUMER_CONTROL_TURNS)),
         })
     }
 
