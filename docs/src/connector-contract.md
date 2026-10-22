@@ -536,8 +536,9 @@ retries on its policy. A listener serves many peers, so one that stalls is not t
 the bound closes that peer's connection, and the scenario observes the connection end no sooner than
 the bound while the listener goes on reading its other peers. A silent endpoint accepts connections
 and never answers or reads, a stallable endpoint in front of a dependency stops carrying bytes in
-both directions while its connections stay open, and the HTTP and gRPC receivers can hold a
-response; scenarios stand them where the stall belongs.
+both directions while its connections stay open, the NATS endpoint a scenario controls can go down
+and refuse every reconnection, so a Core NATS client cannot flush, and the HTTP and gRPC receivers
+can hold a response; scenarios stand them where the stall belongs.
 
 #### Review checklist
 
@@ -1198,8 +1199,10 @@ transient failure its pending work is still waiting out.
 Every sink implements `finish`, and no sink inherits a default. A publish reports a record
 delivered at the completion point its mode declares, and for `NO_ACK` on Kafka, Pulsar and MQTT
 QoS 0 that point is the client taking the record, so the client can still hold delivered records
-when the emitter stops. `finish` sends what the client still holds by the deadline the host gives
-it and answers with one of two outcomes:
+when the emitter stops. A Core NATS write delivers its records once the client flushed them to its
+socket, so its client holds records only after a write ran out of the client's `timeout_ms`: they
+stay unresolved for the host's retry, and the client still sends them. `finish` sends what the
+client still holds by the deadline the host gives it and answers with one of two outcomes:
 
 - **Nothing held.** The client holds no record once a publish returns, so there is nothing to send.
 - **Flushed.** The client held records and sent every one of them before the deadline.
@@ -1236,7 +1239,7 @@ the emitter's transient error that `DESCRIBE EMITTER` shows and as an error even
 | Kafka | `NO_ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
 | Pulsar | `NO_ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
 | MQTT | `QOS 0`: publishes the client took and its event loop has not yet written and flushed to the broker connection, which a client cut off from its broker holds until it connects again. `QOS 1` and `QOS 2`: nothing | Waits until the event loop has flushed every publish the client took or the deadline passes; reports a failed flush or the count still unflushed at that deadline |
-| NATS | Nothing: a core publish flushes the connection before it reports its records, and JetStream answers each record | Nothing to send |
+| NATS | Core `NO_ACK`: nothing after a write whose flush completed; after a write that ran out of `timeout_ms`, the records it handed the client, which the next write flushes before it hands the client more. JetStream: nothing, because JetStream answers each record | Flushes the Core NATS client by the deadline, which sends what it holds; reports the count still held when the deadline passes, or the client's failure with the driver's cause beneath |
 | ZeroMQ | Nothing a publish reported delivered: a completed send has flushed its frame to a peer's socket, and a send that ran out of `timeout_ms` failed its record | Nothing to send |
 | RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
 | Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#sinks) describes |
@@ -1473,7 +1476,10 @@ work the node still holds until they resolve. The retained payloads live with th
 than the connector, so reopening a connector between attempts keeps them; only a failure that ends
 the attempt for good releases them, and their members then follow the error policy with every other
 unresolved row. A row sink names every member itself, so its retry writes only the rows it left
-unresolved; MongoDB's per-document results shrink a retried bulk write this way.
+unresolved; MongoDB's per-document results shrink a retried bulk write this way. That includes a
+MongoDB write whose write concern failed: the server applied every document it did not refuse and
+reports the write concern error beside them, so the documents it applied are delivered, a document
+it refused for good is rejected, and the failure leaves only the rest of the write unresolved.
 
 A row sink divides its own writes, because only the connector can measure what it sends. The
 host projects each buffered carrier once and hands the sink every run of successive carriers of
@@ -1510,8 +1516,9 @@ shrink with a candidate: `connector-row-request-division` the division rule and 
 `emitter-batch-subdivision` and `emitter-batch-packing` the candidates, seals, relay, branch and
 envelope grouping and the exact container bytes, `codec-bounded-encodings` and
 `bounded-write-limits` the exact sizes under `MAX SIZE`, `emitter-row-preparations` and
-`emitter-retained-payloads` the membership and byte-for-byte retry, and `sqs-batch-requests`,
+`emitter-retained-payloads` the membership and byte-for-byte retry, `sqs-batch-requests`,
 `mqtt-publish-packets` and `postgres-insert-measures` the connector-specific measures.
+`mongodb-write-answers` checks the rows a failed MongoDB write delivers, rejects and leaves unresolved.
 `sentry-prepared-envelopes` checks complete event preservation, defaults, framing and attempt
 bytes; the one- and three-node Sentry scenarios qualify those bytes through a reopened connector
 after a mock endpoint's `503` response. See
