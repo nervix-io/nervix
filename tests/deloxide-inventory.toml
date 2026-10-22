@@ -478,6 +478,14 @@ selections = ["deloxide-order"]
 test = "order_context_and_retention_overload_leave_failure_evidence"
 
 [[workload]]
+coverage = "Locks that each live for one request, taken under the lock of an owner that outlives them, as relay admission records are under their relay peer owner."
+id = "probe.per-request-order-history"
+invariant = "A run that takes 32,768 per-request locks under one owner's lock keeps every instance edge within the order history and ends with qualifying evidence and no finding."
+invocation = "probes"
+selections = ["deloxide-order"]
+test = "per_request_locks_under_one_owner_stay_within_the_order_history"
+
+[[workload]]
 coverage = "Finding descriptions written to a failing or blocked standard error."
 id = "probe.output-failure"
 invariant = "A finding whose description cannot be written, or whose standard error stays blocked past the recording budget, ends the child with status 4 and nonqualifying evidence."
@@ -689,6 +697,16 @@ id = "scenario.pulsar-finish-at-stop"
 invariant = "STOP retains a Pulsar producer until every accepted record's receipt arrives within the finish deadline, rather than completing while those records are held behind a broker fault."
 invocation = "scenarios"
 scenario = "STOP waits for the records a NO ACK Pulsar emitter's producer holds"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "STOP on one and three nodes reaches the MQTT sink's finish while its client holds a QOS 0 publish it took behind a broker connection whose CONNECT the endpoint holds. The measured stop completion follows the endpoint's resumption and the broker receives the payload exactly once. Domain teardown and source controls exercise tracked locks; the client's event loop, its flush notices and the proxy's asynchronous gate are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_emission.feature"
+id = "scenario.mqtt-finish-at-stop"
+invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
+invocation = "scenarios"
+scenario = "STOP waits for the publish a QOS 0 MQTT emitter's client holds"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1805,6 +1823,16 @@ scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: STOP on one and three nodes reaches the MQTT sink's finish while its client holds a QOS 0 publish it took behind a broker connection whose CONNECT the endpoint holds. Source controls and domain teardown reach tracked locks; the client's event loop, its flush notices and the asynchronous fault gate remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_emission.feature"
+id = "stress.mqtt-finish-at-stop"
+invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
+invocation = "stress-scenarios"
+scenario = "STOP waits for the publish a QOS 0 MQTT emitter's client holds"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: an Iceberg commit on one and three nodes whose staged file the bulk memory class has no room for, so the emitter host retries the commit on its policy while the sink keeps the staged file and its acknowledgements, then the commit once the scenario releases its hold. The host's retry status and its tracked publication run beside the commit; the memory charges are semaphore permits and the catalog and object-store clients are asynchronous, so the detector does not see them."
 examples = 2
 feature = "tests/features/runtime/iceberg_emission.feature"
@@ -2665,6 +2693,8 @@ workloads = [
   "stress.sqs-receive-at-quiesce",
   "scenario.pulsar-finish-at-stop",
   "stress.pulsar-finish-at-stop",
+  "scenario.mqtt-finish-at-stop",
+  "stress.mqtt-finish-at-stop",
   "scenario.mqtt-session-drop",
   "scenario.mqtt-topic-replacement",
   "scenario.mqtt-endpoint-replacement",
