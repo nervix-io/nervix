@@ -338,8 +338,8 @@ Feature: Web console backup and restore
     Then the command response delivery pause on node "{{leader}}" is reached
     When the web console loses its session connection
     And the command response delivery pause on node "{{leader}}" is released
-    Then the web console's session reconnects to node "{{leader}}"
-    And the web console's expected download is saved
+    Then the web console's expected download is saved
+    And the web console's session reconnected to node "{{leader}}" after it was lost
     And selector ".backup-status" contains "downloaded 'typed.nvxb'"
     And selector ".terminal" contains "backed up domain '{{domain}}'" exactly 1 times
     And selector ".terminal" contains "archive downloaded as 'typed.nvxb'"

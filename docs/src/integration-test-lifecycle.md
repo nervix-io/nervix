@@ -1183,8 +1183,9 @@ from a second session without counting the leader notices, which every reconnect
 steps check which console each session connection reached around the leader redirect, and where
 the backup downloads and restores went. `the web console loses its session connection` closes the
 newest session connection the page holds, as a connection lost under the console closes, and notes
-that moment; `the web console's session reconnects to node ...` waits, for up to two minutes, until
-a session connection the page constructed after it has opened on that node.
+that moment; `the web console's session reconnected to node ... after it was lost` then checks that
+a session connection the page constructed after that moment opened on that node. It reads the
+record once, after a step that waits for something only the new connection can deliver.
 
 The **active-scenario registry** holds every scenario that has started and not yet ended. A scenario
 registers in its before hook, before it acquires its permits, so a scenario that never gets them is

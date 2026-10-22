@@ -9,12 +9,9 @@
 //!   and its checks.
 //! - **Must not know.** How the console drives its session, or how a node serves it.
 
-use std::time::Duration;
-
 use cucumber::{then, when};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::websocket::CONSOLE_SESSION_PATH;
-use nervix_primitives::time::Instant;
 
 use super::{ScenarioWorld, expand_placeholders};
 use crate::common::console_connections::{ConsoleAddress, ConsoleConnectionRecord};
@@ -27,10 +24,6 @@ const READ_RECORD: &str = "() => window.__nervixConsoleConnections.record()";
 
 /// Closes the newest connection the page holds at the path it is given.
 const LOSE_CONNECTION: &str = "(path) => window.__nervixConsoleConnections.lose(path)";
-
-/// How long a console may take to connect its session again after losing it. It bounds a wait for
-/// something to happen, so it is generous under parallel load.
-const RECONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Starts `page` with the connection recorder, so its record holds every connection the console
 /// makes, from its first.
@@ -78,30 +71,19 @@ async fn when_web_console_loses_its_session_connection(world: &mut ScenarioWorld
     }
 }
 
-#[then(expr = "the web console's session reconnects to node {string}")]
-async fn then_web_console_session_reconnects(world: &mut ScenarioWorld, node_id: String) {
+#[then(expr = "the web console's session reconnected to node {string} after it was lost")]
+async fn then_web_console_session_reconnected(world: &mut ScenarioWorld, node_id: String) {
     let console = console_of(world, &node_id);
-    let page = browser_page(world);
-    let deadline = Instant::now()
-        .checked_add(RECONNECT_TIMEOUT)
-        .assured("a two-minute bound fits after the present instant");
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        let record = read_record(page).await;
-        let reconnected = match record.session_reconnected_after_loss(&console) {
-            Ok(reconnected) => reconnected,
-            Err(violation) => panic!("{violation}; the web console's connections:{record}"),
-        };
-        if reconnected {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the web console's session did not connect to {console} again within \
-             {RECONNECT_TIMEOUT:?} of losing it; its connections:{record}"
-        );
-        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
-    }
+    let record = read_record(browser_page(world)).await;
+    let reconnected = match record.session_reconnected_after_loss(&console) {
+        Ok(reconnected) => reconnected,
+        Err(violation) => panic!("{violation}; the web console's connections:{record}"),
+    };
+    assert!(
+        reconnected,
+        "no session connection opened on {console} after the web console lost its session \
+         connection; its connections:{record}"
+    );
 }
 
 #[then("the web console never held two session connections at once")]
