@@ -800,7 +800,7 @@ Feature: Placement policies
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION placement_timeout_junction FROM placement_timeout_input UNBRANCHED
         TO placement_timeout_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT placement_timeout_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT placement_timeout_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
