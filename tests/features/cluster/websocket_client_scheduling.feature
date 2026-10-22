@@ -13,8 +13,7 @@ Feature: WebSocket client ingestor scheduling
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT ws_main
-        TYPE WEBSOCKETS
+      CREATE WEBSOCKETS CLIENT ws_main
         CONFIG {
           'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
@@ -78,8 +77,7 @@ Feature: WebSocket client ingestor scheduling
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT ws_main
-        TYPE WEBSOCKETS
+      CREATE WEBSOCKETS CLIENT ws_main
         CONFIG {
           'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
@@ -125,8 +123,7 @@ Feature: WebSocket client ingestor scheduling
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT ws_main
-        TYPE WEBSOCKETS
+      CREATE WEBSOCKETS CLIENT ws_main
         CONFIG {
           'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
@@ -176,8 +173,7 @@ Feature: WebSocket client ingestor scheduling
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT ws_main
-        TYPE WEBSOCKETS
+      CREATE WEBSOCKETS CLIENT ws_main
         CONFIG {
           'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };

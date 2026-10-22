@@ -479,36 +479,31 @@ CREATE RELAY location_distance_alerts SCHEMA distance_alert BRANCHED BY by_devic
 CREATE RELAY connection_distance_alerts SCHEMA distance_alert BRANCHED BY by_device CAPACITY 128;
 CREATE RELAY distance_alerts SCHEMA distance_alert BRANCHED BY by_device CAPACITY 256;
 
-CREATE CLIENT kafka_auth
-  TYPE KAFKA
+CREATE KAFKA CLIENT kafka_auth
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9092'
   };
 
-CREATE CLIENT mqtt_devices
-  TYPE MQTT
+CREATE MQTT CLIENT mqtt_devices
   CONFIG {
     'addr' = 'mqtt://127.0.0.1:1883',
     'client_id' = 'nervix-datalake-device-source-{{instance}}'
   };
 
-CREATE CLIENT nats_edge
-  TYPE NATS
+CREATE NATS CLIENT nats_edge
   CONFIG {
     'addr' = 'nats://127.0.0.1:4222'
   };
 
-CREATE CLIENT redis_security_alerts
-  TYPE REDIS
+CREATE REDIS CLIENT redis_security_alerts
   POOL SIZE MIN 1 MAX 4
   CONFIG {
     'addr' = 'redis://127.0.0.1:6379'
   };
 
-CREATE CLIENT s3_lakehouse TYPE S3 CONFIG {'endpoint' = 'http://127.0.0.1:9900', 'region' = 'us-east-1', 'access_key_id' = 'rustfsadmin', 'secret_access_key' = 'rustfsadmin', 'path_style_access' = 'true'};
+CREATE S3 CLIENT s3_lakehouse CONFIG {'endpoint' = 'http://127.0.0.1:9900', 'region' = 'us-east-1', 'access_key_id' = 'rustfsadmin', 'secret_access_key' = 'rustfsadmin', 'path_style_access' = 'true'};
 
-CREATE CLIENT lakehouse_catalog
-  TYPE ICEBERG_REST
+CREATE ICEBERG_REST CLIENT lakehouse_catalog
   CONFIG {
     'uri' = 'http://127.0.0.1:8181',
     'warehouse' = 's3://nervix-iceberg/warehouse'

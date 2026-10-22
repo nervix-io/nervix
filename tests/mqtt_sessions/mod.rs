@@ -43,7 +43,7 @@ async fn start_session_ingestor(
             CREATE WIRE JSON SCHEMA item_wire MODE STRICT (user_id integer);
             CREATE CODEC item_codec FROM WIRE JSON SCHEMA item_wire TO SCHEMA item;
             CREATE RELAY output SCHEMA item UNBRANCHED;
-            CREATE CLIENT broker TYPE MQTT CONFIG {{ 'addr' = '{{{{mqtt_addr}}}}'{identity} }};
+            CREATE MQTT CLIENT broker CONFIG {{ 'addr' = '{{{{mqtt_addr}}}}'{identity} }};
             CREATE MQTT TOPIC INGESTOR {name}
               FROM broker TOPIC 'session_{{{{test_id}}}}' INSTANCES {instances}
               SESSION PERSISTENT QOS 1 MODE NO ACK

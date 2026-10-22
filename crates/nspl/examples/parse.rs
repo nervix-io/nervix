@@ -141,9 +141,8 @@ fn main() -> ExitCode {
     );
     println!("  CREATE ENDPOINT <name> ON <vhost> PATH '/path' TYPE WEBSOCKETS|HTTP [;]");
     println!(
-        "  CREATE CLIENT <name> TYPE \
-         KAFKA|PULSAR|HTTP|PROMETHEUS|RABBITMQ|REDIS|MQTT|NATS|ZEROMQ|SQS|S3|GCS|AZURE_BLOB|\
-         ICEBERG_REST|WEBSOCKETS CONFIG {{ 'k' = 'v', ... }} [;]"
+        "  CREATE <CONNECTOR> CLIENT <name> [POOL SIZE MIN <n> MAX <n>] [WITH SIGNALING PROTOCOL \
+         <name>] [MOUNT <resource> VERSION <n>|LATEST] CONFIG {{ 'k' = 'v', ... }} [;]"
     );
     println!(
         "  CREATE HTTP REQUEST|HTTP ENDPOINT|KAFKA TOPIC|PULSAR TOPIC|MQTT TOPIC|NATS \

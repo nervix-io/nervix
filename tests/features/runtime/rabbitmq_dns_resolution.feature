@@ -31,7 +31,7 @@ Feature: RabbitMQ name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
@@ -96,7 +96,7 @@ Feature: RabbitMQ name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{rabbitmq_tls_dns_addr}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
@@ -140,7 +140,7 @@ Feature: RabbitMQ name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = '{{rabbitmq_forwarded_addr}}'
       };
       CREATE RABBITMQ QUEUE INGESTOR rabbit_in
@@ -209,7 +209,7 @@ Feature: RabbitMQ name resolution
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -225,7 +225,7 @@ Feature: RabbitMQ name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT rabbitmq_sink TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbitmq_sink CONFIG {
         'addr' = '{{rabbitmq_forwarded_addr}}'
       };
       CREATE ATTACHED EMITTER rabbitmq_boundary FROM notifications
@@ -282,7 +282,7 @@ Feature: RabbitMQ name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = '{{rabbitmq_forwarded_addr}}'
       };
       CREATE RABBITMQ QUEUE INGESTOR rabbit_in

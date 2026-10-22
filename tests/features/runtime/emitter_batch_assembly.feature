@@ -43,7 +43,7 @@ Feature: Emitter payload assembly across Arrow carriers
           INHERIT ALL BRANCHED BY by_source_b SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE EMITTER assembled
         FROM source_a_events, source_b_events
         TO KAFKA kafka_main TOPIC assembled_{{test_id}}
