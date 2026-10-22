@@ -107,7 +107,7 @@ use crate::common::{
         HttpsPublishLoopOutcome, InterconnectCredentialFault, TEST_AUTH_PASSWORD,
         TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
         assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
-        observe_kafka_through, publish_kafka_record_through,
+        command_connect_options, observe_kafka_through, publish_kafka_record_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
@@ -5400,8 +5400,7 @@ impl IngestorLogicTransportFixture {
             }
             Self::Kafka => {
                 r#"
-      CREATE CLIENT logic_kafka
-        TYPE KAFKA
+      CREATE KAFKA CLIENT logic_kafka
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
@@ -5409,8 +5408,7 @@ impl IngestorLogicTransportFixture {
             }
             Self::Mqtt => {
                 r#"
-      CREATE CLIENT logic_mqtt
-        TYPE MQTT
+      CREATE MQTT CLIENT logic_mqtt
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-logic-{{test_id}}'
@@ -5419,8 +5417,7 @@ impl IngestorLogicTransportFixture {
             }
             Self::Nats => {
                 r#"
-      CREATE CLIENT logic_nats
-        TYPE NATS
+      CREATE NATS CLIENT logic_nats
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
@@ -5438,8 +5435,7 @@ impl IngestorLogicTransportFixture {
             }
             Self::ZeroMq => {
                 r#"
-      CREATE CLIENT logic_zeromq
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT logic_zeromq
         CONFIG {
           'addr' = '{{zeromq_ingest_addr}}',
           'bind' = 'true'
@@ -15913,14 +15909,14 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_the_leader_
         .cluster()
         .grpc_uri(&leader)
         .expect("failed to resolve leader gRPC URI");
+    let commands = expand_placeholders(world, docstring(step));
     let client = Client::connect_with_options(
         &grpc_uri,
         client_domain(&world.domain),
-        client_connect_options(&grpc_uri).expect("failed to build client tls options"),
+        command_connect_options(&grpc_uri, &commands).expect("failed to build client tls options"),
     )
     .await
     .expect("failed to connect leader client");
-    let commands = expand_placeholders(world, docstring(step));
     for command in nspl_statements(&commands) {
         let outcome = client
             .execute(command.clone())
@@ -17479,52 +17475,52 @@ impl UnacknowledgedSourceFixture {
         match self {
             Self::Kafka => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT unacknowledged_client CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };"#
             }
             Self::Mqtt => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT unacknowledged_client CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-unacknowledged-{{test_id}}'
       };"#
             }
             Self::Nats => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE NATS CONFIG {
+      CREATE NATS CLIENT unacknowledged_client CONFIG {
         'addr' = '{{nats_addr}}'
       };"#
             }
             Self::Pulsar => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT unacknowledged_client CONFIG {
         'addr' = '{{pulsar_addr}}'
       };"#
             }
             Self::RedisPubSub => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG {
+      CREATE REDIS CLIENT unacknowledged_client POOL SIZE MIN 1 MAX 4 CONFIG {
         'addr' = '{{redis_addr}}'
       };"#
             }
             Self::Syslog => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT unacknowledged_client CONFIG {
         'protocol' = 'udp',
         'addr' = '{{syslog_ingest_addr}}'
       };"#
             }
             Self::WebsocketClient => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE WEBSOCKETS CONFIG {
+      CREATE WEBSOCKETS CLIENT unacknowledged_client CONFIG {
         'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
       };"#
             }
             Self::ZeroMq => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT unacknowledged_client CONFIG {
         'addr' = '{{zeromq_ingest_addr}}',
         'bind' = 'true'
       };"#

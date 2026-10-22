@@ -151,7 +151,7 @@ Feature: Configuration backup into a public archive
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE CLIENT drop_nats TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };
+      CREATE NATS CLIENT drop_nats CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE NATS SUBJECT INGESTOR event_source FROM drop_nats
         SUBJECT 'backup_drop_{{test_id}}' QUEUE GROUP 'backup_drop_group_{{test_id}}'
         INSTANCES 1 MODE NO ACK
@@ -204,7 +204,7 @@ Feature: Configuration backup into a public archive
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
-      CREATE CLIENT wait_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT wait_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -290,7 +290,7 @@ Feature: Configuration backup into a public archive
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
       CREATE ATTACHED EMITTER published FROM outgoing
@@ -404,7 +404,7 @@ Feature: Configuration backup into a public archive
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -538,7 +538,7 @@ Feature: Configuration backup into a public archive
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5s;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -642,7 +642,7 @@ Feature: Configuration backup into a public archive
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

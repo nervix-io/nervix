@@ -48,8 +48,7 @@ CREATE RELAY notifications
   SCHEMA notification
   BRANCHED BY by_user;
 
-CREATE CLIENT kafka_main
-  TYPE KAFKA
+CREATE KAFKA CLIENT kafka_main
   CONFIG {
     'bootstrap.servers' = 'localhost:9092'
   };
