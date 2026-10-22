@@ -1,6 +1,6 @@
 //! Bounded source syntax, macro fragment and complete current representation qualification.
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 
 use super::*;
 
@@ -176,10 +176,219 @@ trait Contract {
 statement_tokens! { let value = 12u8 as usize; consume(value); }
 "#,
     );
+    let result: Vec<_> = result
+        .into_iter()
+        .filter(|site| site.rule == "as_casts")
+        .collect();
     assert_eq!(result.len(), 10);
     assert!(result.iter().all(|site| site.rule == "as_casts"));
     assert_eq!(
         result.iter().map(|site| site.line).collect::<Vec<_>>(),
         [2, 3, 4, 5, 6, 10, 13, 16, 19, 21]
     );
+}
+
+#[test]
+fn bolero_hidden_tunables_preserve_every_policy_site() {
+    bolero::check!().with_type::<[u8; 32]>().for_each(|seed| {
+        let path = format!("src/policy_{}.rs", seed[0]);
+        let mut source =
+            String::from("// bounded Unicode π policy\nuse std::time::Duration as Budget;\n");
+        let mut expected = Vec::new();
+        let count = usize::from(seed[1] % 8);
+        for index in 0..count {
+            let line = match seed[index + 2] % 6 {
+                0 => format!("#[cfg(any())] const P_{index}: Budget = Budget::from_secs(5);\n"),
+                1 => format!("macro_rules! p_{index} {{ () => {{ const P: usize = 7; }}; }}\n"),
+                2 => format!("fn p_{index}() {{ mpsc::channel(8); }}\n"),
+                3 => format!("fn p_{index}() {{ Vec::with_capacity(16); }}\n"),
+                4 => format!("const P_{index}: std::time::r#Duration = make();\n"),
+                _ => format!("fn p_{index}() {{ std::time::r#Duration::r#from_secs(5); }}\n"),
+            };
+            let column = match seed[index + 2] % 6 {
+                0 | 1 | 4 => line
+                    .find("const")
+                    .assured("the generated constant has a const token"),
+                2 => line
+                    .find("mpsc")
+                    .assured("the generated call starts with mpsc"),
+                3 => line
+                    .find("Vec")
+                    .assured("the generated call starts with Vec"),
+                _ => line
+                    .find("std")
+                    .assured("the generated call starts with std"),
+            };
+            expected.push(SourceSite {
+                path: path.clone(),
+                line: index + 3,
+                column,
+                rule: "hidden_tunables".into(),
+            });
+            source.push_str(&line);
+        }
+        source.push_str(
+            "#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = \"wire tag width\"))] const \
+             TAG: u8 = 4;\n",
+        );
+        source.push_str("#[cfg(test)] mod checks { const PROBE: u32 = 16; }\n");
+        source.push_str(
+            "fn data(capacity: usize) { Vec::with_capacity(capacity); let text = \
+             \"Duration::from_secs(3)\"; }\n",
+        );
+        source.push_str(
+            "struct Group { budget: Field<Spec> }\nuse Setting as Field;\ntype Config = \
+             Group;\nimpl Default for Config { fn default() -> Self { Duration::from_secs(9); \
+             make() } }\n",
+        );
+        let input = SourceInput { path, source };
+        let encoded =
+            serde_json::to_vec(&input).assured("current source input has a JSON representation");
+        let decoded: SourceInput =
+            serde_json::from_slice(&encoded).assured("the encoded complete input is valid JSON");
+        assert_eq!(decoded, input);
+        let result = scan(vec![decoded])
+            .assured("the generator supplies valid current Rust syntax and contracts");
+        assert_eq!(result, expected);
+        let encoded =
+            serde_json::to_vec(&result).assured("complete sites have a JSON representation");
+        let decoded: Vec<SourceSite> =
+            serde_json::from_slice(&encoded).assured("the complete sites were just serialized");
+        assert_eq!(decoded, result);
+    });
+}
+
+#[test]
+fn class_groups_resolve_late_aliases_within_each_scope() {
+    let declaration = "struct Group { budget: Field<Spec> } use Setting as Field; type Config = \
+                       Group; impl Default for Config { fn default() -> Self { \
+                       Duration::from_secs(3); make() } }";
+    for source in [
+        declaration.to_owned(),
+        format!("mod area {{ {declaration} }}"),
+        format!("fn configure() {{ {declaration} }}"),
+    ] {
+        assert!(sites(&source).is_empty());
+    }
+    assert_eq!(
+        sites(
+            "struct Group { budget: usize } impl Default for Group { fn default() -> Self { \
+             Duration::from_secs(3); make() } }"
+        )
+        .len(),
+        1
+    );
+    assert_eq!(
+        sites(
+            "struct Group { budget: Setting<Spec> } mod area { struct Group { budget: usize } \
+             impl Default for Group { fn default() -> Self { Duration::from_secs(3); make() } } }"
+        )
+        .len(),
+        1
+    );
+    assert!(
+        sites(
+            "use Other as Group; mod area { struct Group { budget: Setting<Spec> } impl Default \
+             for Group { fn default() -> Self { Duration::from_secs(3); make() } } }"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn raw_policy_spellings_keep_current_types_and_defaults() {
+    let result = sites(
+        r#"
+use std::time::r#Duration as r#Budget;
+const DIRECT: std::time::r#Duration = make();
+const RENAMED: r#Budget = make();
+fn policy() {
+    std::time::r#Duration::r#from_secs(3);
+    Vec::r#with_capacity(4);
+    queue.r#add_permits(5);
+}
+struct Group { budget: r#Setting<Spec> }
+impl r#Default for Group { fn default() -> Self { r#Budget::from_secs(6); make() } }
+impl r#SettingDefinition for Spec {
+    fn r#default_value() -> r#Budget { r#Budget::from_secs(7) }
+}
+"#,
+    );
+    assert_eq!(
+        result.iter().map(|site| site.line).collect::<Vec<_>>(),
+        [3, 4, 6, 7, 8]
+    );
+}
+
+#[test]
+fn setting_defaults_fixed_contracts_and_lexical_aliases_keep_their_owners() {
+    let result = sites(
+        r#"
+use std::time::{Duration as Budget};
+type Wait = Budget;
+const DEADLINE: Wait = Budget::from_secs(5);
+struct Settings { budget: Setting<BudgetSpec> }
+impl Default for Settings { fn default() -> Self { Budget::from_secs(6); make() } }
+impl SettingDefinition for BudgetSpec {
+    fn default_value() -> Budget { Budget::from_secs(7) }
+    fn validate() { Budget::from_secs(8); }
+    #[cfg(test)] fn probe() { Budget::from_secs(9); }
+}
+struct Ordinary;
+impl Default for Ordinary { fn default() -> Self { Budget::from_secs(10); Self } }
+mod labels { type Budget = String; const TEXT: Budget = make(); }
+fn configure() {
+    use std::time::Duration as Local;
+    Local::from_millis(11);
+    Semaphore::new(12);
+    ArrayQueue::new(13);
+    queue.add_permits(14);
+    builder.with_capacity(15);
+    sync_channel(16);
+    bounded(17);
+    watch::channel(18);
+}
+#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = "the frame tag is one byte"))]
+const TAG: u8 = 1;
+#[test] fn probe() { Budget::from_secs(19); }
+trait Contract { #[cfg(test)] const PROBE: u64 = 20; const WIDTH: NonZeroU32 = make(); }
+impl Settings { #[cfg(test)] const PROBE: u32 = 21; const WIDTH: ByteUnit = make(); }
+type Left = Right;
+type Right = Left;
+const CYCLIC: Left = make();
+fn cycle() { Left::from_secs(22); }
+const PAIR: (u8, u8) = (1, 2);
+"#,
+    );
+    assert_eq!(
+        result.iter().map(|site| site.line).collect::<Vec<_>>(),
+        [4, 9, 13, 17, 18, 19, 20, 21, 22, 23, 29, 30]
+    );
+    assert!(result.iter().all(|site| site.rule == "hidden_tunables"));
+}
+
+#[test]
+fn invalid_constant_contracts_fail_with_the_authored_location() {
+    for annotation in [
+        "#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = \"\"))] const C: u8 = 1;",
+        "#[cfg_attr(nervix_lint, nervix::constant(variable, reason = \"wire\"))] const C: u8 = 1;",
+        "#[cfg_attr(nervix_lint, nervix::constant(fixed))] const C: u8 = 1;",
+        "#[nervix::constant(fixed, reason = \"wire\")] const C: u8 = 1;",
+        "#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = \"wire\"))] fn probe() {}",
+    ] {
+        let error = scan(vec![SourceInput {
+            path: "src/invalid.rs".into(),
+            source: annotation.into(),
+        }])
+        .expect_err("an invalid current source contract cannot authorize an exclusion");
+        assert!(
+            matches!(error.current_context(), SourceError::ConstantContract {path, line: 1, ..} if path == "src/invalid.rs")
+        );
+    }
+    let result = scan(vec![SourceInput {
+        path: "crates/model-harness/src/probe.rs".into(),
+        source: "const TEST_BUDGET: usize = 8;".into(),
+    }])
+    .assured("a harness constant is valid Rust");
+    assert!(result.is_empty());
 }

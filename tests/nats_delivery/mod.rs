@@ -4,7 +4,8 @@
 //! - **Owns.** The wait for a client to find the scenario's controlled NATS endpoint down, a domain
 //!   stop concurrent with that endpoint forwarding again, and the observation that stopping waited
 //!   for it before it reported what the emitter's client held as sent.
-//! - **Depends on.** The scenario's cluster, its controlled NATS endpoint and shared command steps.
+//! - **Depends on.** The scenario's cluster, its controlled NATS endpoint, shared command steps and
+//!   the shared STOP timing record.
 //! - **Must not know.** The NATS sink's private state or how its driver queues what it sends.
 
 #![cfg_attr(
@@ -17,20 +18,15 @@ use std::time::Duration;
 use cucumber::{then, when};
 use nervix_primitives::time::Instant;
 
-use super::{NodeSession, ScenarioWorld, execute_nspl_commands_on_leader, parse_duration_text};
+use super::{
+    NodeSession, ScenarioWorld, emitter_finish::StopTiming, execute_nspl_commands_on_leader,
+    parse_duration_text,
+};
 use crate::common::nats_endpoint::NatsEndpoint;
 
 /// How long a scenario waits for a client to find its controlled NATS endpoint down. Generous,
 /// because the wait ends at the first connection the endpoint refuses.
 const REFUSAL_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// When a domain stop returned, and when the controlled NATS endpoint started to forward again
-/// while it ran.
-#[derive(Debug)]
-pub(crate) struct NatsStopTiming {
-    stopped_at: Instant,
-    forwarding_at: Instant,
-}
 
 struct StoppedDomain {
     result: Result<NodeSession, String>,
@@ -74,23 +70,14 @@ async fn stop_while_controlled_endpoint_returns(world: &mut ScenarioWorld, delay
     let _stopped = stopped
         .result
         .expect("STOP finishes what the NATS emitter's client held");
-    world.nats_stop_timing = Some(NatsStopTiming {
-        stopped_at: stopped.at,
-        forwarding_at,
-    });
+    world.stop_timing = Some(StopTiming::new(stopped.at, forwarding_at));
 }
 
 #[then("STOP completed after the controlled NATS endpoint forwarded everything")]
 fn stop_waited_for_controlled_endpoint(world: &mut ScenarioWorld) {
-    let timing = world
-        .nats_stop_timing
+    world
+        .stop_timing
         .as_ref()
-        .expect("the preceding action observed STOP and the endpoint forwarding again");
-    assert!(
-        timing.stopped_at >= timing.forwarding_at,
-        "STOP returned {:?} before the NATS server could receive what the emitter's client held",
-        timing
-            .forwarding_at
-            .checked_duration_since(timing.stopped_at)
-    );
+        .expect("the preceding action observed STOP and the endpoint forwarding again")
+        .assert_stop_followed_the_fault();
 }

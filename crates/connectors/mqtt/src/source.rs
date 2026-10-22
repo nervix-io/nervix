@@ -3,10 +3,11 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The MQTT client and event loop each source instance subscribes through, its
-//!   session and quality-of-service settings, the shared subscription every instance joins, the
-//!   client identity each instance connects with, the batches a read gathers and how a read ends
-//!   when the host cancels it, manual acknowledgement of publishes, and the local replay of
-//!   publishes the host rejected, and retirement of obsolete broker sessions.
+//!   session and quality-of-service settings, the Maximum Packet Size every connection advertises
+//!   and the refusal of a larger packet, the shared subscription every instance joins, the client
+//!   identity each instance connects with, the batches a read gathers and how a read ends when the
+//!   host cancels it, manual acknowledgement of publishes, and the local replay of publishes the
+//!   host rejected, and retirement of obsolete broker sessions.
 //! - **Depends on.** The connector contract, the crate's broker connection through the node DNS
 //!   resolver, typed client configuration entries, `error-stack`, Tokio, `rumqttc` and `url`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
@@ -33,6 +34,7 @@ use std::{
 use arch_into::ArchInto as _;
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
+use meticulous::ResultExt as _;
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, SourceBatch,
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
@@ -40,12 +42,15 @@ use nervix_connector::{
     optional_client_config_value, read_tls_file,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, ConnectorKind, MqttQos, MqttSession};
+use nervix_models::{
+    ClientConfigEntry, ConnectorKind, MQTT_SOURCE_MAXIMUM_PACKET_BYTES, MqttQos, MqttSession,
+};
 use nervix_primitives::time::{Instant, timeout, timeout_at};
 use rumqttc::{
-    AckMode, AsyncClient, BrokerSessionResumePolicy, DisconnectProperties, DisconnectReasonCode,
-    Event, EventLoop, Incoming, MqttOptions, Outgoing, Publish, QoS, SessionMode,
-    SubscribeReasonCode, TlsConfiguration, Transport as MqttTransport, UnsubAckReason,
+    AckMode, AsyncClient, BrokerSessionResumePolicy, ConnectionError, DisconnectProperties,
+    DisconnectReasonCode, Event, EventLoop, Incoming, MqttOptions, Outgoing, Publish, QoS,
+    SessionMode, StateError, SubscribeReasonCode, TlsConfiguration, Transport as MqttTransport,
+    UnsubAckReason, mqttbytes::Error as MqttPacketError,
 };
 use thiserror::Error;
 use url::{Host, Url};
@@ -86,6 +91,12 @@ pub enum MqttSourceError {
     SubscriptionRefused,
     #[error("failed to receive an MQTT message")]
     Receive,
+    #[error(
+        "the {connector} broker sent a packet of {packet_bytes} bytes, above the Maximum Packet \
+         Size of {maximum} bytes the connection advertised",
+        connector = ConnectorKind::Mqtt
+    )]
+    PacketTooLarge { packet_bytes: usize, maximum: u32 },
     #[error("the MQTT connection is closed")]
     Disconnected,
     #[error("failed to acknowledge an MQTT message")]
@@ -105,6 +116,33 @@ pub enum MqttSourceError {
 }
 
 type MqttSourceResult<T> = Result<T, Report<MqttSourceError>>;
+
+impl MqttSourceError {
+    /// The failure of a read whose connection the client's event loop ended with `error`: a packet
+    /// above the advertised Maximum Packet Size, which the client refused with a `DISCONNECT`, or
+    /// any other lost connection.
+    fn lost_connection(error: ConnectionError) -> Report<Self> {
+        let refused = match &error {
+            ConnectionError::MqttState(StateError::Deserialization(
+                MqttPacketError::PayloadSizeLimitExceeded { pkt_size, max },
+            )) => Some(Self::PacketTooLarge {
+                packet_bytes: *pkt_size,
+                maximum: *max,
+            }),
+            _ => None,
+        };
+        let lost = MqttConnectionError::report(error);
+        match refused {
+            Some(refused) => lost.change_context(refused),
+            None => lost.change_context(Self::Receive),
+        }
+    }
+
+    /// Whether a read that failed with this error lost its connection.
+    fn ends_connection(&self) -> bool {
+        matches!(self, Self::Receive | Self::PacketTooLarge { .. })
+    }
+}
 
 /// Why the declared client identity cannot serve every instance of a source.
 ///
@@ -236,11 +274,7 @@ impl PublishRead for MqttConnection {
             match self.eventloop.poll().await {
                 Ok(Event::Incoming(Incoming::Publish(publish))) => return Ok(publish),
                 Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
-                Err(error) => {
-                    return Err(
-                        MqttConnectionError::report(error).change_context(MqttSourceError::Receive)
-                    );
-                }
+                Err(error) => return Err(MqttSourceError::lost_connection(error)),
             }
         }
     }
@@ -463,6 +497,12 @@ impl MqttSourcePlan {
             MqttSession::Clean => SessionMode::Clean,
             MqttSession::Persistent => SessionMode::Persistent,
         });
+        // Advertised in every CONNECT, the bound obliges the broker to discard a larger publish
+        // for this subscriber rather than send it, so a persistent session never presents it
+        // again, and the client refuses a larger packet a broker sends anyway.
+        let maximum_packet_size = u32::try_from(MQTT_SOURCE_MAXIMUM_PACKET_BYTES)
+            .assured("the vocabulary bounds the declared size by MQTT's Four Byte Integer");
+        options.set_max_packet_size(Some(maximum_packet_size));
         if session == MqttSession::Persistent {
             // Nervix deliberately keeps in-flight messages and ACK state in memory. After an
             // owner change, accept the broker's retained session and let it redeliver pending
@@ -802,7 +842,7 @@ impl BrokerSourceConnector for MqttSource {
             Err(error) => {
                 // A read that loses its connection drops it, and with it every publish the read
                 // took, which a persistent session delivers again once the source resumes.
-                if let MqttSourceError::Receive = error.current_context() {
+                if error.current_context().ends_connection() {
                     self.disconnect();
                 }
                 Err(error.change_context(SourceError::Read { connector: MQTT }))
@@ -849,7 +889,7 @@ impl BrokerSourceConnector for MqttSource {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use meticulous::{OptionExt as _, ResultExt as _};
+    use meticulous::OptionExt as _;
     use nervix_dns::{DnsLookupError, DnsLookupFailure};
     use nonzero_ext::nonzero;
 
@@ -937,6 +977,29 @@ mod tests {
             eventloop.options.broker_session_resume_policy(),
             BrokerSessionResumePolicy::AllowBrokerOnly
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn every_connection_advertises_the_declared_packet_bound_as_its_maximum_packet_size() {
+        let config = [entry("addr", "mqtt://127.0.0.1:1883")];
+        for session in [MqttSession::Clean, MqttSession::Persistent] {
+            nervix_primitives::task::consume_budget().await;
+            let fixture = DnsFixture::start().await;
+            let (_, eventloop) = MqttSourcePlan::client_from_config(
+                &config,
+                "bounded",
+                session,
+                true,
+                fixture.dns.clone(),
+            )
+            .expect("the bounded MQTT client is valid");
+
+            assert_eq!(
+                eventloop.options.max_packet_size().map(u64::from),
+                Some(MQTT_SOURCE_MAXIMUM_PACKET_BYTES),
+                "a {session:?} session's CONNECT advertises the declared bound"
+            );
+        }
     }
 
     #[test]

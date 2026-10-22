@@ -14,7 +14,7 @@ use nervix_connector::{
     SourceMessage as _, SourceReadCancellation,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, MqttQos, MqttSession};
+use nervix_models::{ClientConfigEntry, MQTT_SOURCE_MAXIMUM_PACKET_BYTES, MqttQos, MqttSession};
 use nervix_primitives::{
     sync::mpsc,
     time::{Instant, sleep, timeout},
@@ -96,6 +96,9 @@ impl Read {
         match batch {
             SourceBatch::Messages(messages) => Self::Completed(Self::ids(&messages)),
             SourceBatch::Interrupted { gathered } => Self::Interrupted(Self::ids(&gathered)),
+            SourceBatch::Oversized { payloads } => {
+                panic!("an MQTT read drops no publish for its size, yet it dropped {payloads}")
+            }
             SourceBatch::ResumeRequired | SourceBatch::Closed => {
                 panic!("a read from a connection neither resumes nor closes")
             }
@@ -321,12 +324,19 @@ fn publish_packet(packet_id: u16, payload: &[u8]) -> Vec<u8> {
     // The packet identifier, and an empty property section.
     body.extend_from_slice(&[id_high, id_low, 0]);
     body.extend_from_slice(payload);
-    let remaining = u8::try_from(body.len()).assured("a check's publish is a few bytes long");
-    assert!(
-        remaining < 0x80,
-        "a Remaining Length below 128 takes one byte"
-    );
-    let mut packet = vec![0x32, remaining];
+    let mut packet = vec![0x32];
+    // The Remaining Length: seven value bits a byte, least significant first, each byte but the
+    // last with its continuation bit set.
+    let mut remaining = body.len();
+    loop {
+        let value = u8::try_from(remaining % 128).assured("a remainder of 128 fits a byte");
+        remaining /= 128;
+        if remaining == 0 {
+            packet.push(value);
+            break;
+        }
+        packet.push(value | 0x80);
+    }
     packet.extend(body);
     packet
 }
@@ -405,6 +415,67 @@ async fn cancelled_reads_through_the_client_hand_over_every_publish_the_broker_s
         handed_over,
         [b"1".to_vec(), b"2".to_vec()],
         "the interrupted reads handed over every publish the broker sent, each once and in order"
+    );
+}
+
+/// The control packet type of DISCONNECT.
+const DISCONNECT: u8 = 14;
+
+/// The reason code of a DISCONNECT that refuses a packet above the advertised maximum.
+const PACKET_TOO_LARGE: u8 = 0x95;
+
+#[nervix_primitives::test]
+async fn a_packet_above_the_advertised_bound_ends_the_read_and_tells_the_broker() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone());
+    let (mut source, mut connection) = subscribed(&plan, &broker).await;
+    let maximum = usize::try_from(MQTT_SOURCE_MAXIMUM_PACKET_BYTES)
+        .assured("the declared bound fits the address space");
+    // The payload alone fills the bound, so the packet around it exceeds it.
+    let oversize = publish_packet(1, &vec![b'x'; maximum]);
+    connection.write(&oversize).await;
+
+    let cancellation = SourceReadCancellation::new();
+    let reading = source.next_batch(request(8, Some(LONG_BATCH_TIMEOUT)), &cancellation);
+    let Ok(read) = timeout(OBSERVATION_BUDGET, reading).await else {
+        panic!(
+            "a read that met a packet above the bound was still waiting after \
+             {OBSERVATION_BUDGET:?}"
+        );
+    };
+
+    let Err(error) = read else {
+        panic!("a read that met a packet above the bound fails");
+    };
+    assert!(matches!(
+        error.current_context(),
+        SourceError::Read { connector: "mqtt" }
+    ));
+    let refused = error.downcast_ref::<MqttSourceError>();
+    let Some(MqttSourceError::PacketTooLarge {
+        packet_bytes,
+        maximum: advertised,
+    }) = refused
+    else {
+        panic!("the read names the packet above the bound: {refused:?}");
+    };
+    assert_eq!(*packet_bytes, oversize.len());
+    assert_eq!(u64::from(*advertised), MQTT_SOURCE_MAXIMUM_PACKET_BYTES);
+    assert!(
+        source.needs_resume(),
+        "a read whose packet ended its connection drops it, so the source resumes before it reads \
+         again"
+    );
+    let Ok((packet_type, body)) = timeout(OBSERVATION_BUDGET, connection.read_packet()).await
+    else {
+        panic!("the client told the broker nothing within {OBSERVATION_BUDGET:?}");
+    };
+    assert_eq!(packet_type, DISCONNECT);
+    assert_eq!(
+        body.first(),
+        Some(&PACKET_TOO_LARGE),
+        "the DISCONNECT tells the broker the packet was too large"
     );
 }
 

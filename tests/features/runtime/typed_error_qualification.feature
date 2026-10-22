@@ -184,7 +184,7 @@ Feature: Typed error qualification through public streams
       """
       CREATE SCHEMA secret_event (id STRING, secret STRING SENSITIVE);
       CREATE RELAY secret_events SCHEMA secret_event UNBRANCHED;
-      CREATE CLIENT database TYPE POSTGRES
+      CREATE POSTGRES CLIENT database
         POOL SIZE MIN 1 MAX 4
         CONFIG { 'addr' = '127.0.0.1:5432' };
       CREATE EMITTER direct_values FROM secret_events

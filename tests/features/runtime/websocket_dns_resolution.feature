@@ -22,7 +22,7 @@ Feature: WebSocket client name resolution
         SEND JAQ '{op: "subscribe"}'
         WAIT JAQ '.user_id == 42' ACCEPT DATA
         TIMEOUT 5s;
-      CREATE CLIENT ws_main TYPE WEBSOCKETS WITH SIGNALING PROTOCOL initial_frame CONFIG {
+      CREATE WEBSOCKETS CLIENT ws_main WITH SIGNALING PROTOCOL initial_frame CONFIG {
         'endpoint' = '{{websocket_forwarded_addr}}/ws/{{test_id}}'
       };
       CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications

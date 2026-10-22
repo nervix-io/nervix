@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter};
 
 use super::{
-    ChoiceRequirement, ClientIngestorAlteration, ClientSourceEntity, DeclaredBounds,
+    ChoiceRequirement, ClientIngestorAlteration, ClientSourceEntity, DeclaredBounds, HeaderModel,
     HttpIngestorAlteration, HttpSource, HttpSourceEntity, KafkaIngestorAlteration, KafkaSource,
     KafkaSourceEntity, LocatorDeclaration, MqttIngestorAlteration, MqttSource, MqttSourceEntity,
     NatsIngestorAlteration, NatsSource, NatsSourceEntity, OptionDeclaration,
@@ -414,9 +414,9 @@ pub enum AcknowledgementConfirmation {
 /// documentation and the generated conformance tests read the same declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngestSourceCapabilities {
-    /// Whether its messages carry transport headers that `read_header` and `read_headers` can
-    /// read.
-    pub reads_headers: bool,
+    /// How its messages carry the transport headers that `read_header` and `read_headers` read,
+    /// or `None` where they carry none.
+    pub headers: Option<HeaderModel>,
     /// The typed `metadata` namespace its messages expose to the ingestor's programs.
     pub metadata: SourceMetadataScope,
     /// Whether it executes on every live cluster node rather than on one scheduled owner.
@@ -440,6 +440,12 @@ pub struct IngestSourceCapabilities {
 }
 
 impl IngestSourceCapabilities {
+    /// Whether its messages carry transport headers that `read_header` and `read_headers` can
+    /// read.
+    pub const fn reads_headers(&self) -> bool {
+        self.headers.is_some()
+    }
+
     /// The declaration of the delivery mode `kind`, where the entity declares it.
     ///
     /// An entity declares at most one entry per kind, of the three kinds there are.
@@ -664,7 +670,7 @@ impl IngestSourceKind {
     }
 
     pub fn reads_headers(self) -> bool {
-        self.capabilities().reads_headers
+        self.capabilities().reads_headers()
     }
 
     /// The connector a client this source reads through must configure. A source that names an

@@ -25,7 +25,7 @@ Feature: Iceberg storage deadlines and retry ownership
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT s3_main TYPE S3 CONFIG {
+      CREATE S3 CLIENT s3_main CONFIG {
         'endpoint' = '{{iceberg_objects}}',
         'region' = 'us-east-1',
         'access_key_id' = 'rustfsadmin',
@@ -33,7 +33,7 @@ Feature: Iceberg storage deadlines and retry ownership
         'path_style_access' = true,
         'timeout_ms' = 1000
       };
-      CREATE CLIENT iceberg_catalog TYPE ICEBERG_REST CONFIG {
+      CREATE ICEBERG_REST CLIENT iceberg_catalog CONFIG {
         'uri' = '{{iceberg_rest_addr}}',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };

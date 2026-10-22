@@ -76,6 +76,76 @@ Feature: Transaction-owned domain pause recovery
       | 1            |
       | 3            |
 
+  @client_wire_pause_lapsed_publication @deloxide_stress
+  Scenario Outline: A model command whose publication met a lapsed leader lease releases its own pause on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA pause_event (key I64);
+      CREATE RELAY pause_input SCHEMA pause_event UNBRANCHED;
+      START;
+      """
+    Given the leader refuses the next model publication in domain "{{domain}}" and the pause release after it with "a lapsed leader lease"
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE RELAY lapsed_publication SCHEMA pause_event UNBRANCHED;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DOMAIN_PAUSE
+      """
+    And the refusal of the model publication in domain "{{domain}}" and of its pause release was delivered
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE RELAY after_lapsed_publication SCHEMA pause_event UNBRANCHED;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DOMAIN_PAUSE
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @client_wire_pause_saturated_publication
+  Scenario Outline: A model command whose publication met a saturated consensus log stays applying until it releases its own pause on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA pause_event (key I64);
+      CREATE RELAY pause_input SCHEMA pause_event UNBRANCHED;
+      START;
+      """
+    Given the leader refuses the next model publication in domain "{{domain}}" and the pause release after it with "a saturated consensus log"
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE RELAY saturated_publication SCHEMA pause_event UNBRANCHED;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DOMAIN_PAUSE
+      """
+    And the refusal of the model publication in domain "{{domain}}" and of its pause release was delivered
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE RELAY after_saturated_publication SCHEMA pause_event UNBRANCHED;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DOMAIN_PAUSE
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @client_wire_pause_leadership @deloxide_stress
   Scenario: A refused pause release remains recoverable when its coordinator regains leadership
     Given a 3 node nervix cluster is started

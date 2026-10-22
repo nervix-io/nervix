@@ -193,6 +193,7 @@ impl<'a> Reports<'a> {
         let transport_redeliveries_total = self.number();
         let decode_rejections_total = self.number();
         let last_decode_rejection = self.decode_rejection();
+        let oversized_payloads_total = self.number();
         let memory_backpressure_paused = self.arbitrary.entropy().flag();
         let transient_error = self.text();
         let reconnect_backoff = self.text();
@@ -211,6 +212,7 @@ impl<'a> Reports<'a> {
             transport_redeliveries_total,
             decode_rejections_total,
             last_decode_rejection,
+            oversized_payloads_total,
             memory_backpressure_paused,
             transient_error,
             reconnect_backoff,

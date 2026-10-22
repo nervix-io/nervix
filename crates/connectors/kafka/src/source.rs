@@ -5,8 +5,8 @@
 //! - **Owns.** Kafka consumer configuration, polling, headers and metadata, partition assignment,
 //!   offset acknowledgement, partition inspection, and the opaque services through which a source
 //!   reads and advances host-owned domain offsets.
-//! - **Depends on.** The connector contract, Kafka vocabulary values, `error-stack`, Tokio, and
-//!   `rust-rdkafka`.
+//! - **Depends on.** The connector contract, Kafka vocabulary values, the bounded executor,
+//!   the primitive boundary, `error-stack` and `rust-rdkafka`.
 //! - **Must not know.** Runtime offset-state types, domain execution maps, relays, branches,
 //!   schedules outside the typed Kafka partition schedule, or registry state.
 
@@ -22,6 +22,9 @@
     )
 )]
 
+#[path = "source_control.rs"]
+mod control;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroUsize,
@@ -29,19 +32,23 @@ use std::{
 };
 
 use async_trait::async_trait;
+use control::{CommitTask, ControlBudget, KafkaControl};
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceAckPolicy, SourceBatch,
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
     SourceResult, SourceResume,
 };
-use nervix_models::{ClientConfigEntry, KafkaPartitionSchedule, KafkaTopicName, Timestamp};
+use nervix_execution::Executor;
+use nervix_models::{
+    ClientConfigEntry, ConnectorKind, KafkaPartitionSchedule, KafkaTopicName, Timestamp,
+};
 use nervix_primitives::{
     sync::{Arc, watch},
-    task::JoinHandle,
     time::{Instant, sleep_until, timeout},
 };
-use nervix_recovery::Discarded as _;
+use nervix_recovery::{Discarded as _, Reported as _};
 use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
@@ -228,6 +235,8 @@ impl KafkaGroupCommit {
 /// The complete connector-owned plan for opening Kafka source instances.
 #[derive(Clone)]
 pub struct KafkaSourcePlan {
+    /// The node-owned executor used by this source and its inspectors.
+    pub executor: Executor,
     pub config: Vec<ClientConfigEntry>,
     pub topic: KafkaTopicName,
     pub offset_mode: KafkaSourceOffsetMode,
@@ -235,6 +244,14 @@ pub struct KafkaSourcePlan {
 
 #[derive(Debug, Error)]
 pub enum KafkaSourceError {
+    #[error("the {connector} source cannot admit its control call", connector = ConnectorKind::Kafka)]
+    ControlAdmission,
+    #[error("the {connector} source control call could not run", connector = ConnectorKind::Kafka)]
+    ControlExecution,
+    #[error("the {connector} control call did not finish within socket.timeout.ms {bound}", connector = ConnectorKind::Kafka, bound = humantime::format_duration(*timeout))]
+    ControlTimeout { timeout: Duration },
+    #[error("the {connector} control call was cancelled", connector = ConnectorKind::Kafka)]
+    ControlCancelled,
     #[error("failed to initialize Kafka consumer")]
     Initialize,
     #[error("failed to subscribe to Kafka topic '{topic}'")]
@@ -310,10 +327,9 @@ impl KafkaConsumerAssignment {
             return self.clear(consumer, topic);
         }
         consumer.assign(assignment).map_err(|source| {
-            Report::new(KafkaSourceError::Assign {
+            Report::new(source).change_context(KafkaSourceError::Assign {
                 topic: topic.to_string(),
             })
-            .attach_printable(source.to_string())
         })?;
         *self = Self::Partitions(assignment.clone());
         Ok(())
@@ -328,10 +344,9 @@ impl KafkaConsumerAssignment {
             return Ok(());
         }
         consumer.unassign().map_err(|source| {
-            Report::new(KafkaSourceError::Unassign {
+            Report::new(source).change_context(KafkaSourceError::Unassign {
                 topic: topic.to_string(),
             })
-            .attach_printable(source.to_string())
         })?;
         *self = Self::Cleared;
         Ok(())
@@ -403,6 +418,7 @@ impl SourceMessage for KafkaSourceMessage {
 }
 
 pub struct KafkaSource {
+    control: KafkaControl,
     /// Shared with the blocking-pool job of a commit in flight, which keeps the consumer open
     /// until librdkafka answers it.
     consumer: Arc<StreamConsumer>,
@@ -437,13 +453,14 @@ impl SourceConnector for KafkaSource {
                 "false"
             },
         );
+        let control = KafkaControl::new(&config, plan.executor.clone())
+            .change_context(SourceError::Open { connector: KAFKA })?;
         let consumer = config
             .create()
-            .map_err(|source| {
-                Report::new(KafkaSourceError::Initialize).attach_printable(source.to_string())
-            })
+            .map_err(|source| Report::new(source).change_context(KafkaSourceError::Initialize))
             .change_context(SourceError::Open { connector: KAFKA })?;
         Ok(Self {
+            control,
             consumer: Arc::new(consumer),
             topic: plan.topic.clone(),
             offset_mode: plan.offset_mode.clone(),
@@ -470,26 +487,26 @@ impl SourceConnector for KafkaSource {
         match &self.offset_mode {
             KafkaSourceOffsetMode::ConsumerGroup { group_id, commit } => self
                 .commits
-                .leave_group(&self.consumer, group_id, *commit)
+                .leave_group(&self.control, &self.consumer, group_id, *commit)
                 .await
                 .change_context(SourceError::Suspend { connector: KAFKA }),
             KafkaSourceOffsetMode::Domain { .. } => self
-                .assignment
-                .clear(&self.consumer, self.topic.as_str())
+                .clear_assignment()
+                .await
                 .change_context(SourceError::Suspend { connector: KAFKA }),
         }
     }
 
     async fn resume(&mut self) -> SourceResult<SourceResume> {
         if let KafkaSourceOffsetMode::ConsumerGroup { .. } = &self.offset_mode {
-            self.consumer
-                .subscribe(&[self.topic.as_str()])
-                .map_err(|source| {
-                    Report::new(KafkaSourceError::Subscribe {
-                        topic: self.topic.as_str().to_string(),
-                    })
-                    .attach_printable(source.to_string())
+            let topic = self.topic.as_str().to_owned();
+            self.control
+                .run(&self.consumer, move |consumer, _budget| {
+                    consumer
+                        .subscribe(&[&topic])
+                        .change_context(KafkaSourceError::Subscribe { topic })
                 })
+                .await
                 .change_context(SourceError::Resume { connector: KAFKA })?;
             return Ok(SourceResume::Ready);
         }
@@ -522,12 +539,12 @@ impl SourceConnector for KafkaSource {
         match &self.offset_mode {
             KafkaSourceOffsetMode::ConsumerGroup { group_id, commit } => self
                 .commits
-                .leave_group(&self.consumer, group_id, *commit)
+                .leave_group(&self.control, &self.consumer, group_id, *commit)
                 .await
                 .change_context(SourceError::Close { connector: KAFKA }),
             KafkaSourceOffsetMode::Domain { .. } => self
-                .assignment
-                .clear(&self.consumer, self.topic.as_str())
+                .clear_assignment()
+                .await
                 .change_context(SourceError::Close { connector: KAFKA }),
         }
     }
@@ -572,9 +589,7 @@ impl BrokerSourceConnector for KafkaSource {
             }
         };
         let first = first
-            .map_err(|source| {
-                Report::new(KafkaSourceError::Initialize).attach_printable(source.to_string())
-            })
+            .map_err(|source| Report::new(source).change_context(KafkaSourceError::Initialize))
             .change_context(SourceError::Read { connector: KAFKA })?
             .detach();
         let first = KafkaSourceMessage::from_message(first)
@@ -631,7 +646,7 @@ impl BrokerSourceConnector for KafkaSource {
                 let request = GroupCommitRequest::acknowledged(&positions)
                     .change_context(SourceError::Acknowledge { connector: KAFKA })?;
                 self.commits
-                    .commit(&self.consumer, group_id, request)
+                    .commit(&self.control, &self.consumer, group_id, request)
                     .await
                     .change_context(SourceError::Acknowledge { connector: KAFKA })
             }
@@ -651,117 +666,138 @@ impl BrokerSourceConnector for KafkaSource {
     async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         let starts = earliest_message_offsets(positions)
             .change_context(SourceError::Reject { connector: KAFKA })?;
-        let assigned = self
-            .assigned_partitions()
-            .change_context(SourceError::Reject { connector: KAFKA })?;
-        for position in starts {
-            nervix_primitives::task::consume_budget().await;
-            // Kafka can seek only a partition this consumer is fetching. A rebalance may have moved
-            // the partition to another group member while the batch was in flight; it needs no
-            // seek, because whichever member is assigned it next, this one included, resumes it
-            // from the committed offset, and no offset past an unacknowledged record was committed.
-            if !assigned.contains(&position) {
-                debug!(
-                    topic = position.topic.as_str(),
-                    partition = position.partition,
-                    offset = position.offset,
-                    "rejected Kafka partition is no longer assigned; its next holder resumes it \
-                     from the committed offset"
-                );
-                continue;
-            }
-            self.seek(&position)
-                .change_context(SourceError::Reject { connector: KAFKA })?;
-        }
-        Ok(())
+        let topic = self.topic.as_str().to_owned();
+        self.control
+            .run(&self.consumer, move |consumer, budget| {
+                let assignment =
+                    consumer
+                        .assignment()
+                        .change_context(KafkaSourceError::ReadAssignment {
+                            topic: topic.clone(),
+                        })?;
+                let assigned = AssignedPartitions::of_topic(&topic, &assignment);
+                for position in starts {
+                    budget.remaining()?;
+                    if !assigned.contains(&position) {
+                        debug!(
+                            topic = position.topic.as_str(),
+                            partition = position.partition,
+                            offset = position.offset,
+                            "rejected Kafka partition is no longer assigned; its next holder \
+                             resumes it from the committed offset"
+                        );
+                        continue;
+                    }
+                    consumer
+                        .seek(
+                            &position.topic,
+                            position.partition,
+                            Offset::Offset(position.offset),
+                            budget.remaining()?,
+                        )
+                        .change_context(KafkaSourceError::Seek {
+                            topic: position.topic,
+                            partition: position.partition,
+                        })?;
+                }
+                Ok(())
+            })
+            .await
+            .change_context(SourceError::Reject { connector: KAFKA })
     }
 }
 
 impl KafkaSource {
+    async fn clear_assignment(&mut self) -> Result<(), Report<KafkaSourceError>> {
+        let mut assignment = std::mem::take(&mut self.assignment);
+        let topic = self.topic.as_str().to_owned();
+        self.assignment = self
+            .control
+            .run(&self.consumer, move |consumer, _budget| {
+                assignment.clear(consumer, &topic)?;
+                Ok(assignment)
+            })
+            .await?;
+        Ok(())
+    }
+
     async fn initialize_domain_offsets(
         &mut self,
         host: &KafkaDomainOffsetHost,
     ) -> SourceResult<bool> {
-        let partitions = topic_partitions(&self.consumer, self.topic.as_str())
+        let topic = self.topic.as_str().to_owned();
+        let partitions = self
+            .control
+            .run(&self.consumer, move |consumer, budget| {
+                topic_partitions(consumer, &topic, budget)
+            })
+            .await
             .change_context(SourceError::Resume { connector: KAFKA })?;
         let initialization = host
             .initialization(&partitions)
             .await
             .change_context(SourceError::Resume { connector: KAFKA })?;
-        let is_new_start = matches!(initialization.start, KafkaDomainOffsetStart::At(_));
-        let offsets = match initialization.start {
-            KafkaDomainOffsetStart::Resume {
-                positions,
-                missing_partition_timestamp,
-            } => resume_offsets(
-                &self.consumer,
-                self.topic.as_str(),
-                &partitions,
-                positions,
-                missing_partition_timestamp,
-            )
-            .change_context(SourceError::Resume { connector: KAFKA })?,
-            KafkaDomainOffsetStart::At(timestamp) => offsets_for_partitions_by_timestamp(
-                &self.consumer,
-                self.topic.as_str(),
-                partitions.iter().copied(),
-                timestamp,
-            )
-            .change_context(SourceError::Resume { connector: KAFKA })?,
-        };
-        let ready = assign_offsets_for_instance(
-            &self.consumer,
-            self.topic.as_str(),
-            &offsets,
-            initialization.schedule.as_ref(),
-            self.instance_index,
-            &mut self.assignment,
-        )
-        .change_context(SourceError::Resume { connector: KAFKA })?;
-
-        if is_new_start {
-            let positions = concrete_next_offsets_from_assignment(
-                &self.consumer,
-                self.topic.as_str(),
-                &offsets,
-            )
+        let generation = initialization.generation;
+        let topic = self.topic.as_str().to_owned();
+        let instance_index = self.instance_index;
+        let mut assignment = std::mem::take(&mut self.assignment);
+        struct InitializedOffsets {
+            ready: bool,
+            assignment: KafkaConsumerAssignment,
+            reset: Option<Vec<KafkaOffsetPosition>>,
+        }
+        let initialized = self
+            .control
+            .run(&self.consumer, move |consumer, budget| {
+                let is_new_start = matches!(initialization.start, KafkaDomainOffsetStart::At(_));
+                let offsets = match initialization.start {
+                    KafkaDomainOffsetStart::Resume {
+                        positions,
+                        missing_partition_timestamp,
+                    } => resume_offsets(
+                        consumer,
+                        &topic,
+                        &partitions,
+                        positions,
+                        missing_partition_timestamp,
+                        budget,
+                    )?,
+                    KafkaDomainOffsetStart::At(timestamp) => offsets_for_partitions_by_timestamp(
+                        consumer, &topic, partitions, timestamp, budget,
+                    )?,
+                };
+                let ready = assign_offsets_for_instance(
+                    consumer,
+                    &topic,
+                    &offsets,
+                    initialization.schedule.as_ref(),
+                    instance_index,
+                    &mut assignment,
+                    budget,
+                )?;
+                let reset = if is_new_start {
+                    Some(concrete_next_offsets_from_assignment(
+                        consumer, &topic, &offsets, budget,
+                    )?)
+                } else {
+                    None
+                };
+                Ok(InitializedOffsets {
+                    ready,
+                    assignment,
+                    reset,
+                })
+            })
+            .await
             .change_context(SourceError::Resume { connector: KAFKA })?;
+        self.assignment = initialized.assignment;
+        if let Some(positions) = initialized.reset {
             host.reset(positions)
                 .await
                 .change_context(SourceError::Resume { connector: KAFKA })?;
         }
-        self.observed_generation = Some(initialization.generation);
-        Ok(ready)
-    }
-
-    fn assigned_partitions(&self) -> Result<AssignedPartitions, Report<KafkaSourceError>> {
-        let assignment = self.consumer.assignment().map_err(|source| {
-            Report::new(KafkaSourceError::ReadAssignment {
-                topic: self.topic.as_str().to_string(),
-            })
-            .attach_printable(source.to_string())
-        })?;
-        Ok(AssignedPartitions::of_topic(
-            self.topic.as_str(),
-            &assignment,
-        ))
-    }
-
-    fn seek(&self, position: &KafkaOffsetPosition) -> Result<(), Report<KafkaSourceError>> {
-        self.consumer
-            .seek(
-                &position.topic,
-                position.partition,
-                Offset::Offset(position.offset),
-                Duration::from_secs(5),
-            )
-            .map_err(|source| {
-                Report::new(KafkaSourceError::Seek {
-                    topic: position.topic.clone(),
-                    partition: position.partition,
-                })
-                .attach_printable(source.to_string())
-            })
+        self.observed_generation = Some(generation);
+        Ok(initialized.ready)
     }
 }
 
@@ -820,8 +856,8 @@ impl GroupCommitRequest {
 /// more than one thread.
 struct GroupCommits {
     deadline: Duration,
-    /// The commit whose answer outlasted its deadline, still owned by librdkafka.
-    unanswered: Option<JoinHandle<KafkaResult<()>>>,
+    /// The exact submitted commit, retained until this owner consumes its answer.
+    unanswered: Option<CommitTask>,
 }
 
 impl GroupCommits {
@@ -836,38 +872,40 @@ impl GroupCommits {
     /// group's coordinator answered it, or fails when the deadline passes first.
     async fn commit(
         &mut self,
+        control: &KafkaControl,
         consumer: &Arc<StreamConsumer>,
         group_id: &str,
         request: GroupCommitRequest,
     ) -> Result<(), Report<KafkaSourceError>> {
-        if let Some(mut unanswered) = self.unanswered.take() {
-            let earlier = timeout(self.deadline, &mut unanswered).await;
+        if let Some(unanswered) = self.unanswered.as_mut() {
+            let earlier = timeout(self.deadline, unanswered).await;
             let Ok(earlier) = earlier else {
-                self.unanswered = Some(unanswered);
                 return Err(self.unanswered_failure(group_id));
             };
+            self.unanswered = None;
             earlier.discarded(
-                "the acknowledgement or leave that started the commit already failed when its \
-                 deadline passed, so a late answer owes nothing",
+                "the acknowledgement or leave that started this commit already timed out or was \
+                 cancelled, so its late answer owes nothing",
             );
         }
-        let consumer = consumer.clone();
-        let mut pending =
-            nervix_primitives::task::spawn_blocking(move || request.commit(&consumer));
-        let answered = timeout(self.deadline, &mut pending).await;
+        // Install before awaiting: cancellation of this future must not detach an untracked
+        // commit and let the next request submit another one.
+        self.unanswered = Some(control.start_commit(consumer, request)?);
+        let pending = self
+            .unanswered
+            .as_mut()
+            .verified("the exact commit was installed above");
+        let answered = timeout(self.deadline, pending).await;
         let Ok(joined) = answered else {
-            self.unanswered = Some(pending);
             return Err(self.unanswered_failure(group_id));
         };
-        let committed = joined.map_err(|source| {
-            Report::new(source).change_context(KafkaSourceError::CommitTask {
-                group: group_id.to_string(),
-            })
+        self.unanswered = None;
+        let executed = joined.change_context(KafkaSourceError::CommitTask {
+            group: group_id.to_owned(),
         })?;
-        committed.map_err(|source| {
-            Report::new(source).change_context(KafkaSourceError::CommitOffset {
-                group: group_id.to_string(),
-            })
+        let committed = executed.change_context(KafkaSourceError::ControlExecution)?;
+        committed.change_context(KafkaSourceError::CommitOffset {
+            group: group_id.to_owned(),
         })
     }
 
@@ -880,19 +918,31 @@ impl GroupCommits {
     /// another member. A failed commit is returned once the consumer left the group all the same.
     async fn leave_group(
         &mut self,
+        control: &KafkaControl,
         consumer: &Arc<StreamConsumer>,
         group_id: &str,
         commit: KafkaGroupCommit,
     ) -> Result<(), Report<KafkaSourceError>> {
         let committed = match commit {
             KafkaGroupCommit::DriverCadence => {
-                self.commit(consumer, group_id, GroupCommitRequest::Delivered)
+                self.commit(control, consumer, group_id, GroupCommitRequest::Delivered)
                     .await
             }
             KafkaGroupCommit::EachAcknowledgedBatch => Ok(()),
         };
-        consumer.unsubscribe();
-        committed
+        let left = control
+            .run(consumer, move |consumer, _budget| {
+                consumer.unsubscribe();
+                Ok(())
+            })
+            .await;
+        match committed {
+            Ok(()) => left,
+            Err(error) => {
+                left.reported("unsubscribe after a failed consumer-group commit");
+                Err(error)
+            }
+        }
     }
 
     fn unanswered_failure(&self, group_id: &str) -> Report<KafkaSourceError> {
@@ -1004,14 +1054,14 @@ pub fn earliest_message_offsets(
 fn topic_partitions(
     consumer: &StreamConsumer,
     topic: &str,
+    budget: &ControlBudget<'_>,
 ) -> Result<Vec<i32>, Report<KafkaSourceError>> {
     let metadata = consumer
-        .fetch_metadata(Some(topic), Duration::from_secs(5))
+        .fetch_metadata(Some(topic), budget.remaining()?)
         .map_err(|source| {
-            Report::new(KafkaSourceError::FetchMetadata {
+            Report::new(source).change_context(KafkaSourceError::FetchMetadata {
                 topic: topic.to_string(),
             })
-            .attach_printable(source.to_string())
         })?;
     let Some(topic_metadata) = metadata.topics().iter().find(|entry| entry.name() == topic) else {
         return Err(Report::new(KafkaSourceError::MissingMetadata {
@@ -1037,6 +1087,7 @@ fn offsets_for_partitions_by_timestamp<I>(
     topic: &str,
     partitions: I,
     timestamp: Timestamp,
+    budget: &ControlBudget<'_>,
 ) -> Result<BTreeMap<i32, Offset>, Report<KafkaSourceError>>
 where
     I: IntoIterator<Item = i32>,
@@ -1044,26 +1095,26 @@ where
     let mut query = TopicPartitionList::new();
     let timestamp_ms = timestamp.unix_nanos().div_euclid(1_000_000);
     for partition in partitions {
+        budget.remaining()?;
         query
             .add_partition_offset(topic, partition, Offset::Offset(timestamp_ms))
             .map_err(|source| {
-                Report::new(KafkaSourceError::BuildTimestampQuery {
+                Report::new(source).change_context(KafkaSourceError::BuildTimestampQuery {
                     topic: topic.to_string(),
                     partition,
                 })
-                .attach_printable(source.to_string())
             })?;
     }
     let resolved = consumer
-        .offsets_for_times(query, Duration::from_secs(5))
+        .offsets_for_times(query, budget.remaining()?)
         .map_err(|source| {
-            Report::new(KafkaSourceError::ResolveTimestampOffsets {
+            Report::new(source).change_context(KafkaSourceError::ResolveTimestampOffsets {
                 topic: topic.to_string(),
             })
-            .attach_printable(source.to_string())
         })?;
     let mut offsets = BTreeMap::new();
     for element in resolved.elements() {
+        budget.remaining()?;
         let offset = match element.offset() {
             Offset::Invalid => Offset::End,
             other => other,
@@ -1078,15 +1129,15 @@ fn normalized_resume_offset(
     topic: &str,
     partition: i32,
     next_offset: i64,
+    budget: &ControlBudget<'_>,
 ) -> Result<Offset, Report<KafkaSourceError>> {
     let (low, high) = consumer
-        .fetch_watermarks(topic, partition, Duration::from_secs(5))
+        .fetch_watermarks(topic, partition, budget.remaining()?)
         .map_err(|source| {
-            Report::new(KafkaSourceError::FetchWatermarks {
+            Report::new(source).change_context(KafkaSourceError::FetchWatermarks {
                 topic: topic.to_string(),
                 partition,
             })
-            .attach_printable(source.to_string())
         })?;
     Ok(Offset::Offset(next_offset.clamp(low, high)))
 }
@@ -1097,6 +1148,7 @@ fn resume_offsets(
     partitions: &[i32],
     positions: Vec<KafkaOffsetPosition>,
     missing_partition_timestamp: Option<Timestamp>,
+    budget: &ControlBudget<'_>,
 ) -> Result<BTreeMap<i32, Offset>, Report<KafkaSourceError>> {
     let mut recorded = BTreeMap::new();
     for position in positions {
@@ -1107,10 +1159,11 @@ fn resume_offsets(
     let mut offsets = BTreeMap::new();
     let mut missing = Vec::new();
     for partition in partitions {
+        budget.remaining()?;
         if let Some(next_offset) = recorded.get(partition) {
             offsets.insert(
                 *partition,
-                normalized_resume_offset(consumer, topic, *partition, *next_offset)?,
+                normalized_resume_offset(consumer, topic, *partition, *next_offset, budget)?,
             );
         } else {
             missing.push(*partition);
@@ -1118,10 +1171,11 @@ fn resume_offsets(
     }
     if let Some(timestamp) = missing_partition_timestamp {
         offsets.extend(offsets_for_partitions_by_timestamp(
-            consumer, topic, missing, timestamp,
+            consumer, topic, missing, timestamp, budget,
         )?);
     } else {
         for partition in missing {
+            budget.remaining()?;
             offsets.insert(partition, Offset::Beginning);
         }
     }
@@ -1135,6 +1189,7 @@ fn assign_offsets_for_instance(
     schedule: Option<&KafkaPartitionSchedule>,
     instance_index: u64,
     consumer_assignment: &mut KafkaConsumerAssignment,
+    budget: &ControlBudget<'_>,
 ) -> Result<bool, Report<KafkaSourceError>> {
     let has_topic_partitions = schedule.is_some() && !offsets.is_empty();
     let assigned_partitions = if let Some(schedule) = schedule
@@ -1147,18 +1202,19 @@ fn assign_offsets_for_instance(
     };
     let mut assignment = TopicPartitionList::new();
     for (partition, offset) in offsets {
+        budget.remaining()?;
         if assigned_partitions.contains(partition) {
             assignment
                 .add_partition_offset(topic, *partition, *offset)
                 .map_err(|source| {
-                    Report::new(KafkaSourceError::BuildAssignment {
+                    Report::new(source).change_context(KafkaSourceError::BuildAssignment {
                         topic: topic.to_string(),
                         partition: *partition,
                     })
-                    .attach_printable(source.to_string())
                 })?;
         }
     }
+    budget.remaining()?;
     consumer_assignment.apply(consumer, topic, &assignment)?;
     Ok(has_topic_partitions)
 }
@@ -1167,35 +1223,39 @@ fn concrete_next_offsets_from_assignment(
     consumer: &StreamConsumer,
     topic: &str,
     offsets: &BTreeMap<i32, Offset>,
+    budget: &ControlBudget<'_>,
 ) -> Result<Vec<KafkaOffsetPosition>, Report<KafkaSourceError>> {
     let mut concrete = Vec::with_capacity(offsets.len());
     for (partition, offset) in offsets {
+        budget.remaining()?;
         let next_offset = match offset {
             Offset::Offset(value) => *value,
             Offset::Beginning => {
                 let mapping_input = consumer
-                    .fetch_watermarks(topic, *partition, Duration::from_secs(5))
+                    .fetch_watermarks(topic, *partition, budget.remaining()?)
                     .map(|(low, _)| low);
                 match mapping_input {
                     Ok(mapped_value) => Ok(mapped_value),
-                    Err(source) => Err(Report::new(KafkaSourceError::FetchWatermarks {
-                        topic: topic.to_string(),
-                        partition: *partition,
-                    })
-                    .attach_printable(source.to_string())),
+                    Err(source) => Err(Report::new(source).change_context(
+                        KafkaSourceError::FetchWatermarks {
+                            topic: topic.to_string(),
+                            partition: *partition,
+                        },
+                    )),
                 }
             }?,
             Offset::End | Offset::Invalid => {
                 let mapping_input = consumer
-                    .fetch_watermarks(topic, *partition, Duration::from_secs(5))
+                    .fetch_watermarks(topic, *partition, budget.remaining()?)
                     .map(|(_, high)| high);
                 match mapping_input {
                     Ok(mapped_value) => Ok(mapped_value),
-                    Err(source) => Err(Report::new(KafkaSourceError::FetchWatermarks {
-                        topic: topic.to_string(),
-                        partition: *partition,
-                    })
-                    .attach_printable(source.to_string())),
+                    Err(source) => Err(Report::new(source).change_context(
+                        KafkaSourceError::FetchWatermarks {
+                            topic: topic.to_string(),
+                            partition: *partition,
+                        },
+                    )),
                 }
             }?,
             Offset::Stored | Offset::OffsetTail(_) => {
@@ -1215,6 +1275,7 @@ fn concrete_next_offsets_from_assignment(
 }
 
 pub struct TopicPartitionInspector {
+    control: KafkaControl,
     consumer: Arc<StreamConsumer>,
 }
 
@@ -1222,6 +1283,7 @@ impl TopicPartitionInspector {
     pub fn new(
         config: &[ClientConfigEntry],
         group_id: String,
+        executor: Executor,
     ) -> Result<Self, Report<KafkaSourceError>> {
         let mut client_config = ClientConfig::new();
         for entry in config {
@@ -1230,23 +1292,24 @@ impl TopicPartitionInspector {
         client_config.set("group.id", group_id);
         client_config.set("enable.partition.eof", "false");
         client_config.set("enable.auto.commit", "false");
-        let consumer = client_config.create().map_err(|source| {
-            Report::new(KafkaSourceError::Initialize).attach_printable(source.to_string())
-        })?;
+        let control = KafkaControl::new(&client_config, executor)?;
+        let consumer = client_config
+            .create()
+            .map_err(|source| Report::new(source).change_context(KafkaSourceError::Initialize))?;
         Ok(Self {
+            control,
             consumer: Arc::new(consumer),
         })
     }
 
     pub async fn partitions(&self, topic: &str) -> Result<Vec<i32>, Report<KafkaSourceError>> {
-        let consumer = self.consumer.clone();
-        let topic = topic.to_string();
-        nervix_primitives::task::spawn_blocking(move || topic_partitions(&consumer, &topic))
+        let topic = topic.to_owned();
+        self.control
+            .run(&self.consumer, move |consumer, budget| {
+                topic_partitions(consumer, &topic, budget)
+            })
             .await
-            .map_err(|source| {
-                Report::new(KafkaSourceError::InspectPartitions)
-                    .attach_printable(source.to_string())
-            })?
+            .change_context(KafkaSourceError::InspectPartitions)
     }
 }
 
@@ -1266,6 +1329,36 @@ mod tests {
             .add_partition_offset("events", 0, Offset::Offset(offset))
             .assured("the test uses a nonnegative literal Kafka offset");
         assignment
+    }
+
+    /// Both KAFKA TOPIC sides declare ordered repeats with exact names: the record headers a
+    /// sink writes keep every write in the order written, and a reader of the produced record
+    /// visits them in that order, a repeated name once for each of its values.
+    #[test]
+    fn written_headers_read_back_in_write_order_with_every_repeat() {
+        let mut written = Vec::new();
+        for (name, value) in [
+            ("trace", "a"),
+            ("Tenant", "x"),
+            ("trace", "b"),
+            ("tenant", "y"),
+        ] {
+            written.push((name.to_string(), value.to_string()));
+        }
+        let message = rdkafka::message::OwnedMessage::new(
+            Some(b"{}".to_vec()),
+            None,
+            "events".to_string(),
+            rdkafka::Timestamp::NotAvailable,
+            0,
+            0,
+            Some(crate::KafkaSink::owned_headers(&written)),
+        );
+        let message =
+            KafkaSourceMessage::from_message(message).assured("offset zero has a next offset");
+        let mut visited = Vec::new();
+        message.visit(&mut |name, value| visited.push(format!("{name}={value}")));
+        assert_eq!(visited, ["trace=a", "Tenant=x", "trace=b", "tenant=y"]);
     }
 
     #[test]
@@ -1447,3 +1540,11 @@ mod commit_tests;
 )]
 #[path = "source_read_tests.rs"]
 mod read_tests;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "source_control_tests.rs"]
+mod control_tests;

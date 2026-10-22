@@ -230,7 +230,7 @@ counters remain on that node across emitter restarts.
 The [HTTP Emitter Architecture](./http-emitter-architecture.md) chapter follows the validated
 request through host preparation, the connector, retry, lifecycle and qualification evidence.
 
-An HTTP emitter uses an existing `TYPE HTTP` client and declares the request method, path and body
+An HTTP emitter uses an existing `HTTP CLIENT` and declares the request method, path and body
 selection in this order:
 
 <!-- connector-matrix:emit-http-request:start -->
@@ -256,7 +256,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `METHOD 'POST'` (expression); required<br>`PATH '/events'` (expression); required |
-| Headers | `write_header` |
+| Headers | `write_header`; `sorted_by_name`, lowercase names: one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Body | ENCODE USING &lt;codec&gt; \| WITHOUT BODY |
 | BATCH | unavailable: send one request per record |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -276,7 +276,7 @@ See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md
 the expression. `MODE ACK` has no acknowledgement window or `ACK TIMEOUT`, and `NO_ACK` is not
 available. The ordinary route-local `FLUSH` clause is required.
 
-The referenced client must be a `TYPE HTTP` client in the same domain. Its `endpoint` is an
+The referenced client must be a `HTTP CLIENT` in the same domain. Its `endpoint` is an
 `http://` or `https://` origin with a host and optional port, and no credentials, non-root path,
 query or fragment. It requires a positive, schedulable `timeout_ms`; the client's polling `method`
 setting does not supply the emitter's `METHOD`. HTTPS retains certificate and hostname verification.
@@ -311,7 +311,7 @@ tenant header and a JSON body of two of its fields, and the second deletes witho
 `api.example.com` stands for an endpoint the operator has already provisioned.
 
 ```nspl
-CREATE CLIENT api TYPE HTTP CONFIG {
+CREATE HTTP CLIENT api CONFIG {
   'endpoint' = 'https://api.example.com',
   'timeout_ms' = 5000
 };
@@ -367,9 +367,12 @@ materialized state its batch was admitted with; with a codec it also reads the a
 The method keeps its spelling. The request goes to exactly the normalized target: encoded
 separators such as `%2F`, repeated query parameters, a literal `+`, and the empty query of a
 trailing `?` stay as they are. Header names compare without ASCII case and a later write replaces an
-earlier value; an empty string is sent as an empty value. An invalid or reserved write rejects its
-record even when a later write would replace it, and the 128-header and 32 KiB bounds apply after
-every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
+earlier value, so the request carries each name once, in lowercase and in ascending order of name;
+an empty string is sent as an empty value. Two writes whose names are string literals naming the
+same field, such as `write_header('X-Tenant', …)` and `write_header('x-tenant', …)`, are refused when
+the statement is validated, because the earlier one could never be sent; a name an expression
+computes is replaced at run time. An invalid or reserved write rejects its record even when a later
+write would replace it, and the 128-header and 32 KiB bounds apply after every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
 newline, form encoding or compression added; Nervix adds no `Content-Type`, and a declared
 `Content-Encoding` does not transform the bytes. `WITHOUT BODY` sends zero content bytes.
 
@@ -912,10 +915,29 @@ expressions and is valid only as a top-level `INVOKE` call. Sensitive values req
 mutations are staged in a temporary route-local envelope; invocation failure prevents payload and
 partial-envelope publication.
 
-Header output is supported only on codec emitters for Kafka, NATS, Pulsar, RabbitMQ, and SQS.
-Kafka and NATS preserve ordered repeated values. Pulsar, RabbitMQ, and SQS use last-write-wins
-behavior. Redis, MQTT, Syslog, ZeroMQ, Sentry, OTEL, direct database sinks, and Iceberg reject
-header writes.
+Each emitter that writes transport headers declares a
+[header model](./connector-contract.md#header-models), which `DESCRIBE EMITTER` shows as its
+`headers:` line:
+
+<!-- connector-matrix:emit-headers:start -->
+| Emitter | Header model | What a record's `write_header` calls become |
+| --- | --- | --- |
+| `HTTP REQUEST` | `sorted_by_name`, lowercase names | one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `PULSAR TOPIC` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `SQS QUEUE` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+
+`CLIENT CONSUMER`, `REDIS PUBSUB`, `MQTT TOPIC`, `ZEROMQ PUSH`, `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`, `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION`, `ICEBERG TABLE` write no transport headers and refuse `write_header`.
+<!-- connector-matrix:emit-headers:end -->
+
+Where a sink keeps one value per name, a second `write_header` whose name is a string literal equal,
+as the sink compares names, to an earlier literal one is refused when the statement is validated,
+with a message such as `emitter 'out' in domain 'shop' writes header 'route' at INVOKE #1 and again
+at #3, but PULSAR TOPIC emitters keep one value per header name, so the later write would replace
+the earlier one on every record`. A name an expression computes is not compared then: at run time a
+later write of the name replaces the earlier value, as the model states.
 
 Emitter expressions use the same typed surface as other runtime nodes:
 
@@ -947,8 +969,7 @@ Emitter TLS is configured on the referenced `CLIENT` exactly the same way as ing
 Common pattern:
 
 ```nspl,ignore
-CREATE [IF NOT EXISTS] CLIENT <name>
-  TYPE <kind>
+CREATE [IF NOT EXISTS] <kind> CLIENT <name>
   MOUNT <tls_resource> VERSION <n>|LATEST
   CONFIG {
     ...
@@ -965,7 +986,7 @@ Transport-specific expectations:
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`. Pulsar client certificate authentication is not currently exposed.
 - `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
-- `SENTRY`: the referenced `TYPE SENTRY` client carries an `https://...` `dsn`; Nervix honors the
+- `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; Nervix honors the
   client's `tls_ca_file`, `tls_cert_file`, and `tls_key_file`.
 - `OTEL`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file`, `tls_cert_file`, and
   `tls_key_file` for both OTLP/gRPC and OTLP/HTTP-protobuf.
@@ -979,8 +1000,7 @@ Transport-specific expectations:
 Example Kafka TLS emitter client:
 
 ```nspl
-CREATE IF NOT EXISTS CLIENT kafka_tls
-  TYPE KAFKA
+CREATE IF NOT EXISTS KAFKA CLIENT kafka_tls
   MOUNT dev_tls VERSION 1
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9094',
@@ -997,10 +1017,11 @@ TLS and the answer. `connect_timeout_ms` bounds establishing a connection: name 
 address attempts, TLS and the protocol's own handshake. Each value is a positive whole number of
 milliseconds.
 
-`HTTP`, `SENTRY`, `OTEL`, `SQS`, `CLICKHOUSE`, `NATS`, `ZEROMQ` and the Iceberg emitter's
-object-store clients read `timeout_ms`; an `HTTP` request emitter's client requires it. A `NATS`
-client's `timeout_ms` bounds a Core NATS write: its hand-over to the client and the client's flush
-to its socket. A `RABBITMQ` client's `timeout_ms` bounds the round trip that ends a `NO_ACK` write.
+`HTTP`, `SENTRY`, `OTEL`, `SQS`, `CLICKHOUSE`, `NATS`, `ZEROMQ`, `SYSLOG` and the Iceberg
+emitter's object-store clients read `timeout_ms`; an `HTTP` request emitter's client requires it,
+and a `SYSLOG` emitter's client bounds writing and flushing each frame by it. A `NATS` client's
+`timeout_ms` bounds a Core NATS write: its hand-over to the client and the client's flush to its
+socket. A `RABBITMQ` client's `timeout_ms` bounds the round trip that ends a `NO_ACK` write.
 `RABBITMQ`, `REDIS`, `SYSLOG` and `ZEROMQ` clients read `connect_timeout_ms`, and allow 30 seconds
 when it is left out; a `REDIS` command pool also waits no longer than that to check out a
 connection. A `RABBITMQ` client's `connect_timeout_ms` covers resolving the broker, the address
@@ -1038,7 +1059,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC orders (topic_name) |
 | Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | `write_header` |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -1108,7 +1129,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC orders (topic_name) |
 | Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | `write_header` |
+| Headers | `write_header`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -1176,7 +1197,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | QUEUE orders (queue_name) |
 | Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | `write_header` |
+| Headers | `write_header`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -1260,7 +1281,7 @@ See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md
 
 Redis Pub/Sub has no subscriber delivery acknowledgment. The awaited `PUBLISH` response confirms
 server acceptance only. A record-specific server rejection follows `ON MESSAGE ERROR`; connection
-failures retry the undelivered work. A `TYPE REDIS` client declares its connection-pool bounds; see
+failures retry the undelivered work. A `REDIS CLIENT` declares its connection-pool bounds; see
 [Database Client Connection Pools](database-client-pools.md).
 Each physical pooled command connection resolves the `addr` hostname through the node's
 asynchronous DNS resolver when it opens. A replacement connection can use a changed DNS answer;
@@ -1309,8 +1330,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
 <!-- connector-matrix:emit-mqtt-topic:end -->
 
-QoS 0 acknowledges client acceptance, and QoS 0 publishes still queued in the client when the
-emitter stops are discarded with it, which the node logs at `warn`. QoS 1 waits for `PUBACK`; QoS 2
+QoS 0 acknowledges client acceptance. When the emitter stops, it waits within the stop or shutdown
+deadline for its client to send the publishes it still holds, which a client cut off from its
+broker holds until it connects again; publishes still unsent at that deadline fail the stop and are
+counted in the emitter's transient error. QoS 1 waits for `PUBACK`; QoS 2
 waits for the complete exactly-once handshake. QoS 1 and 2 use a persistent session and the emitter client's stable
 identity so in-flight messages survive reconnects. Reconnect pacing follows the declared retry
 policy. When an answer misses its `ACK TIMEOUT`, or the broker or client fails it for a reason that
@@ -1353,7 +1376,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | SUBJECT orders (subject_name) |
 | Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | `write_header` |
+| Headers | `write_header`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -1495,9 +1518,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>a write: unbounded |
+| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>writing and flushing a frame: `timeout_ms`; unbounded when omitted |
 | Driver limits | None declared. |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |
 
 See the [SYSLOG COLLECTOR capability and mirror reference](connector-capabilities.md#syslog-collector-emit).
 <!-- connector-matrix:emit-syslog-collector:end -->
@@ -1538,7 +1561,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | QUEUE orders (queue_name) |
 | Modes (complete bodies after MODE) | SINGLE RETRY POLICY BACKOFF 1s MAX 30s<br>BATCH RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `FIFO GROUP tenant` (expression); `FIFO GROUP FROM BRANCH` (keyword choice); optional; omitted when unset |
-| Headers | `write_header` |
+| Headers | `write_header`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | 256KiB |
@@ -1559,7 +1582,9 @@ responses. Per-entry transient failures retry only those entries, while invalid 
 message larger than 256 KiB, counting its attributes and FIFO message group, follow
 `ON MESSAGE ERROR` individually. Nervix checks what SQS refuses before sending: a body that is not
 UTF-8, a body or attribute value holding a character SQS forbids, more than ten attributes, an
-attribute name SQS does not allow, an empty attribute value, and an invalid FIFO message group. SQS
+attribute name SQS does not allow, an empty attribute value, and an invalid FIFO message group. A
+later `write_header` of a name replaces the earlier value, so the ten are counted after repeated
+names keep their last value: eleven writes of ten names make a message SQS accepts. SQS
 accepts the characters of the XML 1.0 `Char` production: tab, line feed, carriage return, U+0020
 to U+D7FF, U+E000 to U+FFFD and U+10000 to U+10FFFF. Every other C0 control and the noncharacters
 U+FFFE and U+FFFF are forbidden, while the other noncharacters fall inside those ranges and are
@@ -1638,12 +1663,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [SENTRY EVENT capability and mirror reference](connector-capabilities.md#sentry-event-emit).
 <!-- connector-matrix:emit-sentry-event:end -->
 
-Sentry emission uses a `TYPE SENTRY` client whose required `dsn` contains the project endpoint and
+Sentry emission uses a `SENTRY CLIENT` whose required `dsn` contains the project endpoint and
 public key:
 
 ```nspl
-CREATE CLIENT sentry_main
-  TYPE SENTRY
+CREATE SENTRY CLIENT sentry_main
   CONFIG {
     'dsn' = 'https://<public-key>@sentry.example.com/<project-id>',
     'timeout_ms' = 5000
@@ -1822,12 +1846,11 @@ See the [OTEL METRICS capability and mirror reference](connector-capabilities.md
 <!-- connector-matrix:emit-otel-metrics:end -->
 
 OTEL emission is a codec-free direct sink for OTLP logs, traces, and metric data points. It uses a
-`TYPE OTEL` client and supports both OTLP/gRPC and OTLP/HTTP-protobuf. The protocol is always
+`OTEL CLIENT` and supports both OTLP/gRPC and OTLP/HTTP-protobuf. The protocol is always
 explicit; there is no hidden default:
 
 ```nspl
-CREATE CLIENT otel_main
-  TYPE OTEL
+CREATE OTEL CLIENT otel_main
   CONFIG {
     'endpoint' = 'http://127.0.0.1:4317',
     'protocol' = 'grpc',
@@ -2022,8 +2045,7 @@ CREATE EMITTER to_ch
 ClickHouse clients use the HTTP endpoint:
 
 ```nspl
-CREATE CLIENT ch
-  TYPE CLICKHOUSE
+CREATE CLICKHOUSE CLIENT ch
   CONFIG {
     'addr' = 'http://127.0.0.1:8123',
     'user' = 'default',
@@ -2145,8 +2167,7 @@ verification. See [Database Client Connection Pools](database-client-pools.md) f
 pool counts:
 
 ```nspl
-CREATE CLIENT pg
-  TYPE POSTGRES
+CREATE POSTGRES CLIENT pg
   POOL SIZE MIN 2 MAX 8
   CONFIG {
     'addr' = 'postgresql://postgres:nervix@127.0.0.1:5432/postgres?sslmode=disable'
@@ -2231,8 +2252,7 @@ MySQL clients declare their connection-pool bounds and use a mysql_async connect
 [Database Client Connection Pools](database-client-pools.md) for the accepted counts:
 
 ```nspl
-CREATE CLIENT mysql
-  TYPE MYSQL
+CREATE MYSQL CLIENT mysql
   POOL SIZE MIN 2 MAX 8
   CONFIG {
     'addr' = 'mysql://nervix:nervix@127.0.0.1:3306/nervix'
@@ -2323,8 +2343,7 @@ MongoDB clients declare their connection-pool bounds and use a MongoDB connectio
 name. See [Database Client Connection Pools](database-client-pools.md) for the accepted counts:
 
 ```nspl
-CREATE CLIENT mongodb
-  TYPE MONGODB
+CREATE MONGODB CLIENT mongodb
   POOL SIZE MIN 2 MAX 8
   CONFIG {
     'addr' = 'mongodb://root:nervix@127.0.0.1:27017/nervix?authSource=admin',
@@ -2377,8 +2396,7 @@ See the [ICEBERG TABLE capability and mirror reference](connector-capabilities.m
 <!-- connector-matrix:emit-iceberg-table:end -->
 
 ```nspl
-CREATE CLIENT s3_main
-  TYPE S3
+CREATE S3 CLIENT s3_main
   CONFIG {
     'endpoint' = 'http://127.0.0.1:9900',
     'region' = 'us-east-1',
@@ -2387,8 +2405,7 @@ CREATE CLIENT s3_main
     'path_style_access' = true
   };
 
-CREATE CLIENT iceberg_catalog
-  TYPE ICEBERG_REST
+CREATE ICEBERG_REST CLIENT iceberg_catalog
   CONFIG {
     'uri' = 'http://127.0.0.1:8181',
     'warehouse' = 's3://nervix-iceberg/warehouse'
@@ -2409,25 +2426,23 @@ CREATE EMITTER iceberg_notifications
   ON GENERAL ERROR LOG;
 ```
 
-Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The `ON S3`, `ON GCS`, or `ON AZURE_BLOB` backend clause selects the object-store implementation. The referenced blob client supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `TYPE ICEBERG_REST` client that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, mapped output columns, table location, catalog client reference, and flush policy.
+Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The `ON S3`, `ON GCS`, or `ON AZURE_BLOB` backend clause selects the object-store implementation. The referenced blob client supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `ICEBERG_REST CLIENT` that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, mapped output columns, table location, catalog client reference, and flush policy.
 
 The catalog and object-store HTTP clients resolve endpoint names through the node's configured
 DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
 resolver for object operations and credential HTTP calls. DNS failures enter the existing sink
 initialization or commit retry path; they do not advance the commit or ACK boundary.
 
-GCS uses the same emitter shape with a `TYPE GCS` client and `gs://` locations:
+GCS uses the same emitter shape with a `GCS CLIENT` and `gs://` locations:
 
 ```nspl
-CREATE CLIENT gcs_main
-  TYPE GCS
+CREATE GCS CLIENT gcs_main
   CONFIG {
     'service_path' = 'https://storage.googleapis.com',
     'token' = '<oauth2-token>'
   };
 
-CREATE CLIENT iceberg_catalog
-  TYPE ICEBERG_REST
+CREATE ICEBERG_REST CLIENT iceberg_catalog
   CONFIG {
     'uri' = 'https://iceberg-rest.example.com',
     'warehouse' = 'gs://nervix-iceberg/warehouse'
@@ -2448,18 +2463,16 @@ CREATE EMITTER iceberg_notifications
   ON GENERAL ERROR LOG;
 ```
 
-Azure Blob uses `TYPE AZURE_BLOB` and `wasbs://` locations. `wasb://` is also accepted for plain-HTTP local endpoints:
+Azure Blob uses `AZURE_BLOB CLIENT` and `wasbs://` locations. `wasb://` is also accepted for plain-HTTP local endpoints:
 
 ```nspl
-CREATE CLIENT azure_main
-  TYPE AZURE_BLOB
+CREATE AZURE_BLOB CLIENT azure_main
   CONFIG {
     'account_name' = 'myaccount',
     'account_key' = '<account-key>'
   };
 
-CREATE CLIENT iceberg_catalog
-  TYPE ICEBERG_REST
+CREATE ICEBERG_REST CLIENT iceberg_catalog
   CONFIG {
     'uri' = 'https://iceberg-rest.example.com',
     'warehouse' = 'wasbs://nervix-iceberg@myaccount.blob.core.windows.net/warehouse'
@@ -2625,9 +2638,10 @@ resends only records not yet confirmed or definitively rejected. With the
 yet confirmed or rejected, with the bytes and members they were first written with. `NO_ACK`, MQTT QoS 0, Core NATS,
 Redis Pub/Sub, and ZeroMQ expose earlier acceptance boundaries and can lose acknowledged records
 after a crash or downstream failure. A stop sends what a Kafka producer still queues, waits for
-accepted Pulsar messages' receipts and flushes what a Core NATS client still holds after a write ran
-out of `timeout_ms`, within the stop's deadline. MQTT QoS 0 discards what its client still queues;
-see [Finishing a sink](./connector-contract.md#finishing-a-sink). External broker durability and
+accepted Pulsar messages' receipts, flushes what a Core NATS client still holds after a write ran
+out of `timeout_ms`, and waits for an MQTT QoS 0 client to send the publishes it still holds, within
+the stop's deadline; see [Finishing a sink](./connector-contract.md#finishing-a-sink). External
+broker durability and
 idempotence settings remain the user's client and service configuration.
 
 When one source record reaches multiple emitters or multiple attached routes, the upstream ACK

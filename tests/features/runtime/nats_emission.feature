@@ -48,8 +48,7 @@ Feature: NATS emission
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY columnar_events SCHEMA columnar_event BRANCHED BY by_tenant CAPACITY 64;
 
-      CREATE CLIENT nats_main
-        TYPE NATS
+      CREATE NATS CLIENT nats_main
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
@@ -137,8 +136,7 @@ Feature: NATS emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
@@ -153,8 +151,7 @@ Feature: NATS emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT nats_main
-        TYPE NATS
+        CREATE NATS CLIENT nats_main
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
@@ -222,8 +219,7 @@ Feature: NATS emission
 
       CREATE RELAY narrow_events SCHEMA narrow_event UNBRANCHED CAPACITY 64;
 
-      CREATE CLIENT nats_main
-        TYPE NATS
+      CREATE NATS CLIENT nats_main
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
@@ -302,7 +298,7 @@ Feature: NATS emission
       CREATE SCHEMA user_id_branch ( user_id I64 );
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -319,7 +315,7 @@ Feature: NATS emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT nats_main TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };
+      CREATE NATS CLIENT nats_main CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE EMITTER nats_jetstream FROM notifications
         TO NATS nats_main SUBJECT jetstream_out_{{test_id}}
           MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 1s
@@ -391,7 +387,7 @@ Feature: NATS emission
         FROM WIRE JSON SCHEMA window_record_wire
         TO SCHEMA window_record;
       CREATE RELAY window_records SCHEMA window_record UNBRANCHED;
-      CREATE CLIENT nats_in TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };
+      CREATE NATS CLIENT nats_in CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE NATS SUBJECT INGESTOR window_in
         FROM nats_in SUBJECT 'window_in_{{test_id}}' QUEUE GROUP 'window_in_group_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING window_input_codec
@@ -402,7 +398,7 @@ Feature: NATS emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT nats_out TYPE NATS CONFIG { 'addr' = '{{nats_controlled_addr}}' };
+      CREATE NATS CLIENT nats_out CONFIG { 'addr' = '{{nats_controlled_addr}}' };
       CREATE EMITTER window_out FROM window_records
         TO NATS nats_out SUBJECT window_out_{{test_id}}
           MODE JETSTREAM ACK PARALLEL MAX 16384 ACK TIMEOUT 3s
@@ -473,7 +469,7 @@ Feature: NATS emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT held_nats TYPE NATS CONFIG {
+      CREATE NATS CLIENT held_nats CONFIG {
         'addr' = '{{nats_controlled_addr}}',
         'timeout_ms' = '1000'
       };

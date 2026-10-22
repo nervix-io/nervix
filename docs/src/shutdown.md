@@ -694,6 +694,14 @@ before its shared stop deadline.
 Shutdown does not change any connector's delivery contract. It changes only whether a connector
 reaches its completion point before the process ends.
 
+A graceful stop completes two things for its connectors. Each source in an acknowledged mode
+confirms on its transport the positions of every batch its graph acknowledged before the source
+closes, within the drain timeout, and each emitter finishes its sink when it stops, sending what
+the sink's client still holds by the deadline it is given. [Sources](#sources) and [Sinks](#sinks)
+give each one's deadline and what is left when it passes, and the
+[connector delivery standard](./connector-contract.md#connector-delivery-standard) states the rules
+both follow.
+
 ### Sources
 
 An MQTT execution stop or ownership move retains its persistent broker sessions for resume.
@@ -749,9 +757,13 @@ acknowledged source redelivers the record after the restart.
 ### Sinks
 
 An emitter reaches the sink completion point its `MODE` declares, and the drain waits for it. An
-emitter that cannot finish reports `emitter '<name>' did not drain before its configured deadline`
-and holds the drain until the timeout. A batching emitter's drain also writes every batch payload an
-earlier attempt left unanswered, with the bytes and members it was first written with, as an OTEL
+emitter whose buffer cannot drain by its configured deadline reports
+`emitter '<name>' did not drain before its configured deadline`. When a sink's finish answers that
+it still holds records at that deadline, an emitter swap reports the sink's own outcome and count;
+a finish that does not answer within half the supervisor's response grace reports the stop deadline.
+The sink receives the original deadline, and a failed swap keeps the emitter task running. A
+batching emitter's drain also writes every batch payload an earlier attempt left unanswered, with
+the bytes and members it was first written with, as an OTEL
 emitter's drain sends every Export request it prepared and did not learn the outcome of, and the
 emitter buffer counts those members as work the node still holds until they resolve.
 
@@ -789,8 +801,10 @@ that same finish deadline. A driver failure or still-unanswered receipts fail it
 expired deadline reports their count, without claiming the broker did not receive them. A Core
 NATS client holds records only after a write ran out of the client's `timeout_ms`, which leaves them
 unresolved and with the client; its finish flushes them within that same finish deadline, and a
-deadline that ends first reports how many the client still held. MQTT
-QoS 0 discards what its client still holds, which the emitter logs at `warn`. Every other sink
+deadline that ends first reports how many the client still held. MQTT QoS 0 waits within that same
+finish deadline for its client's event loop to write and flush the publishes the client still holds;
+a failed flush or publishes still unflushed when it ends fail its finish, which reports the failure
+or their count. Every other sink
 holds nothing once a publish returns, so the publish itself is the
 completion point. [Finishing a sink](./connector-contract.md#finishing-a-sink) lists what each sink
 holds and does.
@@ -1250,9 +1264,7 @@ them again` at `info`, with the `domain`, the `ingestor`, the `instance` and the
 An emitter records what finishing its sink did when it stopped, with the `domain`, the `emitter`,
 the `sink` and the `ending`: `stop` for a stop that drained it, `teardown` for terminal teardown,
 and `interaction_stopped` when its relay interaction ended without either:
-`emitter sent the records its transport client held` at `info`,
-`emitter closed a transport client that may still hold records it delivered` at `warn` for a
-MQTT QoS 0 client, and
+`emitter sent the records its transport client held` at `info`, and
 `emitter stopped before its transport client sent every record it held` at `warn` with the
 `error`, which counts the records the client still held. That failure is also the emitter's
 transient error and an error event.

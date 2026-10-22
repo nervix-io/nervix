@@ -31,10 +31,11 @@ use super::{
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
-    LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, SubjectName,
+    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
+    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    SubjectName,
 };
 
 configured_client!(Nats: unpooled, config NervixWithAddressQuery, CreateClientNats => NatsConfigEntry);
@@ -172,7 +173,9 @@ const NATS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for NatsSubjectSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
+        // A NATS message's header map keeps every value of a name together under it, and its names
+        // in no order.
+        headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Nats),
@@ -255,7 +258,9 @@ pub struct NatsSubjectSink {
 
 impl SinkEntity for NatsSubjectSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: true,
+        // A NATS message's header map keeps every value of a name together under it, and its names
+        // in no order.
+        headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
         reference: SinkReferenceKind::Client(ConnectorKind::Nats),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },

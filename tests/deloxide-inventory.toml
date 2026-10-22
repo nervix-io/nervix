@@ -106,6 +106,7 @@ package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = [
   "@client_wire_pause_leadership",
+  "@client_wire_pause_lapsed_publication",
   "@client_wire_standalone_preparation",
   "@deadlock_diagnostics",
   "@restore_installation",
@@ -477,6 +478,14 @@ selections = ["deloxide-order"]
 test = "order_context_and_retention_overload_leave_failure_evidence"
 
 [[workload]]
+coverage = "Locks that each live for one request, taken under the lock of an owner that outlives them, as relay admission records are under their relay peer owner."
+id = "probe.per-request-order-history"
+invariant = "A run that takes 32,768 per-request locks under one owner's lock keeps every instance edge within the order history and ends with qualifying evidence and no finding."
+invocation = "probes"
+selections = ["deloxide-order"]
+test = "per_request_locks_under_one_owner_stay_within_the_order_history"
+
+[[workload]]
 coverage = "Finding descriptions written to a failing or blocked standard error."
 id = "probe.output-failure"
 invariant = "A finding whose description cannot be written, or whose standard error stays blocked past the recording budget, ends the child with status 4 and nonqualifying evidence."
@@ -698,6 +707,16 @@ id = "scenario.nats-finish-at-stop"
 invariant = "STOP finishes a Core NATS emitter by flushing what its client still holds within the domain drain timeout, so the records a write that ran out of timeout_ms left with the client reach the server once it is back."
 invocation = "scenarios"
 scenario = "STOP sends the records a core NATS write left with its client"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "STOP on one and three nodes reaches the MQTT sink's finish while its client holds a QOS 0 publish it took behind a broker connection whose CONNECT the endpoint holds. The measured stop completion follows the endpoint's resumption and the broker receives the payload exactly once. Domain teardown and source controls exercise tracked locks; the client's event loop, its flush notices and the proxy's asynchronous gate are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_emission.feature"
+id = "scenario.mqtt-finish-at-stop"
+invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
+invocation = "scenarios"
+scenario = "STOP waits for the publish a QOS 0 MQTT emitter's client holds"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1205,12 +1224,12 @@ selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
 coverage = "Diagnostic native-client pending-reply cancellation after wait expiry, followed by a fresh client's reference-preserving recovery and archive download."
-examples = 2
+examples = 4
 feature = "tests/features/cluster/backup_wait.feature"
 id = "scenario.backup-native-recovery"
-invariant = "A bounded native wait preserves the original multi-domain execution for recovery by a fresh client on one and three nodes."
+invariant = "A bounded native wait preserves the original multi-domain execution for recovery by a fresh client on one and three nodes, including expiry before the second cut."
 invocation = "scenarios"
-scenario = "A bounded native wait recovers the original multi-domain backup"
+scenario = "A bounded native wait recovers the original multi-domain backup after a <first_cut_seconds> second first cut"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1745,12 +1764,12 @@ selections = ["deloxide-stress-restore"]
 
 [[workload]]
 coverage = "Under scheduling stress: diagnostic native-client pending-reply cancellation after wait expiry, followed by a fresh client's reference-preserving recovery and archive download."
-examples = 2
+examples = 4
 feature = "tests/features/cluster/backup_wait.feature"
 id = "stress.backup-native-recovery"
-invariant = "A bounded native wait preserves the original multi-domain execution for recovery by a fresh client on one and three nodes."
+invariant = "A bounded native wait preserves the original multi-domain execution for recovery by a fresh client on one and three nodes, including expiry before the second cut."
 invocation = "stress-restore-scenarios"
-scenario = "A bounded native wait recovers the original multi-domain backup"
+scenario = "A bounded native wait recovers the original multi-domain backup after a <first_cut_seconds> second first cut"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
@@ -1811,6 +1830,16 @@ id = "stress.emitter-finish-at-stop"
 invariant = "STOP finishes every emitter's sink by the domain drain timeout, so a NO ACK Kafka emitter's producer sends the records it still queued before the domain stops."
 invocation = "stress-scenarios"
 scenario = "STOP sends the records a NO ACK Kafka emitter's producer still holds"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: STOP on one and three nodes reaches the MQTT sink's finish while its client holds a QOS 0 publish it took behind a broker connection whose CONNECT the endpoint holds. Source controls and domain teardown reach tracked locks; the client's event loop, its flush notices and the asynchronous fault gate remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_emission.feature"
+id = "stress.mqtt-finish-at-stop"
+invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
+invocation = "stress-scenarios"
+scenario = "STOP waits for the publish a QOS 0 MQTT emitter's client holds"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -2163,6 +2192,26 @@ invocation = "stress-scenarios"
 scenario = "A stale standalone preflight recovers the applying command across repeated leadership changes"
 selections = ["deloxide-stress"]
 
+[[workload]]
+coverage = "Transaction model application, tracked impact recording, and the adopted domain pause's drain and release after the leader refuses the step's publication and pause release. Async proposal waits and fault refusals remain untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "scenario.transaction-pause-adoption"
+invariant = "A model step whose coordinator stopped after pausing its domain runs again under that adopted pause, which every outcome releases before the command records one; the command succeeds once and the next mutation proceeds."
+invocation = "scenarios"
+scenario = "A model command whose publication met a lapsed leader lease releases its own pause on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: transaction model application, tracked impact recording, and the adopted domain pause's drain and release after a refused publication and pause release."
+examples = 2
+feature = "tests/features/runtime/client_wire_pause_recovery.feature"
+id = "stress.transaction-pause-adoption"
+invariant = "A model step whose coordinator stopped after pausing its domain runs again under that adopted pause, which every outcome releases before the command records one; the command succeeds once and the next mutation proceeds."
+invocation = "stress-scenarios"
+scenario = "A model command whose publication met a lapsed leader lease releases its own pause on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -2381,6 +2430,8 @@ path = "src/application/model_mutation.rs"
 workloads = [
   "scenario.standalone-preflight",
   "stress.standalone-preflight",
+  "scenario.transaction-pause-adoption",
+  "stress.transaction-pause-adoption",
   "scenario.transaction-pause-release",
   "stress.transaction-pause-release",
   "scenario.diagnostic-nodes",
@@ -2662,6 +2713,8 @@ workloads = [
   "stress.sqs-receive-at-quiesce",
   "scenario.pulsar-finish-at-stop",
   "stress.pulsar-finish-at-stop",
+  "scenario.mqtt-finish-at-stop",
+  "stress.mqtt-finish-at-stop",
   "scenario.mqtt-session-drop",
   "scenario.mqtt-topic-replacement",
   "scenario.mqtt-endpoint-replacement",
