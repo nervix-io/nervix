@@ -214,7 +214,7 @@ use shutdown::BeforeDeadline;
 pub use shutdown::{
     DrainTimeout, ShutdownCoordinator, ShutdownDeadline, ShutdownOutcome, ShutdownPhase,
     ShutdownPhaseOutcome, ShutdownRequest, ShutdownRequestOutcome, ShutdownSettings,
-    ShutdownTimeout,
+    ShutdownSettingsError, ShutdownTimeout,
 };
 use tonic::transport::Server;
 use tracing::{Instrument as _, debug, error, info, warn};

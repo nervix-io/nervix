@@ -107,6 +107,10 @@ pub enum AppError {
     CloseStores,
     #[error("invalid memory pressure configuration")]
     InvalidMemoryPressureConfig,
+    #[error("invalid Raft timings")]
+    InvalidRaftTimings,
+    #[error("invalid shutdown timeouts")]
+    InvalidShutdownTimeouts,
     #[error("failed to read the node settings")]
     ReadSettings,
     #[error("failed to initialize memory pressure monitor")]

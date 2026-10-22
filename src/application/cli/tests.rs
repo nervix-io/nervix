@@ -9,10 +9,12 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use clap::CommandFactory as _;
+use nervix_consensus::RaftTimingError;
 use ubyte::ByteUnit;
 
 use super::*;
 use crate::application::{
+    ShutdownSettingsError,
     cli_values::{HumanBytes, HumanDuration},
     test_fixtures::test_args,
 };
@@ -233,6 +235,64 @@ fn a_setting_the_command_line_does_not_know_is_refused() {
 
     assert!(matches!(refused.current_context(), AppError::ReadSettings));
     assert!(refused.contains::<clap::Error>());
+}
+
+#[test]
+fn a_drain_timeout_above_the_shutdown_timeout_refuses_the_node() {
+    let refused = Application::try_from(test_args(&["--drain-timeout", "1m"]))
+        .err()
+        .assured("a one-minute drain does not fit a fifty-second shutdown");
+
+    assert!(matches!(
+        refused.current_context(),
+        AppError::InvalidShutdownTimeouts
+    ));
+    assert_eq!(
+        refused.downcast_ref::<ShutdownSettingsError>(),
+        Some(&ShutdownSettingsError::DrainExceedsShutdown {
+            drain_timeout: Duration::from_secs(60),
+            shutdown_timeout: Duration::from_secs(50),
+        })
+    );
+}
+
+#[test]
+fn raft_timings_out_of_order_refuse_the_node() {
+    let refused = Application::try_from(test_args(&["--raft-election-timeout-min", "250ms"]))
+        .err()
+        .assured("the minimum election timeout equals the default heartbeat");
+    assert!(matches!(
+        refused.current_context(),
+        AppError::InvalidRaftTimings
+    ));
+    assert_eq!(
+        refused.downcast_ref::<RaftTimingError>(),
+        Some(&RaftTimingError::ElectionTimeoutNotAboveHeartbeat {
+            election_timeout_min: Duration::from_millis(250),
+            heartbeat_interval: Duration::from_millis(250),
+        })
+    );
+
+    let refused = Application::try_from(test_args(&["--raft-election-timeout-max", "1500ms"]))
+        .err()
+        .assured("the maximum election timeout equals the default minimum");
+    assert!(matches!(
+        refused.current_context(),
+        AppError::InvalidRaftTimings
+    ));
+}
+
+#[test]
+fn a_named_setting_that_breaks_a_relationship_is_refused_like_an_option() {
+    let refused = NodeSettings::default()
+        .with_overrides(&[override_of("drain-timeout", "2m")])
+        .err()
+        .assured("a two-minute drain does not fit a fifty-second shutdown");
+
+    assert!(matches!(
+        refused.current_context(),
+        AppError::InvalidShutdownTimeouts
+    ));
 }
 
 fn override_of(name: &str, value: &str) -> SettingOverride {

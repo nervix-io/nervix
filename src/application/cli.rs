@@ -27,19 +27,21 @@ mod tests;
 mod trace_export;
 mod transactions;
 
-pub use consensus::ConsensusArgs;
 #[cfg(feature = "deloxide")]
-pub use diagnostics::DiagnosticArgs;
-pub use membership::MembershipArgs;
-pub use memory_pressure::MemoryPressureArgs;
-pub use node::NodeArgs;
-pub use resources::ResourceArgs;
-pub use runtime::RuntimeArgs;
-pub use scheduling::SchedulingArgs;
-pub use settings::{SettingOverride, SettingsArgs};
-pub use shutdown::ShutdownArgs;
-pub use trace_export::TracingArgs;
-pub use transactions::TransactionArgs;
+pub use self::diagnostics::DiagnosticArgs;
+pub use self::{
+    consensus::ConsensusArgs,
+    membership::MembershipArgs,
+    memory_pressure::MemoryPressureArgs,
+    node::NodeArgs,
+    resources::ResourceArgs,
+    runtime::RuntimeArgs,
+    scheduling::SchedulingArgs,
+    settings::{SettingOverride, SettingsArgs},
+    shutdown::ShutdownArgs,
+    trace_export::TracingArgs,
+    transactions::TransactionArgs,
+};
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "nervix-server")]

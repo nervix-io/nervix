@@ -123,7 +123,8 @@ pub use retention::RaftRetentionPolicy;
 pub use settings::{
     RaftCoveredLogBytesRetained, RaftCoveredLogEntriesRetained, RaftElectionTimeoutMax,
     RaftElectionTimeoutMin, RaftHeartbeatInterval, RaftRetainedLogCap, RaftRetentionBounds,
-    RaftRetentionSettings, RaftSnapshotByteThreshold, RaftSnapshotEntryThreshold, RaftTimings,
+    RaftRetentionSettings, RaftSnapshotByteThreshold, RaftSnapshotEntryThreshold, RaftTimingError,
+    RaftTimings,
 };
 pub use snapshot::{SealedSnapshot, SnapshotRetention};
 mod storage;
@@ -2090,11 +2091,10 @@ impl Consensus {
         // knows what a heartbeat would tell it, so sustained writes send none. The window never
         // takes more than half of the gap before the minimum election timeout, which keeps one
         // interval plus the window below that timeout and leaves the rest for delivery.
-        let heartbeat_min_interval = match election_timeout_min.checked_sub(heartbeat_interval) {
-            Some(election_gap) => heartbeat_interval.min(election_gap / 2),
-            // `validate` rejects an election timeout that does not exceed the heartbeat interval.
-            None => 0,
-        };
+        let election_gap = election_timeout_min
+            .checked_sub(heartbeat_interval)
+            .assured("RaftTimings keeps the minimum election timeout above the heartbeat interval");
+        let heartbeat_min_interval = heartbeat_interval.min(election_gap / 2);
         let config = StdArc::new(
             Config {
                 cluster_name: settings.cluster_name,

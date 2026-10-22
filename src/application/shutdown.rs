@@ -27,7 +27,7 @@ use nervix_primitives::{
 use tracing::info;
 
 mod settings;
-pub use settings::{DrainTimeout, ShutdownSettings, ShutdownTimeout};
+pub use settings::{DrainTimeout, ShutdownSettings, ShutdownSettingsError, ShutdownTimeout};
 
 pub(super) const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a shutdown may take from its first stop request until the process exits. It covers

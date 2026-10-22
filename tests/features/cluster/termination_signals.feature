@@ -14,7 +14,7 @@ Feature: Process termination signals
       | SIGTERM |
 
   Scenario Outline: A repeated termination signal forces termination while graceful shutdown is stalled
-    Given a nervix-server process is started with drain timeout "10m"
+    Given a nervix-server process is started with drain timeout "45s"
     And the server process is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};

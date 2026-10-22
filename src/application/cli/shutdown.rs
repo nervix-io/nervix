@@ -12,13 +12,13 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use meticulous::ResultExt as _;
+use error_stack::Report;
 use nervix_models::SettingDefinition;
 
 use super::settings::CommandLine;
 use crate::application::{
     cli_values::HumanDuration,
-    shutdown::{DrainTimeout, ShutdownSettings, ShutdownTimeout},
+    shutdown::{DrainTimeout, ShutdownSettings, ShutdownSettingsError, ShutdownTimeout},
 };
 
 #[derive(clap::Args, Debug, Clone, PartialEq)]
@@ -27,7 +27,7 @@ pub struct ShutdownArgs {
     #[arg(
         long = DrainTimeout::NAME,
         env = "NERVIX_DRAIN_TIMEOUT",
-        default_value_t = HumanDuration(DrainTimeout::default_value(&())),
+        default_value_t = HumanDuration(ShutdownSettings::default().drain_timeout()),
         help = "Maximum time to wait for drain operations before continuing"
     )]
     pub drain_timeout: HumanDuration,
@@ -41,9 +41,8 @@ pub struct ShutdownArgs {
 }
 
 impl ShutdownArgs {
-    pub(super) fn settings(&self) -> ShutdownSettings {
+    pub(super) fn settings(&self) -> Result<ShutdownSettings, Report<ShutdownSettingsError>> {
         ShutdownSettings::resolve(Some(self.shutdown_timeout.0), Some(self.drain_timeout.0))
-            .assured("the shutdown settings declare no validation")
     }
 
     pub(super) fn from_settings(settings: &ShutdownSettings) -> Self {

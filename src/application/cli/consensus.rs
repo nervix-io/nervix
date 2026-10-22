@@ -13,11 +13,13 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
+use error_stack::Report;
 use meticulous::ResultExt as _;
 use nervix_consensus::{
     RaftCoveredLogBytesRetained, RaftCoveredLogEntriesRetained, RaftElectionTimeoutMax,
     RaftElectionTimeoutMin, RaftHeartbeatInterval, RaftRetainedLogCap, RaftRetentionBounds,
-    RaftRetentionSettings, RaftSnapshotByteThreshold, RaftSnapshotEntryThreshold, RaftTimings,
+    RaftRetentionSettings, RaftSnapshotByteThreshold, RaftSnapshotEntryThreshold, RaftTimingError,
+    RaftTimings,
 };
 use nervix_models::SettingDefinition;
 
@@ -37,7 +39,7 @@ pub struct ConsensusArgs {
     #[arg(
         long = RaftElectionTimeoutMin::NAME,
         env = "NERVIX_RAFT_ELECTION_TIMEOUT_MIN",
-        default_value_t = HumanDuration(RaftElectionTimeoutMin::default_value(&())),
+        default_value_t = HumanDuration(RaftTimings::default().election_timeout_min()),
         help = "The shortest time a follower waits without hearing from a leader before it stands \
                 for election"
     )]
@@ -45,7 +47,7 @@ pub struct ConsensusArgs {
     #[arg(
         long = RaftElectionTimeoutMax::NAME,
         env = "NERVIX_RAFT_ELECTION_TIMEOUT_MAX",
-        default_value_t = HumanDuration(RaftElectionTimeoutMax::default_value(&())),
+        default_value_t = HumanDuration(RaftTimings::default().election_timeout_max()),
         help = "The longest time a follower waits without hearing from a leader before it stands \
                 for election"
     )]
@@ -89,13 +91,12 @@ pub struct ConsensusArgs {
 }
 
 impl ConsensusArgs {
-    pub(super) fn timings(&self) -> RaftTimings {
+    pub(super) fn timings(&self) -> Result<RaftTimings, Report<RaftTimingError>> {
         RaftTimings::resolve(
             Some(self.raft_heartbeat_interval.0),
             Some(self.raft_election_timeout_min.0),
             Some(self.raft_election_timeout_max.0),
         )
-        .assured("the Raft timings declare no validation")
     }
 
     pub(super) fn retention(&self) -> RaftRetentionSettings {

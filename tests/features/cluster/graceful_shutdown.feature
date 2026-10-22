@@ -1185,6 +1185,7 @@ Feature: Graceful shutdown
   Scenario Outline: Every node stopping at once ends its generators together on a cluster of <cluster_size>
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And shutdown timeout is configured as "20s"
+    And drain timeout is configured as "20s"
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     When a materialized restore workload with 40 relays is created
@@ -1503,6 +1504,7 @@ Feature: Graceful shutdown
   Scenario: A transaction commit stuck at its shutdown deadline is cancelled and completed after restart
     Given graceful shutdown drain is enabled
     And shutdown timeout is configured as "5s"
+    And drain timeout is configured as "5s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands
@@ -1533,6 +1535,7 @@ Feature: Graceful shutdown
   Scenario: A command still waiting for admission is cancelled without an effect when its node stops
     Given graceful shutdown drain is enabled
     And shutdown timeout is configured as "5s"
+    And drain timeout is configured as "5s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands

@@ -48,14 +48,23 @@ pub struct SettingsArgs {
 impl TryFrom<SettingsArgs> for NodeSettings {
     type Error = Report<AppError>;
 
-    /// Converts every area's options once, validating each value before the node does any I/O.
+    /// Converts every area's options once, validating each value, and each relationship between
+    /// values, before the node does any I/O.
     fn try_from(args: SettingsArgs) -> Result<Self, Self::Error> {
+        let raft = args
+            .consensus
+            .timings()
+            .change_context(AppError::InvalidRaftTimings)?;
         let memory_pressure = args
             .memory_pressure
             .settings()
             .change_context(AppError::InvalidMemoryPressureConfig)?;
+        let shutdown = args
+            .shutdown
+            .settings()
+            .change_context(AppError::InvalidShutdownTimeouts)?;
         Ok(Self {
-            raft: args.consensus.timings(),
+            raft,
             raft_retention: args.consensus.retention(),
             membership: args.membership.settings(),
             scheduling: args.scheduling.settings(),
@@ -63,7 +72,7 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             transactions: args.transactions.limits(),
             commands: args.transactions.commands(),
             memory_pressure,
-            shutdown: args.shutdown.settings(),
+            shutdown,
             resources: args.resources.settings(),
         })
     }

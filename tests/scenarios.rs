@@ -334,6 +334,14 @@ struct CliClockProcess {
     _reader: AbortOnDropHandle<()>,
 }
 
+/// How one node start that a scenario attempted, without requiring it to succeed, ended.
+#[derive(Debug)]
+struct NodeStartAttempt {
+    node: String,
+    /// The startup's failure rendered with its whole report, or nothing when the node started.
+    failure: Option<String>,
+}
+
 /// The next row and the subscription session returned by its independent receipt observer.
 struct SubscriptionReceipt {
     session: TestSession,
@@ -514,6 +522,8 @@ struct ScenarioWorld {
     /// Contents each NSPL file was given, so "is unchanged" has something to compare against.
     formatter_original_files: BTreeMap<String, String>,
     last_cluster_operation_elapsed: Option<Duration>,
+    /// The last node start a scenario attempted without requiring it to succeed.
+    node_start_attempt: Option<NodeStartAttempt>,
     browser_page: Option<playwright_rs::Page>,
     /// Canvas positions and routes captured before changing an inspector's presentation view.
     inspector_geometry: Option<String>,
@@ -620,6 +630,7 @@ impl fmt::Debug for ScenarioWorld {
                 "last_cluster_operation_elapsed",
                 &self.last_cluster_operation_elapsed,
             )
+            .field("node_start_attempt", &self.node_start_attempt)
             .field("clickhouse_table", &self.clickhouse_table)
             .field("clickhouse_tls", &self.clickhouse_tls)
             .field("postgres_table", &self.postgres_table)
@@ -11511,6 +11522,42 @@ async fn when_node_is_started(world: &mut ScenarioWorld, node_id: String) {
         .start_node(&node_id)
         .await
         .expect("failed to start node");
+}
+
+/// Starts a node whose start the scenario expects may be refused, and records how it ended for a
+/// later step to assert instead of failing this one.
+#[when(expr = "node {string} attempts to start")]
+async fn when_node_attempts_to_start(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let started = world.cluster_mut().start_node(&node_id).await;
+    let failure = match started {
+        Ok(()) => None,
+        Err(error) => Some(format!("{error:#}")),
+    };
+    world.node_start_attempt = Some(NodeStartAttempt {
+        node: node_id,
+        failure,
+    });
+}
+
+#[then(expr = "node {string} refused to start because {string}")]
+fn then_node_refused_to_start(world: &mut ScenarioWorld, node_id: String, reason: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let attempt = world
+        .node_start_attempt
+        .as_ref()
+        .verified("the preceding step attempted to start a node");
+    assert_eq!(
+        attempt.node, node_id,
+        "the attempted start belongs to another node"
+    );
+    let Some(failure) = &attempt.failure else {
+        panic!("node '{node_id}' started although it was expected to refuse: {reason}");
+    };
+    assert!(
+        failure.contains(&reason),
+        "node '{node_id}' refused to start for another reason: {failure}"
+    );
 }
 
 #[when(expr = "node {string} is started while consensus connectivity is blocked")]
