@@ -2,15 +2,19 @@
 //!
 //! Outside the layer order: a test harness.
 //!
-//! - **Owns.** One loopback listener, the one connection a client opens to it, and the protocol
-//!   operations a check reads from that client or writes to it.
-//! - **Depends on.** Tokio's TCP sockets and I/O traits.
+//! - **Owns.** One loopback listener, whether it greets or ends the connections a client opens to
+//!   it, and the protocol operations a check reads from a greeted connection or writes to it.
+//! - **Depends on.** Tokio's TCP sockets and I/O traits, and the boundary's tasks and channels.
 //! - **Must not know.** The connector's source or sink, the runtime host, or how a real server
 //!   decides.
 
-use nervix_primitives::net::{
-    TcpListener,
-    tcp::{OwnedReadHalf, OwnedWriteHalf},
+use nervix_primitives::{
+    net::{
+        TcpListener,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+    },
+    sync::oneshot,
+    task::JoinHandle,
 };
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 
@@ -20,6 +24,13 @@ const INBOX_PREFIX: &str = "_INBOX.";
 /// A server on a loopback port that answers only what its check tells it to.
 pub(crate) struct ScriptedServer {
     listener: TcpListener,
+}
+
+/// A scripted server that went down. It keeps its port and ends every connection a client opens
+/// before it greets it, as a server that stopped, until it comes back.
+pub(crate) struct DownServer {
+    back: oneshot::Sender<()>,
+    refusing: JoinHandle<TcpListener>,
 }
 
 /// The connection a client opened to a scripted server.
@@ -69,6 +80,36 @@ impl ScriptedServer {
     /// Accepts the client's connection, greets it with a `max_payload` of `max_payload` bytes and
     /// answers its CONNECT. The server stops listening, so a later attempt to connect is refused.
     pub(crate) async fn accept(self, max_payload: usize) -> ScriptedConnection {
+        self.greet(max_payload).await
+    }
+
+    /// Goes down without giving up its port: every connection a client opens from now on ends
+    /// before the server greets it, until [`DownServer::come_back`].
+    pub(crate) fn go_down(self) -> DownServer {
+        let (back, back_rx) = oneshot::channel();
+        let refusing = nervix_primitives::task::spawn(Self::refuse(self.listener, back_rx));
+        DownServer { back, refusing }
+    }
+
+    /// Ends every connection a client opens on `listener` until the server comes back, and then
+    /// hands the listener back.
+    async fn refuse(listener: TcpListener, mut back: oneshot::Receiver<()>) -> TcpListener {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
+                _ = &mut back => return listener,
+                accepted = listener.accept() => {
+                    let (connection, _) =
+                        accepted.expect("the scripted server accepts each connection it ends");
+                    drop(connection);
+                }
+            }
+        }
+    }
+
+    /// Accepts the client's next connection, greets it with a `max_payload` of `max_payload` bytes
+    /// and answers its CONNECT, keeping the server's port.
+    pub(crate) async fn greet(&self, max_payload: usize) -> ScriptedConnection {
         let (stream, _) = self
             .listener
             .accept()
@@ -90,6 +131,20 @@ impl ScriptedServer {
         // The client sends CONNECT and then PING, and is connected once the PING is answered.
         connection.answer_ping().await;
         connection
+    }
+}
+
+impl DownServer {
+    /// Comes back on the port it kept, so the next connection a client opens is greeted.
+    pub(crate) async fn come_back(self) -> ScriptedServer {
+        self.back
+            .send(())
+            .expect("the refusing task waits for the server to come back");
+        let listener = self
+            .refusing
+            .await
+            .expect("the refusing task hands its listener back");
+        ScriptedServer { listener }
     }
 }
 

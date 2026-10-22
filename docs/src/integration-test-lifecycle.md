@@ -914,6 +914,24 @@ without expiring the records whose match policy it asserts. The Kafka handoff sc
 after entity-gate engagement uses a test-configured two-minute gate lease so its broker-delivery
 assertions and pause release fit inside the handoff budget under concurrent suite load.
 
+The branch-activity sampling scenario observes each initial input at the correlator through its
+received counter, then waits for the initial branch to disappear from the relay and for the retained
+branch-instance count to reach zero on both the HTTP intake node and the correlator owner. That
+count deduplicates a concrete key while any local owner retains it; zero after confirmed receipt
+establishes retirement of the initial state. Each runtime owner has its own physical maintenance
+scan, so relay disappearance does not identify the correlator's scan phase.
+
+Both fresh left inputs are posted concurrently after the idle period, followed immediately by both
+matching right inputs before either subscription result is awaited. The unordered assertion requires
+exactly one complete field set for each expected pairing within the unchanged ten-second bound.
+Both TTL/rate examples have a three-second physical lifetime: sleeping that long before posting a
+matching input would race legitimate expiration, because HTTP and scheduling delay also consume the
+lifetime. The existing three-second physical pause follows the matched outputs, then bounded metric
+observations establish retirement on both owners. Fresh-clock sampling has direct production-owner
+unit coverage; this public scenario proves initial-state retirement, branch isolation and exact fresh
+pairings without assuming the phase of an owner's next scan. Logical TTLs, domain clock rates,
+physical scan cadence and correlation policy retain their own contracts.
+
 Collection and route-flush timing assertions measure observed row arrival from the HTTP publication
 instant. Concurrent branch posts retain one publication origin, and every expected row must match
 its tenant and sequence and arrive after the declared lower bound, inside the unchanged delivery

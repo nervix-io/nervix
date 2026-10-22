@@ -179,6 +179,7 @@ mod ingestion_time;
 mod mqtt_fixtures;
 mod mqtt_sessions;
 mod mysql_isolation;
+mod nats_delivery;
 mod paced_replication;
 mod paced_simulation;
 mod postgres_fixtures;
