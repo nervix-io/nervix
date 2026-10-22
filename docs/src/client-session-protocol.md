@@ -723,7 +723,14 @@ A transaction that paused its domain for a model alteration completes that pause
 it publishes a terminal outcome. Losing leadership during release leaves the applying step and its
 mutation lease available to recovery under the same execution identity. The successor completes
 cleanup before another mutation can acquire the domain; a refused release alone does not turn an
-otherwise applied alteration into a definitive failure.
+otherwise applied alteration into a definitive failure. A leader whose lease lapsed refuses the
+step's publication the same way while it still leads. The coordinator that resumes such a step
+adopts the pause as the step's own: it drains it, checks the step's frozen inputs against the
+domain as the pause left it, and releases it before the step records any outcome, a planning-input
+refusal included. An ordinary command keeps its mutation lease while its internal transaction is
+still committing. When its attempt ends on another failure, it answers `OutcomeUnknown` with the
+`StillApplying` cause instead of a terminal result, so the lease that transaction needs to release
+its pause is never given up first.
 
 Because the lease lives in replicated state rather than in a leader's memory, it survives leadership
 changes and restarts. A new leader resumes the applying record, or the committing transaction, that
