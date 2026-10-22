@@ -28,8 +28,7 @@ use nervix_interconnect::EntityGatePurpose;
 use nervix_models::{
     DomainName, DomainSchedule, DomainStatus, ExecutionStepImpactReport, ImpactDiagnosticKind,
     ModelKind, ModelName, OperationImpactReason, OperationImpactReport, PauseRequirement,
-    QuiesceLevel,
-    RequestedResourceVersion, ResourceBindingImpact, Statement, TransactionOperation,
+    QuiesceLevel, RequestedResourceVersion, ResourceBindingImpact, Statement, TransactionOperation,
     TransactionOperationNumber,
 };
 use nervix_nspl::client_statement::ClientStatement;
@@ -1597,15 +1596,17 @@ impl SessionServiceImpl {
                             .effects
                             .clone(),
                     );
-                    match Box::pin(self.publish_transaction_model_step(
-                        &domain,
-                        transaction_step.transaction,
-                        transaction_step
-                            .actual
-                            .apply_to(transaction_step.planned_step.impact.clone()),
-                        step_result,
-                        effect,
-                    ))
+                    match Box::pin(
+                        self.publish_transaction_model_step(
+                            &domain,
+                            transaction_step.transaction,
+                            transaction_step
+                                .actual
+                                .apply_to(transaction_step.planned_step.impact.clone()),
+                            step_result,
+                            effect,
+                        ),
+                    )
                     .await
                     {
                         Ok(transaction) => {

@@ -259,7 +259,9 @@ async fn a_command_whose_transaction_is_still_committing_stays_applying_until_it
     let transaction_id = command_transaction_id(&request);
     let mut subscriptions = SessionSubscriptions::new();
 
-    let first = service.test_command(request.clone(), &mut subscriptions).await;
+    let first = service
+        .test_command(request.clone(), &mut subscriptions)
+        .await;
 
     assert!(
         matches!(

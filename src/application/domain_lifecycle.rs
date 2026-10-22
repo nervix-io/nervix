@@ -618,13 +618,11 @@ impl SessionServiceImpl {
         // publication, the same way it refused that publication: before appending it.
         #[cfg(feature = "testing")]
         if let Some(refusal) = self.inner.runtime.take_model_pause_release_refusal(domain) {
-            return Err(
-                Report::new(ConsensusError::from(refusal)).change_context(
-                    DomainAlterError::ResumeDomain {
-                        domain: domain.clone(),
-                    },
-                ),
-            );
+            return Err(Report::new(ConsensusError::from(refusal)).change_context(
+                DomainAlterError::ResumeDomain {
+                    domain: domain.clone(),
+                },
+            ));
         }
         let resumed = self
             .inner

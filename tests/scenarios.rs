@@ -8918,8 +8918,8 @@ async fn then_relocation_commit_refusal_was_delivered(world: &mut ScenarioWorld,
 }
 
 #[given(
-    expr = "the leader refuses the next model publication in domain {string} and the pause release \
-            after it with {string}"
+    expr = "the leader refuses the next model publication in domain {string} and the pause \
+            release after it with {string}"
 )]
 async fn given_leader_refuses_next_model_publication(
     world: &mut ScenarioWorld,
