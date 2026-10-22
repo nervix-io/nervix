@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     bounds::{
-        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
-        WaitBound,
+        BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
@@ -156,8 +156,11 @@ const NATS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Driver("5 s per address"),
         },
         DeclaredWait {
-            wait: "a core publish and its flush",
-            bound: WaitBound::Unbounded,
+            wait: "a core publish and its flush to the client's socket, not a server round trip",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
         },
         DeclaredWait {
             wait: "a JetStream acknowledgement",

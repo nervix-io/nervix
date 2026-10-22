@@ -427,3 +427,90 @@ Feature: NATS emission
       | cluster_size |
       | 1            |
       | 3            |
+
+  # A core NATS write delivers its records once the client flushed them to its socket. The emitter
+  # publishes through an endpoint the scenario controls, which goes down, so the client holds the
+  # three records one write hands it and the write runs out of the client's timeout_ms with its
+  # records unresolved. Every retry first waits for the client to flush what it holds and hands it
+  # nothing more, so the client holds one copy of each record. STOP ends the emitter either by
+  # draining it, whose retry waits for the client to send what it holds and then sends its own copy
+  # of each record, or by finishing it, which flushes what the client holds. Either way STOP returns
+  # only once the endpoint forwards again, and every held record reaches the subscriber, a retried
+  # one possibly twice.
+  @nats_finish_at_stop @emitter_finish_at_stop @deloxide_stress
+  Scenario Outline: STOP sends the records a core NATS write left with its client
+    Given NATS is running
+    And a NATS endpoint the scenario controls is configured
+    And drain timeout is configured as "60s"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And NATS subject "held_out_{{test_id}}" is observed
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA held_event ( sequence I64 );
+      CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );
+      CREATE CODEC held_events_codec FROM JSON TO SCHEMA held_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
+      CREATE VHOST edge held-nats-{{test_id}}.example.com;
+      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR held_source
+        FROM held_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_events_codec
+        TIMESTAMP NOW
+        TO held_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE NATS CLIENT held_nats CONFIG {
+        'addr' = '{{nats_controlled_addr}}',
+        'timeout_ms' = '1000'
+      };
+      CREATE NATS SUBJECT EMITTER held_output FROM held_events
+        TO held_nats SUBJECT 'held_out_{{test_id}}'
+          MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        ENCODE USING held_event_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "held-nats-{{test_id}}.example.com" path "/events"
+      """
+      [{"sequence":0}]
+      """
+    Then the observed broker receives a payload
+      """
+      {"sequence":0}
+      """
+    When the controlled NATS endpoint goes down
+    Then the controlled NATS endpoint refuses a client that reconnects
+    When http payload is posted to node "node-1" with host "held-nats-{{test_id}}.example.com" path "/events"
+      """
+      [{"sequence":1},{"sequence":2},{"sequence":3}]
+      """
+    Then within "30s" DESCRIBE EMITTER "held_output" on the leader node contains
+      """
+      did not finish within timeout_ms 1s
+      """
+    When STOP runs while the controlled NATS endpoint forwards everything after "2s"
+    Then STOP completed after the controlled NATS endpoint forwarded everything
+    And within "30s" the observed broker receives payloads
+      """
+      {"sequence":1}
+      {"sequence":2}
+      {"sequence":3}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

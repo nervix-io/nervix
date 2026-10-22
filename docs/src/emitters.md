@@ -178,7 +178,7 @@ to discard a record.
 | Pulsar | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | Producer acceptance for `NO ACK`; one broker receipt per record for `ACK` |
 | RabbitMQ | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | The channel's answer to one round trip after each write for `NO ACK`; publisher confirm for `ACK` |
 | MQTT | `QOS 0`; `QOS 1 ACK ...`; `QOS 2 ACK ...` | Client acceptance, `PUBACK`, or completion of the QoS 2 handshake respectively |
-| NATS | `NO ACK`; `JETSTREAM ACK SEQUENTIAL`; `JETSTREAM ACK PARALLEL MAX <n>` | Core-NATS connection flush for `NO ACK`; JetStream `PubAck` otherwise |
+| NATS | `NO ACK`; `JETSTREAM ACK SEQUENTIAL`; `JETSTREAM ACK PARALLEL MAX <n>` | The core NATS client's flush of the write to its socket for `NO ACK`, which is not a server round trip; JetStream `PubAck` otherwise |
 | Redis Pub/Sub | `NO ACK` | Server acceptance of `PUBLISH`; the subscriber count is not a delivery guarantee |
 | ZeroMQ | `NO ACK` | Socket acceptance |
 | SQS | `SINGLE`; `BATCH` | Successful per-record or per-entry service response |
@@ -1061,20 +1061,21 @@ TLS and the answer. `connect_timeout_ms` bounds establishing a connection: name 
 address attempts, TLS and the protocol's own handshake. Each value is a positive whole number of
 milliseconds.
 
-`HTTP`, `SENTRY`, `OTEL`, `SQS`, `CLICKHOUSE`, `ZEROMQ`, `SYSLOG` and the Iceberg emitter's
-object-store clients read `timeout_ms`; an `HTTP` request emitter's client requires it, and a
-`SYSLOG` emitter's client bounds writing and flushing each frame by it. A `RABBITMQ` client's
-`timeout_ms` bounds the round trip that ends a `NO ACK` write. `RABBITMQ`, `REDIS`, `SYSLOG` and
-`ZEROMQ` clients read `connect_timeout_ms`, and allow 30 seconds when it is left out; a `REDIS`
-command pool also waits no longer than that to check out a connection. A `RABBITMQ` client's
-`connect_timeout_ms` covers resolving the broker, the address attempts, TLS, the AMQP handshake,
-opening the emitter's channel, selecting publisher confirms under `ACK` and checking its queue. A
-`ZEROMQ` client's `connect_timeout_ms` covers a connect-mode socket's connection and its ZMTP
-handshake, and its `timeout_ms` bounds each send. A request, send, frame write, connection or round
-trip that runs out of its deadline becomes the emitter's transient status, and the emitter retries
-on its policy; a deadline that runs out is reported naming the key and its bound.
-[Connector Capabilities](connector-capabilities.md) lists each entity's network waits and what
-bounds each one, including the waits nothing bounds yet.
+`HTTP`, `SENTRY`, `OTEL`, `SQS`, `CLICKHOUSE`, `NATS`, `ZEROMQ`, `SYSLOG` and the Iceberg
+emitter's object-store clients read `timeout_ms`; an `HTTP` request emitter's client requires it,
+and a `SYSLOG` emitter's client bounds writing and flushing each frame by it. A `NATS` client's
+`timeout_ms` bounds a Core NATS write: its hand-over to the client and the client's flush to its
+socket. A `RABBITMQ` client's `timeout_ms` bounds the round trip that ends a `NO ACK` write.
+`RABBITMQ`, `REDIS`, `SYSLOG` and `ZEROMQ` clients read `connect_timeout_ms`, and allow 30 seconds
+when it is left out; a `REDIS` command pool also waits no longer than that to check out a
+connection. A `RABBITMQ` client's `connect_timeout_ms` covers resolving the broker, the address
+attempts, TLS, the AMQP handshake, opening the emitter's channel, selecting publisher confirms under
+`ACK` and checking its queue. A `ZEROMQ` client's `connect_timeout_ms` covers a connect-mode
+socket's connection and its ZMTP handshake, and its `timeout_ms` bounds each send. A request, send,
+write, connection or round trip that runs out of its deadline becomes the emitter's transient
+status, and the emitter retries on its policy; a deadline that runs out is reported naming the key
+and its bound. [Connector Capabilities](connector-capabilities.md) lists each entity's network waits
+and what bounds each one, including the waits nothing bounds yet.
 
 ## Supported Emitter Sinks
 
@@ -1427,16 +1428,30 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it |
-| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush: unbounded<br>a JetStream acknowledgement: `ACK TIMEOUT` |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush to the client's socket, not a server round trip: `timeout_ms`; unbounded when omitted<br>a JetStream acknowledgement: `ACK TIMEOUT` |
 | Driver limits | Messages above the server's max_payload are rejected. |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |
+| Stalled-peer checks | `STALLED PEER timeout_ms` |
 
 See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-emit).
 <!-- connector-matrix:emit-nats-subject:end -->
 
-`NO ACK` publishes through Core NATS and acknowledges after the connection flush. `JETSTREAM`
-waits for one `PubAck` per record. The stream must already exist and capture the subject; a missing
-stream is an infrastructure error that remains under backpressure until an operator provisions it.
+`NO ACK` publishes through Core NATS. A write hands its records to the client and delivers them once
+the client flushed them to its socket. The flush is local: the server answers nothing, so a record
+the client flushed is still lost when its connection fails before the server reads it. The client's
+optional `timeout_ms` bounds each write, the hand-over and the flush included. A write that runs out
+of it, because the client cannot write to a server that went down or stopped reading, fails as the
+emitter's transient status, which names `timeout_ms` and its bound, and the emitter retries it on
+its policy. Its records stay with the client, which sends them once its connection drains or
+reconnects, so the retry can deliver them a second time. A write first waits, within its own
+`timeout_ms`, for the client to flush what an earlier write left with it, and hands the client
+nothing more until it has, so a retry never queues another copy behind the one the client holds.
+Without `timeout_ms` a write waits for its flush however long that takes. When the emitter stops,
+its finish flushes what the client still holds by the finish deadline; see
+[Finishing a sink](./connector-contract.md#finishing-a-sink).
+
+`JETSTREAM` waits for one `PubAck` per record. The stream must already exist and capture the
+subject; a missing stream is an infrastructure error that remains under backpressure until an
+operator provisions it.
 
 `JETSTREAM` hands records to the client one after another, with at most `MAX <n>` of them awaiting
 their `PubAck` at once, or one under `ACK SEQUENTIAL`, each until `ACK TIMEOUT` after its
@@ -2649,9 +2664,10 @@ resends only records not yet confirmed or definitively rejected. With the
 yet confirmed or rejected, with the bytes and members they were first written with. `NO ACK`, MQTT QoS 0, Core NATS,
 Redis Pub/Sub, and ZeroMQ expose earlier acceptance boundaries and can lose acknowledged records
 after a crash or downstream failure. A stop sends what a Kafka producer still queues, waits for
-accepted Pulsar messages' receipts, and waits for an MQTT QoS 0 client to send the publishes it
-still holds, within the stop's deadline; see
-[Finishing a sink](./connector-contract.md#finishing-a-sink). External broker durability and
+accepted Pulsar messages' receipts, flushes what a Core NATS client still holds after a write ran
+out of `timeout_ms`, and waits for an MQTT QoS 0 client to send the publishes it still holds, within
+the stop's deadline; see [Finishing a sink](./connector-contract.md#finishing-a-sink). External
+broker durability and
 idempotence settings remain the user's client and service configuration.
 
 When one source record reaches multiple emitters or multiple attached routes, the upstream ACK
@@ -2678,7 +2694,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | --- | --- | --- | --- |
 | Kafka | `ACK` retry after an ambiguous delivery report or timeout; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration |
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
-| NATS | JetStream retry after an ambiguous `PubAck`; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` connection flush is not durable stream acknowledgement | None |
+| NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a write ran out of `timeout_ms`, whose records the client still sends; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` delivers once the client flushed a record to its socket, which is not durable stream acknowledgement | None |
 | RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after the broker's channel has taken it; queue durability and message persistence remain broker policy | None |
 | SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |

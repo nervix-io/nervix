@@ -3,9 +3,10 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The NATS connection a client configures, its reconnect delay, the queue
-//!   subscription a source reads through, core and JetStream publication, the JetStream answer
-//!   each record's `PubAck` gives the confirmation window, header mapping in both directions, and
-//!   per-record rejection classification.
+//!   subscription a source reads through, core and JetStream publication, the bound the client's
+//!   `timeout_ms` sets on a core write and the records a core client still holds unflushed, the
+//!   JetStream answer each record's `PubAck` gives the confirmation window, header mapping in both
+//!   directions, and per-record rejection classification.
 //! - **Depends on.** The connector contract and its confirmation window, vocabulary values,
 //!   `error-stack`, Tokio and `async-nats`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -44,13 +45,14 @@ use async_nats::{
     message::OutboundMessage,
 };
 use async_trait::async_trait;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use futures_util::SinkExt;
+use meticulous::OptionExt as _;
 use nervix_connector::{
-    AckConfirmation, BrokerAnswer, BrokerVerdict, ConfirmationWindow, ParsedRetryPolicy,
-    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish, SinkFinishResult, SinkHost,
-    SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
-    client_config_value, client_tls_paths,
+    AckConfirmation, BrokerAnswer, BrokerVerdict, ConfiguredDeadline, ConfirmationWindow,
+    ParsedRetryPolicy, PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish,
+    SinkFinishError, SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkRecord,
+    SinkRecordId, SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
 };
 use nervix_models::{ClientConfigEntry, NatsPublishSubjectName};
 use nervix_primitives::{
@@ -93,11 +95,12 @@ pub struct NatsSink {
 
 /// How this sink publishes, together with whatever that way of publishing needs.
 ///
-/// A JetStream context exists only for `MODE ACK`, so pairing the context with the mode that
-/// requires it means the publish path reads one value instead of matching a mode and then hoping
-/// the separately stored context agrees with it.
+/// A JetStream context exists only for `MODE ACK`, and the bound and the unflushed records of a
+/// core write only for `MODE NO ACK`, so pairing each with the mode that requires it means the
+/// publish path reads one value instead of matching a mode and then hoping a separately stored
+/// value agrees with it.
 enum NatsDelivery {
-    Core,
+    Core(CoreWrites),
     JetStream {
         context: Box<NatsJetStream>,
         confirmation: AckConfirmation,
@@ -108,37 +111,208 @@ enum NatsDelivery {
 /// client gives the record up.
 type NatsAnswer = Pin<Box<dyn Future<Output = BrokerAnswer> + Send>>;
 
+/// The wait the client's `timeout_ms` bounds, as a write that runs out of it names the wait.
+const CORE_WRITE: &str = "a core NATS publish and its flush";
+
 impl NatsDelivery {
-    /// How a sink publishes through `client` in `mode`. JetStream gets a context that awaits each
-    /// record's `PubAck` for at most the declared `ACK TIMEOUT` and holds at most `MAX` records
-    /// awaiting one.
-    fn new(mode: NatsPublishingMode, client: &NatsClient) -> Self {
-        match mode {
-            NatsPublishingMode::Core => Self::Core,
-            NatsPublishingMode::JetStream(confirmation) => Self::JetStream {
-                context: Box::new(
-                    async_nats::jetstream::ContextBuilder::new()
-                        .timeout(confirmation.timeout)
-                        .ack_timeout(confirmation.timeout)
-                        .max_ack_inflight(confirmation.max_in_flight.get())
-                        .backpressure_on_inflight(true)
-                        .build(client.clone()),
-                ),
-                confirmation,
-            },
+    /// JetStream publishing through `client`, with a context that awaits each record's `PubAck`
+    /// for at most the declared `ACK TIMEOUT` and holds at most `MAX` records awaiting one.
+    fn jetstream(confirmation: AckConfirmation, client: &NatsClient) -> Self {
+        Self::JetStream {
+            context: Box::new(
+                async_nats::jetstream::ContextBuilder::new()
+                    .timeout(confirmation.timeout)
+                    .ack_timeout(confirmation.timeout)
+                    .max_ack_inflight(confirmation.max_in_flight.get())
+                    .backpressure_on_inflight(true)
+                    .build(client.clone()),
+            ),
+            confirmation,
+        }
+    }
+}
+
+/// The core writes of one sink: the bound the client's `timeout_ms` sets on each, and the records
+/// the client took that it has not flushed to its socket.
+///
+/// A core write hands its records to the client and delivers them once the client flushed them to
+/// its socket; the server answers nothing. A write that runs out of `timeout_ms` before its flush
+/// completes leaves its records with the client, which still sends them once its connection drains
+/// or reconnects, so the sink counts them until a flush completes.
+struct CoreWrites {
+    /// The client's `timeout_ms`, which bounds each write, the hand-over and the flush included.
+    /// Without the key a write waits for its flush.
+    timeout: Option<ConfiguredDeadline>,
+    /// The records the client took since its last completed flush.
+    unflushed: u64,
+}
+
+impl CoreWrites {
+    /// Core writes bounded by `timeout`, of a client that holds nothing yet.
+    fn new(timeout: Option<ConfiguredDeadline>) -> Self {
+        Self {
+            timeout,
+            unflushed: 0,
+        }
+    }
+
+    /// Writes `records` to `subject` through `client` within the client's `timeout_ms`, and
+    /// answers for each of them.
+    async fn publish(
+        &mut self,
+        client: &NatsClient,
+        subject: &Subject,
+        records: Vec<SinkRecord>,
+    ) -> PerRecordOutcome<SinkRecordId> {
+        let mut outcome = PerRecordOutcome::with_capacity(records.len());
+        let timeout = self.timeout;
+        let write = self.write(client, subject, records, &mut outcome);
+        let written = match timeout {
+            Some(timeout) => {
+                let bounded = nervix_primitives::time::timeout(timeout.bound(), write).await;
+                match bounded {
+                    Ok(written) => written,
+                    Err(_elapsed) => Err(Self::elapsed(timeout)),
+                }
+            }
+            None => write.await,
+        };
+        match written {
+            Ok(flushed) => {
+                for record_id in flushed {
+                    outcome.deliver(record_id);
+                }
+            }
+            Err(failure) => outcome.fail(failure),
+        }
+        outcome
+    }
+
+    /// Hands `records` to `client` and flushes them to its socket, after it flushed what an
+    /// earlier write left with the client. Answers with the records it flushed, having recorded in
+    /// `outcome` each record NATS refuses for good.
+    ///
+    /// The count of unflushed records changes only once the client took a record or a flush
+    /// completed, so a write the bound cuts short leaves it naming exactly what the client holds.
+    async fn write(
+        &mut self,
+        client: &NatsClient,
+        subject: &Subject,
+        records: Vec<SinkRecord>,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
+    ) -> Result<Vec<SinkRecordId>, Report<SinkPublishError>> {
+        // Records handed over before what the client still holds is flushed would queue behind
+        // it, and a write that retries those records would queue a second copy of each.
+        if self.unflushed > 0 {
+            Self::flush(client).await?;
+            self.unflushed = 0;
+        }
+        let mut sink = client.clone();
+        let mut handed_over = Vec::with_capacity(records.len());
+        for record in records {
+            nervix_primitives::task::consume_budget().await;
+            let record_id = record.id;
+            let occurred_at = record.occurred_at;
+            let headers = if record.headers.is_empty() {
+                None
+            } else {
+                Some(NatsSink::header_map(&record.headers))
+            };
+            let result = sink
+                .feed(OutboundMessage {
+                    subject: subject.clone(),
+                    reply: None,
+                    payload: record.payload.into(),
+                    headers,
+                })
+                .await;
+            match result {
+                Ok(()) => {
+                    handed_over.push(record_id);
+                    self.unflushed = self.unflushed.checked_add(1).assured(
+                        "the records one client holds are in memory, far fewer than u64 counts",
+                    );
+                }
+                Err(error) if NatsSink::is_core_record_rejection(&error) => {
+                    outcome.reject(RejectedSinkRecord::external(
+                        record_id,
+                        occurred_at,
+                        format!("nats rejected record: {error}"),
+                    ));
+                }
+                Err(error) => return Err(NatsSink::publish_error(error)),
+            }
+        }
+        Self::flush(client).await?;
+        self.unflushed = 0;
+        Ok(handed_over)
+    }
+
+    /// Flushes `client`'s connection, which writes everything handed to the client before it to
+    /// the client's socket.
+    async fn flush(client: &NatsClient) -> Result<(), Report<SinkPublishError>> {
+        client.flush().await.map_err(NatsSink::publish_error)
+    }
+
+    /// The failure of a write that ran out of the client's `timeout_ms`. An emitter shows the
+    /// message its sink attached, so the deadline leads.
+    fn elapsed(timeout: ConfiguredDeadline) -> Report<SinkPublishError> {
+        let elapsed = timeout.elapsed(CORE_WRITE);
+        Report::new(elapsed)
+            .change_context(SinkPublishError::Publish { sink: NATS })
+            .attach_printable(elapsed.to_string())
+    }
+
+    /// Flushes what the client still holds of the records writes handed it, by `deadline`.
+    async fn finish(&mut self, client: &NatsClient, deadline: Instant) -> SinkFinishResult {
+        if self.unflushed == 0 {
+            return Ok(SinkFinish::NothingHeld);
+        }
+        let flushed = nervix_primitives::time::timeout_at(deadline, client.flush()).await;
+        match flushed {
+            Ok(Ok(())) => {
+                self.unflushed = 0;
+                Ok(SinkFinish::Flushed)
+            }
+            Ok(Err(error)) => {
+                let description =
+                    format!("nats client failed to flush the records it held: {error}");
+                Err(Report::new(error)
+                    .change_context(SinkFinishError::Flush { sink: NATS })
+                    .attach_printable(description))
+            }
+            Err(_elapsed) => Err(Report::new(SinkFinishError::Unsent {
+                sink: NATS,
+                records: self.unflushed,
+            })),
         }
     }
 }
 
 impl NatsSink {
     pub async fn new(config: NatsSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
+        // Read before the client connects, so a value that breaks the deadline rule fails the
+        // start as configuration whether or not the server answers.
+        let write_timeout = Self::write_timeout(&config.config)?;
         let client = Self::client_from_config(&config.config, config.retry_policy).await?;
-        let delivery = NatsDelivery::new(config.mode, &client);
+        let delivery = match config.mode {
+            NatsPublishingMode::Core => NatsDelivery::Core(CoreWrites::new(write_timeout)),
+            NatsPublishingMode::JetStream(confirmation) => {
+                NatsDelivery::jetstream(confirmation, &client)
+            }
+        };
         Ok(Self {
             client,
             delivery,
             subject: Subject::from(config.subject.as_str().to_string()),
         })
+    }
+
+    /// The bound the client's `timeout_ms` sets on each core write, where it sets one. JetStream
+    /// bounds its records by `ACK TIMEOUT` instead.
+    fn write_timeout(config: &[ClientConfigEntry]) -> SinkStartResult<Option<ConfiguredDeadline>> {
+        ConfiguredDeadline::timeout(config)
+            .change_context(SinkStartError::InvalidConfiguration { sink: NATS })
     }
 
     async fn client_from_config(
@@ -213,60 +387,13 @@ impl NatsSink {
         delay
     }
 
-    async fn publish_core(&self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
-        let mut outcome = PerRecordOutcome::with_capacity(records.len());
-        let mut sink = self.client.clone();
-        let mut queued = Vec::with_capacity(records.len());
-        for record in records {
-            nervix_primitives::task::consume_budget().await;
-            let record_id = record.id;
-            let occurred_at = record.occurred_at;
-            let headers = if record.headers.is_empty() {
-                None
-            } else {
-                Some(Self::header_map(&record.headers))
-            };
-            let result = sink
-                .feed(OutboundMessage {
-                    subject: self.subject.clone(),
-                    reply: None,
-                    payload: record.payload.into(),
-                    headers,
-                })
-                .await;
-            match result {
-                Ok(()) => queued.push(record_id),
-                Err(error) if Self::is_core_record_rejection(&error) => {
-                    outcome.reject(RejectedSinkRecord::external(
-                        record_id,
-                        occurred_at,
-                        format!("nats rejected record: {error}"),
-                    ));
-                }
-                Err(error) => {
-                    outcome.fail(Self::publish_error(error));
-                    return outcome;
-                }
-            }
-        }
-        match self.client.flush().await {
-            Ok(()) => {
-                for record_id in queued {
-                    outcome.deliver(record_id);
-                }
-            }
-            Err(error) => outcome.fail(Self::publish_error(error)),
-        }
-        outcome
-    }
-
     /// Publishes `records` to JetStream and awaits each record's `PubAck` through the
     /// confirmation window `settings` declare.
     ///
     /// Every way the publish can fail ends it through the window, which first settles each answer
     /// JetStream already gave, so the host's retry never resends a record the stream confirmed.
     async fn publish_jetstream(
-        &self,
+        subject: &Subject,
         jetstream: &NatsJetStream,
         settings: AckConfirmation,
         records: Vec<SinkRecord>,
@@ -279,12 +406,12 @@ impl NatsSink {
             let occurred_at = record.occurred_at;
             let handed_over = if record.headers.is_empty() {
                 jetstream
-                    .publish(self.subject.clone(), record.payload.into())
+                    .publish(subject.clone(), record.payload.into())
                     .await
             } else {
                 jetstream
                     .publish_with_headers(
-                        self.subject.clone(),
+                        subject.clone(),
                         Self::header_map(&record.headers),
                         record.payload.into(),
                     )
@@ -406,10 +533,15 @@ impl NatsSink {
 
 #[async_trait]
 impl SinkLifecycle for NatsSink {
-    /// A core publish flushes the connection before it reports its records, and JetStream
-    /// answers each record, so the client holds nothing a publish reported delivered.
-    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
-        Ok(SinkFinish::NothingHeld)
+    /// A core write delivers its records once the client flushed them, so the client holds
+    /// records only after a write ran out of `timeout_ms`, and finishing flushes them by
+    /// `deadline`. JetStream answers each record, so its client holds nothing a publish reported
+    /// delivered.
+    async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
+        match &mut self.delivery {
+            NatsDelivery::Core(writes) => writes.finish(&self.client, deadline).await,
+            NatsDelivery::JetStream { .. } => Ok(SinkFinish::NothingHeld),
+        }
     }
 
     /// A publish failure leaves the client connected: it reconnects on its own schedule, and
@@ -422,15 +554,14 @@ impl SinkLifecycle for NatsSink {
 #[async_trait]
 impl RecordSink for NatsSink {
     async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
-        match &self.delivery {
-            NatsDelivery::Core => self.publish_core(records).await,
+        match &mut self.delivery {
+            NatsDelivery::Core(writes) => {
+                writes.publish(&self.client, &self.subject, records).await
+            }
             NatsDelivery::JetStream {
                 context,
                 confirmation,
-            } => {
-                self.publish_jetstream(context, *confirmation, records)
-                    .await
-            }
+            } => Self::publish_jetstream(&self.subject, context, *confirmation, records).await,
         }
     }
 }
@@ -443,10 +574,100 @@ impl RecordSink for NatsSink {
 mod tests {
     use std::num::NonZeroUsize;
 
-    use nervix_models::Timestamp;
+    use async_nats::connection::State;
+    use nervix_connector::{DeadlineElapsed, SinkFinishError};
+    use nervix_models::{DeadlineKey, Timestamp};
 
     use super::*;
-    use crate::scripted_server::ScriptedServer;
+    use crate::scripted_server::{DownServer, ScriptedServer};
+
+    /// How long a check waits for what the client or the scripted server must do. Generous,
+    /// because each wait ends as soon as what it waits for has happened.
+    const CHECK_BOUND: Duration = Duration::from_secs(30);
+
+    /// The `timeout_ms` of the clients whose core writes the checks hold up.
+    const WRITE_TIMEOUT_MS: &str = "200";
+
+    /// `operation`, which must end within [`CHECK_BOUND`].
+    async fn bounded<T>(operation: impl Future<Output = T>) -> T {
+        nervix_primitives::time::timeout(CHECK_BOUND, operation)
+            .await
+            .expect("the operation ends well within the check's bound")
+    }
+
+    /// A deadline [`CHECK_BOUND`] from now.
+    fn check_deadline() -> Instant {
+        Instant::now()
+            .checked_add(CHECK_BOUND)
+            .expect("thirty seconds from now is within the monotonic clock's range")
+    }
+
+    /// A core sink publishing to subject `events` through the server at `addr`, with the client
+    /// entries `config` adds to its address.
+    async fn core_sink(addr: &str, config: &[(&str, &str)]) -> NatsSink {
+        let policy = ParsedRetryPolicy {
+            backoff: Duration::from_millis(50),
+            max_backoff: Duration::from_millis(200),
+        };
+        let mut entries = vec![ClientConfigEntry {
+            key: "addr".to_string(),
+            value: addr.to_string(),
+        }];
+        for (key, value) in config {
+            entries.push(ClientConfigEntry {
+                key: (*key).to_string(),
+                value: (*value).to_string(),
+            });
+        }
+        let write_timeout =
+            NatsSink::write_timeout(&entries).expect("the checks configure a valid timeout_ms");
+        let client = NatsSink::client_from_config(&entries, policy)
+            .await
+            .expect("the sink connects to the scripted server");
+        NatsSink {
+            delivery: NatsDelivery::Core(CoreWrites::new(write_timeout)),
+            client,
+            subject: Subject::from("events"),
+        }
+    }
+
+    /// A core sink whose server went down after the sink connected: the server ended the
+    /// connection and refuses every one its client opens to reconnect, until it comes back.
+    struct StrandedSink {
+        sink: NatsSink,
+        server: DownServer,
+    }
+
+    /// A [`StrandedSink`] whose client sets `config`, returned once its client noticed that its
+    /// server went down.
+    async fn stranded_core_sink(config: &[(&str, &str)]) -> StrandedSink {
+        let server = ScriptedServer::start().await;
+        let addr = server.addr();
+        let script = nervix_primitives::task::spawn(async move {
+            let connection = server.greet(1024 * 1024).await;
+            connection.end().await;
+            server.go_down()
+        });
+        let sink = core_sink(&addr, config).await;
+        let server = script.await.expect("the scripted server ran");
+        wait_for_state(&sink.client, State::Disconnected).await;
+        StrandedSink { sink, server }
+    }
+
+    /// Waits until `client`'s connection is in `state`.
+    async fn wait_for_state(client: &NatsClient, state: State) {
+        let reached = nervix_primitives::time::timeout(CHECK_BOUND, async {
+            while client.connection_state() != state {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            reached.is_ok(),
+            "the client's connection did not become {state:?}"
+        );
+    }
 
     /// A JetStream sink publishing to subject `events` through the server at `addr`, with at most
     /// `max_in_flight` records awaiting their `PubAck` at once.
@@ -467,7 +688,7 @@ mod tests {
             timeout: Duration::from_secs(30),
         };
         NatsSink {
-            delivery: NatsDelivery::new(NatsPublishingMode::JetStream(confirmation), &client),
+            delivery: NatsDelivery::jetstream(confirmation, &client),
             client,
             subject: Subject::from("events"),
         }
@@ -675,6 +896,336 @@ mod tests {
             "the oldest record's failed PubAck ends the publish"
         );
         let _connection = script.await.expect("the scripted server ran");
+    }
+
+    /// A core write whose client cannot flush, because its server went down and refuses every
+    /// reconnection, fails within the client's `timeout_ms` and leaves its record unresolved. The
+    /// failure names the deadline it ran out of, which the emitter shows as its transient error.
+    #[nervix_primitives::test]
+    async fn a_core_write_its_client_cannot_flush_fails_within_timeout_ms() {
+        let StrandedSink {
+            mut sink,
+            server: _down,
+        } = stranded_core_sink(&[("timeout_ms", WRITE_TIMEOUT_MS)]).await;
+
+        let outcome = bounded(sink.publish(vec![record(0, b"held", &[])]))
+            .await
+            .into_parts();
+
+        assert!(
+            outcome.delivered.is_empty(),
+            "a record its client did not flush is not delivered"
+        );
+        assert!(outcome.rejected.is_empty());
+        let failure = outcome
+            .infrastructure_error
+            .expect("the flush the client could not finish fails the write");
+        assert!(matches!(
+            failure.current_context(),
+            SinkPublishError::Publish { sink: NATS }
+        ));
+        let elapsed = failure
+            .downcast_ref::<DeadlineElapsed>()
+            .expect("the failure names the deadline the write ran out of");
+        assert_eq!(elapsed.key, DeadlineKey::Timeout);
+        assert_eq!(elapsed.bound, Duration::from_millis(200));
+        assert_eq!(printable_description(&failure), Some(elapsed.to_string()));
+    }
+
+    /// A write after one that ran out of `timeout_ms` first waits for the client to flush what it
+    /// still holds, and hands the client none of its own records while it cannot. The client
+    /// therefore never queues a second copy behind the record it holds: once its server is back it
+    /// sends that record once, and then the record of the write that found it flushed.
+    #[nervix_primitives::test]
+    async fn a_core_write_flushes_what_its_client_still_holds_before_it_hands_over_more() {
+        let StrandedSink { mut sink, server } =
+            stranded_core_sink(&[("timeout_ms", WRITE_TIMEOUT_MS)]).await;
+        let held = bounded(sink.publish(vec![record(0, b"held", &[])]))
+            .await
+            .into_parts();
+        assert!(
+            held.infrastructure_error.is_some(),
+            "the first write runs out of timeout_ms"
+        );
+        let refused = bounded(sink.publish(vec![record(0, b"refused", &[])]))
+            .await
+            .into_parts();
+        assert!(refused.delivered.is_empty());
+        assert!(
+            refused.infrastructure_error.is_some(),
+            "the client still cannot flush the record it holds"
+        );
+
+        let script = nervix_primitives::task::spawn(async move {
+            let server = server.come_back().await;
+            let mut connection = server.accept(1024 * 1024).await;
+            let first = connection.expect_publish().await;
+            let second = connection.expect_publish().await;
+            (first.message, second.message, connection)
+        });
+        wait_for_state(&sink.client, State::Connected).await;
+        let next = bounded(sink.publish(vec![record(0, b"next", &[])]))
+            .await
+            .into_parts();
+
+        assert_eq!(next.delivered, vec![SinkRecordId::new(0)]);
+        assert!(next.infrastructure_error.is_none());
+        let (first, second, _connection) = script.await.expect("the scripted server ran");
+        assert_eq!(first, b"held");
+        assert_eq!(
+            second, b"next",
+            "the write that found the client holding a record handed over none of its own"
+        );
+    }
+
+    /// Finishing a core sink whose write ran out of `timeout_ms` flushes what its client still
+    /// holds by the finish deadline, which sends the record once the server is back.
+    #[nervix_primitives::test]
+    async fn finishing_a_core_sink_sends_what_a_stalled_write_left_with_its_client() {
+        let StrandedSink { mut sink, server } =
+            stranded_core_sink(&[("timeout_ms", WRITE_TIMEOUT_MS)]).await;
+        let held = bounded(sink.publish(vec![record(0, b"held", &[])]))
+            .await
+            .into_parts();
+        assert!(
+            held.infrastructure_error.is_some(),
+            "the write runs out of timeout_ms"
+        );
+
+        let script = nervix_primitives::task::spawn(async move {
+            let server = server.come_back().await;
+            let mut connection = server.accept(1024 * 1024).await;
+            let publish = connection.expect_publish().await;
+            (publish.message, connection)
+        });
+        let finished = bounded(sink.finish(check_deadline())).await;
+
+        assert!(matches!(finished, Ok(SinkFinish::Flushed)), "{finished:?}");
+        let (message, _connection) = script.await.expect("the scripted server ran");
+        assert_eq!(message, b"held");
+    }
+
+    /// Finishing a core sink whose client still holds the records of a write that ran out of
+    /// `timeout_ms` when the finish deadline passes counts them.
+    #[nervix_primitives::test]
+    async fn finishing_a_core_sink_counts_what_its_client_still_holds_at_the_deadline() {
+        let StrandedSink {
+            mut sink,
+            server: _down,
+        } = stranded_core_sink(&[("timeout_ms", WRITE_TIMEOUT_MS)]).await;
+        let held = bounded(sink.publish(vec![record(0, b"first", &[]), record(1, b"second", &[])]))
+            .await
+            .into_parts();
+        assert!(
+            held.infrastructure_error.is_some(),
+            "the write runs out of timeout_ms"
+        );
+
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(200))
+            .expect("a moment from now is within the monotonic clock's range");
+        let finished = bounded(sink.finish(deadline)).await;
+
+        let failure = match finished {
+            Ok(finished) => {
+                panic!("a client that cannot flush leaves its records unsent, not {finished:?}")
+            }
+            Err(failure) => failure,
+        };
+        assert_eq!(
+            *failure.current_context(),
+            SinkFinishError::Unsent {
+                sink: NATS,
+                records: 2
+            }
+        );
+    }
+
+    /// A core write delivers the records its client flushed, writes a record's headers into its
+    /// message and refuses for good a record above the server's `max_payload`.
+    #[nervix_primitives::test]
+    async fn a_core_write_delivers_what_its_client_flushed_and_refuses_a_record_above_max_payload()
+    {
+        let server = ScriptedServer::start().await;
+        let addr = server.addr();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.accept(64).await;
+            let plain = connection.expect_publish().await;
+            let tagged = connection.expect_publish().await;
+            (plain.message, tagged.message, connection)
+        });
+        let mut sink = core_sink(&addr, &[("timeout_ms", WRITE_TIMEOUT_MS)]).await;
+
+        let outcome = bounded(sink.publish(vec![
+            record(0, b"plain", &[]),
+            record(1, &[b'x'; 128], &[]),
+            record(2, b"tagged", &[("trace", "a")]),
+        ]))
+        .await
+        .into_parts();
+
+        assert_eq!(
+            outcome.delivered,
+            vec![SinkRecordId::new(0), SinkRecordId::new(2)]
+        );
+        let rejected = outcome
+            .rejected
+            .iter()
+            .map(|rejected| rejected.id)
+            .collect::<Vec<_>>();
+        assert_eq!(rejected, vec![SinkRecordId::new(1)]);
+        assert!(outcome.infrastructure_error.is_none());
+        let (plain, tagged, _connection) = script.await.expect("the scripted server ran");
+        assert_eq!(plain, b"plain");
+        assert_eq!(tagged, b"NATS/1.0\r\ntrace: a\r\n\r\ntagged");
+    }
+
+    /// A client without `timeout_ms` bounds no core write: a write whose client cannot flush
+    /// waits until its server is back, and then delivers its record.
+    #[nervix_primitives::test]
+    async fn a_core_write_without_timeout_ms_waits_until_its_server_is_back() {
+        let StrandedSink { mut sink, server } = stranded_core_sink(&[]).await;
+        let script = async move {
+            // The outage outlasts the bound the other checks configure.
+            nervix_primitives::time::sleep(Duration::from_millis(500)).await;
+            let server = server.come_back().await;
+            let mut connection = server.accept(1024 * 1024).await;
+            let publish = connection.expect_publish().await;
+            (publish.message, connection)
+        };
+
+        let (outcome, (message, _connection)) = bounded(async {
+            futures_util::join!(sink.publish(vec![record(0, b"waited", &[])]), script)
+        })
+        .await;
+
+        let outcome = outcome.into_parts();
+        assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+        assert!(outcome.infrastructure_error.is_none());
+        assert_eq!(message, b"waited");
+    }
+
+    /// Finishing a core sink whose client closed while it still held a record reports the
+    /// client's failure with the driver's flush error beneath.
+    #[nervix_primitives::test]
+    async fn finishing_a_core_sink_whose_client_closed_reports_its_failed_flush() {
+        let StrandedSink { mut sink, server } =
+            stranded_core_sink(&[("timeout_ms", WRITE_TIMEOUT_MS)]).await;
+        let held = bounded(sink.publish(vec![record(0, b"held", &[])]))
+            .await
+            .into_parts();
+        assert!(
+            held.infrastructure_error.is_some(),
+            "the write runs out of timeout_ms"
+        );
+        let script = nervix_primitives::task::spawn(async move {
+            let server = server.come_back().await;
+            let mut connection = server.accept(1024 * 1024).await;
+            let publish = connection.expect_publish().await;
+            (publish.message, connection)
+        });
+        let (message, _connection) = script.await.expect("the scripted server ran");
+        assert_eq!(message, b"held");
+        sink.client
+            .drain()
+            .await
+            .expect("the client takes the request to close");
+        // The client closes once its connection handler takes the request; from then on a flush
+        // fails.
+        let closed = nervix_primitives::time::timeout(CHECK_BOUND, async {
+            while sink.client.flush().await.is_ok() {
+                nervix_primitives::task::consume_budget().await;
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "the drained client did not close");
+
+        let finished = bounded(sink.finish(check_deadline())).await;
+
+        let failure = match finished {
+            Ok(finished) => panic!("a closed client cannot flush, not {finished:?}"),
+            Err(failure) => failure,
+        };
+        assert_eq!(
+            *failure.current_context(),
+            SinkFinishError::Flush { sink: NATS }
+        );
+        assert!(
+            failure
+                .downcast_ref::<async_nats::client::FlushError>()
+                .is_some(),
+            "the failure keeps the driver's flush error: {failure:?}"
+        );
+    }
+
+    /// Every record of a completed core write was flushed to the client's socket, so finishing
+    /// the sink has nothing to send.
+    #[nervix_primitives::test]
+    async fn finishing_a_core_sink_whose_writes_flushed_has_nothing_to_send() {
+        let server = ScriptedServer::start().await;
+        let addr = server.addr();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.accept(1024 * 1024).await;
+            let publish = connection.expect_publish().await;
+            (publish.message, connection)
+        });
+        let mut sink = core_sink(&addr, &[("timeout_ms", WRITE_TIMEOUT_MS)]).await;
+
+        let outcome = bounded(sink.publish(vec![record(0, b"sent", &[])]))
+            .await
+            .into_parts();
+        let finished = bounded(sink.finish(check_deadline())).await;
+
+        assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+        assert!(
+            matches!(finished, Ok(SinkFinish::NothingHeld)),
+            "{finished:?}"
+        );
+        let (message, _connection) = script.await.expect("the scripted server ran");
+        assert_eq!(message, b"sent");
+    }
+
+    #[test]
+    fn a_core_write_takes_the_bound_the_clients_timeout_ms_sets() {
+        let configured = NatsSink::write_timeout(&[ClientConfigEntry {
+            key: "timeout_ms".to_string(),
+            value: "1500".to_string(),
+        }])
+        .expect("1500 ms is a valid deadline")
+        .expect("the client sets timeout_ms");
+        assert_eq!(configured.key(), DeadlineKey::Timeout);
+        assert_eq!(configured.bound(), Duration::from_millis(1500));
+
+        let omitted = NatsSink::write_timeout(&[]).expect("a client may leave timeout_ms out");
+        assert_eq!(
+            omitted, None,
+            "without the key a core write waits for its flush"
+        );
+    }
+
+    #[test]
+    fn a_timeout_ms_that_breaks_the_deadline_rule_fails_the_start_as_configuration() {
+        for value in ["0", "-1", "1.5", "1s", ""] {
+            let failure = NatsSink::write_timeout(&[ClientConfigEntry {
+                key: "timeout_ms".to_string(),
+                value: value.to_string(),
+            }])
+            .expect_err("the value breaks the deadline rule");
+            assert_eq!(
+                *failure.current_context(),
+                SinkStartError::InvalidConfiguration { sink: NATS },
+                "{value:?}"
+            );
+            assert!(
+                matches!(
+                    failure.downcast_ref::<nervix_connector::ClientConfigError>(),
+                    Some(nervix_connector::ClientConfigError::InvalidDeadline {
+                        key: "timeout_ms"
+                    })
+                ),
+                "{value:?}: {failure:?}"
+            );
+        }
     }
 
     #[test]

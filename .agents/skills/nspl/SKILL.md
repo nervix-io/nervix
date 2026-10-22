@@ -411,10 +411,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   emitter and WebSocket clients take `connect_timeout_ms` and allow 30 seconds without it, while a
   ZeroMQ PULL ingestor reads none of these keys; a RabbitMQ client's deadline also covers the AMQP
   handshake and opening the entity's channel, and its `timeout_ms` bounds the round trip that ends
-  a `NO ACK` write. A Syslog emitter's client bounds each frame write by `timeout_ms`; a TLS Syslog
-  listener's client bounds each accepted handshake by `connect_timeout_ms`, 30 seconds without it,
-  and a TCP or TLS listener's client may close idle connections with `idle_timeout_ms`. Put each
-  key only on a client whose direction performs the wait it bounds. Read `Ingestors` or
+  a `NO ACK` write. A NATS client's `timeout_ms` bounds a Core NATS write and its flush to the
+  client's socket, which is not a server round trip. A Syslog emitter's client bounds each frame
+  write by `timeout_ms`; a TLS Syslog listener's client bounds each accepted handshake by
+  `connect_timeout_ms`, 30 seconds without it, and a TCP or TLS listener's client may close idle
+  connections with `idle_timeout_ms`. Put each key only on a client whose direction performs the
+  wait it bounds. Read `Ingestors` or
   `Emitters` → `Client Deadlines`, and `Connector Capabilities` for each entity's waits and what
   bounds them.
 - For an HTTP emitter, write `CREATE HTTP REQUEST EMITTER <name> FROM <relay> TO <client> METHOD <string_expression> PATH
