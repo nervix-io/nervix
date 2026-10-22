@@ -31,8 +31,7 @@ CREATE BRANCH chaos_paced_branch SCHEMA chaos_paced_branch_key TTL 5m MAX INSTAN
 
 CREATE RELAY chaos_paced_records SCHEMA chaos_paced_record BRANCHED BY chaos_paced_branch CAPACITY 1;
 
-CREATE CLIENT chaos_paced_kafka
-  TYPE KAFKA
+CREATE KAFKA CLIENT chaos_paced_kafka
   CONFIG {
     'bootstrap.servers' = 'broker:9092',
     'auto.offset.reset' = 'earliest'

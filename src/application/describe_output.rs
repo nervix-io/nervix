@@ -28,8 +28,8 @@ use nervix_models::{
     BranchSelection, CanonicalNsplError, ClickHouseSink, ClickHouseTableSink, ClientConsumerSink,
     ClientSink, ClusterNodeName, CreateCorrelator, CreateDeduplicator, CreateEmitter,
     CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor, CreateReorderer,
-    CreateWindowProcessor, EmitSink, EmitterBody, FieldPath, HttpRequestSink, HttpSink,
-    IcebergCatalog, IcebergSink, IcebergTableSink, IngestSource, IngestTimestampSource,
+    CreateWindowProcessor, EmitSink, EmitterBody, FieldPath, HeaderModel, HttpRequestSink,
+    HttpSink, IcebergCatalog, IcebergSink, IcebergTableSink, IngestSource, IngestTimestampSource,
     IngestorInput, KafkaOffsetMode, KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource,
     Model, ModelKind, ModelName, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink,
     MqttSink, MqttTopicSink, MySqlConflictAction, MySqlSink, MySqlTableSink, NatsSink,
@@ -463,8 +463,21 @@ pub(in crate::application) fn format_ingestor_describe_output(
         ));
         lines.push(format!("pulsar instances: {instances}"));
     }
+    lines.push(format!(
+        "headers: {}",
+        format_header_model(ingestor.input.source_kind().capabilities().headers)
+    ));
 
     lines.join("\n")
+}
+
+/// How `DESCRIBE` shows the header model of one side: the model, or `none` where that side's
+/// messages carry no transport headers.
+fn format_header_model(model: Option<HeaderModel>) -> String {
+    match model {
+        Some(model) => model.to_string(),
+        None => "none".to_string(),
+    }
 }
 
 /// One line of `SHOW INGESTORS`: the pair the ingestor reads, its schema or codec, the node that
@@ -985,6 +998,10 @@ pub(in crate::application) fn format_emitter_describe_output(
             } else {
                 "none"
             }
+        ),
+        format!(
+            "headers: {}",
+            format_header_model(emitter.sink.capabilities().headers)
         ),
     ]);
     Ok(lines.join("\n"))

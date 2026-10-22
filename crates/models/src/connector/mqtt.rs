@@ -103,15 +103,42 @@ pub struct MqttTopicSource {
     pub quiesce: IngestQuiesceMode,
 }
 
+/// The largest packet an MQTT TOPIC ingestor's client receives, in bytes, which every `CONNECT` it
+/// sends advertises as its Maximum Packet Size, so MQTT 5 obliges the broker to discard a larger
+/// publish for this subscriber instead of sending it.
+///
+/// A policy input: the ten KiB the driver applied, unannounced, before Nervix declared the bound,
+/// so declaring it refuses nothing an ingestor received before.
+pub const MQTT_SOURCE_MAXIMUM_PACKET_BYTES: u64 = 10 * 1024;
+
+/// The largest value MQTT's Four Byte Integer, which carries the Maximum Packet Size, can hold.
+const MQTT_FOUR_BYTE_INTEGER_MAX: u64 = 0xFFFF_FFFF;
+
+const _: () = assert!(
+    MQTT_SOURCE_MAXIMUM_PACKET_BYTES > 0
+        && MQTT_SOURCE_MAXIMUM_PACKET_BYTES <= MQTT_FOUR_BYTE_INTEGER_MAX,
+    "MQTT forbids a Maximum Packet Size of zero, and carries it as a Four Byte Integer"
+);
+
 /// What the connector of a MQTT TOPIC ingestor holds and how long it waits.
 const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
-    buffers: &[DeclaredBuffer {
-        holds: "SUBSCRIBE and PUBACK requests for the connection",
-        bound: BufferBound::Bounded {
-            capacity: BufferCapacity::Driver("1024 requests"),
-            overflow: BufferOverflow::Backpressure,
+    buffers: &[
+        DeclaredBuffer {
+            holds: "each incoming packet, whose bound every CONNECT advertises as its Maximum \
+                    Packet Size",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Bytes(MQTT_SOURCE_MAXIMUM_PACKET_BYTES),
+                overflow: BufferOverflow::PeerDiscards,
+            },
         },
-    }],
+        DeclaredBuffer {
+            holds: "SUBSCRIBE and PUBACK requests for the connection",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Driver("1024 requests"),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+    ],
     waits: &[
         DeclaredWait {
             wait: "connection: name resolution, TCP, TLS and CONNECT",
@@ -126,7 +153,10 @@ const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Driver("keep-alive of 60 s, or the broker's"),
         },
     ],
-    driver_limits: &["An incoming packet above 10 KiB ends the connection."],
+    driver_limits: &[
+        "A packet above the advertised Maximum Packet Size that a broker sends anyway ends the \
+         connection with DISCONNECT Packet too large.",
+    ],
 };
 
 /// What the connector of a MQTT TOPIC emitter holds and how long it waits.
@@ -157,7 +187,7 @@ const MQTT_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for MqttTopicSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
+        headers: None,
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Mqtt),
@@ -401,7 +431,7 @@ pub struct MqttTopicSink {
 
 impl SinkEntity for MqttTopicSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::Client(ConnectorKind::Mqtt),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },

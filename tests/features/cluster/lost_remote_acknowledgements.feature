@@ -23,7 +23,7 @@ Feature: Remote record acknowledgements lost between nodes
       CREATE SCHEMA lost_ack_key ( branch_name STRING );
       CREATE BRANCH lost_ack_branch SCHEMA lost_ack_key TTL 5m;
       CREATE RELAY lost_ack_records SCHEMA lost_ack_event BRANCHED BY lost_ack_branch;
-      CREATE CLIENT lost_ack_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT lost_ack_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

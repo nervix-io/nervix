@@ -586,4 +586,62 @@ mod tests {
         headers.visit(&mut |name, value| visited.push(format!("{name}={value}")));
         assert_eq!(visited, vec!["trace=a", "trace=b"]);
     }
+
+    /// Both NATS entities declare repeats by name with exact names: the header map a sink writes
+    /// keeps every value of a name together under it in write order, so a reader of the published
+    /// message finds each name's values together and in that order, while names that differ in
+    /// letter case stay two names.
+    #[test]
+    fn written_headers_read_back_with_every_value_of_a_name_together_in_write_order() {
+        let mut written = Vec::new();
+        for (name, value) in [
+            ("trace", "a"),
+            ("Tenant", "x"),
+            ("trace", "b"),
+            ("tenant", "y"),
+            ("trace", "c"),
+        ] {
+            written.push((name.to_string(), value.to_string()));
+        }
+        let headers = NatsMessageHeaders {
+            message: NatsMessage {
+                subject: "events".into(),
+                reply: None,
+                payload: bytes::Bytes::new(),
+                headers: Some(crate::NatsSink::header_map(&written)),
+                status: None,
+                description: None,
+                length: 0,
+            },
+        };
+        let mut visited: Vec<(String, String)> = Vec::new();
+        headers.visit(&mut |name, value| visited.push((name.to_string(), value.to_string())));
+
+        let mut finished = std::collections::BTreeSet::new();
+        let mut current: Option<&str> = None;
+        let mut values: std::collections::BTreeMap<&str, Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for (name, value) in &visited {
+            if current != Some(name.as_str()) {
+                if let Some(previous) = current {
+                    finished.insert(previous);
+                }
+                assert!(
+                    !finished.contains(name.as_str()),
+                    "every value of {name} is visited together: {visited:?}"
+                );
+                current = Some(name);
+            }
+            values
+                .entry(name.as_str())
+                .or_default()
+                .push(value.as_str());
+        }
+        let expected = std::collections::BTreeMap::from([
+            ("Tenant", vec!["x"]),
+            ("tenant", vec!["y"]),
+            ("trace", vec!["a", "b", "c"]),
+        ]);
+        assert_eq!(values, expected);
+    }
 }

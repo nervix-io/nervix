@@ -18,7 +18,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 1 CONFIG {
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 CONFIG {
         'addr' = 'redis://{{redis_peer}}',
         'connect_timeout_ms' = '1000'
       };
@@ -64,7 +64,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 0 MAX 1 CONFIG {
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 0 MAX 1 CONFIG {
         'addr' = 'redis://{{redis_peer}}',
         'connect_timeout_ms' = '1000'
       };
@@ -104,7 +104,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqps://{{rabbitmq_peer}}/%2f',
         'connect_timeout_ms' = '1000'
       };
@@ -142,7 +142,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqps://{{rabbitmq_peer}}/%2f',
         'connect_timeout_ms' = '1000'
       };
@@ -179,7 +179,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqp://{{rabbitmq_peer}}/%2f',
         'connect_timeout_ms' = '1000'
       };
@@ -217,7 +217,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = 'amqp://{{rabbitmq_peer}}/%2f',
         'connect_timeout_ms' = '1000'
       };
@@ -265,7 +265,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = '{{rabbitmq_stallable_addr}}',
         'timeout_ms' = '1000'
       };
@@ -328,7 +328,7 @@ Feature: Stalled peers
       CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
-      CREATE CLIENT syslog_forwarder TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_forwarder CONFIG {
         'protocol' = 'tls',
         'addr' = '{{syslog_peer}}',
         'connect_timeout_ms' = '1000'
@@ -378,7 +378,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT syslog_forwarder TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT syslog_forwarder CONFIG {
         'protocol' = 'tcp',
         'addr' = '{{syslog_peer}}',
         'timeout_ms' = '1000'
@@ -417,7 +417,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT ws_main TYPE WEBSOCKETS CONFIG {
+      CREATE WEBSOCKETS CLIENT ws_main CONFIG {
         'endpoint' = 'ws://{{websocket_peer}}/stalled',
         'connect_timeout_ms' = '1000'
       };
@@ -454,7 +454,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT poll_source TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT poll_source CONFIG {
         'endpoint' = 'http://{{http_peer}}/notifications',
         'method' = 'GET',
         'timeout_ms' = 1000
@@ -492,7 +492,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (value number);
       CREATE CODEC sample_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample;
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
-      CREATE CLIENT prom_main TYPE PROMETHEUS CONFIG {
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = 'http://{{prometheus_peer}}',
         'timeout_ms' = 1000
       };
@@ -538,7 +538,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sentry_main TYPE SENTRY CONFIG {
+      CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = 'http://public@{{sentry_peer}}/1',
         'timeout_ms' = 1000
       };
@@ -586,7 +586,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_main TYPE OTEL CONFIG {
+      CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = 'http://{{otel_peer}}',
         'protocol' = '<protocol>',
         'timeout_ms' = 1000
@@ -640,7 +640,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT clickhouse_main TYPE CLICKHOUSE CONFIG {
+      CREATE CLICKHOUSE CLIENT clickhouse_main CONFIG {
         'addr' = 'http://{{clickhouse_peer}}',
         'timeout_ms' = 1000
       };
@@ -693,7 +693,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+      CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_peer}}',
         'region' = 'us-east-1',
         'timeout_ms' = 1000
@@ -742,7 +742,7 @@ Feature: Stalled peers
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT zeromq_main CONFIG {
         'addr' = 'tcp://{{zeromq_peer}}',
         'connect_timeout_ms' = '1000'
       };
@@ -791,7 +791,7 @@ Feature: Stalled peers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT zeromq_main TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT zeromq_main CONFIG {
         'addr' = '{{zeromq_peer}}',
         'timeout_ms' = '1000'
       };

@@ -22,14 +22,12 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
           'protocol' = 'udp',
           'addr' = '{{syslog_ingest_addr}}'
         };
-      CREATE CLIENT syslog_forwarder
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_forwarder
         CONFIG {
           'protocol' = 'udp',
           'addr' = '{{syslog_emit_addr}}'
@@ -125,14 +123,12 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
           'protocol' = 'udp',
           'addr' = '{{syslog_ingest_addr}}'
         };
-      CREATE CLIENT syslog_forwarder
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_forwarder
         CONFIG {
           'protocol' = 'udp',
           'addr' = '{{syslog_emit_addr}}'
@@ -189,8 +185,7 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
-      CREATE CLIENT invalid_syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT invalid_syslog_listener
         CONFIG {
           'protocol' = 'udp',
           'addr' = '{{syslog_ingest_addr}}',
@@ -240,8 +235,7 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         MOUNT syslog_tls VERSION 1
         CONFIG {
           'protocol' = 'tls',
@@ -299,8 +293,7 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA received_syslog_message UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
           'protocol' = 'tcp',
           'addr' = '{{syslog_ingest_addr}}',
@@ -361,8 +354,7 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
           'protocol' = 'tcp',
           'addr' = '{{syslog_ingest_addr}}'
@@ -430,8 +422,7 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         MOUNT syslog_tls VERSION 1
         CONFIG {
           'protocol' = 'tls',
@@ -501,8 +492,7 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         MOUNT syslog_tls VERSION 1
         CONFIG {
           'protocol' = 'tls',
@@ -559,8 +549,7 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
           'protocol' = 'tcp',
           'addr' = '{{syslog_ingest_addr}}',
@@ -614,8 +603,7 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
           'protocol' = 'udp',
           'addr' = '{{syslog_ingest_addr}}',
@@ -677,8 +665,7 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
           'protocol' = 'udp',
           'addr' = '{{syslog_ingest_addr}}'

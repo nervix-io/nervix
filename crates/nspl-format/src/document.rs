@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn a_url_in_a_statement_is_not_an_interior_comment() {
-        let input = "CREATE CLIENT c TYPE MQTT CONFIG { 'addr' = 'mqtt://127.0.0.1:1883' };";
+        let input = "CREATE MQTT CLIENT c CONFIG { 'addr' = 'mqtt://127.0.0.1:1883' };";
         let tokens = nervix_nspl::lex(input).expect("must lex");
         assert!(!contains_interior_comment(
             input,

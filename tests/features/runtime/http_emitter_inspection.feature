@@ -54,10 +54,10 @@ Feature: HTTP emitter inspection, errors and metrics
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT encoded_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT encoded_client CONFIG {
         'endpoint' = '{{http_receiver.encoded_api}}', 'timeout_ms' = 60000
       };
-      CREATE CLIENT empty_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT empty_client CONFIG {
         'endpoint' = '{{http_receiver.empty_api}}', 'timeout_ms' = 60000
       };
       CREATE EMITTER encoded FROM outgoing
@@ -264,7 +264,7 @@ Feature: HTTP emitter inspection, errors and metrics
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -279,7 +279,7 @@ Feature: HTTP emitter inspection, errors and metrics
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
       CREATE ATTACHED EMITTER published FROM outgoing

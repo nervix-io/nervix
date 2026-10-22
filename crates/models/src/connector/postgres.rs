@@ -80,7 +80,7 @@ const POSTGRES_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SinkEntity for PostgresTableSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::Client(ConnectorKind::Postgres),
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },

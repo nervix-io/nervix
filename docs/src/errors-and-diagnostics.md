@@ -13,6 +13,8 @@ as waiting for materialized state or following a new leader, remain distinct fro
 The web console applies the same distinction to structured choice lookups: an absent form
 prerequisite shows a neutral hint, and stale context offers a fresh request. A failed lookup,
 closed session channel, or unreadable reply appears as an alert.
+Client creation names its choice as a connector and presents the composed Plexus
+`<CONNECTOR> CLIENT` head; a missing choice asks the operator to choose a client connector.
 
 This chapter owns the error and diagnostic model across layers: who gives a failure its meaning,
 how a report is created, enriched, inspected and rendered, which outcomes are not failures, where a
@@ -859,12 +861,18 @@ invalid-model failure naming the node and output in its diagnostic. An ingestor 
 client of another connector, or an endpoint of another `TYPE`, than its head's entity reads is
 refused with a typed failure naming the domain, the ingestor, its connector and entity, the client
 or endpoint, and both connectors or both endpoint types, such as `KAFKA TOPIC ingestor 'orders_in'
-in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. A `TYPE
-PROMETHEUS` client's `CONFIG` is held to the keys the vocabulary declares for it when the client
+in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. A `PROMETHEUS CLIENT`'s `CONFIG` is held to the keys the vocabulary declares for it when the client
 is created. The refusal names the connector, the client and the domain, with the vocabulary's
 `PrometheusClientConfigError` beneath it naming the key. Where the key's value breaks its address
 or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
 domain 'shop' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string`.
+An emitter whose sink keeps one value per header name and whose `INVOKE` clause writes one literal
+header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
+emitter, the sink's connector and entity, the header as the sink's
+[header model](./connector-contract.md#header-models) records it, and both `INVOKE` positions, such as
+`emitter 'out' in domain 'shop' writes header 'route' at INVOKE #1 and again at #3, but PULSAR TOPIC
+emitters keep one value per header name, so the later write would replace the earlier one on every
+record`. The header is a name the statement writes, never a value a record carries.
 Planning failures
 likewise retain the selected entity or placement so an operator can correct the request. A
 relocation the graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`:
@@ -1036,6 +1044,12 @@ and fails with `ExecutionBuildError::StopEmitter` above the stop report, beneath
 `RuntimeError::BuildDomainExecution`. The emitter holds the task's own description of a failed
 drain as a printable attachment, which a rendered chain does not show, so `StopEmitter` carries that
 description and its message ends with it. A later stop can still end the retained task.
+
+The task bounds buffer draining by its deadline, then lets the sink's finish answer within half the
+supervisor's response grace while still passing the original deadline to the sink. A finish that
+reports unsent records at its deadline supplies its own count to the stop report. A buffer drain
+that misses the deadline, or a finish that never answers within that reporting window, reports the
+stop deadline instead.
 
 ### Node Startup
 
@@ -1586,6 +1600,14 @@ report above the domain lifecycle and consensus or runtime cause, and leaves the
 A refused resume updates the coordinator's current quiescence diagnostics; it does not become a
 definitive application failure merely because the coordinator temporarily lost its authority. An existing
 definitive effect failure is retained when cleanup succeeds in that same completion attempt.
+An ordinary command whose internal transaction is still committing when its commit attempt ends on
+any other report, such as `TransactionCommitError::RecoverQuiescence` above a drain timeout or a
+consensus write refused by a saturated log, answers `OutcomeUnknown` with the `StillApplying` cause
+rather than `Failed`. That report describes one attempt, and the committing transaction keeps the
+command's domain mutation lease until recovery under the same reference records the outcome. A
+model step that adopts its transaction's own pause validates its frozen planning inputs against
+the domain as that pause left it, so `PlanningInputsChanged` names only inputs that another owner
+changed.
 
 An ordinary command's preflight, queue, and commit-planning refusals are reports decided against
 its coordinator's observation of the command's internal transaction. Before the session maps such a

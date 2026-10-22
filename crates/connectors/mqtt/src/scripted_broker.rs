@@ -110,6 +110,20 @@ impl ScriptedConnection {
         }
     }
 
+    /// Reads the next packet the client sends, which must be a QoS 0 PUBLISH, and returns its
+    /// payload.
+    pub(crate) async fn read_publish_at_most_once(&mut self) -> Vec<u8> {
+        let (packet_type, body) = self.read_packet().await;
+        assert_eq!(packet_type, PUBLISH, "the client sends a PUBLISH");
+        // The topic with its two-byte length and the property section with its length come before
+        // the payload; a QoS 0 PUBLISH carries no packet identifier.
+        let topic_bytes = usize::from(u16::from_be_bytes([body[0], body[1]]));
+        let properties_at = 2 + topic_bytes;
+        let (properties_bytes, length_bytes) = variable_integer(&body[properties_at..]);
+        let payload_at = properties_at + length_bytes + properties_bytes;
+        body[payload_at..].to_vec()
+    }
+
     /// Answers the PUBLISH `packet_id` with a PUBACK carrying the reason code `reason`.
     pub(crate) async fn puback(&mut self, packet_id: u16, reason: u8) {
         let [high, low] = packet_id.to_be_bytes();

@@ -2462,6 +2462,12 @@ The `Docker Build` workflow builds the images a suite needs and calls the `Chaos
 
 Both calls pass the revision the build checked out. The diagnostic image is pushed under that tag
 only and never enters a published manifest, and its build runs only when a chaos suite needs it.
+
+Both image build jobs record the shared short CPU, memory-access and filesystem calibrations.
+The builder also probes its mounted Cargo target filesystem before compilation, retaining raw
+results in the plain BuildKit log. These are host/build diagnostics, not chaos execution evidence
+or a sustained SSD benchmark; [Integration Test Lifecycle](integration-test-lifecycle.md) owns
+their bounds and interpretation. They do not alter image identity, suite budgets or verdicts.
 The triggers are:
 
 | Trigger | Suite |
