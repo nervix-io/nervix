@@ -940,6 +940,15 @@ unit coverage; this public scenario proves initial-state retirement, branch isol
 pairings without assuming the phase of an owner's next scan. Logical TTLs, domain clock rates,
 physical scan cadence and correlation policy retain their own contracts.
 
+The materialized-state expiration and recreation outline gives its fixture a 30-second branch TTL,
+allows 30 seconds to observe each complete row and 60 seconds to observe retirement, and posts both
+recreated branches concurrently. A short fixture lifetime can end while the shared scenario runner
+is delayed between an HTTP response and a state query; extending only the query's wait cannot make
+an expired row visible again. The outline still requires the initial row, an empty publication after
+expiration, and the exact recreated keys and payloads on one- and three-node clusters. These bounds
+belong to the fixture and its observations; product retention and deadline policies keep their own
+contracts.
+
 Collection and route-flush timing assertions measure observed row arrival from the HTTP publication
 instant. Concurrent branch posts retain one publication origin, and every expected row must match
 its tenant and sequence and arrive after the declared lower bound, inside the unchanged delivery
