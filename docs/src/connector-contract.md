@@ -1732,7 +1732,8 @@ sequenceDiagram
   host retries. Closing the source ends the retained connection tasks and queue together.
   Plans, sources and stream listeners retain a configured accept capability. Ordinary builds keep
   zero-sized fault markers; the testing module owns the harness channel and selected bound address.
-  The harness retains one armed fault in a watch channel until the selected listener claims it
+  The harness retains one named request carrying the bound address and its acknowledgement in a
+  watch channel until the selected listener claims it
   and acknowledges it once. Cancelling an accept does not consume that request, and arming another
   fault before acknowledgement is a harness error. The one- and three-node Cucumber checks hold a connection open
   across that failure, observe the fault, and send through both the retained connection and a

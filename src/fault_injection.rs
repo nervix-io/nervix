@@ -4,9 +4,9 @@
 //!
 //! - **Owns.** The shared state used to arm deterministic server failures, pauses, timing
 //!   overrides, listener-address overrides, and test scheduling.
-//! - **Depends on.** Vocabulary identities, Tokio notification primitives, and the decision
-//!   layer's test scheduler mode.
-//! - **Must not know.** Product configuration, NSPL syntax, connector implementations, or runtime
+//! - **Depends on.** Vocabulary identities, connector test-control contracts, execution-sensitive
+//!   notification primitives, and the decision layer's test scheduler mode.
+//! - **Must not know.** Product configuration, Plexus syntax, connector drivers, or runtime
 //!   ownership beyond the typed values needed to select a seam.
 
 #![cfg_attr(
@@ -26,6 +26,7 @@ use std::{
 use ahash::RandomState;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_connector_syslog::SyslogListenerFault;
 use nervix_execution::{Executor, MemoryClass, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
@@ -238,7 +239,7 @@ struct FaultInjectionState {
     /// A scenario can fail one stream accept on a selected bound address, and observe that the
     /// source consumed the fault before checking its established connections. The armed request
     /// remains available until acknowledged; another request cannot overwrite it before then.
-    syslog_listener_faults: watch::Sender<Option<(String, watch::Sender<bool>)>>,
+    syslog_listener_faults: watch::Sender<Option<SyslogListenerFault>>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
     domain_drain_timeout: RwLock<Option<Duration>>,
     entity_gate_deadline: RwLock<Option<Duration>>,
@@ -1960,20 +1961,18 @@ impl FaultInjection {
             "a Syslog source must be subscribed before its listener fault is armed"
         );
         self.inner.syslog_listener_faults.send_modify(|pending| {
-            if let Some((_, fired)) = pending {
+            if let Some(fault) = pending {
                 assert!(
-                    *fired.borrow(),
+                    *fault.fired.borrow(),
                     "observe the armed Syslog listener fault before arming another"
                 );
             }
-            *pending = Some((bind_addr, fired));
+            *pending = Some(SyslogListenerFault { bind_addr, fired });
         });
         observed
     }
 
-    pub(crate) fn syslog_listener_faults(
-        &self,
-    ) -> watch::Sender<Option<(String, watch::Sender<bool>)>> {
+    pub(crate) fn syslog_listener_faults(&self) -> watch::Sender<Option<SyslogListenerFault>> {
         self.inner.syslog_listener_faults.clone()
     }
 

@@ -51,6 +51,8 @@ use crate::config::{SyslogClientConfig, SyslogConfigError, SyslogDirection, Sysl
 #[path = "source/listener_faults.rs"]
 mod listener_faults;
 #[cfg(feature = "testing")]
+pub use listener_faults::SyslogListenerFault;
+#[cfg(feature = "testing")]
 use listener_faults::{ConfiguredListenerFaults, ConfiguredStreamAccept};
 
 /// The listener fault capability has a stable slot in plans and sources. Ordinary builds keep
@@ -120,7 +122,7 @@ impl SyslogSourcePlan {
     #[cfg(feature = "testing")]
     pub fn with_listener_faults(
         mut self,
-        faults: watch::Sender<Option<(String, watch::Sender<bool>)>>,
+        faults: watch::Sender<Option<SyslogListenerFault>>,
     ) -> Self {
         self.listener_faults = ConfiguredListenerFaults::new(faults);
         self

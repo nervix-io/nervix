@@ -16,16 +16,16 @@ fn an_armed_listener_fault_remains_available_until_acknowledged() {
     let late_listener = channel.subscribe();
     {
         let pending = late_listener.borrow();
-        let (address, fired) = pending.as_ref().expect("one armed request");
-        assert_eq!(address, "first-listener");
+        let fault = pending.as_ref().expect("one armed request");
+        assert_eq!(fault.bind_addr, "first-listener");
         assert!(!*observed.borrow());
-        fired.send_replace(true);
+        fault.fired.send_replace(true);
     }
     assert!(*observed.borrow());
     let next_observed = faults.fail_next_syslog_stream_accept("next-listener".into());
     let pending = late_listener.borrow();
     assert_eq!(
-        pending.as_ref().expect("the next armed request").0,
+        pending.as_ref().expect("the next armed request").bind_addr,
         "next-listener"
     );
     assert!(!*next_observed.borrow());

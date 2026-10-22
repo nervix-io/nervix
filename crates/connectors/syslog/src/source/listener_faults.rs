@@ -24,13 +24,22 @@ use nervix_primitives::{
 
 use super::SyslogListenerError;
 
+/// One harness request to fail an accept on a selected listener and acknowledge that failure.
+#[derive(Clone)]
+pub struct SyslogListenerFault {
+    /// The exact bound address whose next accept fails.
+    pub bind_addr: String,
+    /// Shared acknowledgement; only the listener that changes it to true fires the fault.
+    pub fired: watch::Sender<bool>,
+}
+
 #[derive(Clone, Default)]
 pub(super) struct ConfiguredListenerFaults {
-    faults: Option<watch::Sender<Option<(String, watch::Sender<bool>)>>>,
+    faults: Option<watch::Sender<Option<SyslogListenerFault>>>,
 }
 
 impl ConfiguredListenerFaults {
-    pub(super) fn new(faults: watch::Sender<Option<(String, watch::Sender<bool>)>>) -> Self {
+    pub(super) fn new(faults: watch::Sender<Option<SyslogListenerFault>>) -> Self {
         Self {
             faults: Some(faults),
         }
@@ -45,7 +54,7 @@ impl ConfiguredListenerFaults {
 }
 
 pub(super) struct ConfiguredStreamAccept {
-    faults: Option<watch::Receiver<Option<(String, watch::Sender<bool>)>>>,
+    faults: Option<watch::Receiver<Option<SyslogListenerFault>>>,
     bind_addr: String,
 }
 
@@ -69,9 +78,9 @@ impl ConfiguredStreamAccept {
         loop {
             {
                 let pending = faults.borrow_and_update();
-                if let Some((address, fired)) = pending.as_ref()
-                    && address == &self.bind_addr
-                    && fired.send_if_modified(|seen| {
+                if let Some(fault) = pending.as_ref()
+                    && fault.bind_addr == self.bind_addr
+                    && fault.fired.send_if_modified(|seen| {
                         if *seen {
                             false
                         } else {
