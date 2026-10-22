@@ -26,7 +26,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/websockets/src/signaling/__fuzz__/signaling__representation_tests__bolero_protobuf_signaling_preserves_every_value/corpus"
+corpus = "crates/connectors/websockets/src/connection/signaling/__fuzz__/connection__signaling__representation_tests__bolero_protobuf_signaling_preserves_every_value/corpus"
 domain_version = 1
 features = []
 id = "websocket-signaling-protobuf-values"
@@ -35,13 +35,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 256
 package = "nervix-connector-websockets"
 random_iterations = 256
-source = "crates/connectors/websockets/src/signaling/representation_tests.rs"
-test = "signaling::representation_tests::bolero_protobuf_signaling_preserves_every_value"
+source = "crates/connectors/websockets/src/connection/signaling/representation_tests.rs"
+test = "connection::signaling::representation_tests::bolero_protobuf_signaling_preserves_every_value"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/websockets/src/signaling/__fuzz__/signaling__representation_tests__bolero_damaged_protobuf_signaling_frames_are_refused/corpus"
+corpus = "crates/connectors/websockets/src/connection/signaling/__fuzz__/connection__signaling__representation_tests__bolero_damaged_protobuf_signaling_frames_are_refused/corpus"
 domain_version = 1
 features = []
 id = "websocket-signaling-protobuf-malformed"
@@ -50,8 +50,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 256
 package = "nervix-connector-websockets"
 random_iterations = 256
-source = "crates/connectors/websockets/src/signaling/representation_tests.rs"
-test = "signaling::representation_tests::bolero_damaged_protobuf_signaling_frames_are_refused"
+source = "crates/connectors/websockets/src/connection/signaling/representation_tests.rs"
+test = "connection::signaling::representation_tests::bolero_damaged_protobuf_signaling_frames_are_refused"
 test_target = "lib"
 
 [[target]]
@@ -2800,7 +2800,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/pulsar/src/__fuzz__/receipt_tests__bolero_receipts_keep_exact_unanswered_counts_and_the_first_failure/corpus"
+corpus = "crates/connectors/pulsar/src/topic/__fuzz__/topic__receipt_tests__bolero_receipts_keep_exact_unanswered_counts_and_the_first_failure/corpus"
 domain_version = 1
 features = []
 id = "pulsar-unconfirmed-receipts"
@@ -2809,8 +2809,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-pulsar"
 random_iterations = 256
-source = "crates/connectors/pulsar/src/receipt_tests.rs"
-test = "receipt_tests::bolero_receipts_keep_exact_unanswered_counts_and_the_first_failure"
+source = "crates/connectors/pulsar/src/topic/receipt_tests.rs"
+test = "topic::receipt_tests::bolero_receipts_keep_exact_unanswered_counts_and_the_first_failure"
 test_target = "lib"
 
 [[target]]
@@ -2890,7 +2890,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/sqs/src/__fuzz__/tests__bolero_batch_requests_hold_their_records_within_every_sqs_limit/corpus"
+corpus = "crates/connectors/sqs/src/queue/__fuzz__/queue__tests__bolero_batch_requests_hold_their_records_within_every_sqs_limit/corpus"
 domain_version = 1
 features = []
 id = "sqs-batch-requests"
@@ -2899,13 +2899,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-connector-sqs"
 random_iterations = 256
-source = "crates/connectors/sqs/src/lib.rs"
-test = "tests::bolero_batch_requests_hold_their_records_within_every_sqs_limit"
+source = "crates/connectors/sqs/src/queue/mod.rs"
+test = "queue::tests::bolero_batch_requests_hold_their_records_within_every_sqs_limit"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/iceberg/src/__fuzz__/tests__bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth/corpus"
+corpus = "crates/connectors/iceberg/src/table/__fuzz__/table__tests__bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth/corpus"
 domain_version = 1
 features = []
 id = "iceberg-nested-datetime-staging"
@@ -2914,13 +2914,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 160
 package = "nervix-connector-iceberg"
 random_iterations = 256
-source = "crates/connectors/iceberg/src/lib.rs"
-test = "tests::bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth"
+source = "crates/connectors/iceberg/src/table/mod.rs"
+test = "table::tests::bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/mqtt/src/__fuzz__/tests__bolero_measured_packets_are_the_bytes_the_client_writes/corpus"
+corpus = "crates/connectors/mqtt/src/topic/__fuzz__/topic__tests__bolero_measured_packets_are_the_bytes_the_client_writes/corpus"
 domain_version = 1
 features = []
 id = "mqtt-publish-packets"
@@ -2929,13 +2929,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-mqtt"
 random_iterations = 256
-source = "crates/connectors/mqtt/src/lib.rs"
-test = "tests::bolero_measured_packets_are_the_bytes_the_client_writes"
+source = "crates/connectors/mqtt/src/topic/mod.rs"
+test = "topic::tests::bolero_measured_packets_are_the_bytes_the_client_writes"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/postgres/src/__fuzz__/tests__bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes/corpus"
+corpus = "crates/connectors/postgres/src/table/__fuzz__/table__tests__bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes/corpus"
 domain_version = 1
 features = []
 id = "postgres-insert-measures"
@@ -2944,8 +2944,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-connector-postgres"
 random_iterations = 256
-source = "crates/connectors/postgres/src/lib.rs"
-test = "tests::bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes"
+source = "crates/connectors/postgres/src/table/mod.rs"
+test = "table::tests::bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes"
 test_target = "lib"
 
 [[target]]
@@ -3025,7 +3025,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/kafka/src/__fuzz__/source__tests__bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition/corpus"
+corpus = "crates/connectors/kafka/src/topic/__fuzz__/topic__source__tests__bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition/corpus"
 domain_version = 1
 features = []
 id = "kafka-partition-offsets"
@@ -3034,13 +3034,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-connector-kafka"
 random_iterations = 256
-source = "crates/connectors/kafka/src/source.rs"
-test = "source::tests::bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition"
+source = "crates/connectors/kafka/src/topic/source.rs"
+test = "topic::source::tests::bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/sentry/src/__fuzz__/envelope_properties__bolero_prepared_envelopes_preserve_complete_events_across_attempts/corpus"
+corpus = "crates/connectors/sentry/src/event/__fuzz__/event__envelope_properties__bolero_prepared_envelopes_preserve_complete_events_across_attempts/corpus"
 domain_version = 1
 features = []
 id = "sentry-prepared-envelopes"
@@ -3049,13 +3049,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 128
 package = "nervix-connector-sentry"
 random_iterations = 128
-source = "crates/connectors/sentry/src/envelope_properties.rs"
-test = "envelope_properties::bolero_prepared_envelopes_preserve_complete_events_across_attempts"
+source = "crates/connectors/sentry/src/event/envelope_properties.rs"
+test = "event::envelope_properties::bolero_prepared_envelopes_preserve_complete_events_across_attempts"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/http/src/sink/__fuzz__/sink__request_head_tests__bolero_request_heads_carry_every_prepared_field_and_their_declared_framing/corpus"
+corpus = "crates/connectors/http/src/request/sink/__fuzz__/request__sink__request_head_tests__bolero_request_heads_carry_every_prepared_field_and_their_declared_framing/corpus"
 domain_version = 1
 features = []
 id = "http-request-heads"
@@ -3064,8 +3064,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-http"
 random_iterations = 256
-source = "crates/connectors/http/src/sink/request_head_tests.rs"
-test = "sink::request_head_tests::bolero_request_heads_carry_every_prepared_field_and_their_declared_framing"
+source = "crates/connectors/http/src/request/sink/request_head_tests.rs"
+test = "request::sink::request_head_tests::bolero_request_heads_carry_every_prepared_field_and_their_declared_framing"
 test_target = "lib"
 
 [[target]]
@@ -3115,7 +3115,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/websockets/src/signaling/__fuzz__/signaling__representation_tests__bolero_acknowledgement_frames_preserve_the_complete_outcome_value/corpus"
+corpus = "crates/connectors/websockets/src/connection/signaling/__fuzz__/connection__signaling__representation_tests__bolero_acknowledgement_frames_preserve_the_complete_outcome_value/corpus"
 domain_version = 1
 features = []
 id = "websocket-acknowledgement-values"
@@ -3124,8 +3124,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 64
 package = "nervix-connector-websockets"
 random_iterations = 256
-source = "crates/connectors/websockets/src/signaling/representation_tests.rs"
-test = "signaling::representation_tests::bolero_acknowledgement_frames_preserve_the_complete_outcome_value"
+source = "crates/connectors/websockets/src/connection/signaling/representation_tests.rs"
+test = "connection::signaling::representation_tests::bolero_acknowledgement_frames_preserve_the_complete_outcome_value"
 test_target = "lib"
 
 [[target]]

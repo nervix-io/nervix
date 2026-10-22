@@ -67,22 +67,22 @@ name = "nervix-connector"
 
 [[package]]
 checks = [
-  "delivery::shuttle_tests::shuttle_a_publish_that_reads_a_report_finds_its_record_no_longer_retained",
-  "delivery::shuttle_tests::shuttle_the_count_holds_every_record_until_its_report_is_served",
+  "topic::delivery::shuttle_tests::shuttle_a_publish_that_reads_a_report_finds_its_record_no_longer_retained",
+  "topic::delivery::shuttle_tests::shuttle_the_count_holds_every_record_until_its_report_is_served",
 ]
 name = "nervix-connector-kafka"
 
 [[package]]
 checks = [
-  "source::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_publish_the_broker_delivered",
-  "source::shuttle_tests::shuttle_a_read_whose_batch_timeout_races_the_cancellation_hands_over_every_publish",
+  "topic::source::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_publish_the_broker_delivered",
+  "topic::source::shuttle_tests::shuttle_a_read_whose_batch_timeout_races_the_cancellation_hands_over_every_publish",
 ]
 name = "nervix-connector-mqtt"
 
 [[package]]
 checks = [
-  "source::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_message_its_receives_took",
-  "source::shuttle_tests::shuttle_a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget",
+  "queue::source::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_message_its_receives_took",
+  "queue::source::shuttle_tests::shuttle_a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget",
 ]
 name = "nervix-connector-sqs"
 
