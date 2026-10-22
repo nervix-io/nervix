@@ -23373,6 +23373,26 @@ async fn given_mock_kafka_topic_is_observed(world: &mut ScenarioWorld, topic: St
     );
 }
 
+#[given("the mock Kafka broker holds every answer")]
+fn given_mock_kafka_broker_holds_answers(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .assured("the scenario starts its mock broker before holding answers")
+        .hold_answers()
+        .assured("the mock broker holds its answers");
+}
+
+#[when("the mock Kafka broker releases its answers")]
+fn when_mock_kafka_broker_releases_answers(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_ref()
+        .assured("the scenario starts its mock broker before releasing answers")
+        .release_answers()
+        .assured("the mock broker releases its answers");
+}
+
 #[given("the mock Kafka broker refuses every write")]
 fn given_mock_kafka_broker_refuses_every_write(world: &mut ScenarioWorld) {
     world
@@ -31646,6 +31666,12 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.fault_injection.release_all_domain_clock_progress();
                 world.fault_injection.release_all_command_pauses();
                 world.fault_injection.release_all_wasm_checkpoint_pauses();
+
+                if let Some(broker) = &world.kafka_mock_broker {
+                    broker
+                        .release_answers()
+                        .assured("scenario cleanup releases held Kafka mock-broker replies");
+                }
 
                 world.enter_phase(ScenarioPhase::Diagnostics, "");
                 // Scenarios run many at a time, so a status line says which scenario left it.

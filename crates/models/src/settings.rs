@@ -8,7 +8,7 @@
     nervix::layer(vocabulary, reason = "owns typed setting definitions and values")
 )]
 
-use std::marker::PhantomData;
+use std::{fmt, marker::PhantomData};
 
 mod sealed {
     pub trait Class {}
@@ -112,6 +112,42 @@ pub struct Setting<D: SettingDefinition> {
     definition: PhantomData<fn() -> D>,
 }
 
+impl<D: SettingDefinition> Clone for Setting<D>
+where
+    D::Value: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.clone(),
+            definition: PhantomData,
+        }
+    }
+}
+
+impl<D: SettingDefinition> Copy for Setting<D> where D::Value: Copy {}
+
+impl<D: SettingDefinition> PartialEq for Setting<D>
+where
+    D::Value: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<D: SettingDefinition> Eq for Setting<D> where D::Value: Eq {}
+
+// A generic carrier cannot decide whether its value contains credentials. Value rendering
+// belongs to its owner; Debug identifies the declaration without exposing its contents.
+impl<D: SettingDefinition> fmt::Debug for Setting<D> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Setting")
+            .field("name", &D::NAME)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<D: SettingDefinition> Setting<D> {
     pub fn new(
         value: D::Value,
@@ -180,6 +216,8 @@ mod tests {
         let derived =
             Setting::<Workers>::resolve(None, &8).assured("eight CPUs yield a valid worker budget");
         assert_eq!(*derived.value(), 8);
+        let copied = derived;
+        assert_eq!(copied, derived);
         let explicit =
             Setting::<Workers>::resolve(Some(3), &8).assured("three workers fit eight CPUs");
         assert_eq!(explicit.into_value(), 3);

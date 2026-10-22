@@ -103,6 +103,8 @@ pub enum OptionValue {
     Client(ConnectorKind),
     /// A clause of several parts, as the option's example writes them.
     Clause,
+    /// A byte size: a whole number greater than zero followed by its unit, such as `16MiB`.
+    Size,
 }
 
 /// One choice an option offers.

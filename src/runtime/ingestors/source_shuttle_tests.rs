@@ -314,7 +314,12 @@ impl SourceHostServices for ChannelHost {
 
 #[async_trait]
 impl PacedSourceHostServices for ChannelHost {
-    async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
+    /// The channel double takes in a whole poll at once: the checks drive polls of one message.
+    async fn intake_poll(
+        &mut self,
+        poll: SourcePoll,
+        _intake_batch: NonZeroUsize,
+    ) -> SourceIntakeResult<bool> {
         let mut messages = Vec::with_capacity(poll.messages.len());
         for message in &poll.messages {
             nervix_primitives::task::consume_budget().await;
@@ -436,6 +441,7 @@ fn engagement_during_dispatch(family: SourceFamily, cause: IngestorQuiesceCause)
                 ChannelCadence {
                     due: cadence_receiver,
                 },
+                NonZeroUsize::MIN,
                 shutdown_rx,
             )),
             SourceFamily::Request => nervix_primitives::task::spawn(run_request_source(

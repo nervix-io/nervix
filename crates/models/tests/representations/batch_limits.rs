@@ -10,7 +10,8 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_models::{
-    BatchMessageLimit, ByteSizeUnit, EmitterBatchLimitError, EmitterBatchPolicy, PayloadSizeLimit,
+    BatchMessageLimit, ByteSizeUnit, EmitterBatchLimitError, EmitterBatchPolicy, PayloadSizeError,
+    PayloadSizeLimit,
 };
 
 const UNITS: [ByteSizeUnit; 9] = [
@@ -140,9 +141,9 @@ fn bolero_batch_limit_input_is_validated_or_rejected() {
                 }
                 Err(error) => assert!(matches!(
                     error,
-                    EmitterBatchLimitError::MalformedSize { .. }
-                        | EmitterBatchLimitError::ZeroSize
-                        | EmitterBatchLimitError::SizeOverflow { .. }
+                    PayloadSizeError::Malformed { .. }
+                        | PayloadSizeError::Zero
+                        | PayloadSizeError::Overflow { .. }
                 )),
             }
 

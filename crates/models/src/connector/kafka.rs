@@ -90,15 +90,27 @@ pub struct KafkaTopicSource {
 
 /// What the connector of a KAFKA TOPIC ingestor holds and how long it waits.
 const KAFKA_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
-    buffers: &[DeclaredBuffer {
-        holds: "messages librdkafka prefetches",
-        bound: BufferBound::Bounded {
-            capacity: BufferCapacity::Driver(
-                "queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536",
-            ),
-            overflow: BufferOverflow::Backpressure,
+    buffers: &[
+        DeclaredBuffer {
+            holds: "messages librdkafka prefetches",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Driver(
+                    "queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
         },
-    }],
+        DeclaredBuffer {
+            holds: "admitted synchronous control jobs per node",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 1024,
+                    unit: "pending jobs",
+                },
+                overflow: BufferOverflow::RefuseRequest,
+            },
+        },
+    ],
     waits: &[
         DeclaredWait {
             wait: "name resolution",
@@ -117,8 +129,9 @@ const KAFKA_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Fixed(Duration::from_secs(30)),
         },
         DeclaredWait {
-            wait: "offset lookups, watermarks and seeks",
-            bound: WaitBound::Fixed(Duration::from_secs(5)),
+            wait: "metadata, partition inspection, offset lookups, watermarks and seeks including \
+                   executor admission",
+            bound: WaitBound::Driver("socket.timeout.ms, 60 s per control job"),
         },
         DeclaredWait {
             wait: "subscribe, assign and unsubscribe",
@@ -127,6 +140,10 @@ const KAFKA_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
     driver_limits: &[
         "Every librdkafka key passes through, so a client can change each driver default above.",
+        "Connector control execution has two workers per node by default. A commit still \
+         unanswered after its caller's 30 s deadline retains its worker and the source's one \
+         in-flight commit until the native call ends. Native subscribe, assign and unsubscribe \
+         have no cancellable deadline; their caller waits socket.timeout.ms at most.",
         "receive.message.max.bytes 100000000",
     ],
 };

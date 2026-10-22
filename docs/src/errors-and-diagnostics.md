@@ -1,5 +1,11 @@
 # Errors And Diagnostics
 
+Connector-storage worker capacity crosses the typed node-capability setting boundary before
+executor construction. A claim exceeding the primitive's permit representation returns
+`ExecutionConfigError::WorkerCountTooLarge` with its class, requested count and maximum; the
+nonzero semantic value already excludes an empty pool. Defaults and explicit claims use that
+same validation boundary.
+
 Setting construction preserves the definition owner's typed report. `Setting<D>::new` and
 `resolve` run the same validation for explicit and default values against typed context; an
 invalid default is a failure, and never a replacement value. The vocabulary formats no cause
@@ -554,6 +560,16 @@ request is not an attempt failure: it is a record rejection with code `external`
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the sink.
 
+A Prometheus query that fails is a `PrometheusSourceError` beneath `SourceError::Read`: a request
+that could not be sent, a status other than success, a response whose announced length or body
+exceeds the ingestor's `MAX BODY SIZE`, a body that could not be read, a payload that does not
+decode, a query Prometheus answers with an error status, or a result that is not a vector. The
+oversized response is `ResponseTooLarge`, which names the bound and never the body, such as
+`Prometheus query response exceeds MAX BODY SIZE 16MiB`. The host shows the chain as the
+ingestor's transient error, which `DESCRIBE INGESTOR` prints, and the next poll queries again. A
+sample whose value or timestamp cannot be read fails only its own record, reported beside the
+poll's other messages.
+
 Iceberg object storage retains the Iceberg storage error contract when it installs the node's
 HTTP resolver. Invalid object URLs are `DataInvalid`, and an unsupported Azure connection string
 is `FeatureUnsupported`. Building the storage HTTP client or an OpenDAL operation can fail as
@@ -706,6 +722,14 @@ transient status in `DESCRIBE INGESTOR` shows the deepest cause, such as the dri
 the refusal, and the host rejects the batch's positions, which the source reads again. The commit a
 `MODE NO ACK` consumer makes as it leaves its group fails beneath `SourceError::Suspend` or
 `SourceError::Close`, which the source loop reports as a runtime event. None rejects a record.
+
+Kafka control-call admission keeps `AdmissionError` beneath `KafkaSourceError::ControlAdmission`,
+and a refused queue or failed admitted worker keeps `ExecutionError` beneath
+`KafkaSourceError::ControlExecution`. These are transient failures of resume, rejection or
+acknowledgement, rather than failures to decode a record. A control call that exhausts its native
+`socket.timeout.ms` budget reports `KafkaSourceError::ControlTimeout` with that bound. Metadata,
+watermark, timestamp and seek failures preserve the driver's typed cause beneath the operation
+that failed.
 
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a

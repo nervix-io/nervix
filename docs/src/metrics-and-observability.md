@@ -296,6 +296,11 @@ Relay admission:
 
 Execution admission:
 
+Worker series include the `connector_storage` class. Its running and pending jobs show Kafka
+source control calls and consumer-group commits waiting on their broker, independently of
+`filesystem_storage` and `consensus_storage`. A commit may keep its worker after its caller's
+thirty-second deadline; the next commit from that instance waits for the same job.
+
 - `nervix_execution_memory_capacity_bytes` and `nervix_execution_memory_reserved_bytes`: the
   transient memory reserved for one class, and what it is currently holding
 - `nervix_execution_memory_reservations_total` and `nervix_execution_memory_rejections_total`:
