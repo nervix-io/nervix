@@ -498,9 +498,10 @@ reading, and the transport's own window or prefetch keeps the peer from sending 
 waits for the buffer to drain. A protocol without flow control drops what does not fit and counts
 it. A buffer that drops without counting, or whose overflow fails the publish for the host to retry,
 is declared as it behaves, and a buffer that nothing bounds yet is declared unbounded, so the matrix
-shows each gap until its connector closes it. A polled source's response is bounded by its
+shows each gap until its connector closes it. A `PROMETHEUS QUERY` response is bounded by its
 statement's `MAX BODY SIZE`: a response that exceeds it fails the poll, which the ingestor reports
-as its transient error, and the next poll reads again.
+as its transient error, and the next poll reads again. An `HTTP REQUEST` poll's response body has
+no such bound yet and is declared unbounded.
 
 A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a fixed bound Nervix
 sets, or the driver's own default. A wait that only the host's stop ends is declared unbounded. The
