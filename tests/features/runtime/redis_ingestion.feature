@@ -16,7 +16,7 @@ Feature: Redis ingestion
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE CODEC notification_after_hold FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 1 CONFIG {
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 CONFIG {
         'addr' = '{{redis_addr}}',
         'subscription_buffer_messages' = '2',
         'idle_timeout_ms' = '30000'
@@ -94,7 +94,7 @@ Feature: Redis ingestion
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 1 CONFIG {
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 CONFIG {
         'addr' = '{{redis_idle_peer}}',
         'idle_timeout_ms' = '1000',
         'subscription_buffer_messages' = '2'
