@@ -1358,11 +1358,11 @@ Feature: Kafka ingestion
   @kafka_owned_broker_state
   Scenario Outline: Kafka ingestor reports a missing topic by name, never creates it, and starts once it is provisioned
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus statements
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus statements are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -1417,11 +1417,11 @@ Feature: Kafka ingestion
   @kafka_owned_broker_state
   Scenario Outline: CREATE CLIENT refuses a Kafka CONFIG that lets a consumer create topics
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus statements
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "client 'kafka_main' in domain '{{domain}}' cannot set CONFIG key 'allow.auto.create.topics'"
+    When these Plexus statements fail with "client 'kafka_main' in domain '{{domain}}' cannot set CONFIG key 'allow.auto.create.topics'"
       """
       CREATE CLIENT kafka_main
       TYPE KAFKA
@@ -1430,7 +1430,7 @@ Feature: Kafka ingestion
         'allow.auto.create.topics' = 'true'
       };
       """
-    And these NSPL commands are executed
+    And these Plexus statements are executed on the leader node
       """
       CREATE CLIENT kafka_main
       TYPE KAFKA
@@ -1448,11 +1448,11 @@ Feature: Kafka ingestion
   Scenario Outline: A Kafka ingestor with domain-owned offsets keeps no consumer group on the broker, running or dropped
     Given a <cluster_size> node nervix cluster is started
     And Kafka topic "dropped_{{test_id}}" exists with 1 partitions
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus statements
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus statements are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -1509,7 +1509,7 @@ Feature: Kafka ingestion
       nervix_domain_watch_{{domain}}_kafka_dropped
       nervix_schedule_watch_{{domain}}_kafka_dropped
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus statements are executed on the leader node
       """
       DROP INGESTOR kafka_dropped;
       """

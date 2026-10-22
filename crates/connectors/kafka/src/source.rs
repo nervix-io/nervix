@@ -682,9 +682,10 @@ impl KafkaSource {
         {
             return Report::new(KafkaSourceError::MissingTopic {
                 topic: self.topic.as_str().to_string(),
-            });
+            })
+            .attach(source);
         }
-        Report::new(KafkaSourceError::Initialize).attach_printable(source.to_string())
+        Report::new(source).change_context(KafkaSourceError::Initialize)
     }
 
     async fn initialize_domain_offsets(
@@ -1062,7 +1063,8 @@ fn topic_partitions(
     {
         return Err(Report::new(KafkaSourceError::MissingTopic {
             topic: topic.to_string(),
-        }));
+        })
+        .attach(KafkaError::MetadataFetch(error.into())));
     }
     Ok(topic_metadata
         .partitions()
