@@ -2956,9 +2956,14 @@ coverage-chaos-pause-delivery:
 test-chaos-degraded-evidence:
     exec bash scripts/chaos/tests/degraded-self-test.sh
 
-# Pin baseline preparation accounting and the production output-boundary observations.
+# Pin suite preparation and baseline execution accounting and the production output-boundary
+# observations.
 test-chaos-output-boundary selection="all":
     exec bash scripts/chaos/tests/output-boundary-self-test.sh {{ quote(selection) }}
+
+# Check when a run adopts the verifier self-check its suite executed instead of executing its own.
+test-chaos-verifier-self-check:
+    exec bash scripts/chaos/tests/verifier-self-check-self-test.sh
 
 # Preserve the package probe's native refusal and exact retained container lifetime.
 test-chaos-image-package:

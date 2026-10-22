@@ -6980,6 +6980,7 @@ dependencies = [
  "bytes",
  "error-stack",
  "futures-util",
+ "meticulous",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
