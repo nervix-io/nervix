@@ -280,7 +280,7 @@ const PROMETHEUS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 /// of its own, so a query source reads none.
 impl SourceEntity for PrometheusQuerySource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
+        headers: None,
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Prometheus),

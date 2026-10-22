@@ -152,12 +152,8 @@ impl PreparedSqsRecord {
                 return Err(report.change_context(issue));
             }
         };
-        if headers.len() > 10 {
-            return Err(Report::new(SqsRecordError::AttributeCount {
-                count: headers.len(),
-                maximum: 10,
-            }));
-        }
+        // A later write of a name replaces the earlier value, so the message carries one attribute
+        // per name and SQS counts those, after the writes have collapsed.
         let mut attributes = HashMap::with_capacity(headers.len());
         for (name, value) in headers {
             SqsSink::validate_attribute(&name, &value)?;
@@ -170,6 +166,12 @@ impl PreparedSqsRecord {
                         .attach_printable(error)
                 })?;
             attributes.insert(name, attribute);
+        }
+        if attributes.len() > 10 {
+            return Err(Report::new(SqsRecordError::AttributeCount {
+                count: attributes.len(),
+                maximum: 10,
+            }));
         }
         if let Some(group_id) = group_id.as_deref() {
             SqsSink::validate_group_id(group_id)?;
@@ -838,6 +840,41 @@ mod tests {
             empty_value.current_context(),
             &SqsRecordError::EmptyAttributeValue {
                 name: "tenant".to_string()
+            }
+        );
+    }
+
+    /// SQS keeps one attribute per name, the last one written, so ten names written in eleven
+    /// writes make a message of ten attributes, which SQS accepts, and the count refuses only
+    /// eleven distinct names.
+    #[test]
+    fn attributes_are_counted_after_a_repeated_name_keeps_its_last_value() {
+        let mut headers = Vec::new();
+        for index in 0..10 {
+            headers.push((format!("attribute_{index}"), format!("value_{index}")));
+        }
+        headers.push(("attribute_3".to_string(), "replaced".to_string()));
+        let mut repeated = record(0, vec![b'x']);
+        repeated.headers = headers.clone();
+        let prepared = PreparedSqsRecord::new(repeated)
+            .expect("ten distinct names are within the attribute limit");
+        assert_eq!(prepared.attributes.len(), 10);
+        let replaced = prepared
+            .attributes
+            .get("attribute_3")
+            .and_then(MessageAttributeValue::string_value);
+        assert_eq!(replaced, Some("replaced"));
+
+        headers.push(("attribute_10".to_string(), "value_10".to_string()));
+        let mut eleven = record(0, vec![b'x']);
+        eleven.headers = headers;
+        let refused =
+            PreparedSqsRecord::new(eleven).expect_err("eleven distinct names exceed the limit");
+        assert_eq!(
+            refused.current_context(),
+            &SqsRecordError::AttributeCount {
+                count: 11,
+                maximum: 10,
             }
         );
     }

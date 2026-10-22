@@ -17,16 +17,18 @@ use std::fs;
 use nervix_models::{
     AckMode, AckWindow, AlterEmitter, AlterEmitterOperation, ClientConfigEntry, ClientName,
     CodecName, CodecWireFormat, CreateClientHttp, CreateClientPrometheus, CreateClientS3,
-    CreateClientSqs, CreateWireSchema, EmitterPublishingMode, ErrorPolicies, FlushPolicy,
-    GeneralErrorPolicy, HttpEndpointSource, HttpSource, IcebergCatalog, IcebergStorageBackend,
-    IcebergTableSink, IngestSource, IngestorName, JsonType, KafkaConsumerGroupName,
-    KafkaIngestMode, KafkaOffsetMode, KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource,
-    MaterializedRelayState, MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, MqttSource,
-    MqttTopicSource, OtelLogsSink, OtelMetric, OtelValueMapping, OutputBranch, PostgresSink,
-    PostgresTableSink, ProcessorInputs, ProcessorOutputs, PrometheusApiRootError,
-    PrometheusClientConfigError, PrometheusClientKey, RetryPolicy, SentryEventSink, SentrySink,
-    SignalingProtobufConfig, SyslogCollectorSink, SyslogListenerSource, SyslogSink,
-    WireSchemaField, WireSchemaName, ZeroMqPushSink, ZeroMqSink,
+    CreateClientSqs, CreateWireSchema, EmitSinkKind, EmitterPublishingMode, ErrorPolicies,
+    FlushPolicy, GeneralErrorPolicy, HttpEndpointSource, HttpSinkEntity, HttpSource,
+    IcebergCatalog, IcebergStorageBackend, IcebergTableSink, IngestSource, IngestorName, JsonType,
+    KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaSink, KafkaSource,
+    KafkaTopicSink, KafkaTopicSource, MaterializedRelayState, MessageErrorPolicy, MqttIngestMode,
+    MqttQos, MqttSession, MqttSource, MqttTopicSource, NatsSink, NatsSubjectSink, OtelLogsSink,
+    OtelMetric, OtelValueMapping, OutputBranch, PostgresSink, PostgresTableSink, ProcessorInputs,
+    ProcessorOutputs, PrometheusApiRootError, PrometheusClientConfigError, PrometheusClientKey,
+    PulsarSink, PulsarSinkEntity, PulsarTopicSink, RabbitMqQueueSink, RabbitMqSink,
+    RabbitMqSinkEntity, RetryPolicy, SentryEventSink, SentrySink, SignalingProtobufConfig,
+    SqsSinkEntity, SyslogCollectorSink, SyslogListenerSource, SyslogSink, WireSchemaField,
+    WireSchemaName, ZeroMqPushSink, ZeroMqSink,
 };
 use nonzero_ext::nonzero;
 
@@ -796,6 +798,162 @@ fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
         &schema,
     )
     .expect("Kafka emitters must accept write_header");
+}
+
+/// A sink that keeps one value per header name refuses an `INVOKE` clause that writes one literal
+/// name twice, naming the header as the sink records it and both calls, because the later write
+/// would replace the earlier one on every record. Names compare as the sink's header model records
+/// them, a sink that keeps every value accepts the repeat, and a name an expression computes is
+/// left to the sink at run time.
+#[test]
+fn a_repeated_literal_header_write_is_refused_where_the_sink_keeps_one_value_per_name() {
+    let domain = DomainName::parse("default").expect("valid domain");
+    let schema = CreateSchema {
+        name: named("event_schema"),
+        fields: vec![SchemaField {
+            name: named("tenant"),
+            ty: ParseAsType::String,
+            optional: false,
+            sensitive: false,
+        }],
+    };
+    let mut emitter = CreateEmitter {
+        name: named("emit"),
+        from: ProcessorInputs::single(named("events")),
+        body: nervix_models::EmitterBody::Codec {
+            codec: named("events_codec"),
+        },
+        sink: Box::new(EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
+            client: named("pulsar_main"),
+            topic: named("events_out"),
+        }))),
+        publishing_mode: EmitterPublishingMode::NoAck {
+            retry_policy: RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+        batch: None,
+        flush_policy: FlushPolicy::Each {
+            interval: "100ms".to_string(),
+            max_batch_size: "1MiB".to_string(),
+        },
+        mode: AckMode::Attached,
+        error_policies: ErrorPolicies::handled_by_log(),
+        construction: nervix_nspl::parse_route_construction(
+            "INHERIT ALL INVOKE write_header('route', 'a'), write_header('tenant', input.tenant), \
+             write_header('route', 'b')",
+        )
+        .expect("valid construction"),
+        materialized_state: Vec::new(),
+    };
+    let validate = |emitter: &CreateEmitter| {
+        super::effective_emitter_filter_map_schema(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &ModelIndex::new(),
+            emitter,
+            &schema,
+            &schema,
+        )
+    };
+    let refused = |emitter: &CreateEmitter, sink: EmitSinkKind, header: &str| {
+        let error = validate(emitter).expect_err("a repeated literal header name is refused");
+        assert_eq!(
+            error.current_context(),
+            &RegistryError::ReplacedHeaderWrite {
+                domain: domain.clone(),
+                emitter: named("emit"),
+                sink,
+                header: header.to_string(),
+                earlier: 1,
+                later: 3,
+            }
+        );
+        format!("{error:#}")
+    };
+
+    let rendered = refused(
+        &emitter,
+        EmitSinkKind::Pulsar(PulsarSinkEntity::Topic),
+        "route",
+    );
+    assert!(
+        rendered.contains(
+            "emitter 'emit' in domain 'default' writes header 'route' at INVOKE #1 and again at \
+             #3, but PULSAR TOPIC emitters keep one value per header name, so the later write \
+             would replace the earlier one on every record"
+        ),
+        "{rendered}"
+    );
+
+    *emitter.sink = EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+        client: named("sqs_main"),
+        queue: "events".to_string(),
+        fifo_group: None,
+    }));
+    refused(&emitter, EmitSinkKind::Sqs(SqsSinkEntity::Queue), "route");
+
+    *emitter.sink = EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink {
+        client: named("rabbitmq_main"),
+        queue: named("events_out"),
+    }));
+    refused(
+        &emitter,
+        EmitSinkKind::RabbitMq(RabbitMqSinkEntity::Queue),
+        "route",
+    );
+
+    // HTTP records field names in lowercase, so two spellings of one name are one name.
+    *emitter.sink = EmitSink::Http(HttpSink::Request(HttpRequestSink {
+        client: named("api"),
+        method: Expression::Literal(nervix_models::Literal::String("POST".to_string())),
+        path: Expression::Literal(nervix_models::Literal::String("/events".to_string())),
+    }));
+    emitter.construction = nervix_nspl::parse_route_construction(
+        "INHERIT ALL INVOKE write_header('X-Route', 'a'), write_header('Tenant', input.tenant), \
+         write_header('x-route', 'b')",
+    )
+    .expect("valid construction");
+    refused(
+        &emitter,
+        EmitSinkKind::Http(HttpSinkEntity::Request),
+        "x-route",
+    );
+
+    // Names that differ in letter case are two names where a sink keeps them exactly.
+    *emitter.sink = EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
+        client: named("pulsar_main"),
+        topic: named("events_out"),
+    }));
+    validate(&emitter).expect("X-Route and x-route are two Pulsar property names");
+
+    // A sink that keeps every value of a name publishes both writes.
+    emitter.construction = nervix_nspl::parse_route_construction(
+        "INHERIT ALL INVOKE write_header('route', 'a'), write_header('route', 'b')",
+    )
+    .expect("valid construction");
+    *emitter.sink = EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
+        client: named("kafka_main"),
+        topic: named("events_out"),
+    }));
+    validate(&emitter).expect("a Kafka record keeps both headers");
+    *emitter.sink = EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
+        client: named("nats_main"),
+        subject: named("events_out"),
+    }));
+    validate(&emitter).expect("a NATS message keeps both values of the name");
+
+    // A name an expression computes is the sink's to settle at run time.
+    emitter.construction = nervix_nspl::parse_route_construction(
+        "INHERIT ALL INVOKE write_header(input.tenant, 'a'), write_header(input.tenant, 'b')",
+    )
+    .expect("valid construction");
+    *emitter.sink = EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
+        client: named("pulsar_main"),
+        topic: named("events_out"),
+    }));
+    validate(&emitter).expect("computed names are not compared when the statement is validated");
 }
 
 #[test]

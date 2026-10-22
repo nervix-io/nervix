@@ -239,8 +239,7 @@ Feature: Sensitive data
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'

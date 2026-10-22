@@ -74,7 +74,7 @@ use nervix_primitives::{
 };
 use nervix_recovery::Discarded as _;
 use nervix_server::{
-    FaultInjection, SchedulerMode, WasmStateResetRequestError,
+    FaultInjection, ModelPublicationRefusalKind, SchedulerMode, WasmStateResetRequestError,
     application::{InternalTransportMode, ShutdownPhaseOutcome},
     memory_pressure::MemoryPressureConfig,
 };
@@ -134,10 +134,11 @@ use crate::common::{
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{
-        SessionScope, TestUpload, TestUploadPart, WireOutcome as _, command_output,
-        fresh_execution_reference, outcome_awaits_leader,
+        SessionScope, TestSubscriptionEvent, TestUpload, TestUploadPart, WireOutcome as _,
+        command_output, fresh_execution_reference, outcome_awaits_leader,
     },
     runner_lag::RunnerLagObserver,
+    runner_observation::ArrivalObservation,
     scenario_phase::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         begin_suite_measurement, suite_summary,
@@ -170,6 +171,7 @@ mod deadlock_diagnostics;
 mod deadlock_reports;
 mod domain_clock_attachment;
 mod domain_resume;
+mod emitter_finish;
 mod endpoint_intake;
 mod generated_http_payloads;
 mod iceberg_delivery;
@@ -313,6 +315,12 @@ struct CliClockProcess {
     _reader: AbortOnDropHandle<()>,
 }
 
+/// The next row and the subscription session returned by its independent receipt observer.
+struct SubscriptionReceipt {
+    session: TestSession,
+    event: TestSubscriptionEvent,
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
     mqtt_fixture_publication: Option<mqtt_fixtures::Publication>,
@@ -324,6 +332,8 @@ struct ScenarioWorld {
     active_scenario: Option<ActiveScenarioRegistration>,
     cluster: Option<Cluster>,
     active_session: Option<TestSession>,
+    /// A bounded next-row reader installed before the publication whose delay it measures.
+    subscription_arrival: Option<ArrivalObservation<SubscriptionReceipt>>,
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
@@ -384,7 +394,8 @@ struct ScenarioWorld {
     /// instant and the arrival together, which is what makes such an assertion hold on a
     /// busy machine where a fixed wall-clock window does not.
     last_publish_at: Option<Instant>,
-    pulsar_stop_timing: Option<pulsar_delivery::StopTiming>,
+    /// When the last STOP run beside a timed endpoint fault completed, and when the fault ended.
+    stop_timing: Option<emitter_finish::StopTiming>,
     /// When the scenario first posted an HTTP payload to a node. An input collector's window
     /// opens no earlier than the first record that reaches it, so a collection-delay assertion
     /// measures its collected output from this instant.
@@ -5389,8 +5400,7 @@ impl IngestorLogicTransportFixture {
             }
             Self::Kafka => {
                 r#"
-      CREATE CLIENT logic_kafka
-        TYPE KAFKA
+      CREATE KAFKA CLIENT logic_kafka
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
@@ -5398,8 +5408,7 @@ impl IngestorLogicTransportFixture {
             }
             Self::Mqtt => {
                 r#"
-      CREATE CLIENT logic_mqtt
-        TYPE MQTT
+      CREATE MQTT CLIENT logic_mqtt
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-logic-{{test_id}}'
@@ -5408,8 +5417,7 @@ impl IngestorLogicTransportFixture {
             }
             Self::Nats => {
                 r#"
-      CREATE CLIENT logic_nats
-        TYPE NATS
+      CREATE NATS CLIENT logic_nats
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
@@ -5427,8 +5435,7 @@ impl IngestorLogicTransportFixture {
             }
             Self::ZeroMq => {
                 r#"
-      CREATE CLIENT logic_zeromq
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT logic_zeromq
         CONFIG {
           'addr' = '{{zeromq_ingest_addr}}',
           'bind' = 'true'
@@ -8914,6 +8921,42 @@ async fn then_relocation_commit_refusal_was_delivered(world: &mut ScenarioWorld,
             .fault_injection
             .relocation_commit_refusal_delivered(&domain),
         "no relocation commit in domain {domain} met the armed leader refusal"
+    );
+}
+
+#[given(
+    expr = "the leader refuses the next model publication in domain {string} and the pause \
+            release after it with {string}"
+)]
+async fn given_leader_refuses_next_model_publication(
+    world: &mut ScenarioWorld,
+    domain: String,
+    refusal: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    let refusal = ModelPublicationRefusalKind::from_str(&refusal)
+        .expect("the scenario names a model publication refusal the fault harness declares");
+    world
+        .fault_injection
+        .refuse_next_model_publication(domain, refusal);
+}
+
+#[then(
+    expr = "the refusal of the model publication in domain {string} and of its pause release was \
+            delivered"
+)]
+async fn then_model_publication_refusal_was_delivered(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    assert!(
+        world
+            .fault_injection
+            .model_publication_refusal_delivered(&domain),
+        "no model publication in domain {domain} met the armed leader refusal of both its \
+         publication and its pause release"
     );
 }
 
@@ -15088,6 +15131,7 @@ async fn when_named_client_closes_cleanly(world: &mut ScenarioWorld, name: Strin
 }
 
 #[when(expr = "client {string} executes these NSPL commands")]
+#[when(expr = "client {string} executes these Plexus statements")]
 async fn when_named_client_executes_commands(
     world: &mut ScenarioWorld,
     name: String,
@@ -17431,52 +17475,52 @@ impl UnacknowledgedSourceFixture {
         match self {
             Self::Kafka => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT unacknowledged_client CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };"#
             }
             Self::Mqtt => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT unacknowledged_client CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-unacknowledged-{{test_id}}'
       };"#
             }
             Self::Nats => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE NATS CONFIG {
+      CREATE NATS CLIENT unacknowledged_client CONFIG {
         'addr' = '{{nats_addr}}'
       };"#
             }
             Self::Pulsar => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT unacknowledged_client CONFIG {
         'addr' = '{{pulsar_addr}}'
       };"#
             }
             Self::RedisPubSub => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG {
+      CREATE REDIS CLIENT unacknowledged_client POOL SIZE MIN 1 MAX 4 CONFIG {
         'addr' = '{{redis_addr}}'
       };"#
             }
             Self::Syslog => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT unacknowledged_client CONFIG {
         'protocol' = 'udp',
         'addr' = '{{syslog_ingest_addr}}'
       };"#
             }
             Self::WebsocketClient => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE WEBSOCKETS CONFIG {
+      CREATE WEBSOCKETS CLIENT unacknowledged_client CONFIG {
         'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
       };"#
             }
             Self::ZeroMq => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT unacknowledged_client CONFIG {
         'addr' = '{{zeromq_ingest_addr}}',
         'bind' = 'true'
       };"#
@@ -24331,6 +24375,29 @@ async fn when_mqtt_qos1_message_is_published(
         .expect("failed to publish mqtt QoS 1 message");
 }
 
+/// Publishes one QoS 1 message whose payload is exactly `bytes` long: a JSON object whose one
+/// string field pads it to that size.
+#[when(expr = "an MQTT QoS 1 message of {int} bytes is published to topic {string}")]
+async fn when_sized_mqtt_qos1_message_is_published(
+    world: &mut ScenarioWorld,
+    bytes: usize,
+    topic: String,
+) {
+    const EMPTY_PADDING: &str = r#"{"padding":""}"#;
+    let padding_bytes = bytes
+        .checked_sub(EMPTY_PADDING.len())
+        .unwrap_or_else(|| panic!("a {bytes}-byte MQTT payload cannot hold {EMPTY_PADDING}"));
+    let topic = expand_placeholders(world, &topic);
+    let padding = "x".repeat(padding_bytes);
+    let payload = format!(r#"{{"padding":"{padding}"}}"#);
+    wait_for_mqtt_ingestors_ready(world).await;
+    world
+        .cluster()
+        .publish_mqtt_qos1(&topic, &payload)
+        .await
+        .expect("failed to publish the sized MQTT QoS 1 message");
+}
+
 #[when(expr = "RabbitMQ message is published to queue {string}")]
 async fn when_rabbitmq_message_is_published(
     world: &mut ScenarioWorld,
@@ -31025,6 +31092,79 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
     }
 }
 
+#[when("the next relay subscription payload is timed")]
+async fn when_the_next_subscription_payload_is_timed(world: &mut ScenarioWorld) {
+    assert!(
+        world.subscription_arrival.is_none(),
+        "a receipt observation is already active"
+    );
+    let mut session = world
+        .active_session
+        .take()
+        .assured("the scenario opened its subscription");
+    // Only the following publication can supply this observation's origin.
+    world.last_publish_at = None;
+    let observation = ArrivalObservation::start(async move {
+        let event = session
+            .next_subscription()
+            .await
+            .expect("the receipt observer must read its subscription");
+        SubscriptionReceipt { session, event }
+    })
+    .await;
+    world.subscription_arrival = Some(observation);
+}
+
+#[then(
+    expr = "within {string} the timed relay subscription payload arrives no sooner than {string} \
+            after publication and contains all fragments"
+)]
+async fn then_the_timed_subscription_payload_arrives_after_publication(
+    world: &mut ScenarioWorld,
+    within: String,
+    delay: String,
+    #[step] step: &Step,
+) {
+    let within = parse_duration_text(&within).assured("the receipt budget is a valid duration");
+    let delay = parse_duration_text(&delay).assured("the receipt lower bound is a valid duration");
+    let published_at = world
+        .last_publish_at
+        .assured("the timed observation is followed by publication");
+    let expected = docstring_fragment_sets(world, step);
+    assert_eq!(
+        expected.len(),
+        1,
+        "one next-row observation expects exactly one fragment set"
+    );
+    let observation = world
+        .subscription_arrival
+        .take()
+        .assured("the receipt observer was installed before publication");
+    let arrival = nervix_primitives::time::timeout(within, observation.finish())
+        .await
+        .expect("the next subscription payload must arrive within the receipt budget");
+    let on_time = arrival.arrived_no_sooner_than(published_at, delay);
+    let received_at = arrival.received_at;
+    let SubscriptionReceipt { session, event } = arrival.value;
+    world.active_session = Some(session);
+    world.last_subscription_payload = Some(event.payload.clone());
+    assert!(
+        expected[0]
+            .iter()
+            .all(|fragment| event.payload.contains(fragment)),
+        "next subscription payload {:?} does not match all expected fragments {:?}",
+        event.payload,
+        expected[0]
+    );
+    assert!(
+        on_time,
+        "subscription payload {:?} arrived {:?} after publication, before its {delay:?} lower \
+         bound",
+        event.payload,
+        received_at.checked_duration_since(published_at)
+    );
+}
+
 async fn try_capture_any_subscription_payload(
     world: &mut ScenarioWorld,
     duration: Duration,
@@ -31392,6 +31532,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 stop_receivers(world).await;
                 close_browser(world).await;
                 world.active_session = None;
+                world.subscription_arrival = None;
                 world.active_session_node = None;
                 world.active_session_has_subscription = false;
                 world.last_server_error = None;

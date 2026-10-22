@@ -47,13 +47,13 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `client-ffi-field-descriptors-malformed` | `nervix-client-ffi` invalid-argument refusal that leaves the field list as the accepted calls built it | unknown types, lengths on scalar and `LIST` levels, empty and oversized `FIXED_LIST` levels, a 33rd list, refused names, elements without an open field, fields before the open one's element, an open last field, and reads past a field's last level or past the last field, v1 | 256 | 4096 bytes |
 | `client-processor-choice-request` | `nervix-client-wire` processor choice request round-trip equality | current targets with relay context, search, page and identity, v1 | 128 | 32 bytes |
 | `nspl-expression` | `nervix-nspl` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | NSPL expressions of every form, v5 | 256 | 512 bytes |
-| `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v11 | 256 | 2048 bytes |
-| `nspl-archive-model` | `nervix-nspl` complete ordered canonical Model equality through export, restore reads, reparse and re-export | cluster/domain archives with multiple ordered documents and every Model family, v12 | 128 | 4096 bytes |
-| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v9 | 256 | 2048 bytes |
-| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v9 | 256 | 2048 bytes |
+| `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | Plexus Models of every family, client emitters included, v12 | 256 | 2048 bytes |
+| `nspl-archive-model` | `nervix-nspl` complete ordered canonical Model equality through export, restore reads, reparse and re-export | cluster/domain archives with multiple ordered documents and every Model family, v13 | 128 | 4096 bytes |
+| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | Plexus statements of every form, session-only forms included, v10 | 256 | 2048 bytes |
+| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v10 | 256 | 2048 bytes |
 | `nspl-expression-text` | `nervix-nspl` edited expression text reads as the same expression, or as none, through a statement and the standalone expression, expression-list and route-construction readers | edited canonical expressions, v3 | 256 | 512 bytes |
-| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v9 | 256 | 4096 bytes |
-| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v8 | 256 | 4096 bytes |
+| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v10 | 256 | 4096 bytes |
+| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v9 | 256 | 4096 bytes |
 | `models-names` | `nervix-models` name text, conversion, JSON, archive and Model-name widening equality | every name type, v1 | 256 | 256 bytes |
 | `models-name-validation` | `nervix-models` name parsing matches the name rule; decoders accept only canonical text | arbitrary text, v1 | 256 | 256 bytes |
 | `models-timestamps` | `nervix-models` integer, RFC 3339, JSON, archive and chrono equality | every signed Unix nanosecond, v1 | 256 | 64 bytes |
@@ -62,6 +62,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `models-domain-clock-validation` | `nervix-models` clock text and numbers read in range or fail typed; decoders refuse invalid values | arbitrary text and numbers, v1 | 256 | 64 bytes |
 | `models-durations` | `nervix-models` a duration reads back from the text `humantime` writes for it; only one within one of each unit of the longest duration may be refused as too long | every duration, v1 | 256 | 16 bytes |
 | `models-duration-text` | `nervix-models` duration text reads as `humantime` reads it or fails typed, and never panics | arbitrary duration text, v1 | 256 | 64 bytes |
+| `models-header-model-round-trip` | `nervix-models` writes carried through a header model read back per name as the model keeps them, and the model refuses exactly the literal writes that round trip would lose | repeated and case-varied header names under every layout and name rule, v1 | 256 | 64 bytes |
 | `models-json-paths` | `nervix-models` path text, JSON and archive equality | paths up to the step limit, v1 | 256 | 1024 bytes |
 | `models-json-path-validation` | `nervix-models` path text reaches a fixed point or fails typed; decoders admit the constructor's step counts | arbitrary path text, v1 | 256 | 512 bytes |
 | `models-batch-limits` | `nervix-models` message and size limit text, JSON and archive equality | every limit and unit, v1 | 256 | 64 bytes |
@@ -87,6 +88,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `console-pending-backups` | `nervix-web-console` pending backup entry and tab storage round-trip equality, with forgetting only by its own reference | any execution reference and query text, no domain or one in any spelling the name rule admits, recorded over an earlier record, v1 | 256 | 1024 bytes |
 | `console-pending-backups-malformed` | `nervix-web-console` exact read-back or refusal of a tab's stored record, which a refusal forgets while other entries stay | missing, canonical, edited, upper-cased and drawn reference, query and domain entries beside an unrelated entry, v1 | 256 | 1024 bytes |
 | `console-restore-drafts` | `nervix-web-console` restore draft lowering equality and existing-user option text | every `RESTORE` scope, source, mode, runtime state and lifecycle, domains in any spelling the name rule admits, every policy, v1 | 256 | 512 bytes |
+| `console-client-drafts` | `nervix-web-console` client draft rendering and complete Model reparse equality | all 22 Plexus client heads, actual and masked configuration in order, pool bounds, optional resource pins and WebSocket signaling, v1 | 128 | 1024 bytes |
 | `backup-capture-wire` | `nervix-interconnect` complete capture/drain/inventory request and response equality and fetch request equality through each request's declared class limit | every drain action and counter, every success/refusal, empty and ordered inventories of all twelve kinds, zero/full-width lengths and counters, arbitrary digests and bounded Unicode paths, v1 | 256 | 1024 bytes |
 | `backup-capture-wire-malformed` | `nervix-interconnect` typed decode refusal or complete stable re-encoding, with management/bulk reservations released | truncated, bit-flipped, overwritten and arbitrary capture/drain/inventory request and response bytes and fetch request bytes, v1 | 256 | 1024 bytes |
 | `backup-section-mapping` | `nervix-server` total and injective capture-kind/archive-content mapping and distinct validated archive paths | all twelve section kinds over generated identities, group ordinals and branched/unbranched fingerprints, v1 | 256 | 128 bytes |
@@ -481,7 +483,11 @@ that run in parallel, each in a job of its own:
   `just coverage-bolero 30 <number>/<count>`: the runner tests, its share of the campaigns and the
   complete failure qualification. Only the server preparation is held to one build job; discovery
   and library builds use every core. A shard samples CPU use, steal time and used memory every five
-  seconds and adds the summary to its job summary.
+  seconds and adds the summary to its job summary. Samples also retain guest-reported MHz,
+  UTC and CPU/memory/I/O pressure. Every build step first records the shared short CPU, memory
+  access and filesystem calibration, with JSON and Markdown artifacts. The
+  [runner diagnostics contract](integration-test-lifecycle.md) owns its bounds, units and limits;
+  these measurements never change campaign budgets or decide a property verdict.
 - `bolero-fuzz-combined` downloads every shard's completion evidence, without the raw profiles, and
   runs `just combine-bolero-fuzz`. It accepts only shards 1 to N of one plan, from one workflow run
   and attempt at the tested revision and inventory. Each must be complete, must have run exactly its

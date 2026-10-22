@@ -1381,48 +1381,39 @@ pub fn alter_avro_wire_schema_to_canonical_nspl(
     alter_wire_schema_to_nspl("AVRO", alter)
 }
 
-/// The clauses between `CREATE CLIENT <name>` and its `CONFIG` block.
+/// Pool clauses after a connector-headed client name, before its mount and configuration.
 ///
-/// This is the whole of what a pooled client renders differently: it carries a `POOL SIZE` clause
-/// between the type and the mount, because that is the order the grammar accepts.
-macro_rules! client_head_clauses {
-    ($client:expr, $connector:expr, unpooled) => {
+/// A pool-capable client always declares both bounds in the order its grammar accepts.
+macro_rules! client_pool_clauses {
+    ($client:expr, unpooled) => {
+        Vec::new()
+    };
+    ($client:expr, pooled) => {
         vec![Clause::line(format!(
-            "TYPE {}{}",
-            $connector.keyword(),
-            client_mount_clause($client.mount.as_ref()),
+            "POOL SIZE MIN {} MAX {}",
+            $client.pool.minimum(),
+            $client.pool.maximum(),
         ))]
     };
-    ($client:expr, $connector:expr, pooled) => {{
-        let mut clauses = vec![
-            Clause::line(format!("TYPE {}", $connector.keyword())),
-            Clause::line(format!(
-                "POOL SIZE MIN {} MAX {}",
-                $client.pool.minimum(),
-                $client.pool.maximum(),
-            )),
-        ];
-        if let Some(mount) = $client.mount.as_ref() {
-            clauses.push(Clause::line(format!(
-                "MOUNT {} VERSION {}",
-                mount.resource.as_str(),
-                mount.version
-            )));
-        }
-        clauses
-    }};
 }
 
-macro_rules! impl_standard_client_canonical_nspl {
+macro_rules! impl_standard_client_canonical {
     ($($Client:ident => $pooling:ident;)+) => {
         $(
             impl<Version: Display> $Client<Version> {
                 pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-                    let mut clauses = client_head_clauses!(self, Self::CONNECTOR, $pooling);
+                    let mut clauses = client_pool_clauses!(self, $pooling);
+                    if let Some(mount) = self.mount.as_ref() {
+                        clauses.push(Clause::line(format!(
+                            "MOUNT {} VERSION {}",
+                            mount.resource.as_str(),
+                            mount.version,
+                        )));
+                    }
                     clauses.push(Clause::braced("CONFIG", config_entry_items(&self.config)?));
 
                     Ok(clause_statement(
-                        format!("CREATE CLIENT {}", self.name.as_str()),
+                        format!("CREATE {} CLIENT {}", Self::CONNECTOR.keyword(), self.name.as_str()),
                         clauses,
                     ))
                 }
@@ -1431,7 +1422,7 @@ macro_rules! impl_standard_client_canonical_nspl {
     };
 }
 
-impl_standard_client_canonical_nspl! {
+impl_standard_client_canonical! {
     CreateClientKafka => unpooled;
     CreateClientPulsar => unpooled;
     CreateClientHttp => unpooled;
@@ -1459,9 +1450,9 @@ impl<Version: Display> CreateClientS3<Version> {
         let config = config_entry_items(&self.config)?.join(", ");
 
         Ok(format!(
-            "CREATE CLIENT {} TYPE {}{} CONFIG {{{}}};",
-            self.name.as_str(),
+            "CREATE {} CLIENT {}{} CONFIG {{{}}};",
             Self::CONNECTOR.keyword(),
+            self.name.as_str(),
             client_mount_clause(self.mount.as_ref()),
             config
         ))
@@ -1470,17 +1461,28 @@ impl<Version: Display> CreateClientS3<Version> {
 
 impl<Version: Display> CreateClientWebsockets<Version> {
     pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+        let mut clauses = Vec::new();
+        if let Some(protocol) = self.signaling_protocol.as_ref() {
+            clauses.push(Clause::line(format!(
+                "WITH SIGNALING PROTOCOL {}",
+                protocol.as_str(),
+            )));
+        }
+        if let Some(mount) = self.mount.as_ref() {
+            clauses.push(Clause::line(format!(
+                "MOUNT {} VERSION {}",
+                mount.resource.as_str(),
+                mount.version,
+            )));
+        }
+        clauses.push(Clause::braced("CONFIG", config_entry_items(&self.config)?));
         Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE {}{}{}",
-                    Self::CONNECTOR.keyword(),
-                    signaling_protocol_clause(self.signaling_protocol.as_ref()),
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", config_entry_items(&self.config)?),
-            ],
+            format!(
+                "CREATE {} CLIENT {}",
+                Self::CONNECTOR.keyword(),
+                self.name.as_str()
+            ),
+            clauses,
         ))
     }
 }
@@ -4246,7 +4248,7 @@ mod tests {
         let nspl = model.to_canonical_nspl().expect("must render");
         assert_eq!(
             nspl,
-            "CREATE CLIENT kafka_main\n  TYPE KAFKA\n  CONFIG {\n    'bootstrap.servers' = \
+            "CREATE KAFKA CLIENT kafka_main\n  CONFIG {\n    'bootstrap.servers' = \
              'host1:9092',\n    'enable.auto.commit' = 'true'\n  };"
         );
     }
@@ -4264,7 +4266,7 @@ mod tests {
 
         assert_eq!(
             model.to_canonical_nspl().expect("must render"),
-            "CREATE CLIENT k\n  TYPE KAFKA\n  CONFIG {\n    'quoted' = $s$both ' and \"$s$\n  };"
+            "CREATE KAFKA CLIENT k\n  CONFIG {\n    'quoted' = $s$both ' and \"$s$\n  };"
         );
     }
 
@@ -4367,7 +4369,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT http_main\n  TYPE HTTP\n  CONFIG {\n    'base_url' = 'https://example.com'\n  };",
+                "CREATE HTTP CLIENT http_main\n  CONFIG {\n    'base_url' = 'https://example.com'\n  };",
             ),
             (
                 CreateClientSentry::<u64> {
@@ -4380,7 +4382,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT sentry_main\n  TYPE SENTRY\n  CONFIG {\n    'dsn' = 'https://key@sentry.example/42'\n  };",
+                "CREATE SENTRY CLIENT sentry_main\n  CONFIG {\n    'dsn' = 'https://key@sentry.example/42'\n  };",
             ),
             (
                 CreateClientMqtt::<u64> {
@@ -4390,7 +4392,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT mqtt_main\n  TYPE MQTT\n  CONFIG {\n    'host' = 'mqtt.internal'\n  };",
+                "CREATE MQTT CLIENT mqtt_main\n  CONFIG {\n    'host' = 'mqtt.internal'\n  };",
             ),
             (
                 CreateClientNats::<u64> {
@@ -4400,7 +4402,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT nats_main\n  TYPE NATS\n  CONFIG {\n    'servers' = 'nats://localhost:4222'\n  };",
+                "CREATE NATS CLIENT nats_main\n  CONFIG {\n    'servers' = 'nats://localhost:4222'\n  };",
             ),
             (
                 CreateClientPrometheus::<u64> {
@@ -4413,7 +4415,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT prom_main\n  TYPE PROMETHEUS\n  CONFIG {\n    'url' = 'http://prometheus:9090'\n  };",
+                "CREATE PROMETHEUS CLIENT prom_main\n  CONFIG {\n    'url' = 'http://prometheus:9090'\n  };",
             ),
             (
                 CreateClientRabbitMq::<u64> {
@@ -4423,7 +4425,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT rmq_main\n  TYPE RABBITMQ\n  CONFIG {\n    'uri' = 'amqp://guest:guest@localhost:5672'\n  };",
+                "CREATE RABBITMQ CLIENT rmq_main\n  CONFIG {\n    'uri' = 'amqp://guest:guest@localhost:5672'\n  };",
             ),
             (
                 CreateClientRedis::<u64> {
@@ -4434,7 +4436,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT redis_main\n  TYPE REDIS\n  POOL SIZE MIN 1 MAX 4\n  CONFIG {\n    'url' = 'redis://localhost:6379'\n  };",
+                "CREATE REDIS CLIENT redis_main\n  POOL SIZE MIN 1 MAX 4\n  CONFIG {\n    'url' = 'redis://localhost:6379'\n  };",
             ),
             (
                 CreateClientPostgres::<u64> {
@@ -4454,7 +4456,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT postgres_tls\n  TYPE POSTGRES\n  POOL SIZE MIN 0 MAX 1\n  MOUNT dev_tls VERSION 3\n  CONFIG {\n    'addr' = 'postgresql://db.example.com/nervix?sslmode=verify-full',\n    'tls_ca_file' = '{{ dev_tls }}/ca.pem'\n  };",
+                "CREATE POSTGRES CLIENT postgres_tls\n  POOL SIZE MIN 0 MAX 1\n  MOUNT dev_tls VERSION 3\n  CONFIG {\n    'addr' = 'postgresql://db.example.com/nervix?sslmode=verify-full',\n    'tls_ca_file' = '{{ dev_tls }}/ca.pem'\n  };",
             ),
             (
                 CreateClientZeroMq::<u64> {
@@ -4464,7 +4466,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT zmq_main\n  TYPE ZEROMQ\n  CONFIG {\n    'bind' = 'tcp://*:5555'\n  };",
+                "CREATE ZEROMQ CLIENT zmq_main\n  CONFIG {\n    'bind' = 'tcp://*:5555'\n  };",
             ),
             (
                 CreateClientSyslog::<u64> {
@@ -4481,7 +4483,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT syslog_main\n  TYPE SYSLOG MOUNT syslog_tls VERSION 2\n  CONFIG {\n    'protocol' = 'tls',\n    'addr' = 'logs.example.com:6514',\n    'tls_ca_file' = '{{ syslog_tls }}/ca.pem'\n  };",
+                "CREATE SYSLOG CLIENT syslog_main\n  MOUNT syslog_tls VERSION 2\n  CONFIG {\n    'protocol' = 'tls',\n    'addr' = 'logs.example.com:6514',\n    'tls_ca_file' = '{{ syslog_tls }}/ca.pem'\n  };",
             ),
             (
                 CreateClientSqs::<u64> {
@@ -4491,7 +4493,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT sqs_main\n  TYPE SQS\n  CONFIG {\n    'region' = 'us-east-1'\n  };",
+                "CREATE SQS CLIENT sqs_main\n  CONFIG {\n    'region' = 'us-east-1'\n  };",
             ),
             (
                 CreateClientWebsockets::<u64> {
@@ -4502,7 +4504,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT ws_main\n  TYPE WEBSOCKETS\n  CONFIG {\n    'url' = 'wss://example.com/socket'\n  };",
+                "CREATE WEBSOCKETS CLIENT ws_main\n  CONFIG {\n    'url' = 'wss://example.com/socket'\n  };",
             ),
             (
                 CreateClientWebsockets::<u64> {
@@ -4513,7 +4515,7 @@ mod tests {
                 }
                 .to_canonical_nspl()
                 .expect("must render"),
-                "CREATE CLIENT ws_main\n  TYPE WEBSOCKETS WITH SIGNALING PROTOCOL binance_ws\n  CONFIG {\n    'url' = 'wss://example.com/socket'\n  };",
+                "CREATE WEBSOCKETS CLIENT ws_main\n  WITH SIGNALING PROTOCOL binance_ws\n  CONFIG {\n    'url' = 'wss://example.com/socket'\n  };",
             ),
         ];
 
@@ -5672,7 +5674,7 @@ mod tests {
 
         assert_eq!(
             model.to_canonical_nspl().expect("must render"),
-            "CREATE CLIENT kafka_main\n  TYPE KAFKA\n  CONFIG {\n    'bootstrap.servers' = \
+            "CREATE KAFKA CLIENT kafka_main\n  CONFIG {\n    'bootstrap.servers' = \
              'localhost:9092'\n  };"
         );
     }

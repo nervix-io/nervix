@@ -32,19 +32,16 @@ Feature: Multi-source DAG routing
         CREATE RELAY kafka_projected SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE RELAY rabbit_projected SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE RELAY shared_dispatch SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE CLIENT rabbit_main
-        TYPE RABBITMQ
+        CREATE RABBITMQ CLIENT rabbit_main
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
-        CREATE CLIENT redis_main
-        TYPE REDIS
+        CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{redis_addr}}'

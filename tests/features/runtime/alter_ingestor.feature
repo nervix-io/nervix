@@ -143,7 +143,7 @@ Feature: Altering ingestors
       CREATE RELAY buffered_events SCHEMA buffered_event UNBRANCHED CAPACITY 2;
       CREATE VHOST buffered_edge http-{{test_id}}-buffered-alter.example.com;
       CREATE ENDPOINT buffered_ingress ON buffered_edge PATH '/buffered-alter' TYPE HTTP;
-      CREATE CLIENT buffered_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT buffered_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -259,8 +259,7 @@ Feature: Altering ingestors
         TO SCHEMA paced_event;
       CREATE RELAY paced_events SCHEMA paced_event UNBRANCHED;
 
-      CREATE CLIENT paced_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT paced_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
