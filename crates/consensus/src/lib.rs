@@ -131,6 +131,9 @@ use replication::AppendPath;
 use storage::FjallLogReader;
 use storage::FjallStore;
 mod transaction;
+mod transaction_retention;
+#[cfg(test)]
+mod transaction_retention_tests;
 use connectivity_fault::ConnectivityFault;
 use domain_mutation::{DomainMutationAdmission, DomainMutationError};
 #[cfg(any(test, feature = "testing"))]
@@ -2572,6 +2575,19 @@ impl Observer {
     }
     pub async fn current_transactions(&self) -> BTreeMap<String, ReplicatedTransaction> {
         (&self.inner.store.inner.state().transactions).into()
+    }
+    /// Whether the current replicated state has an aged transaction no applying execution needs.
+    pub async fn has_removable_finished_transactions(
+        &self,
+        finished_before: nervix_models::Timestamp,
+    ) -> bool {
+        !self
+            .inner
+            .store
+            .inner
+            .state()
+            .finished_transaction_removals(finished_before)
+            .is_empty()
     }
     pub async fn current_transaction(&self, id: &str) -> Option<ReplicatedTransaction> {
         self.inner.store.inner.state().transactions.get(id).cloned()
@@ -6142,28 +6158,13 @@ fn apply_consensus_command_at(
             }
         }
         ConsensusCommand::RemoveFinishedTransactions { finished_before } => {
-            let removed_ids = state
-                .transactions
-                .iter()
-                .filter_map(|(id, transaction)| {
-                    let TransactionState::Finished(finished) = &transaction.state else {
-                        return None;
-                    };
-                    (finished.finished_at <= *finished_before).then(|| id.clone())
-                })
-                .collect::<Vec<_>>();
-            let before = state.transactions.len();
-            state.transactions.retain(|_, transaction| {
-                let TransactionState::Finished(finished) = &transaction.state else {
-                    return true;
-                };
-                finished.finished_at > *finished_before
-            });
+            let removed_ids = state.finished_transaction_removals(*finished_before);
             for id in &removed_ids {
+                state.transactions.remove(id);
                 state.transaction_commit_plans.remove(id);
             }
             state.transaction_reports.remove_transactions(&removed_ids);
-            changes.transactions_changed = state.transactions.len() != before;
+            changes.transactions_changed = !removed_ids.is_empty();
         }
     }
     AppliedConsensusCommand::applied(changes)
