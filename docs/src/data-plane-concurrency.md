@@ -2100,6 +2100,15 @@ outside Deloxide's tracked locks. The registered `scenario.pulsar-finish-at-stop
 `stress.pulsar-finish-at-stop` workloads exercise that finish through one- and three-node STOP,
 including the host's tracked quiesce and teardown paths.
 
+The MQTT sink's QoS 0 publishing has the same shape. One sink task owns the flush notices of the
+publishes its client took, the driver's one-shot completions that its event loop ends once it has
+written and flushed each publish. The task drops the notices that ended at the start of each
+publish and awaits the rest at finish under the host's deadline, in the order the client took them.
+No notice or outcome is persisted or published through a shared map, and the driver's event loop and
+its channels remain outside Deloxide's tracked locks. The registered `scenario.mqtt-finish-at-stop`
+and `stress.mqtt-finish-at-stop` workloads exercise that finish through one- and three-node STOP,
+including the host's tracked quiesce and teardown paths.
+
 The ordering contracts above are checked against the production owners under Shuttle. A check
 runs several tasks or threads through one scheduler, which chooses an interleaving at visible
 synchronization points. It can expose a lost notification, an early drain, a double completion, or
