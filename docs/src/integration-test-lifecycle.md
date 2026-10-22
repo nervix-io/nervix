@@ -149,9 +149,15 @@ scenarios out by default: their steps assert a detector an ordinary build does n
 The stressed endpoint ACK lifecycle examples use `@deloxide_stress_endpoint_ack` in their own
 bounded diagnostic invocation. They run serially as the other stressed lifecycle examples do,
 with a 900-second process bound and the existing 360-second teardown reserve. The baseline
-lifecycle invocation keeps its 1,800-second bound; all phases share the unchanged 4,800-second
-selection workload budget. Inventory discovery checks both groups completely, and the ordinary
+lifecycle invocation has a 2,700-second bound; all phases share the 4,800-second
+selection workload budget. Inventory discovery checks every group completely, and the ordinary
 suite continues to admit these examples beside its other scenarios.
+
+The six transaction-retention examples use `@deloxide_stress_transaction_retention` in the
+`stress-transaction-retention` invocation, before the baseline lifecycle process. It uses the
+same 900-second process bound and 360-second teardown reserve. Inventory discovery checks that
+the baseline, endpoint ACK and retention groups are complete and disjoint. The separate serial
+phase accounts for every retention example within the selection's workload budget.
 
 The [diagnostic lane](#diagnostic-lane) also selects the ordinary `@restore_installation`,
 `@client_ingestor_alter_drain`, `@memory_pressure_pause`, `@client_io_03_consumer_restore`,
@@ -423,8 +429,10 @@ qualification evidence.
 The `checks`, `tests`, and `scenarios` jobs use Go 1.26 and check out the source before installing
 their pinned Go formatters. This makes the installer and the later cache publication and report
 scripts available when a tool setup step fails. The installer retains every attempt in a
-`go-tool-bootstrap-<job>` artifact and retries only a checksum database transport error within its
-eight-minute budget. The publication and report steps check for their scripts before calling them,
+`go-tool-bootstrap-<job>` artifact and retries transport errors reading Go's public module proxy or
+checksum database within its eight-minute budget. Checksum verification remains mandatory; compiler,
+version and verification failures end installation immediately. The publication and report steps
+check for their scripts before calling them,
 so a failed checkout does not add a second failure that obscures the original one. The jobs'
 existing deadlines and test budgets are unchanged.
 
@@ -1575,6 +1583,20 @@ it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
 
+MongoDB write-concern scenarios use a separate single-member replica set, reached through a direct
+connection after its primary election completes within the dependency startup budget. A client
+requesting two data-bearing members receives the server's unsatisfied write-concern answer beside
+the documents it applied. This fault belongs to that client's write concern, so other scenarios
+sharing the server keep running. Each scenario provisions its own collection and retains its
+server kind with that collection for later assertions; standalone and TLS collections keep their
+own server kinds.
+
+Both MongoDB test servers set `GLIBC_TUNABLES=glibc.pthread.rseq=1`, enabling glibc's restartable
+sequence registration. This avoids the MongoDB/TCMalloc crash on affected Linux kernels when the
+image's default disables that registration; the [image maintainers document the setting and kernel
+issue](https://github.com/docker-library/mongo/discussions/748). The fixed container environment is
+shared by ordinary and diagnostic runs and participates in the fixture's configuration hash.
+
 A scenario that needs a Kafka broker to refuse what the shared broker accepts for every other
 scenario starts a broker of its own: librdkafka's in-process mock cluster of one broker, which the
 scenario keeps until it ends, across its cluster's restarts. While the scenario asks it to, that
@@ -2121,11 +2143,12 @@ scenarios in one process, their nodes contended on it and missed startup and req
 that a plain diagnostic build of the same scenarios met.
 [Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
 them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
-owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 98
-lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, the ten endpoint ACK
-examples in their own 15-minute invocation, and the
+owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 102
+lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
-bounded at 40. `deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
+bounded at 40. The six transaction-retention and ten endpoint ACK examples run in separate serial
+invocations, each bounded at 15 minutes, within the same selection workload budget.
+`deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
 invocation of 53 capture, restore and checkpoint-transfer runs tagged `@deloxide_stress_restore`,
 bounded at 70 minutes. Each selection has the inventory's 80-minute budget and its own CI runner.
 

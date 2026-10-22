@@ -277,6 +277,8 @@ use.
 - **E-3.** A client MUST NOT create a new reference for a command whose outcome is uncertain. It
   MUST repeat the command under the same reference until it receives a terminal disposition, or give
   up and report the outcome as unknown, naming the reference.
+  An applying execution retains the finished transactions its recovery needs even beyond their
+  configured tombstone age; transaction retention does not require a new execution reference.
 - **E-4.** A client SHOULD stop repeating a reference well before the retry validity, 15 minutes by
   default, has passed since the reference was created, and its clock SHOULD stay within five minutes
   of the cluster's. A repetition after the record was reclaimed is refused with
