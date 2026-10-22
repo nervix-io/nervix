@@ -739,10 +739,10 @@ Feature: Kafka emission
         TIMESTAMP NOW
         TO swap_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT refusing_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT refusing_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}'
       };
-      CREATE CLIENT replacement_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT replacement_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}'
       };
       CREATE EMITTER swap_output FROM swap_events

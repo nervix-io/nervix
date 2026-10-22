@@ -19,9 +19,9 @@ Feature: Header models
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (event_id string, tenant string);
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT pulsar_main TYPE PULSAR CONFIG { 'addr' = 'pulsar://127.0.0.1:6650' };
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE PULSAR CLIENT pulsar_main CONFIG { 'addr' = 'pulsar://127.0.0.1:6650' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://127.0.0.1:19080', 'timeout_ms' = 5000
       };
       """
@@ -115,7 +115,7 @@ Feature: Header models
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://127.0.0.1:19080', 'timeout_ms' = 5000
       };
       CREATE EMITTER requests FROM outgoing
@@ -124,7 +124,7 @@ Feature: Header models
           WITHOUT BODY
         INVOKE write_header('X-Tenant', input.tenant)
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT pushes TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT pushes CONFIG {
         'addr' = 'tcp://127.0.0.1:63001', 'bind' = 'false'
       };
       CREATE EMITTER broadcasts FROM outgoing
