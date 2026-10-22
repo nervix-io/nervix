@@ -321,6 +321,11 @@ connection failed, lookup failures included, before the source reports the failu
 connections stay open when their host's answer changes or expires; the next connection resolves
 again.
 
+SQS unit checks retain a bound, non-listening socket for each refused endpoint until the request
+finishes. The socket keeps another parallel fixture from listening on that address while still
+making the SDK observe connection refusal. The ownership check verifies both properties; source
+receive stand-ins continue to run independently beside these checks.
+
 ### DNS for OTEL gRPC
 
 The OTEL sink receives the node's resolver in its typed sink configuration. Its gRPC transport
