@@ -245,10 +245,9 @@ async fn post_acknowledged_payment(world: &ScenarioWorld, node: &str, host: &str
             }
             None => PAYMENT_RETRY_DELAY,
         };
-        let body = response
-            .bytes()
-            .await
-            .unwrap_or_else(|error| panic!("the payment endpoint's answer did not arrive: {error}"));
+        let body = response.bytes().await.unwrap_or_else(|error| {
+            panic!("the payment endpoint's answer did not arrive: {error}")
+        });
         let outcome: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|error| {
             panic!("the payment endpoint answered {status} outside its outcome vocabulary: {error}")
         });
