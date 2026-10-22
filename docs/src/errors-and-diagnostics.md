@@ -630,6 +630,13 @@ failure's whole chain. A deadline key whose value breaks the vocabulary's rule i
 `ClientConfigError::InvalidDeadline`, naming the key above the `ClientDeadlineError` that says why,
 and each connector reports it as a configuration failure.
 
+A Core NATS write that runs out of the client's `timeout_ms` keeps `DeadlineElapsed` beneath
+`SinkPublishError::Publish` and attaches its message, which `DESCRIBE EMITTER` shows; the write's
+records stay unresolved for the emitter's retry. A NATS sink whose client still holds records when
+its finish deadline passes fails its finish with `SinkFinishError::Unsent` and their count, and one
+whose client fails while it flushes them with `SinkFinishError::Flush`, the driver's flush error
+beneath.
+
 A Syslog frame write that runs out of the client's `timeout_ms` keeps `DeadlineElapsed` beneath
 `SinkPublishError::Publish`, and the sink attaches the deadline's message last, so
 `DESCRIBE EMITTER` leads with it; the emitter rebuilds its connection and retries on its policy. A Syslog
