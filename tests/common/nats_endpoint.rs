@@ -3,25 +3,30 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** One loopback listener, the connections it forwards to the server, the NATS protocol
-//!   framing of what a client sends through it, and whether it forwards, holds or refuses them.
-//! - **Depends on.** Tokio's TCP sockets and I/O traits, and the boundary's tasks, cancellation and
-//!   watch channel.
+//!   framing of what a client sends through it, whether it forwards, holds or refuses them, and how
+//!   many it refused.
+//! - **Depends on.** Tokio's TCP sockets and I/O traits, and the boundary's tasks, timers,
+//!   cancellation and watch channel.
 //! - **Must not know.** Nervix, or what a client sends beyond its protocol operation and its size.
 //!
 //! The endpoint takes the server away from the clients that connect through it without touching
 //! the server the other scenarios share. Going down ends every connection it forwards and refuses
-//! new ones, as a server that stopped. Holding stops reading what each client sends once it
-//! forwarded a number of publishes, as a server that stopped reading, while everything the server
-//! sends still reaches the client: the client keeps the answers to what was forwarded, and what it
-//! sends after them backs up in its own buffers.
+//! new ones, as a server that stopped, and counts each connection it refuses, so a scenario knows a
+//! client found it down. Holding stops reading what each client sends once it forwarded a number of
+//! publishes, as a server that stopped reading, while everything the server sends still reaches the
+//! client: the client keeps the answers to what was forwarded, and what it sends after them backs
+//! up in its own buffers.
 
-use std::{io, net::SocketAddr};
+use std::{future::Future, io, net::SocketAddr, time::Duration};
 
+use meticulous::OptionExt as _;
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
     sync::{CancellationToken, watch},
     task::JoinHandle,
+    time::{Instant, sleep},
 };
+use nervix_recovery::Discarded as _;
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
 };
@@ -48,6 +53,8 @@ enum NatsEndpointMode {
 pub(crate) struct NatsEndpoint {
     local_addr: SocketAddr,
     mode: watch::Sender<NatsEndpointMode>,
+    /// How many connections the endpoint refused while it was down.
+    refused: watch::Sender<u64>,
     /// Cancelled to end every connection the endpoint forwards, when the endpoint stops.
     connections: CancellationToken,
     listener: JoinHandle<()>,
@@ -59,16 +66,19 @@ impl NatsEndpoint {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
         let local_addr = listener.local_addr()?;
         let (mode, observed) = watch::channel(NatsEndpointMode::Forwarding);
+        let (refused, _) = watch::channel(0_u64);
         let connections = CancellationToken::new();
         let listener = nervix_primitives::task::spawn(Self::accept(
             listener,
             server,
             observed,
+            refused.clone(),
             connections.clone(),
         ));
         Ok(Self {
             local_addr,
             mode,
+            refused,
             connections,
             listener,
         })
@@ -96,10 +106,35 @@ impl NatsEndpoint {
         self.mode.send_replace(NatsEndpointMode::Down);
     }
 
+    /// Waits until the endpoint has refused `count` connections while it was down.
+    pub(crate) async fn refused_at_least(&self, count: u64) {
+        let mut refused = self.refused.subscribe();
+        refused
+            .wait_for(|refused| *refused >= count)
+            .await
+            .discarded("the endpoint holds the sender for as long as it can be asked");
+    }
+
+    /// Forwards everything clients send once `delay` has passed, and answers when it started to.
+    /// The returned future owns its control, so the action it runs beside can borrow the scenario.
+    pub(crate) fn forward_everything_after(
+        &self,
+        delay: Duration,
+    ) -> impl Future<Output = Instant> + use<> {
+        let mode = self.mode.clone();
+        async move {
+            sleep(delay).await;
+            let forwarding_at = Instant::now();
+            mode.send_replace(NatsEndpointMode::Forwarding);
+            forwarding_at
+        }
+    }
+
     async fn accept(
         listener: TcpListener,
         server: SocketAddr,
         mode: watch::Receiver<NatsEndpointMode>,
+        refused: watch::Sender<u64>,
         connections: CancellationToken,
     ) {
         loop {
@@ -111,6 +146,11 @@ impl NatsEndpoint {
             // server greets it.
             if *mode.borrow() == NatsEndpointMode::Down {
                 drop(client);
+                refused.send_modify(|refused| {
+                    *refused = refused
+                        .checked_add(1)
+                        .assured("a scenario connects to one endpoint far fewer than 2^64 times");
+                });
                 continue;
             }
             nervix_primitives::task::spawn(Self::forward(
