@@ -346,6 +346,7 @@ impl IngestSourceDraft {
             IngestSourceKind::Prometheus(PrometheusSourceEntity::Query) => PrometheusQuerySource {
                 client: self.client()?,
                 query: self.required(&self.query, IngestSourceDraftError::Query)?,
+                max_body_size: None,
                 every: self.every()?,
                 mode: PrometheusIngestMode::NoAck,
                 quiesce,

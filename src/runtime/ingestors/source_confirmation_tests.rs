@@ -275,6 +275,9 @@ impl SourceHostServices for ConfirmingHost {
     fn record_transport_redeliveries(&self, positions: usize) {
         panic!("a replayable check source discarded {positions} positions after a reconnect");
     }
+    fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+        panic!("a check source whose payloads all fit dropped {payloads} for their size");
+    }
     fn record_unconfirmed_stop(&self, positions: usize) {
         self.record
             .lock()

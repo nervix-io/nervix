@@ -14,15 +14,13 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::NonZeroUsize;
-
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
     bounds::{
-        BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DEFAULT_IDLE_TIMEOUT,
-        DeadlineKey, DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
+        BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
+        DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
@@ -41,17 +39,6 @@ configured_client!(Redis: pooled, config NervixWithAddressQuery, CreateClientRed
 
 /// The longest channel Nervix subscribes to, in bytes.
 const REDIS_CHANNEL_MAX: usize = 1024;
-
-/// The read-ahead capacity when a Redis client leaves `subscription_buffer_messages` out.
-pub const DEFAULT_REDIS_SUBSCRIPTION_MESSAGES: NonZeroUsize = nonzero_ext::nonzero!(1024usize);
-
-/// The largest explicit Redis subscription read-ahead capacity.
-pub const MAX_REDIS_SUBSCRIPTION_MESSAGES: NonZeroUsize = nonzero_ext::nonzero!(65_536usize);
-
-const _: () = assert!(
-    DEFAULT_REDIS_SUBSCRIPTION_MESSAGES.get() <= MAX_REDIS_SUBSCRIPTION_MESSAGES.get(),
-    "the default Redis subscription capacity is an admitted explicit capacity"
-);
 
 external_names! {
     /// A Redis Pub/Sub channel: 1 to 1,024 bytes. A Redis channel is binary-safe, so any text is a
@@ -95,7 +82,7 @@ const REDIS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
             wait: "idle subscription activity, including its PING probe",
             bound: WaitBound::Key {
                 key: DeadlineKey::IdleTimeout,
-                omitted: OmittedDeadline::Default(DEFAULT_IDLE_TIMEOUT),
+                omitted: OmittedDeadline::Required,
             },
         },
     ],
@@ -130,7 +117,7 @@ const REDIS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for RedisPubSubSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
+        headers: None,
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Redis),
@@ -203,7 +190,7 @@ pub struct RedisPubSubSink {
 
 impl SinkEntity for RedisPubSubSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
+        headers: None,
         reference: SinkReferenceKind::Client(ConnectorKind::Redis),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },

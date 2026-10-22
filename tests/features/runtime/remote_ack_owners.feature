@@ -21,7 +21,7 @@ Feature: Attached record outcomes across independent branch deliveries
       CREATE SCHEMA ack_owner_key ( branch_name STRING );
       CREATE BRANCH ack_owner_branch SCHEMA ack_owner_key TTL 5m;
       CREATE RELAY ack_owner_records SCHEMA ack_owner_event BRANCHED BY ack_owner_branch;
-      CREATE CLIENT ack_owner_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT ack_owner_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

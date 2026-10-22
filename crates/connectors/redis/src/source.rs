@@ -34,11 +34,12 @@ use nervix_connector::{
     client_config_value, optional_client_config_value,
 };
 use nervix_dns::{DnsLookupFailure, DnsResolver, LookupShare, OperationBudget};
-use nervix_models::{
-    ClientConfigEntry, ConnectorKind, DEFAULT_REDIS_SUBSCRIPTION_MESSAGES,
-    MAX_REDIS_SUBSCRIPTION_MESSAGES, RedisChannelName,
+use nervix_models::{ClientConfigEntry, ConnectorKind, RedisChannelName};
+use nervix_primitives::{
+    net::TcpStream,
+    sync::{Semaphore, StdArc},
+    time::timeout,
 };
-use nervix_primitives::{net::TcpStream, sync::StdArc, time::timeout};
 use redis::{Client as RedisClient, ConnectionAddr, Msg};
 use rustls_pki_types::ServerName;
 use subscription::RedisSubscription;
@@ -60,6 +61,8 @@ pub enum RedisPubSubSourceError {
     InvalidConnectTimeout,
     #[error("invalid {connector} client idle_timeout_ms", connector = ConnectorKind::Redis)]
     InvalidIdleTimeout,
+    #[error("{connector} subscription requires client config key '{key}'", connector = ConnectorKind::Redis)]
+    MissingConfiguration { key: &'static str },
     #[error("{connector} subscription_buffer_messages must be between 1 and {maximum}", connector = ConnectorKind::Redis)]
     InvalidBufferCapacity { maximum: usize },
     #[error("failed to build Redis client")]
@@ -126,6 +129,11 @@ impl RedisPubSubSourcePlan {
             .change_context(RedisPubSubSourceError::InvalidConnectTimeout)?;
         let idle_timeout = ConfiguredDeadline::idle(&config)
             .change_context(RedisPubSubSourceError::InvalidIdleTimeout)?;
+        let Some(idle_timeout) = idle_timeout else {
+            return Err(Report::new(RedisPubSubSourceError::MissingConfiguration {
+                key: "idle_timeout_ms",
+            }));
+        };
         let buffer_messages = Self::buffer_messages(&config)?;
         let tls = match client.get_connection_info().addr() {
             ConnectionAddr::TcpTls { .. } => {
@@ -150,16 +158,18 @@ impl RedisPubSubSourcePlan {
     fn buffer_messages(config: &[ClientConfigEntry]) -> RedisPubSubSourceResult<NonZeroUsize> {
         let Some(value) = optional_client_config_value(config, "subscription_buffer_messages")
         else {
-            return Ok(DEFAULT_REDIS_SUBSCRIPTION_MESSAGES);
+            return Err(Report::new(RedisPubSubSourceError::MissingConfiguration {
+                key: "subscription_buffer_messages",
+            }));
         };
         let invalid = || RedisPubSubSourceError::InvalidBufferCapacity {
-            maximum: MAX_REDIS_SUBSCRIPTION_MESSAGES.get(),
+            maximum: Semaphore::MAX_PERMITS,
         };
         if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(Report::new(invalid()));
         }
         let capacity = value.parse::<NonZeroUsize>().change_context(invalid())?;
-        if capacity > MAX_REDIS_SUBSCRIPTION_MESSAGES {
+        if capacity.get() > Semaphore::MAX_PERMITS {
             return Err(Report::new(invalid()));
         }
         Ok(capacity)
@@ -437,7 +447,7 @@ mod tests {
         time::Duration,
     };
 
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_connector::DeadlineElapsed;
     use nervix_dns::{DnsLookupError, DnsLookupFailure};
     use nervix_models::DeadlineKey;
@@ -448,19 +458,29 @@ mod tests {
     use crate::test_fixture::Fixture;
 
     #[test]
-    fn subscription_capacity_is_positive_bounded_and_defaults_once() {
-        let capacity = RedisPubSubSourcePlan::buffer_messages(&[])
-            .assured("an omitted capacity takes its declared default");
-        assert_eq!(capacity, DEFAULT_REDIS_SUBSCRIPTION_MESSAGES);
-        for value in ["1", "2", "65536"] {
-            let capacity = RedisPubSubSourcePlan::buffer_messages(&[entry(
+    fn subscription_capacity_is_positive_and_fits_the_bounded_channel() {
+        for capacity in [1, 2, Semaphore::MAX_PERMITS] {
+            let value = capacity.to_string();
+            let parsed = RedisPubSubSourcePlan::buffer_messages(&[entry(
                 "subscription_buffer_messages",
-                value,
+                &value,
             )])
             .assured("the table contains admitted message capacities");
-            assert_eq!(capacity.get().to_string(), value);
+            assert_eq!(parsed.get(), capacity);
         }
-        for value in ["0", "-1", "+2", "1.5", "", "65537", "18446744073709551616"] {
+        let above_channel_limit = Semaphore::MAX_PERMITS
+            .checked_add(1)
+            .assured("the channel's permit ceiling is below usize::MAX")
+            .to_string();
+        for value in [
+            "0",
+            "-1",
+            "+2",
+            "1.5",
+            "",
+            above_channel_limit.as_str(),
+            "18446744073709551616",
+        ] {
             let error = RedisPubSubSourcePlan::buffer_messages(&[entry(
                 "subscription_buffer_messages",
                 value,
@@ -475,10 +495,11 @@ mod tests {
 
     fn plan(addr: &str, dns: DnsResolver) -> RedisPubSubSourcePlan {
         RedisPubSubSourcePlan::new(
-            vec![ClientConfigEntry {
-                key: "addr".to_string(),
-                value: addr.to_string(),
-            }],
+            vec![
+                entry("addr", addr),
+                entry("subscription_buffer_messages", "1024"),
+                entry("idle_timeout_ms", "30000"),
+            ],
             RedisChannelName::parse("events").expect("a plain channel name parses"),
             dns,
         )
@@ -500,6 +521,8 @@ mod tests {
                 vec![
                     entry("addr", "redis://127.0.0.1:6379"),
                     entry("connect_timeout_ms", value),
+                    entry("subscription_buffer_messages", "1024"),
+                    entry("idle_timeout_ms", "30000"),
                 ],
                 RedisChannelName::parse("events").expect("a plain channel name parses"),
                 fixture.dns.clone(),
@@ -535,6 +558,8 @@ mod tests {
             vec![
                 entry("addr", &format!("redis://127.0.0.1:{port}")),
                 entry("connect_timeout_ms", "200"),
+                entry("subscription_buffer_messages", "1024"),
+                entry("idle_timeout_ms", "30000"),
             ],
             RedisChannelName::parse("events").expect("a plain channel name parses"),
             fixture.dns,

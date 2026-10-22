@@ -28,19 +28,19 @@ use nervix_models::{
     BranchSelection, CanonicalNsplError, ClickHouseSink, ClickHouseTableSink, ClientConsumerSink,
     ClientSink, ClusterNodeName, CreateCorrelator, CreateDeduplicator, CreateEmitter,
     CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor, CreateReorderer,
-    CreateWindowProcessor, EmitSink, EmitterBody, FieldPath, HttpRequestSink, HttpSink,
-    IcebergCatalog, IcebergSink, IcebergTableSink, IngestSource, IngestTimestampSource,
+    CreateWindowProcessor, EmitSink, EmitterBody, FieldPath, HeaderModel, HttpRequestSink,
+    HttpSink, IcebergCatalog, IcebergSink, IcebergTableSink, IngestSource, IngestTimestampSource,
     IngestorInput, KafkaOffsetMode, KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource,
     Model, ModelKind, ModelName, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink,
     MqttSink, MqttTopicSink, MySqlConflictAction, MySqlSink, MySqlTableSink, NatsSink,
     NatsSubjectSink, NodeRef, OtelMetricsSink, OtelSink, PlacementName, PlacementPolicy,
     PostgresConflictAction, PostgresSink, PostgresTableSink, ProcessorInputs, ProcessorOutputs,
-    PulsarSink, PulsarSource, PulsarTopicSink, PulsarTopicSource, RabbitMqQueueSink, RabbitMqSink,
-    RedisPubSubSink, RedisSink, RelayName, RequestedResourceVersion, ResourceDescription,
-    ResourceEntryContent, ResourceManifestEntry, ResourceUsage, ResourceVersionEntries,
-    ScheduledNode, SentryEventSink, SentrySink, SqsQueueSink, SqsSink, SyslogCollectorSink,
-    SyslogSink, WasmStateInspection, ZeroMqPushSink, ZeroMqSink, expression_to_nspl,
-    ingest_quiesce_to_nspl, ingestor_input_body_to_nspl,
+    PrometheusSource, PulsarSink, PulsarSource, PulsarTopicSink, PulsarTopicSource,
+    RabbitMqQueueSink, RabbitMqSink, RedisPubSubSink, RedisSink, RelayName,
+    RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
+    ResourceUsage, ResourceVersionEntries, ScheduledNode, SentryEventSink, SentrySink,
+    SqsQueueSink, SqsSink, SyslogCollectorSink, SyslogSink, WasmStateInspection, ZeroMqPushSink,
+    ZeroMqSink, expression_to_nspl, ingest_quiesce_to_nspl, ingestor_input_body_to_nspl,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use sorted_vec::SortedSet;
@@ -69,6 +69,7 @@ pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
         last_decode_rejection: summary
             .last_decode_rejection
             .map(decode_rejection_to_envelope),
+        oversized_payloads_total: summary.oversized_payloads_total,
         memory_backpressure_paused: summary.memory_backpressure_paused,
         transient_error: summary.transient_error,
         reconnect_backoff: summary.reconnect_backoff,
@@ -114,6 +115,7 @@ pub(in crate::application) fn runtime_ingestor_describe_from_envelope(
             last_decode_rejection: summary
                 .last_decode_rejection
                 .map(decode_rejection_from_envelope),
+            oversized_payloads_total: summary.oversized_payloads_total,
             memory_backpressure_paused: summary.memory_backpressure_paused,
             transient_error: summary.transient_error,
             reconnect_backoff: summary.reconnect_backoff,
@@ -364,6 +366,10 @@ pub(in crate::application) fn format_ingestor_describe_output(
             "nervix_ingestor_decode_rejections_total: {}",
             summary.decode_rejections_total
         ),
+        format!(
+            "nervix_ingestor_oversized_payloads_total: {}",
+            summary.oversized_payloads_total
+        ),
     ]);
     let last_decode_rejection = match summary.last_decode_rejection.as_ref() {
         Some(rejection) => rejection.to_string(),
@@ -456,9 +462,29 @@ pub(in crate::application) fn format_ingestor_describe_output(
             subscription.ownership.keywords()
         ));
         lines.push(format!("pulsar instances: {instances}"));
+    } else if let Some(IngestSource::Prometheus(PrometheusSource::Query(source))) =
+        ingestor.input.transport_source()
+    {
+        lines.push(format!(
+            "prometheus max body size: {}",
+            source.max_body_size_in_effect()
+        ));
     }
+    lines.push(format!(
+        "headers: {}",
+        format_header_model(ingestor.input.source_kind().capabilities().headers)
+    ));
 
     lines.join("\n")
+}
+
+/// How `DESCRIBE` shows the header model of one side: the model, or `none` where that side's
+/// messages carry no transport headers.
+fn format_header_model(model: Option<HeaderModel>) -> String {
+    match model {
+        Some(model) => model.to_string(),
+        None => "none".to_string(),
+    }
 }
 
 /// One line of `SHOW INGESTORS`: the pair the ingestor reads, its schema or codec, the node that
@@ -979,6 +1005,10 @@ pub(in crate::application) fn format_emitter_describe_output(
             } else {
                 "none"
             }
+        ),
+        format!(
+            "headers: {}",
+            format_header_model(emitter.sink.capabilities().headers)
         ),
     ]);
     Ok(lines.join("\n"))
@@ -1881,6 +1911,67 @@ mod tests {
             ]),
             "source, sink"
         );
+    }
+
+    #[test]
+    fn a_prometheus_ingestor_describes_the_response_bound_in_effect() {
+        use nervix_models::{IngestQuiesceMode, PrometheusIngestMode, PrometheusQuerySource};
+
+        use super::super::test_fixtures::{named, scheduled_node};
+
+        let summary = RuntimeIngestorDescribe {
+            running: true,
+            ready: true,
+            quiesce_state: None,
+            quiesce_counters: Default::default(),
+            transport_redeliveries_total: 0,
+            decode_rejections_total: 0,
+            last_decode_rejection: None,
+            oversized_payloads_total: 0,
+            memory_backpressure_paused: false,
+            transient_error: None,
+            reconnect_backoff: None,
+            reconnect_wait_millis: None,
+            kafka_domain_offsets: None,
+            client_producers: None,
+        };
+        let written = "1KiB"
+            .parse()
+            .assured("the fixture size is a whole number of kibibytes");
+        for (max_body_size, line) in [
+            (None, "prometheus max body size: 16MiB"),
+            (Some(written), "prometheus max body size: 1KiB"),
+        ] {
+            let mut scheduled = scheduled_node("samples", ModelKind::Ingestor);
+            let Model::Ingestor(ingestor) = scheduled.config.as_mut() else {
+                panic!("the fixture constructs an ingestor");
+            };
+            let IngestorInput::Transport(input) = &mut ingestor.input else {
+                panic!("the fixture constructs a transport ingestor");
+            };
+            input.source = PrometheusQuerySource {
+                client: named("prom_main"),
+                query: "up".to_owned(),
+                max_body_size,
+                every: "15s"
+                    .parse()
+                    .assured("the fixture cadence is a positive duration"),
+                mode: PrometheusIngestMode::NoAck,
+                quiesce: IngestQuiesceMode::Suspend,
+            }
+            .into();
+            let Model::Ingestor(ingestor) = scheduled.config.as_ref() else {
+                panic!("the fixture constructs an ingestor");
+            };
+
+            let described =
+                format_ingestor_describe_output(&ingestor.name, ingestor, &scheduled, &summary);
+
+            assert!(
+                described.lines().any(|candidate| candidate == line),
+                "expected `{line}` in {described}"
+            );
+        }
     }
 
     #[test]

@@ -355,6 +355,7 @@ mod tests {
             value: "1000".to_string(),
         }])
         .assured("one second is a positive schedulable deadline")
+        .assured("the client declares its idle timeout")
     }
 
     fn capacity() -> NonZeroUsize {

@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     bounds::{
-        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
-        WaitBound,
+        BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
     entity_union::{connector_sinks, connector_sources},
@@ -31,10 +31,11 @@ use super::{
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
-    LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, SubjectName,
+    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
+    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    SubjectName,
 };
 
 configured_client!(Nats: unpooled, config NervixWithAddressQuery, CreateClientNats => NatsConfigEntry);
@@ -156,8 +157,11 @@ const NATS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Driver("5 s per address"),
         },
         DeclaredWait {
-            wait: "a core publish and its flush",
-            bound: WaitBound::Unbounded,
+            wait: "a core publish and its flush to the client's socket, not a server round trip",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
         },
         DeclaredWait {
             wait: "a JetStream acknowledgement",
@@ -169,7 +173,9 @@ const NATS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for NatsSubjectSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
+        // A NATS message's header map keeps every value of a name together under it, and its names
+        // in no order.
+        headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Nats),
@@ -252,7 +258,9 @@ pub struct NatsSubjectSink {
 
 impl SinkEntity for NatsSubjectSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: true,
+        // A NATS message's header map keeps every value of a name together under it, and its names
+        // in no order.
+        headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
         reference: SinkReferenceKind::Client(ConnectorKind::Nats),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },

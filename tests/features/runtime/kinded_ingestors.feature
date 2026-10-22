@@ -16,22 +16,22 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE VHOST edge http-{{test_id}}-kinded-ingestors.example.com;
       CREATE ENDPOINT http_ingress ON edge PATH '/events' TYPE HTTP;
       CREATE ENDPOINT ws_ingress ON edge PATH '/stream' TYPE WEBSOCKETS;
-      CREATE CLIENT http_main TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT http_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9/events',
         'method' = 'GET',
         'timeout_ms' = 5000
       };
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE CLIENT pulsar_main TYPE PULSAR CONFIG { 'addr' = 'pulsar://127.0.0.1:6650' };
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG { 'addr' = 'amqp://127.0.0.1:5672' };
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379' };
-      CREATE CLIENT mqtt_main TYPE MQTT CONFIG { 'addr' = 'mqtt://127.0.0.1:1883' };
-      CREATE CLIENT nats_main TYPE NATS CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
-      CREATE CLIENT prom_main TYPE PROMETHEUS CONFIG { 'addr' = 'http://127.0.0.1:9090', 'timeout_ms' = 5000 };
-      CREATE CLIENT zmq_main TYPE ZEROMQ CONFIG { 'addr' = 'tcp://127.0.0.1:5555', 'bind' = 'false' };
-      CREATE CLIENT sqs_main TYPE SQS CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1' };
-      CREATE CLIENT ws_main TYPE WEBSOCKETS CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
-      CREATE CLIENT syslog_main TYPE SYSLOG CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE PULSAR CLIENT pulsar_main CONFIG { 'addr' = 'pulsar://127.0.0.1:6650' };
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG { 'addr' = 'amqp://127.0.0.1:5672' };
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379', 'subscription_buffer_messages' = '1024', 'idle_timeout_ms' = '30000' };
+      CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1883' };
+      CREATE NATS CLIENT nats_main CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
+      CREATE PROMETHEUS CLIENT prom_main CONFIG { 'addr' = 'http://127.0.0.1:9090', 'timeout_ms' = 5000 };
+      CREATE ZEROMQ CLIENT zmq_main CONFIG { 'addr' = 'tcp://127.0.0.1:5555', 'bind' = 'false' };
+      CREATE SQS CLIENT sqs_main CONFIG { 'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1' };
+      CREATE WEBSOCKETS CLIENT ws_main CONFIG { 'endpoint' = 'ws://127.0.0.1:9/stream' };
+      CREATE SYSLOG CLIENT syslog_main CONFIG { 'protocol' = 'udp', 'addr' = '127.0.0.1:5514' };
       CREATE HTTP REQUEST INGESTOR http_request_source
         FROM http_main EVERY 1s MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -275,7 +275,7 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR kafka_source
         FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
@@ -382,7 +382,7 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE VHOST edge http-{{test_id}}-kinded-references.example.com;
       CREATE ENDPOINT http_ingress ON edge PATH '/events' TYPE HTTP;
       CREATE ENDPOINT ws_ingress ON edge PATH '/stream' TYPE WEBSOCKETS;
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379' };
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379', 'subscription_buffer_messages' = '1024', 'idle_timeout_ms' = '30000' };
       """
     When these NSPL commands fail with "HTTP ENDPOINT ingestor 'web_source' in domain '{{domain}}' requires a TYPE HTTP endpoint, but endpoint 'ws_ingress' is TYPE WEBSOCKETS"
       """
@@ -424,8 +424,8 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE VHOST edge http-{{test_id}}-kinded-completion.example.com;
       CREATE ENDPOINT http_ingress ON edge PATH '/events' TYPE HTTP;
       CREATE ENDPOINT ws_ingress ON edge PATH '/stream' TYPE WEBSOCKETS;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379', 'subscription_buffer_messages' = '1024', 'idle_timeout_ms' = '30000' };
       """
     Then the current leader node is saved as placeholder "leader"
     When the CLI suggests for "CREATE |" on node "{{leader}}"
@@ -460,7 +460,7 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

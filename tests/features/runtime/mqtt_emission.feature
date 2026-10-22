@@ -22,8 +22,7 @@ Feature: MQTT emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
@@ -38,8 +37,7 @@ Feature: MQTT emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-emitter-{{test_id}}'
@@ -104,7 +102,7 @@ Feature: MQTT emission
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE RELAY emitter_errors SCHEMA emitter_error BRANCHED BY by_kafka_notifications;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -121,7 +119,7 @@ Feature: MQTT emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT mqtt_sink TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_sink CONFIG {
         'addr' = '{{mqtt_stallable_addr}}',
         'client_id' = 'nervix-mqtt-boundary-{{test_id}}'
       };
@@ -189,7 +187,7 @@ Feature: MQTT emission
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_ingress TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_ingress CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-window-ingress-{{test_id}}'
       };
@@ -202,7 +200,7 @@ Feature: MQTT emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT mqtt_sink TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_sink CONFIG {
         'addr' = '{{mqtt_filtered_addr}}',
         'client_id' = 'nervix-window-emitter-{{test_id}}'
       };
@@ -251,3 +249,76 @@ Feature: MQTT emission
       | 3            | QOS 1 |
       | 1            | QOS 2 |
       | 3            | QOS 2 |
+
+  # A QOS 0 emitter delivers a record once its client takes it. The endpoint holds the client's
+  # CONNECT, so the client still holds the record it took when STOP finishes the emitter: the finish
+  # waits for the client to send it, which it can only do once the endpoint resumes.
+  @mqtt_finish_at_stop @emitter_finish_at_stop @deloxide_stress
+  Scenario Outline: STOP waits for the publish a QOS 0 MQTT emitter's client holds
+    Given MQTT is running
+    And a stallable MQTT endpoint is configured
+    And drain timeout is configured as "60s"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And MQTT topic "held_out_{{test_id}}" is observed
+    When the stallable endpoint "mqtt" is paused
+    And these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA held_event ( sequence I64 );
+      CREATE WIRE JSON SCHEMA held_wire MODE STRICT ( sequence integer );
+      CREATE CODEC held_codec FROM WIRE JSON SCHEMA held_wire TO SCHEMA held_event;
+      CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
+      CREATE VHOST edge mqtt-held-{{test_id}}.example.com;
+      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR held_source
+        FROM held_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_codec
+        TIMESTAMP NOW
+        TO held_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE MQTT CLIENT mqtt_held CONFIG {
+        'addr' = '{{mqtt_stallable_addr}}',
+        'client_id' = 'nervix-cucumber-held-{{test_id}}'
+      };
+      CREATE EMITTER held_output FROM held_events
+        TO MQTT mqtt_held TOPIC held_out_{{test_id}}
+          MODE QOS 0 RETRY POLICY BACKOFF 100ms MAX 1s
+        ENCODE USING held_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "mqtt-held-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":1}
+      """
+    Then within "30s" DESCRIBE EMITTER "held_output" on the leader node contains
+      """
+      messages_total sent relay=held_events
+      """
+    And the last command output owner is saved as placeholder "held_owner"
+    And within "30s" DESCRIBE EMITTER "held_output" on the leader node contains
+      """
+      messages_total sent relay=held_events physical_node={{held_owner}} total=1
+      """
+    When STOP runs while the stallable endpoint "mqtt" resumes after "2s"
+    Then STOP completed after the stallable endpoint resumed
+    And within "30s" the observed broker receives exactly these payloads
+      """
+      {"sequence":1}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
