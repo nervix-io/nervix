@@ -106,7 +106,7 @@ Feature: MQTT sessions belong to their declared ingestor
     And an MQTT session ingestor named "events" runs with client id "moving_{{test_id}}"
     When these Plexus statements are executed
       """
-      CREATE CLIENT proxied TYPE MQTT CONFIG { 'addr' = '{{mqtt_stallable_addr}}', 'client_id' = 'moving_{{test_id}}' };
+      CREATE MQTT CLIENT proxied CONFIG { 'addr' = '{{mqtt_stallable_addr}}', 'client_id' = 'moving_{{test_id}}' };
       ALTER MQTT TOPIC INGESTOR events
         SET FROM proxied TOPIC 'session_{{test_id}}'
         SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND;

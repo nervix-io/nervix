@@ -22,8 +22,7 @@ Feature: MQTT emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
@@ -38,8 +37,7 @@ Feature: MQTT emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-emitter-{{test_id}}'
@@ -104,7 +102,7 @@ Feature: MQTT emission
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE RELAY emitter_errors SCHEMA emitter_error BRANCHED BY by_kafka_notifications;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -121,7 +119,7 @@ Feature: MQTT emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT mqtt_sink TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_sink CONFIG {
         'addr' = '{{mqtt_stallable_addr}}',
         'client_id' = 'nervix-mqtt-boundary-{{test_id}}'
       };
@@ -189,7 +187,7 @@ Feature: MQTT emission
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_ingress TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_ingress CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-window-ingress-{{test_id}}'
       };
@@ -202,7 +200,7 @@ Feature: MQTT emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT mqtt_sink TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_sink CONFIG {
         'addr' = '{{mqtt_filtered_addr}}',
         'client_id' = 'nervix-window-emitter-{{test_id}}'
       };
@@ -286,7 +284,7 @@ Feature: MQTT emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT mqtt_held TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_held CONFIG {
         'addr' = '{{mqtt_stallable_addr}}',
         'client_id' = 'nervix-cucumber-held-{{test_id}}'
       };

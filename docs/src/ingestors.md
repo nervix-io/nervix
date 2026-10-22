@@ -554,8 +554,7 @@ For outbound ingestor clients, TLS is configured on the `CLIENT`, not on the `IN
 General pattern:
 
 ```nspl,ignore
-CREATE [IF NOT EXISTS] CLIENT <name>
-  TYPE <kind>
+CREATE [IF NOT EXISTS] <kind> CLIENT <name>
   MOUNT <tls_resource> VERSION <n>|LATEST
   CONFIG {
     ...
@@ -592,8 +591,7 @@ an `mqtts` broker certificate against that host; see [MQTT](#mqtt).
 Example Kafka TLS client:
 
 ```nspl
-CREATE IF NOT EXISTS CLIENT kafka_tls
-  TYPE KAFKA
+CREATE IF NOT EXISTS KAFKA CLIENT kafka_tls
   MOUNT dev_tls VERSION 1
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9094',
@@ -605,8 +603,7 @@ CREATE IF NOT EXISTS CLIENT kafka_tls
 Example HTTP TLS client:
 
 ```nspl
-CREATE IF NOT EXISTS CLIENT http_tls
-  TYPE HTTP
+CREATE IF NOT EXISTS HTTP CLIENT http_tls
   MOUNT dev_tls VERSION 1
   CONFIG {
     'endpoint' = 'https://127.0.0.1:18443/http/notifications',
@@ -641,7 +638,7 @@ complete native graph through admission, application ACK, credit, forwarding and
 
 A client ingestor, declared under the `CLIENT PRODUCER` head, admits typed batches that applications
 submit through a Nervix session instead of reading an external system. There is no
-`CREATE CLIENT`, codec, `DECODE USING`, transport header, or `NO ACK` mode: a submitted batch
+external connector client, codec, `DECODE USING`, transport header, or `NO ACK` mode: a submitted batch
 already carries the ingestor's input schema, and every batch is acknowledged.
 
 ```nspl
@@ -869,20 +866,20 @@ under the same head. `DECODE USING <codec>`, the timestamp, the filter, the rout
 
 | Head | Reads | Section |
 | --- | --- | --- |
-| `HTTP REQUEST` | Responses to the requests a `TYPE HTTP` client sends on a cadence | [`HTTP REQUEST`](#http-request) |
+| `HTTP REQUEST` | Responses to the requests an `HTTP CLIENT` sends on a cadence | [`HTTP REQUEST`](#http-request) |
 | `HTTP ENDPOINT` | Requests to a `TYPE HTTP` endpoint | [Endpoints](#http-endpoint-and-websockets-endpoint) |
 | `WEBSOCKETS ENDPOINT` | Frames on connections to a `TYPE WEBSOCKETS` endpoint | [Endpoints](#http-endpoint-and-websockets-endpoint) |
-| `WEBSOCKETS CONNECTION` | Frames on the outbound connection of a `TYPE WEBSOCKETS` client | [`WEBSOCKETS CONNECTION`](#websockets-connection) |
-| `KAFKA TOPIC` | A topic, through a `TYPE KAFKA` client | [Kafka](#kafka) |
-| `PULSAR TOPIC` | A topic, through a `TYPE PULSAR` client | [Pulsar](#pulsar) |
-| `RABBITMQ QUEUE` | A queue, through a `TYPE RABBITMQ` client | [RabbitMQ](#rabbitmq) |
-| `REDIS PUBSUB` | A channel, through a `TYPE REDIS` client | [Redis Pub/Sub](#redis-pubsub) |
-| `MQTT TOPIC` | A topic filter, through a `TYPE MQTT` client | [MQTT](#mqtt) |
-| `NATS SUBJECT` | A subject, through a `TYPE NATS` client | [NATS](#nats) |
-| `ZEROMQ PULL` | The PULL socket of a `TYPE ZEROMQ` client | [ZeroMQ](#zeromq) |
-| `SYSLOG LISTENER` | The listener a `TYPE SYSLOG` client declares | [Syslog](#syslog) |
-| `SQS QUEUE` | A queue, through a `TYPE SQS` client | [SQS](#sqs) |
-| `PROMETHEUS QUERY` | A PromQL query, through a `TYPE PROMETHEUS` client | [Prometheus](#prometheus) |
+| `WEBSOCKETS CONNECTION` | Frames on the outbound connection of a `WEBSOCKETS CLIENT` | [`WEBSOCKETS CONNECTION`](#websockets-connection) |
+| `KAFKA TOPIC` | A topic, through a `KAFKA CLIENT` | [Kafka](#kafka) |
+| `PULSAR TOPIC` | A topic, through a `PULSAR CLIENT` | [Pulsar](#pulsar) |
+| `RABBITMQ QUEUE` | A queue, through a `RABBITMQ CLIENT` | [RabbitMQ](#rabbitmq) |
+| `REDIS PUBSUB` | A channel, through a `REDIS CLIENT` | [Redis Pub/Sub](#redis-pubsub) |
+| `MQTT TOPIC` | A topic filter, through an `MQTT CLIENT` | [MQTT](#mqtt) |
+| `NATS SUBJECT` | A subject, through a `NATS CLIENT` | [NATS](#nats) |
+| `ZEROMQ PULL` | The PULL socket of a `ZEROMQ CLIENT` | [ZeroMQ](#zeromq) |
+| `SYSLOG LISTENER` | The listener a `SYSLOG CLIENT` declares | [Syslog](#syslog) |
+| `SQS QUEUE` | A queue, through an `SQS CLIENT` | [SQS](#sqs) |
+| `PROMETHEUS QUERY` | A PromQL query, through a `PROMETHEUS CLIENT` | [Prometheus](#prometheus) |
 | `CLIENT PRODUCER` | Batches applications submit through their sessions | [Client Ingestors](#client-ingestors) |
 
 ### `HTTP REQUEST`
@@ -1258,7 +1255,7 @@ See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md
 
 Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both modes keep reading and
 keep the subscriber healthy; payloads are either retained locally within the declared bound or
-discarded and counted. A `TYPE REDIS` client declares connection-pool bounds even when only
+discarded and counted. A `REDIS CLIENT` declares connection-pool bounds even when only
 ingestors reference it; see [Database Client Connection Pools](database-client-pools.md).
 Each subscription owns a separate connection. It resolves the `addr` hostname through the node's
 asynchronous DNS resolver on initial subscribe and every resume after a disconnect; it does not
@@ -1643,7 +1640,7 @@ and delivers retained results in order after resume. A scrape whose `ON INGESTIO
 the node's extension workers full waits for them; see
 [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
 
-The ingestor reads through a `TYPE PROMETHEUS` client. Every key of its `CONFIG` is Nervix's own:
+The ingestor reads through a `PROMETHEUS CLIENT`. Every key of its `CONFIG` is Nervix's own:
 
 | Key | Required | Value |
 | --- | --- | --- |
@@ -1653,15 +1650,14 @@ The ingestor reads through a `TYPE PROMETHEUS` client. Every key of its `CONFIG`
 | `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
 
 ```nspl
-CREATE CLIENT prom_main
-  TYPE PROMETHEUS
+CREATE PROMETHEUS CLIENT prom_main
   CONFIG {
     'addr' = 'https://prometheus.example.com/monitoring',
     'timeout_ms' = 5000
   };
 ```
 
-`CREATE CLIENT` refuses a configuration that cannot configure a query source, and names the key:
+`CREATE PROMETHEUS CLIENT` refuses a configuration that cannot configure a query source, and names the key:
 a key the client does not declare, a key written twice, a missing `addr` or `timeout_ms`, an
 `addr` that is not such a URL, a `timeout_ms` that is not a positive whole number of
 milliseconds, or one of `tls_cert_file` and `tls_key_file` without the other. For example,
@@ -1882,7 +1878,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [WEBSOCKETS CONNECTION capability and mirror reference](connector-capabilities.md#websockets-connection-ingest).
 <!-- connector-matrix:ingest-websockets-connection:end -->
 
-This opens an outbound WebSocket connection through a `TYPE WEBSOCKETS` client and decodes text or
+This opens an outbound WebSocket connection through a `WEBSOCKETS CLIENT` and decodes text or
 binary frames.
 For `ws` and `wss`, each initial connection and resume resolves the URL host through the node's
 asynchronous resolver. It tries the returned addresses in order within one 30-second budget for
@@ -1913,8 +1909,7 @@ new session on the new owner.
 `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors are different because
 their listeners execute on every live cluster node.
 
-Outbound WebSocket clients can declare `WITH SIGNALING PROTOCOL <name>` after
-`TYPE WEBSOCKETS`. Server-side WebSocket endpoints can declare the same clause
+A `WEBSOCKETS CLIENT` can declare `WITH SIGNALING PROTOCOL <name>` after its name. Server-side WebSocket endpoints can declare the same clause
 after `TYPE WEBSOCKETS`.
 
 A signaling protocol declares a wire format and expresses the whole handshake as

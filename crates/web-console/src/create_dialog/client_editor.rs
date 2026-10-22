@@ -38,12 +38,12 @@ pub(super) fn ClientEditor(
                 } />
         </label>
         <fieldset class="create-choice-group create-client-type">
-            <legend>"Transport"</legend>
+            <legend>"Connector"</legend>
             <div class="create-choice-buttons">
                 <For each=move || ClientTransport::ALL.to_vec()
                     key=|transport| transport.key()
                     children=move |transport| view! {
-                        <button type="button" data-type=transport.key()
+                        <button type="button" data-client-type=transport.key()
                             class:active=move || signals.client.get().transport == Some(transport)
                             disabled=pending
                             on:click=move |_| {
