@@ -787,7 +787,9 @@ not the events waiting in librdkafka's queue, and reports them as its transient 
 event. Pulsar retains the receipts of records accepted under `NO_ACK` and waits for them within
 that same finish deadline. A driver failure or still-unanswered receipts fail its finish; an
 expired deadline reports their count, without claiming the broker did not receive them. MQTT
-QoS 0 discards what its client still holds, which the emitter logs at `warn`. Every other sink
+QoS 0 waits within that same finish deadline for its client's event loop to write and flush the
+publishes the client still holds; a failed flush or publishes still unflushed when it ends fail its
+finish, which reports the failure or their count. Every other sink
 holds nothing once a publish returns, so the publish itself is the
 completion point. [Finishing a sink](./connector-contract.md#finishing-a-sink) lists what each sink
 holds and does.
@@ -1247,9 +1249,7 @@ them again` at `info`, with the `domain`, the `ingestor`, the `instance` and the
 An emitter records what finishing its sink did when it stopped, with the `domain`, the `emitter`,
 the `sink` and the `ending`: `stop` for a stop that drained it, `teardown` for terminal teardown,
 and `interaction_stopped` when its relay interaction ended without either:
-`emitter sent the records its transport client held` at `info`,
-`emitter closed a transport client that may still hold records it delivered` at `warn` for a
-MQTT QoS 0 client, and
+`emitter sent the records its transport client held` at `info`, and
 `emitter stopped before its transport client sent every record it held` at `warn` with the
 `error`, which counts the records the client still held. That failure is also the emitter's
 transient error and an error event.

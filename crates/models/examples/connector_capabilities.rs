@@ -212,6 +212,10 @@ fn buffer_bound(bound: BufferBound) -> String {
         BufferOverflow::DropAndCount => "when full, drops and counts what does not fit",
         BufferOverflow::DropUncounted => "when full, drops what does not fit without counting it",
         BufferOverflow::FailPublish => "when full, fails the publish for the host to retry",
+        BufferOverflow::PeerDiscards => {
+            "when full, its peer, told this capacity, discards what does not fit instead of \
+             sending it"
+        }
         BufferOverflow::RefuseRequest => {
             "when full, immediately refuses the request for its sender to retry"
         }

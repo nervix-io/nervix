@@ -4,10 +4,11 @@
 //!
 //! - **Owns.** The MQTT client a configuration declares, its event loop and reconnect backoff,
 //!   the connection it opens to the broker through the node resolver, the session, quality of
-//!   service and shared subscription a source reads through, manual acknowledgement and local
-//!   replay of publishes, the quality of service each record is published at, the Maximum Packet
-//!   Size the broker declares and the rejection of a record whose PUBLISH packet would exceed it,
-//!   and confirmation classification.
+//!   service and shared subscription a source reads through, the Maximum Packet Size a source
+//!   advertises, manual acknowledgement and local replay of publishes, the quality of service each
+//!   record is published at, the Maximum Packet Size the broker declares and the rejection of a
+//!   record whose PUBLISH packet would exceed it, the QoS 0 publishes a sink's client still holds
+//!   until it sends them, and confirmation classification.
 //! - **Depends on.** The connector contract, the node DNS resolver, vocabulary values,
 //!   `error-stack`, Tokio and `rumqttc`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -41,6 +42,7 @@ mod source;
 mod test_fixtures;
 
 use std::{
+    collections::VecDeque,
     future::Future,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
@@ -52,13 +54,14 @@ use async_trait::async_trait;
 pub use connection::MqttConnectionError;
 use connection::MqttDialer;
 use error_stack::Report;
+use futures_util::FutureExt as _;
 use meticulous::OptionExt as _;
 use nervix_connector::{
     AckConfirmation, BrokerAnswer, BrokerVerdict, ConfirmationWindow, ParsedRetryPolicy,
-    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish, SinkFinishResult, SinkHost,
-    SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
-    client_config_value, client_tls_paths, next_retry_delay, optional_client_config_value,
-    read_tls_file,
+    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkFinish, SinkFinishError,
+    SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkRecord, SinkRecordId,
+    SinkStartError, SinkStartResult, client_config_value, client_tls_paths, next_retry_delay,
+    optional_client_config_value, read_tls_file,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, TopicName};
@@ -68,8 +71,10 @@ use nervix_primitives::{
         atomic::{AtomicU32, Ordering},
         watch,
     },
-    time::{Instant, sleep},
+    task::unconstrained,
+    time::{Instant, sleep, timeout_at},
 };
+use nervix_recovery::Discarded as _;
 use rumqttc::{
     AsyncClient, ClientError as MqttClientError, ConnAck, Event, Incoming, MqttOptions,
     PubAckReason as MqttPubAckReason, PubRecReason as MqttPubRecReason, PublishNotice,
@@ -126,6 +131,9 @@ pub struct MqttSink {
     mode: MqttPublishingMode,
     framing: MqttPublishFraming,
     broker_limit: Arc<MqttBrokerPacketLimit>,
+    /// The QoS 0 publishes the client took and has not yet sent, which stay empty under QoS 1
+    /// and 2.
+    unsent: MqttUnsentPublishes,
     eventloop_shutdown: watch::Sender<bool>,
 }
 
@@ -257,6 +265,115 @@ impl MqttBrokerPacketLimit {
 /// packet of its QoS 2 handshake arrives, or when the client gives the record up.
 type MqttAnswer = Pin<Box<dyn Future<Output = BrokerAnswer> + Send>>;
 
+/// The flush of one QoS 0 publish the client took, which ends once the client's event loop has
+/// written the publish and flushed the connection, or failed to: the write or the flush failed, or
+/// a clean session's next connection dropped the publish a lost connection left behind.
+type MqttFlush = Pin<Box<dyn Future<Output = Result<(), PublishNoticeError>> + Send>>;
+
+/// The QoS 0 publishes a sink reported delivered that its client has not yet sent.
+///
+/// A QoS 0 record is delivered once the client takes it, and the client's event loop writes it to
+/// the broker connection afterwards: at once while it is connected, or once it connects again. The
+/// sink keeps the flush of every publish the client took until that flush ends, so finishing the
+/// sink can wait for what the client still holds. Dropping the ended flushes at the start of each
+/// publish keeps one flush for each publish the client still holds: the one request its queue
+/// takes, and those a lost connection left for the next.
+#[derive(Default)]
+struct MqttUnsentPublishes {
+    flushes: VecDeque<MqttFlush>,
+}
+
+impl MqttUnsentPublishes {
+    fn hold(&mut self, flush: MqttFlush) {
+        self.flushes.push_back(flush);
+    }
+
+    /// Drops every flush that has ended, without waiting, and answers the first failure among
+    /// them. Visiting each flush once leaves every pending one held even if a surrounding finish
+    /// is cancelled.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "polls the MQTT driver's flush notices without waiting; their \
+                      implementations belong to the driver"
+        )
+    )]
+    fn drop_ended(&mut self) -> Option<PublishNoticeError> {
+        let mut failure = None;
+        let flushes = std::mem::take(&mut self.flushes);
+        for mut flush in flushes {
+            match unconstrained(&mut flush).now_or_never() {
+                Some(Ok(())) => {}
+                Some(Err(error)) => {
+                    if failure.is_none() {
+                        failure = Some(error);
+                    }
+                }
+                None => self.flushes.push_back(flush),
+            }
+        }
+        failure
+    }
+
+    /// Drops the flushes that ended while the client was not being finished. One that failed lost
+    /// its publish with the connection whose failure the event loop reported.
+    fn drop_settled(&mut self) {
+        self.drop_ended().discarded(
+            "the event loop reported the lost connection that failed the flush as the sink's \
+             transient error and an error event",
+        );
+    }
+
+    /// Waits until the client has sent every publish it still holds, or `deadline` passes.
+    async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
+        self.drop_settled();
+        if self.flushes.is_empty() {
+            return Ok(SinkFinish::NothingHeld);
+        }
+        let mut failure = None;
+        while let Some(flush) = self.flushes.front_mut() {
+            nervix_primitives::task::consume_budget().await;
+            let waited = timeout_at(deadline, flush).await;
+            let Ok(ended) = waited else {
+                let failed = self.drop_ended();
+                if failure.is_none() {
+                    failure = failed;
+                }
+                break;
+            };
+            self.flushes.pop_front();
+            if let Err(error) = ended
+                && failure.is_none()
+            {
+                failure = Some(error);
+            }
+        }
+        self.finish_outcome(failure)
+    }
+
+    /// What a finish that saw `failure` among the flushes it waited for answers: the count still
+    /// held when its deadline passed, then a failed flush, then a flush of everything held.
+    fn finish_outcome(&self, failure: Option<PublishNoticeError>) -> SinkFinishResult {
+        if !self.flushes.is_empty() {
+            let unsent = SinkFinishError::Unsent {
+                sink: MQTT,
+                records: self.flushes.len().arch_into(),
+            };
+            let report = match failure {
+                Some(error) => Report::new(error).change_context(unsent),
+                None => Report::new(unsent),
+            };
+            return Err(report);
+        }
+        match failure {
+            Some(error) => {
+                Err(Report::new(error).change_context(SinkFinishError::Flush { sink: MQTT }))
+            }
+            None => Ok(SinkFinish::Flushed),
+        }
+    }
+}
+
 /// The delay before the event loop's next reconnect attempt, doubling up to the declared ceiling.
 struct MqttReconnectBackoff {
     policy: ParsedRetryPolicy,
@@ -354,6 +471,7 @@ impl MqttSink {
             mode,
             framing,
             broker_limit,
+            unsent: MqttUnsentPublishes::default(),
             eventloop_shutdown,
         })
     }
@@ -514,11 +632,13 @@ impl MqttSink {
             .attach_printable(description)
     }
 
-    /// Publishes `records` at QoS 0, where the client taking a record delivers it.
+    /// Publishes `records` at QoS 0, where the client taking a record delivers it, and keeps the
+    /// flush of every record the client took until the client sends it.
     async fn publish_at_most_once(
-        &self,
+        &mut self,
         records: Vec<SinkRecord>,
     ) -> PerRecordOutcome<SinkRecordId> {
+        self.unsent.drop_settled();
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
             nervix_primitives::task::consume_budget().await;
@@ -534,12 +654,16 @@ impl MqttSink {
                 ));
                 continue;
             }
-            match self.client.try_publish(
+            let handed_over = self.client.try_publish_tracked(
                 self.topic.as_str(),
                 record.payload,
                 PublishOptions::at_most_once(),
-            ) {
-                Ok(()) => outcome.deliver(record_id),
+            );
+            match handed_over {
+                Ok(notice) => {
+                    self.unsent.hold(Box::pin(notice.wait_completion_async()));
+                    outcome.deliver(record_id);
+                }
                 Err(error) if Self::is_record_client_rejection(&error) => {
                     outcome.reject(RejectedSinkRecord::external(
                         record_id,
@@ -562,7 +686,7 @@ impl MqttSink {
     /// Every way the publish can fail ends it through the window, which first settles each answer
     /// the broker already gave, so the host's retry never resends a record the broker confirmed.
     async fn publish_confirmed(
-        &self,
+        &mut self,
         records: Vec<SinkRecord>,
         settings: AckConfirmation,
     ) -> PerRecordOutcome<SinkRecordId> {
@@ -652,11 +776,11 @@ impl Drop for MqttSink {
 #[async_trait]
 impl SinkLifecycle for MqttSink {
     /// A QoS 0 publish is delivered once the client takes it, and the event loop sends it later,
-    /// so the client can still hold delivered publishes, which closing it discards. A QoS 1 or 2
-    /// publish is delivered only once the broker answered for it.
-    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
+    /// so the client can still hold delivered publishes, which the finish waits for the event loop
+    /// to send. A QoS 1 or 2 publish is delivered only once the broker answered for it.
+    async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
         match self.mode {
-            MqttPublishingMode::Qos0 => Ok(SinkFinish::Discarded),
+            MqttPublishingMode::Qos0 => self.unsent.finish(deadline).await,
             MqttPublishingMode::Qos1(_) | MqttPublishingMode::Qos2(_) => {
                 Ok(SinkFinish::NothingHeld)
             }
@@ -1453,16 +1577,75 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn finishing_a_qos0_sink_discards_what_its_client_may_still_hold() {
+    async fn finishing_a_qos0_sink_that_published_nothing_has_nothing_to_send() {
         let fixture = DnsFixture::start().await;
-        let mut sink = qos0_sink("mqtt://127.0.0.1:9", "unsent", fixture.dns.clone());
+        let mut sink = qos0_sink("mqtt://127.0.0.1:9", "idle", fixture.dns.clone());
 
         let finished = sink
             .finish(Instant::now())
             .await
-            .expect("a QoS 0 sink answers its finish");
+            .expect("a QoS 0 sink that took no record has nothing to send");
 
-        assert_eq!(finished, SinkFinish::Discarded);
+        assert_eq!(finished, SinkFinish::NothingHeld);
+    }
+
+    #[nervix_primitives::test]
+    async fn finishing_a_qos0_sink_sends_the_publish_its_client_still_holds() {
+        // The scripted broker reads the client's CONNECT and holds its answer, so the client takes
+        // the record but cannot send it until the broker answers.
+        let broker = ScriptedBroker::start().await;
+        let fixture = DnsFixture::start().await;
+        let mut sink = qos0_sink(&broker.addr(), "held", fixture.dns.clone());
+        let mut connection = broker.accept_without_reply().await;
+        let outcome = sink.publish(vec![record(0, 3)]).await.into_parts();
+        assert_eq!(
+            outcome.delivered,
+            vec![SinkRecordId::new(0)],
+            "a QoS 0 record is delivered once the client takes it"
+        );
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .assured("thirty seconds after now fits the monotonic clock");
+        let answer = async {
+            // CONNACK: no session present, success, and an empty property section.
+            connection.write(&[0x20, 0x03, 0x00, 0x00, 0x00]).await;
+            connection.read_publish_at_most_once().await
+        };
+
+        let (finished, payload) = tokio::join!(sink.finish(deadline), answer);
+
+        let finished = finished.expect("the client sends the publish once the broker answers");
+        assert_eq!(finished, SinkFinish::Flushed);
+        assert_eq!(
+            payload, b"xxx",
+            "the broker receives the publish the client held"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn finishing_counts_the_qos0_publish_its_client_still_holds_at_the_deadline() {
+        // The scripted broker never answers the client's CONNECT, so the client never sends the
+        // record it took.
+        let broker = ScriptedBroker::start().await;
+        let fixture = DnsFixture::start().await;
+        let mut sink = qos0_sink(&broker.addr(), "unsent", fixture.dns.clone());
+        let _connection = broker.accept_without_reply().await;
+        let outcome = sink.publish(vec![record(0, 3)]).await.into_parts();
+        assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(200))
+            .assured("two hundred milliseconds after now fits the monotonic clock");
+
+        let finished = sink.finish(deadline).await;
+
+        let error = finished.expect_err("the deadline passes while the client still holds it");
+        assert_eq!(
+            error.current_context(),
+            &SinkFinishError::Unsent {
+                sink: MQTT,
+                records: 1
+            }
+        );
     }
 
     #[nervix_primitives::test]
@@ -1489,6 +1672,108 @@ mod tests {
             .expect("a confirmed sink answers its finish");
 
         assert_eq!(finished, SinkFinish::NothingHeld);
+    }
+
+    /// A flush the first poll finds pending and the next finds failed, as one whose connection
+    /// the event loop loses while a finish waits for it.
+    struct FailsOnceWaitedFor {
+        polled: bool,
+    }
+
+    impl Future for FailsOnceWaitedFor {
+        type Output = Result<(), PublishNoticeError>;
+
+        fn poll(
+            mut self: Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            if self.polled {
+                return std::task::Poll::Ready(Err(PublishNoticeError::Qos0NotFlushed));
+            }
+            self.polled = true;
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+
+    fn failing_flush() -> MqttFlush {
+        Box::pin(FailsOnceWaitedFor { polled: false })
+    }
+
+    fn open_flush() -> MqttFlush {
+        Box::pin(std::future::pending())
+    }
+
+    fn ended_flush(ended: Result<(), PublishNoticeError>) -> MqttFlush {
+        Box::pin(std::future::ready(ended))
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_flush_that_fails_while_the_finish_waits_fails_the_finish_with_its_cause() {
+        let mut unsent = MqttUnsentPublishes::default();
+        unsent.hold(failing_flush());
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .assured("thirty seconds after now fits the monotonic clock");
+
+        let finished = unsent.finish(deadline).await;
+
+        let error = finished.expect_err("a flush that failed fails the finish");
+        assert_eq!(
+            error.current_context(),
+            &SinkFinishError::Flush { sink: MQTT }
+        );
+        assert_eq!(
+            error.downcast_ref::<PublishNoticeError>(),
+            Some(&PublishNoticeError::Qos0NotFlushed),
+            "the driver's cause stays beneath the finish failure"
+        );
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_flush_that_ended_before_the_finish_leaves_nothing_held() {
+        let mut unsent = MqttUnsentPublishes::default();
+        unsent.hold(ended_flush(Ok(())));
+        unsent.hold(ended_flush(Err(PublishNoticeError::Qos0NotFlushed)));
+
+        let finished = unsent.finish(Instant::now()).await;
+
+        assert_eq!(
+            finished.expect("the client holds no publish once its flushes ended"),
+            SinkFinish::NothingHeld
+        );
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn the_deadline_counts_every_open_flush_beside_the_failure_the_finish_saw() {
+        let mut unsent = MqttUnsentPublishes::default();
+        unsent.hold(failing_flush());
+        unsent.hold(open_flush());
+        unsent.hold(open_flush());
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .assured("thirty seconds after now fits the monotonic clock");
+
+        let finished = unsent.finish(deadline).await;
+
+        let error = finished.expect_err("open flushes at the deadline fail the finish");
+        assert_eq!(
+            error.current_context(),
+            &SinkFinishError::Unsent {
+                sink: MQTT,
+                records: 2
+            }
+        );
+        assert_eq!(
+            error.downcast_ref::<PublishNoticeError>(),
+            Some(&PublishNoticeError::Qos0NotFlushed),
+            "the failure the finish saw stays beneath the count"
+        );
+        assert_eq!(
+            unsent.flushes.len(),
+            2,
+            "a later finish still answers for the open flushes"
+        );
     }
 
     #[nervix_primitives::test]
