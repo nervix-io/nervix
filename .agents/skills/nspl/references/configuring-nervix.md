@@ -182,7 +182,7 @@ relay. Do not use them to scan across branches.
   order; `ON EMITTING BATCH` may follow `ON EMITTING` and yields exactly one value per batch. Every `ON INGESTION` output is an object that fits the internal schema, and a payload that
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
 - Every codec using the SYSLOG wire schema uses `FROM SYSLOG` and only the exact fixed fields
-  documented in `Common` → `Syslog`; keep the format separate from the `TYPE SYSLOG` transport,
+  documented in `Common` → `Syslog`; keep the format separate from the `SYSLOG CLIENT`,
   use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO_ACK` on a syslog emitter, and
   configure TLS identity and framing for the client direction that consumes it.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
@@ -322,7 +322,7 @@ relay. Do not use them to scan across branches.
   topic or subscription name retires the preceding owned subscription best-effort.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
-  SUSPEND` and nothing else: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO ACK`. The
+  SUSPEND` and nothing else: no external connector client, codec, `DECODE USING`, headers, or `NO ACK`. The
   schema is the exact contract producers declare, including optionality and sensitivity, and a
   paced domain requires its timestamp source. Changing its schema, mode, timestamp, filter, routes
   other than `FLUSH`, or branch declarations ends attached producers. The Rust client may restore a
@@ -345,9 +345,9 @@ relay. Do not use them to scan across branches.
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the
   due instant, and use a fresh execution snapshot for returned data and generated routes.
-- Every `TYPE PROMETHEUS` client sets `addr` to the API root, an `http` or `https` URL without a
+- Every `PROMETHEUS CLIENT` sets `addr` to the API root, an `http` or `https` URL without a
   query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
-  the paired `tls_cert_file` and `tls_key_file`; `CREATE CLIENT` refuses any other. Read
+  the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. Read
   `Ingestors` → `Prometheus` for the keys.
 - Treat Kafka `NO_ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
@@ -355,7 +355,7 @@ relay. Do not use them to scan across branches.
   `message.timeout.ms` or `delivery.timeout.ms` in the client's `CONFIG` as the producer's delivery
   bound. The producer always reports every record, so `delivery.report.only.error` in a client's
   `CONFIG` has no effect.
-- Every Sentry emitter references a `TYPE SENTRY` client with a project DSN, encodes one event JSON
+- Every Sentry emitter references a `SENTRY CLIENT` with a project DSN, encodes one event JSON
   object per record, and has no `write_header` invocation.
 - Every custom WASM guest is built for the current ABI, accepts
   `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and

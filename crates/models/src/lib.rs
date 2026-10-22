@@ -55,6 +55,7 @@ mod restore;
 mod schedule;
 mod schema;
 mod schema_fingerprint;
+mod settings;
 mod statement;
 mod timestamp;
 mod udf;
@@ -268,6 +269,9 @@ pub use schema::{
     WireSchemaField, WireSchemaStrictness,
 };
 pub use schema_fingerprint::SchemaFingerprint;
+pub use settings::{
+    ClusterParameters, NodeCapabilities, Prerequisites, Setting, SettingClass, SettingDefinition,
+};
 pub use statement::{
     AckWindow, AlterDomain, AlterGenerator, AlterGeneratorError, AlterGeneratorOperation,
     AlterIngestor, AlterIngestorError, AlterIngestorOperation, AlterPlacement, AlterPlacementError,

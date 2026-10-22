@@ -1,5 +1,11 @@
 # Errors And Diagnostics
 
+Setting construction preserves the definition owner's typed report. `Setting<D>::new` and
+`resolve` run the same validation for explicit and default values against typed context; an
+invalid default is a failure, and never a replacement value. The vocabulary formats no cause
+into a string. [Node Settings](node-settings.md) owns classes, derivations and relationship
+checks; [Typed States](typed-states.md) owns the construction boundary.
+
 The [architecture rule matrix](architecture-enforcement.md) records the compiler contracts for
 failure signatures, discarded outcomes, canonical panic operations and Option/Result control
 flow. Expanding an error projection into an explicit Result branch preserves its complete report,
@@ -13,6 +19,8 @@ as waiting for materialized state or following a new leader, remain distinct fro
 The web console applies the same distinction to structured choice lookups: an absent form
 prerequisite shows a neutral hint, and stale context offers a fresh request. A failed lookup,
 closed session channel, or unreadable reply appears as an alert.
+Client creation names its choice as a connector and presents the composed Plexus
+`<CONNECTOR> CLIENT` head; a missing choice asks the operator to choose a client connector.
 
 This chapter owns the error and diagnostic model across layers: who gives a failure its meaning,
 how a report is created, enriched, inspected and rendered, which outcomes are not failures, where a
@@ -125,9 +133,13 @@ each with a structured message error, and at most one infrastructure failure of 
 is a report; a record in neither list stays unresolved. Branch construction keeps the outcome of
 each row. None of these builds a report or formats a message per row: the typed value becomes a
 structured message error only where a route's policy reports it, and hot paths do not allocate a
-formatted diagnostic when the variant already names the failure. A source poll is the exception
-that carries reports: it returns the report of each record it could not read beside the messages
-it could, so the rest of one external response continues through intake.
+formatted diagnostic when the variant already names the failure. A source poll and a decode are
+the exceptions that carry reports. A poll returns the report of each record it could not read
+beside the messages it could, so the rest of one external response continues through intake. An
+ingest group returns the codec's report for each payload it refuses, with that payload's place in
+its batch, beside the payloads it decoded, so the host consumes each refusal as a
+[decode rejection](#decode-rejections) while the rest of the batch continues. A refusal for room
+judged no payload and is not one of these outcomes: it fails the whole batch's dispatch.
 
 ### Fixed Outcome Boundaries
 
@@ -602,6 +614,16 @@ failure's whole chain. A deadline key whose value breaks the vocabulary's rule i
 `ClientConfigError::InvalidDeadline`, naming the key above the `ClientDeadlineError` that says why,
 and each connector reports it as a configuration failure.
 
+A Syslog frame write that runs out of the client's `timeout_ms` keeps `DeadlineElapsed` beneath
+`SinkPublishError::Publish`, and the sink attaches the deadline's message last, so
+`DESCRIBE EMITTER` leads with it; the emitter rebuilds its connection and retries on its policy. A Syslog
+listener's connection whose TLS handshake runs out of `connect_timeout_ms`, or which sends nothing
+for its `idle_timeout_ms`, ends with `DeadlineElapsed` beneath the listener's connection failure.
+That failure closes only the connection and is logged at debug level; it is never the ingestor's
+transient error. A Syslog client that sets a deadline key its direction and protocol never wait on
+is refused as `SyslogConfigError::InapplicableDeadlineKey`, naming the key and the clients it
+applies to.
+
 An MQTT client's event loop reports a failed or lost broker connection as an
 `MqttConnectionError`, owned by the connector's connection module. The socket connector hands the
 driver the resolver's `DnsLookupError` as the failure of a lookup, and the driver keeps it as the
@@ -855,8 +877,7 @@ invalid-model failure naming the node and output in its diagnostic. An ingestor 
 client of another connector, or an endpoint of another `TYPE`, than its head's entity reads is
 refused with a typed failure naming the domain, the ingestor, its connector and entity, the client
 or endpoint, and both connectors or both endpoint types, such as `KAFKA TOPIC ingestor 'orders_in'
-in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. A `TYPE
-PROMETHEUS` client's `CONFIG` is held to the keys the vocabulary declares for it when the client
+in domain 'shop' requires a KAFKA client, but client 'cache' is a REDIS client`. A `PROMETHEUS CLIENT`'s `CONFIG` is held to the keys the vocabulary declares for it when the client
 is created. The refusal names the connector, the client and the domain, with the vocabulary's
 `PrometheusClientConfigError` beneath it naming the key. Where the key's value breaks its address
 or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in

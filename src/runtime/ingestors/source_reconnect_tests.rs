@@ -327,6 +327,9 @@ impl SourceHostServices for RedeliveryHost {
             .checked_add(positions)
             .verified("a check counts only a few redeliveries");
     }
+    fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+        panic!("a check broker whose payloads all fit dropped {payloads} for their size");
+    }
     fn record_unconfirmed_stop(&self, positions: usize) {
         panic!(
             "every acknowledgement tree of the check resolves, but {positions} positions did not"

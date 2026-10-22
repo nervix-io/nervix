@@ -107,7 +107,7 @@ use crate::common::{
         HttpsPublishLoopOutcome, InterconnectCredentialFault, TEST_AUTH_PASSWORD,
         TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
         assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
-        observe_kafka_through, publish_kafka_record_through,
+        command_connect_options, observe_kafka_through, publish_kafka_record_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
@@ -134,10 +134,11 @@ use crate::common::{
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{
-        SessionScope, TestUpload, TestUploadPart, WireOutcome as _, command_output,
-        fresh_execution_reference, outcome_awaits_leader,
+        SessionScope, TestSubscriptionEvent, TestUpload, TestUploadPart, WireOutcome as _,
+        command_output, fresh_execution_reference, outcome_awaits_leader,
     },
     runner_lag::RunnerLagObserver,
+    runner_observation::ArrivalObservation,
     scenario_phase::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         begin_suite_measurement, suite_summary,
@@ -307,11 +308,36 @@ struct SyslogSplitSender {
     rest: Vec<u8>,
 }
 
+/// A connection to a Syslog listener that never writes, and the task that reads it until the
+/// listener ends it.
+struct SilentSyslogClient {
+    /// An instant before the connection opened, so no deadline the listener started for it can
+    /// have started earlier.
+    connecting_at: Instant,
+    ended: AbortOnDropHandle<SilentSyslogClientEnd>,
+}
+
+/// How the listener ended a connection that sent nothing.
+enum SilentSyslogClientEnd {
+    /// The listener closed or reset the connection at this instant.
+    Closed(Instant),
+    /// The listener sent bytes, which no Syslog listener does.
+    Answered,
+    /// Reading the connection failed in another way.
+    Failed(std::io::Error),
+}
+
 /// One long-running CLI clock follower and the bounded stdout lines its assertions inspect.
 struct CliClockProcess {
     child: tokio::process::Child,
     lines: StdArc<BlockingMutex<VecDeque<String>>>,
     _reader: AbortOnDropHandle<()>,
+}
+
+/// The next row and the subscription session returned by its independent receipt observer.
+struct SubscriptionReceipt {
+    session: TestSession,
+    event: TestSubscriptionEvent,
 }
 
 #[derive(cucumber::World, Default)]
@@ -325,6 +351,8 @@ struct ScenarioWorld {
     active_scenario: Option<ActiveScenarioRegistration>,
     cluster: Option<Cluster>,
     active_session: Option<TestSession>,
+    /// A bounded next-row reader installed before the publication whose delay it measures.
+    subscription_arrival: Option<ArrivalObservation<SubscriptionReceipt>>,
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
@@ -458,6 +486,8 @@ struct ScenarioWorld {
     /// A Syslog stream connection holding back the end of a frame it began, until a step writes
     /// the rest.
     syslog_split_sender: Option<SyslogSplitSender>,
+    /// A connection to a Syslog listener that sends nothing, until a step observes its end.
+    syslog_silent_client: Option<SilentSyslogClient>,
     placeholders: BTreeMap<String, String>,
     saved_healthy_placements: Vec<SavedHealthyPlacement>,
     health_fault_started_at: Option<Instant>,
@@ -609,6 +639,7 @@ impl fmt::Debug for ScenarioWorld {
             .field("mongodb_tls", &self.mongodb_tls)
             .field("syslog_udp_observer", &self.syslog_udp_observer.is_some())
             .field("syslog_split_sender", &self.syslog_split_sender.is_some())
+            .field("syslog_silent_client", &self.syslog_silent_client.is_some())
             .field("placeholder_count", &self.placeholders.len())
             .field(
                 "mqtt_ingestor_domain_count",
@@ -1289,6 +1320,27 @@ async fn then_the_silent_endpoint_eventually_accepts_a_connection(
     )
     .await
     .unwrap_or_else(|_| panic!("no client connected to the endpoint '{name}'"));
+}
+
+/// A client that reconnects after a failed attempt opens another connection to the endpoint.
+#[then(expr = "the silent endpoint {string} eventually accepts {int} connections")]
+async fn then_the_silent_endpoint_eventually_accepts_connections(
+    world: &mut ScenarioWorld,
+    name: String,
+    count: u64,
+) {
+    let proxy = world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("no endpoint '{name}' was stood"));
+    nervix_primitives::time::timeout(
+        STALLABLE_ENDPOINT_CONNECTION_TIMEOUT,
+        proxy.accepted_at_least(count),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("clients did not open {count} connections to the endpoint '{name}'")
+    });
 }
 
 #[given("ClickHouse is running")]
@@ -5391,8 +5443,7 @@ impl IngestorLogicTransportFixture {
             }
             Self::Kafka => {
                 r#"
-      CREATE CLIENT logic_kafka
-        TYPE KAFKA
+      CREATE KAFKA CLIENT logic_kafka
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
@@ -5400,8 +5451,7 @@ impl IngestorLogicTransportFixture {
             }
             Self::Mqtt => {
                 r#"
-      CREATE CLIENT logic_mqtt
-        TYPE MQTT
+      CREATE MQTT CLIENT logic_mqtt
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-logic-{{test_id}}'
@@ -5410,8 +5460,7 @@ impl IngestorLogicTransportFixture {
             }
             Self::Nats => {
                 r#"
-      CREATE CLIENT logic_nats
-        TYPE NATS
+      CREATE NATS CLIENT logic_nats
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
@@ -5429,8 +5478,7 @@ impl IngestorLogicTransportFixture {
             }
             Self::ZeroMq => {
                 r#"
-      CREATE CLIENT logic_zeromq
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT logic_zeromq
         CONFIG {
           'addr' = '{{zeromq_ingest_addr}}',
           'bind' = 'true'
@@ -15904,14 +15952,14 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_the_leader_
         .cluster()
         .grpc_uri(&leader)
         .expect("failed to resolve leader gRPC URI");
+    let commands = expand_placeholders(world, docstring(step));
     let client = Client::connect_with_options(
         &grpc_uri,
         client_domain(&world.domain),
-        client_connect_options(&grpc_uri).expect("failed to build client tls options"),
+        command_connect_options(&grpc_uri, &commands).expect("failed to build client tls options"),
     )
     .await
     .expect("failed to connect leader client");
-    let commands = expand_placeholders(world, docstring(step));
     for command in nspl_statements(&commands) {
         let outcome = client
             .execute(command.clone())
@@ -17470,52 +17518,52 @@ impl UnacknowledgedSourceFixture {
         match self {
             Self::Kafka => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT unacknowledged_client CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };"#
             }
             Self::Mqtt => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT unacknowledged_client CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-unacknowledged-{{test_id}}'
       };"#
             }
             Self::Nats => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE NATS CONFIG {
+      CREATE NATS CLIENT unacknowledged_client CONFIG {
         'addr' = '{{nats_addr}}'
       };"#
             }
             Self::Pulsar => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT unacknowledged_client CONFIG {
         'addr' = '{{pulsar_addr}}'
       };"#
             }
             Self::RedisPubSub => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG {
+      CREATE REDIS CLIENT unacknowledged_client POOL SIZE MIN 1 MAX 4 CONFIG {
         'addr' = '{{redis_addr}}'
       };"#
             }
             Self::Syslog => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT unacknowledged_client CONFIG {
         'protocol' = 'udp',
         'addr' = '{{syslog_ingest_addr}}'
       };"#
             }
             Self::WebsocketClient => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE WEBSOCKETS CONFIG {
+      CREATE WEBSOCKETS CLIENT unacknowledged_client CONFIG {
         'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
       };"#
             }
             Self::ZeroMq => {
                 r#"
-      CREATE CLIENT unacknowledged_client TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT unacknowledged_client CONFIG {
         'addr' = '{{zeromq_ingest_addr}}',
         'bind' = 'true'
       };"#
@@ -25275,6 +25323,116 @@ async fn when_syslog_sender_writes_the_rest_of_the_split_frame(world: &mut Scena
         .expect("failed to close the split Syslog sender");
 }
 
+/// Opens a TCP connection to a Syslog listener and never writes to it: a TLS listener waits on
+/// the handshake, a TCP listener on the first frame. A task reads the connection until the
+/// listener ends it and records when it did.
+#[when(expr = "a Syslog client that sends nothing connects to {string}")]
+async fn when_a_syslog_client_that_sends_nothing_connects(world: &mut ScenarioWorld, addr: String) {
+    use tokio::io::AsyncReadExt as _;
+
+    let addr = expand_placeholders(world, &addr);
+    // The listener starts a connection's deadline once it accepts it, which may be before this
+    // task sees its connect return, so the delay is measured from before the connection opened.
+    let connecting_at = Instant::now();
+    let mut stream = connect_syslog_tcp(&addr).await;
+    let ended = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+        let mut received = [0_u8; 64];
+        let read = stream.read(&mut received).await;
+        match read {
+            Ok(0) => SilentSyslogClientEnd::Closed(Instant::now()),
+            Ok(_) => SilentSyslogClientEnd::Answered,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                SilentSyslogClientEnd::Closed(Instant::now())
+            }
+            Err(error) => SilentSyslogClientEnd::Failed(error),
+        }
+    }));
+    world.syslog_silent_client = Some(SilentSyslogClient {
+        connecting_at,
+        ended,
+    });
+}
+
+/// How long a scenario waits for a listener to end a connection that sends nothing. Generous,
+/// because the wait ends as soon as the listener closes it.
+const SILENT_SYSLOG_CLIENT_END_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Asserts the delay the listener's deadline imposes rather than a window: the listener ends the
+/// connection, and no earlier than `bound` after the client began connecting, so load can only
+/// move the observed end later.
+#[then(
+    expr = "the Syslog client that sends nothing is disconnected no sooner than {string} after it \
+            connected"
+)]
+async fn then_the_syslog_client_that_sends_nothing_is_disconnected(
+    world: &mut ScenarioWorld,
+    bound: String,
+) {
+    let bound = parse_duration_text(&bound).expect("step duration must be a valid duration");
+    let client = world
+        .syslog_silent_client
+        .take()
+        .expect("a Syslog client that sends nothing must have connected first");
+    let waited =
+        nervix_primitives::time::timeout(SILENT_SYSLOG_CLIENT_END_TIMEOUT, client.ended).await;
+    let Ok(joined) = waited else {
+        panic!(
+            "the listener kept a connection that sent nothing open for \
+             {SILENT_SYSLOG_CLIENT_END_TIMEOUT:?}"
+        );
+    };
+    let ended = joined.expect("the task reading the silent Syslog connection must not panic");
+    let closed_at = match ended {
+        SilentSyslogClientEnd::Closed(closed_at) => closed_at,
+        SilentSyslogClientEnd::Answered => {
+            panic!("the listener sent bytes to a Syslog client that sent nothing")
+        }
+        SilentSyslogClientEnd::Failed(error) => {
+            panic!("reading the silent Syslog connection failed: {error}")
+        }
+    };
+    let open_for = closed_at.duration_since(client.connecting_at);
+    assert!(
+        open_for >= bound,
+        "the listener closed a connection that sent nothing after {open_for:?}, before its \
+         {bound:?} deadline"
+    );
+}
+
+/// Sends one datagram of exactly `size` bytes: an RFC 5424 message whose text pads it.
+#[when(expr = "a Syslog UDP datagram of {int} bytes is published to {string}")]
+async fn when_a_syslog_udp_datagram_of_size_is_published(
+    world: &mut ScenarioWorld,
+    size: usize,
+    addr: String,
+) {
+    let addr = expand_placeholders(world, &addr);
+    let header = "<13>1 2003-10-11T22:14:15.003Z edge-1 orders 123 ID47 - ";
+    let padding = size
+        .checked_sub(header.len())
+        .unwrap_or_else(|| panic!("a {size}-byte datagram cannot hold the Syslog header"));
+    let datagram = format!("{header}{}", "x".repeat(padding));
+    assert_eq!(datagram.len(), size);
+    let socket = nervix_primitives::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind Syslog UDP test sender");
+    let sent = socket
+        .send_to(datagram.as_bytes(), &addr)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to send a Syslog UDP datagram to '{addr}': {error}")
+        });
+    assert_eq!(
+        sent, size,
+        "the Syslog UDP test sender sent part of its datagram"
+    );
+}
+
 #[when(expr = "websocket message is published to host {string} path {string}")]
 async fn when_websocket_message_is_published(
     world: &mut ScenarioWorld,
@@ -31087,6 +31245,79 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
     }
 }
 
+#[when("the next relay subscription payload is timed")]
+async fn when_the_next_subscription_payload_is_timed(world: &mut ScenarioWorld) {
+    assert!(
+        world.subscription_arrival.is_none(),
+        "a receipt observation is already active"
+    );
+    let mut session = world
+        .active_session
+        .take()
+        .assured("the scenario opened its subscription");
+    // Only the following publication can supply this observation's origin.
+    world.last_publish_at = None;
+    let observation = ArrivalObservation::start(async move {
+        let event = session
+            .next_subscription()
+            .await
+            .expect("the receipt observer must read its subscription");
+        SubscriptionReceipt { session, event }
+    })
+    .await;
+    world.subscription_arrival = Some(observation);
+}
+
+#[then(
+    expr = "within {string} the timed relay subscription payload arrives no sooner than {string} \
+            after publication and contains all fragments"
+)]
+async fn then_the_timed_subscription_payload_arrives_after_publication(
+    world: &mut ScenarioWorld,
+    within: String,
+    delay: String,
+    #[step] step: &Step,
+) {
+    let within = parse_duration_text(&within).assured("the receipt budget is a valid duration");
+    let delay = parse_duration_text(&delay).assured("the receipt lower bound is a valid duration");
+    let published_at = world
+        .last_publish_at
+        .assured("the timed observation is followed by publication");
+    let expected = docstring_fragment_sets(world, step);
+    assert_eq!(
+        expected.len(),
+        1,
+        "one next-row observation expects exactly one fragment set"
+    );
+    let observation = world
+        .subscription_arrival
+        .take()
+        .assured("the receipt observer was installed before publication");
+    let arrival = nervix_primitives::time::timeout(within, observation.finish())
+        .await
+        .expect("the next subscription payload must arrive within the receipt budget");
+    let on_time = arrival.arrived_no_sooner_than(published_at, delay);
+    let received_at = arrival.received_at;
+    let SubscriptionReceipt { session, event } = arrival.value;
+    world.active_session = Some(session);
+    world.last_subscription_payload = Some(event.payload.clone());
+    assert!(
+        expected[0]
+            .iter()
+            .all(|fragment| event.payload.contains(fragment)),
+        "next subscription payload {:?} does not match all expected fragments {:?}",
+        event.payload,
+        expected[0]
+    );
+    assert!(
+        on_time,
+        "subscription payload {:?} arrived {:?} after publication, before its {delay:?} lower \
+         bound",
+        event.payload,
+        received_at.checked_duration_since(published_at)
+    );
+}
+
 async fn try_capture_any_subscription_payload(
     world: &mut ScenarioWorld,
     duration: Duration,
@@ -31450,10 +31681,12 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.broker_observer = None;
                 world.syslog_udp_observer = None;
                 world.syslog_split_sender = None;
+                world.syslog_silent_client = None;
                 world.producers = client_producers::ScenarioProducers::default();
                 stop_receivers(world).await;
                 close_browser(world).await;
                 world.active_session = None;
+                world.subscription_arrival = None;
                 world.active_session_node = None;
                 world.active_session_has_subscription = false;
                 world.last_server_error = None;

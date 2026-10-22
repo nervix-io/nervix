@@ -26,8 +26,7 @@ CREATE BRANCH chaos_branch SCHEMA chaos_branch_key TTL 5m MAX INSTANCES 16 EVICT
 
 CREATE RELAY chaos_records SCHEMA chaos_record BRANCHED BY chaos_branch CAPACITY 1;
 
-CREATE CLIENT chaos_kafka
-  TYPE KAFKA
+CREATE KAFKA CLIENT chaos_kafka
   CONFIG {
     'bootstrap.servers' = 'broker:9092',
     'auto.offset.reset' = 'earliest'

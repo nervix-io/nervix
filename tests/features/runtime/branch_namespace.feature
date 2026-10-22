@@ -40,8 +40,7 @@ Feature: Branch namespace
       CREATE RELAY notifications SCHEMA notification_in BRANCHED BY by_mqtt_notifications;
       CREATE RELAY projected_notifications SCHEMA notification_out BRANCHED BY by_mqtt_notifications;
 
-      CREATE CLIENT mqtt_main
-        TYPE MQTT
+      CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branch-namespace-{{test_id}}'

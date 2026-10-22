@@ -1,5 +1,5 @@
 //! Repository tooling, outside the product layer order.
-//! Owns: compiler-independent cast syntax and configuration gates on struct fields.
+//! Owns: compiler-independent cast syntax, struct field gates and hidden setting syntax.
 //! Depends on: the Rust source parser, source token spans and typed report boundaries.
 //! Must not know: resolved APIs, active Cargo configurations or a product location catalog.
 
@@ -30,6 +30,13 @@ pub struct SourceSite {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
+    #[error("invalid fixed-constant contract at {path}:{line}:{column}: {problem}")]
+    ConstantContract {
+        path: String,
+        line: usize,
+        column: usize,
+        problem: &'static str,
+    },
     #[error("cannot parse authored Rust at {path}:{line}:{column}")]
     Syntax {
         path: String,
@@ -57,6 +64,7 @@ pub fn scan(files: Vec<SourceInput>) -> Result<Vec<SourceSite>, error_stack::Rep
             sites: &mut sites,
         }
         .visit_file(&parsed);
+        sites.extend(tunables::scan(&input.path, &parsed)?);
     }
     Ok(sites.into_iter().collect())
 }
@@ -76,33 +84,33 @@ impl Scanner<'_> {
             rule: rule.into(),
         });
     }
+}
 
-    fn fragment(&mut self, tokens: TokenStream) {
-        // Macro metavariables are opaque Rust fragments. Keep their identifier's original span
-        // while supplying an identifier to the syntax parser; recurse into repetition groups.
-        let substituted = substitute(tokens);
-        if let Ok(file) = syn::parse2::<syn::File>(substituted.clone()) {
-            self.visit_file(&file);
-            return;
-        }
-        if let Ok(expression) = syn::parse2::<Expr>(substituted.clone()) {
-            self.visit_expr(&expression);
-            return;
-        }
-        let block = TokenStream::from(TokenTree::Group(Group::new(
-            Delimiter::Brace,
-            substituted.clone(),
-        )));
-        if let Ok(block) = syn::parse2::<syn::Block>(block) {
-            self.visit_block(&block);
-            return;
-        }
-        // Matchers, repetitions and opaque DSL tokens are not complete Rust expressions. Their
-        // nested Rust bodies are still parsed; arbitrary words are never classified as casts.
-        for token in substituted {
-            if let TokenTree::Group(group) = token {
-                self.fragment(group.stream());
-            }
+fn fragment<V: for<'ast> Visit<'ast>>(scanner: &mut V, tokens: TokenStream) {
+    // Macro metavariables are opaque Rust fragments. Keep their identifier's original span
+    // while supplying an identifier to the syntax parser; recurse into repetition groups.
+    let substituted = substitute(tokens);
+    if let Ok(file) = syn::parse2::<syn::File>(substituted.clone()) {
+        scanner.visit_file(&file);
+        return;
+    }
+    if let Ok(expression) = syn::parse2::<Expr>(substituted.clone()) {
+        scanner.visit_expr(&expression);
+        return;
+    }
+    let block = TokenStream::from(TokenTree::Group(Group::new(
+        Delimiter::Brace,
+        substituted.clone(),
+    )));
+    if let Ok(block) = syn::parse2::<syn::Block>(block) {
+        scanner.visit_block(&block);
+        return;
+    }
+    // Matchers, repetitions and opaque DSL tokens are not complete Rust expressions. Their
+    // nested Rust bodies are still parsed; arbitrary words are never classified as casts.
+    for token in substituted {
+        if let TokenTree::Group(group) = token {
+            fragment(scanner, group.stream());
         }
     }
 }
@@ -176,6 +184,14 @@ fn requires_test(meta: &Meta) -> bool {
 
 fn test_only(attributes: &[Attribute]) -> bool {
     attributes.iter().any(|attribute| {
+        if attribute
+            .path()
+            .segments
+            .last()
+            .is_some_and(|segment| matches!(segment.ident.to_string().as_str(), "test" | "rstest"))
+        {
+            return true;
+        }
         if let Meta::List(list) = &attribute.meta
             && list.path.is_ident("cfg")
             && let Some(values) = arguments(list)
@@ -312,9 +328,11 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     }
 
     fn visit_macro(&mut self, value: &'ast syn::Macro) {
-        self.fragment(value.tokens.clone());
+        fragment(self, value.tokens.clone());
     }
 }
+
+mod tunables;
 
 #[cfg(test)]
 mod tests;

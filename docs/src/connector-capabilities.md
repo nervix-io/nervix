@@ -306,9 +306,9 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
 | Buffers | frames read from TCP and TLS connections: at most 64 frames; when full, holds back what fills it |  |
-| Network waits | the TLS handshake of an accepted connection: unbounded<br>reading a connection: unbounded |  |
+| Network waits | the TLS handshake of an accepted connection: `connect_timeout_ms`; 30s when omitted<br>reading a connection: `idle_timeout_ms`; unbounded when omitted |  |
 | Driver limits | Datagrams wait in the kernel's UDP receive buffer, which drops what does not fit. |  |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |
 
 ## Emit
 
@@ -560,9 +560,9 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | The connector holds no buffer between its transport and the host. |  |
-| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>a write: unbounded |  |
+| Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>writing and flushing a frame: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | None declared. |  |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER connect_timeout_ms` |  |
 
 ### OTEL LOGS emit
 

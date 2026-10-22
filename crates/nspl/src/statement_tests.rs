@@ -25,34 +25,6 @@ use rstest::rstest;
 
 use super::*;
 
-#[test]
-fn client_context_suggestions_do_not_leak_schema_keywords() {
-    let input = "CREATE CLIENT kafka_main TYPE ";
-    let suggestions = suggest_statement(input, input.len());
-    assert!(suggestions.contains(&"KAFKA".to_string()));
-    assert!(suggestions.contains(&"PULSAR".to_string()));
-    assert!(suggestions.contains(&"HTTP".to_string()));
-    assert!(suggestions.contains(&"SENTRY".to_string()));
-    assert!(suggestions.contains(&"PROMETHEUS".to_string()));
-    assert!(suggestions.contains(&"RABBITMQ".to_string()));
-    assert!(suggestions.contains(&"REDIS".to_string()));
-    assert!(suggestions.contains(&"MQTT".to_string()));
-    assert!(suggestions.contains(&"NATS".to_string()));
-    assert!(suggestions.contains(&"ZEROMQ".to_string()));
-    assert!(suggestions.contains(&"SQS".to_string()));
-    assert!(suggestions.contains(&"S3".to_string()));
-    assert!(suggestions.contains(&"GCS".to_string()));
-    assert!(suggestions.contains(&"AZURE_BLOB".to_string()));
-    assert!(suggestions.contains(&"ICEBERG_REST".to_string()));
-    assert!(suggestions.contains(&"WEBSOCKETS".to_string()));
-    assert!(suggestions.contains(&"CLICKHOUSE".to_string()));
-    assert!(suggestions.contains(&"POSTGRES".to_string()));
-    assert!(suggestions.contains(&"MYSQL".to_string()));
-    assert!(suggestions.contains(&"MONGODB".to_string()));
-    assert!(!suggestions.contains(&"JSON".to_string()));
-    assert!(!suggestions.contains(&"AVRO".to_string()));
-}
-
 /// Every numeric slot in the language names itself.
 ///
 /// An unlabelled `select!` reports `SomethingElse`, which the suggestion mapping discards, so
@@ -1250,7 +1222,7 @@ fn drop_context_suggestions_do_not_leak_format_keywords() {
 
 #[test]
 fn create_client_name_completion_is_not_semantic_reference_lookup() {
-    let input = "CREATE CLIENT ";
+    let input = "CREATE KAFKA CLIENT ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"client_name".to_string()));
     assert!(!suggestions.contains(&"ref:client".to_string()));
@@ -1367,8 +1339,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::transport(
         r#"
-            CREATE CLIENT kafka_main
-              TYPE KAFKA
+            CREATE KAFKA CLIENT kafka_main
               CONFIG {
                 'bootstrap.servers' = 'host1:9092,host2:9092',
                 'enable.auto.commit' = true
@@ -1379,8 +1350,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::http_client(
         r#"
-            CREATE CLIENT http_main
-              TYPE HTTP
+            CREATE HTTP CLIENT http_main
               CONFIG {
                 'endpoint' = 'https://api.example.com/events',
                 'method' = 'POST'
@@ -1391,8 +1361,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::otel_client(
         r#"
-            CREATE CLIENT otel_main
-              TYPE OTEL
+            CREATE OTEL CLIENT otel_main
               CONFIG {
                 'endpoint' = 'https://collector.example.com:4317',
                 'protocol' = 'grpc',
@@ -1406,8 +1375,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::rabbitmq_transport(
         r#"
-            CREATE CLIENT rabbit_main
-              TYPE RABBITMQ
+            CREATE RABBITMQ CLIENT rabbit_main
               CONFIG {
                 'addr' = 'amqp://guest:guest@localhost:5672/%2f',
                 'connection_name' = 'nervix-rabbit'
@@ -1418,8 +1386,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::websockets_client(
         r#"
-            CREATE CLIENT ws_main
-              TYPE WEBSOCKETS
+            CREATE WEBSOCKETS CLIENT ws_main
               CONFIG {
                 'endpoint' = 'wss://api.example.com/ws',
                 'subprotocol' = 'notifications'
@@ -1430,8 +1397,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::redis_transport(
         r#"
-            CREATE CLIENT redis_main
-              TYPE REDIS
+            CREATE REDIS CLIENT redis_main
               POOL SIZE MIN 1 MAX 4
               CONFIG {
                 'addr' = 'redis://127.0.0.1:6379/',
@@ -1443,8 +1409,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::mqtt_transport(
         r#"
-            CREATE CLIENT mqtt_main
-              TYPE MQTT
+            CREATE MQTT CLIENT mqtt_main
               CONFIG {
                 'addr' = 'mqtt://127.0.0.1:1883',
                 'client_id' = 'nervix-mqtt'
@@ -1455,8 +1420,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::prometheus_transport(
         r#"
-            CREATE CLIENT prom_main
-              TYPE PROMETHEUS
+            CREATE PROMETHEUS CLIENT prom_main
               CONFIG {
                 'addr' = 'http://127.0.0.1:9090'
               };

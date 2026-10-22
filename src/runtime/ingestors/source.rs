@@ -533,6 +533,8 @@ pub(super) struct RuntimeSourceHost {
     /// Counts the positions this host discarded after a reconnect because the broker redelivers
     /// them.
     transport_redeliveries: prometheus::IntCounter,
+    /// Counts the payloads this host's source dropped because they exceed its client's size bound.
+    oversized_payloads: prometheus::IntCounter,
     /// Consumes the payloads the ingestor's codec refuses, for this host and the endpoint bindings
     /// it hands out.
     decode_rejections: DecodeRejections,
@@ -565,6 +567,11 @@ impl RuntimeSourceHost {
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
         );
         let transport_redeliveries = spec.runtime.inner.metrics.ingestor_transport_redeliveries(
+            &spec.domain,
+            &spec.ingestor,
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+        );
+        let oversized_payloads = spec.runtime.inner.metrics.ingestor_oversized_payloads(
             &spec.domain,
             &spec.ingestor,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
@@ -609,6 +616,7 @@ impl RuntimeSourceHost {
             unacknowledged_admission: spec.unacknowledged_admission,
             unfolding_refused,
             transport_redeliveries,
+            oversized_payloads,
             decode_rejections,
             confirmation_delay,
         }
@@ -1236,6 +1244,10 @@ impl SourceHostServices for RuntimeSourceHost {
             "discarded positions of a lost connection that the broker redelivers"
         );
         self.transport_redeliveries.inc_by(positions.arch_into());
+    }
+
+    fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+        self.oversized_payloads.inc_by(payloads.get().arch_into());
     }
 
     fn record_unconfirmed_stop(&self, positions: usize) {
@@ -2370,6 +2382,9 @@ mod tests {
         }
         fn record_transport_redeliveries(&self, positions: usize) {
             panic!("a replayable test source discarded {positions} positions after a reconnect");
+        }
+        fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
+            panic!("a test source whose payloads all fit dropped {payloads} for their size");
         }
         fn record_unconfirmed_stop(&self, positions: usize) {
             panic!("a test source stopped with {positions} positions waiting on their trees");
