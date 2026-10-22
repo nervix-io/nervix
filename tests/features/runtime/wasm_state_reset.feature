@@ -537,15 +537,16 @@ Feature: Coordinated WASM processor state reset
       "tenant":"beta"
       """
     And the relay subscription does not receive a payload within "1500ms"
-    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+    When the next relay subscription payload is timed
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"alpha","sequence":2}
       """
-    Then the relay subscription does not receive a payload within "1s"
-    And within "5s" the relay subscription receives payloads containing all fragments
+    Then within "5s" the timed relay subscription payload arrives no sooner than "3s" after publication and contains all fragments
       """
       key={"tenant":"alpha"} | "tenant":"alpha" | "note":"released"
       """
+    And the relay subscription does not receive a payload within "1500ms"
 
     Examples:
       | cluster_size | replica_count |

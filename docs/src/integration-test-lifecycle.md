@@ -108,6 +108,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
+| Publication-relative receipt timing | A runtime task owns the subscription read before publication and retains its receipt timestamp. The assertion bounds completion after the HTTP publishing step returns; scenario teardown cancels an unfinished reader before stopping nodes | `tests/common/runner_observation.rs`, `tests/common/raw_session.rs` and the timed subscription steps in `tests/scenarios.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
@@ -877,6 +878,26 @@ its tenant and sequence and arrive after the declared lower bound, inside the un
 budget. Starting a new silence window after an HTTP response would reject a valid row whose
 collection or flush deadline elapsed while the harness awaited that response. The production
 owner's timing checks retain the independent branch-deadline assertions.
+
+The WASM reset outline `Reset drains accepted buffered output once and cancels the old branch
+timer` starts a bounded receipt observation before posting the fresh alpha input. The observer
+owns the subscription session on a runtime worker and confirms its first poll before publication.
+It timestamps the next received row there, preserving that instant until the assertion reads the
+result, then returns the session for the duplicate-output check. The row must match the alpha key,
+tenant and release marker and arrive at least three seconds after that publication. Both cluster
+sizes retain the ordered pre-reset alpha/beta drain, the five-second receive budget after the
+publishing request returns and the three-second guest timer. The read remains active across that
+request; the assertion bounds its completion and teardown cancels it if a step fails. A queued
+early row cannot acquire a later timestamp merely because the runner resumes late. This
+observation measures client receipt, not server emission, and cannot
+remove scheduling delay on the observer's own runtime worker. Ordinary raw sessions still read
+only while a caller waits; their later dequeues do not supply independent receipt evidence.
+
+Paused-clock harness controls cover a valid receipt learned late, an early receipt learned late,
+a row predating publication, cancellation and a reader panic. The WASM host's isolated-store test
+separately drops an instance with an armed request, starts its fresh lifetime and checks exact
+domain-time deadlines for it and an untouched sibling. These tests and the public reset outline
+provide complementary receipt and instance-ownership evidence; they add no synchronization claim.
 
 The MQTT changed-address restart scenario waits for the post-restart marker within its bounded
 delivery window. Its persistent QoS 1 source may replay the pre-restart marker before that row;
