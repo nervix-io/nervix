@@ -2,9 +2,9 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Reading `timeout_ms` and `connect_timeout_ms` from a client's entries, each held to
-//!   the vocabulary's one deadline rule, the default a connection takes without its key, and the
-//!   typed failure of a wait that ran out of its deadline.
+//! - **Owns.** Reading `timeout_ms`, `connect_timeout_ms` and `idle_timeout_ms` from a client's
+//!   entries, each held to the vocabulary's one deadline rule, the default a connection takes
+//!   without its key, and the typed failure of a wait that ran out of its deadline.
 //! - **Depends on.** The vocabulary's deadline keys, rule and default, and a client's
 //!   configuration entries.
 //! - **Must not know.** Which connector reads a key, or what its wait is for.
@@ -53,6 +53,12 @@ impl ConfiguredDeadline {
                 bound: DEFAULT_CONNECT_TIMEOUT,
             }),
         }
+    }
+
+    /// The client's `idle_timeout_ms`, where it sets one: how long a connection may carry nothing
+    /// while its connector waits to read from it, after which the connector closes it.
+    pub fn idle(entries: &[nervix_models::ClientConfigEntry]) -> ClientConfigResult<Option<Self>> {
+        Self::read(entries, DeadlineKey::IdleTimeout)
     }
 
     fn read(
@@ -134,7 +140,11 @@ mod tests {
 
     #[test]
     fn each_key_is_read_with_its_own_meaning() {
-        let settings = entries(&[("timeout_ms", "1500"), ("connect_timeout_ms", "250")]);
+        let settings = entries(&[
+            ("timeout_ms", "1500"),
+            ("connect_timeout_ms", "250"),
+            ("idle_timeout_ms", "60000"),
+        ]);
         let timeout = ConfiguredDeadline::timeout(&settings)
             .assured("1500 ms is a valid deadline")
             .assured("the client sets timeout_ms");
@@ -143,6 +153,18 @@ mod tests {
         let connect = ConfiguredDeadline::connect(&settings).assured("250 ms is a valid deadline");
         assert_eq!(connect.key(), DeadlineKey::ConnectTimeout);
         assert_eq!(connect.bound(), Duration::from_millis(250));
+        let idle = ConfiguredDeadline::idle(&settings)
+            .assured("60000 ms is a valid deadline")
+            .assured("the client sets idle_timeout_ms");
+        assert_eq!(idle.key(), DeadlineKey::IdleTimeout);
+        assert_eq!(idle.bound(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_client_without_idle_timeout_ms_never_closes_an_idle_connection() {
+        let idle = ConfiguredDeadline::idle(&entries(&[("connect_timeout_ms", "250")]))
+            .assured("a client without the key is valid");
+        assert_eq!(idle, None);
     }
 
     #[test]
@@ -175,6 +197,17 @@ mod tests {
                     }
                 ),
                 "{value:?}: {connect:?}"
+            );
+            let idle = ConfiguredDeadline::idle(&entries(&[("idle_timeout_ms", value)]))
+                .expect_err("the value breaks the deadline rule");
+            assert!(
+                matches!(
+                    idle.current_context(),
+                    ClientConfigError::InvalidDeadline {
+                        key: "idle_timeout_ms"
+                    }
+                ),
+                "{value:?}: {idle:?}"
             );
         }
     }

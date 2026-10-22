@@ -16,7 +16,7 @@
 use nervix_models::{
     BufferBound, BufferCapacity, BufferOverflow, ChoiceRequirement, ClientConfigOwner,
     ClientDeclaration, ClientPooling, ConnectorKind, DeclaredBounds, EmitSinkCapabilities,
-    EmitSinkKind, EmitterBatchLegality, EmitterBodyForm, IngestSourceCapabilities,
+    EmitSinkKind, EmitterBatchLegality, EmitterBodyForm, HeaderModel, IngestSourceCapabilities,
     IngestSourceKind, LocatorDeclaration, LocatorName, OmittedDeadline, OptionDeclaration,
     OptionForm, OptionPresence, OptionValue, SinkReferenceKind, SourceReferenceKind, WaitBound,
 };
@@ -62,6 +62,7 @@ fn option_value(value: OptionValue) -> String {
         OptionValue::Mapping => "named expressions".to_owned(),
         OptionValue::Client(connector) => format!("{connector} client"),
         OptionValue::Clause => "composed clause".to_owned(),
+        OptionValue::Size => "byte size".to_owned(),
     }
 }
 
@@ -105,7 +106,7 @@ fn requirements(requirements: &[ChoiceRequirement]) -> String {
 
 fn ingestor(kind: IngestSourceKind) -> Value {
     let IngestSourceCapabilities {
-        reads_headers,
+        headers,
         metadata,
         executes_on_every_cluster_node,
         reference: source_reference,
@@ -162,10 +163,22 @@ fn ingestor(kind: IngestSourceKind) -> Value {
         "entity": kind.phrase(), "connector": kind.connector().keyword(),
         "reference": reference, "locator": locator(declared_locator), "options": options,
         "modes": modes, "quiesce": quiesce, "metadata": metadata,
-        "headers": reads_headers, "every_node": executes_on_every_cluster_node,
+        "headers": header_model(headers), "every_node": executes_on_every_cluster_node,
         "position": position_class.as_ref(),
         "confirmation": acknowledgement_confirmation.as_ref(),
         "bounds": bounds(declared_bounds), "template": template,
+    })
+}
+
+/// The header model of one side as the matrix states it, or `null` for a side whose messages carry
+/// no transport headers.
+fn header_model(model: Option<HeaderModel>) -> Value {
+    let Some(HeaderModel { layout, names }) = model else {
+        return Value::Null;
+    };
+    json!({
+        "layout": layout.as_ref(), "names": names.as_ref(),
+        "layout_meaning": layout.meaning(), "names_meaning": names.meaning(),
     })
 }
 
@@ -219,6 +232,7 @@ fn buffer_bound(bound: BufferBound) -> String {
         BufferOverflow::RefuseRequest => {
             "when full, immediately refuses the request for its sender to retry"
         }
+        BufferOverflow::FailPoll => "when exceeded, fails the poll; the next poll reads again",
     };
     format!("{capacity}; {overflow}")
 }
@@ -257,7 +271,7 @@ fn option_template(options: &[OptionDeclaration]) -> String {
 
 fn emitter(kind: EmitSinkKind) -> Value {
     let EmitSinkCapabilities {
-        writes_headers,
+        headers,
         reference,
         body,
         batch,
@@ -299,7 +313,7 @@ fn emitter(kind: EmitSinkKind) -> Value {
     json!({
         "entity": kind.phrase(), "connector": kind.connector().keyword(),
         "reference": reference, "locator": locator(declared_locator), "options": options,
-        "modes": modes, "headers": writes_headers,
+        "modes": modes, "headers": header_model(headers),
         "batch": batch, "batch_maximum": maximum, "body": body,
         "batch_transformation": requires_batch_transformation,
         "envelope": envelope, "properties": properties,

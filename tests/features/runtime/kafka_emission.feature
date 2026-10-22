@@ -25,7 +25,7 @@ Feature: Kafka emission
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING queue_ingest_codec
         TO queue_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT small_queue TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT small_queue CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'queue.buffering.max.messages' = '2',
         'linger.ms' = '200'
@@ -113,7 +113,7 @@ Feature: Kafka emission
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_codec
         TO events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE EMITTER kafka_events FROM events
         TO KAFKA kafka_main TOPIC columnar_json_out_{{test_id}}
           MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING outgoing_codec
@@ -191,8 +191,7 @@ Feature: Kafka emission
       CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
 
-      CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
@@ -210,8 +209,7 @@ Feature: Kafka emission
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -276,8 +274,7 @@ Feature: Kafka emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
@@ -292,8 +289,7 @@ Feature: Kafka emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -351,11 +347,11 @@ Feature: Kafka emission
       CREATE SCHEMA user_id_branch ( user_id I64 );
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE CLIENT unavailable_kafka_sink TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT unavailable_kafka_sink CONFIG {
         'bootstrap.servers' = '127.0.0.1:1',
         'message.timeout.ms' = '100',
         'socket.timeout.ms' = '100'
@@ -417,7 +413,7 @@ Feature: Kafka emission
       FROM WIRE JSON SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -487,11 +483,11 @@ Feature: Kafka emission
       FROM WIRE JSON SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE CLIENT kafka_sink TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_sink CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
         'queue.buffering.max.messages' = '1'
       };
@@ -579,7 +575,7 @@ Feature: Kafka emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT lingering_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT lingering_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'linger.ms' = '120000'
       };
@@ -665,7 +661,7 @@ Feature: Kafka emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT refusing_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT refusing_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}'
       };
       CREATE EMITTER unsent_output FROM unsent_events
@@ -711,6 +707,90 @@ Feature: Kafka emission
       kafka sink's transport client still held 3 records when its finish deadline passed
       """
 
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # Replacing the emitter stops its task without tearing the domain down. The failed swap must
+  # carry the finish's count through the transaction failure on both cluster sizes.
+  @emitter_unsent_at_swap
+  Scenario Outline: A Kafka emitter swap reports the records its producer still holds
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And schema change drain timeout is configured as "5s"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And a mock Kafka broker serves topic "swap_out_{{test_id}}"
+    And the mock Kafka broker refuses every write
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA swap_event ( sequence I64 );
+      CREATE WIRE JSON SCHEMA swap_wire MODE STRICT ( sequence integer );
+      CREATE CODEC swap_codec FROM WIRE JSON SCHEMA swap_wire TO SCHEMA swap_event;
+      CREATE RELAY swap_events SCHEMA swap_event UNBRANCHED;
+      CREATE VHOST edge swap-{{test_id}}.example.com;
+      CREATE ENDPOINT swap_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR swap_source
+        FROM swap_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING swap_codec
+        TIMESTAMP NOW
+        TO swap_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA CLIENT refusing_kafka CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}'
+      };
+      CREATE KAFKA CLIENT replacement_kafka CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}'
+      };
+      CREATE EMITTER swap_output FROM swap_events
+        TO KAFKA refusing_kafka TOPIC swap_out_{{test_id}} MODE NO_ACK
+          RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING swap_codec INHERIT ALL
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "swap_leader"
+    When these Plexus statements are executed on the leader node
+      """
+      RELOCATE EMITTER swap_output ONTO NODE {{swap_leader}} IGNORE PREFERENCES;
+      """
+    And http payload is posted to node "node-1" with host "swap-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":1}
+      """
+    And http payload is posted to node "node-1" with host "swap-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":2}
+      """
+    And http payload is posted to node "node-1" with host "swap-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":3}
+      """
+    Then within "30s" DESCRIBE EMITTER "swap_output" on the leader node contains
+      """
+      messages_total sent relay=swap_events
+      """
+    And within "30s" DESCRIBE EMITTER "swap_output" on the leader node contains
+      """
+      messages_total sent relay=swap_events physical_node={{swap_leader}} total=3
+      """
+    Given client "owner" is connected to the leader node
+    When client "owner" executes these Plexus statements
+      """
+      BEGIN;
+      ALTER EMITTER swap_output
+        SET CLIENT replacement_kafka, SET DETACHED;
+      """
+    Then client "owner" transaction id is saved as placeholder "swap_transaction"
+    When client "owner" attempts to commit its transaction
+    Then the last command error contains
+      """
+      kafka sink's transport client still held 3 records when its finish deadline passed
+      """
+    And transaction "{{swap_transaction}}" eventually has state "FAILED"
     Examples:
       | cluster_size |
       | 1            |

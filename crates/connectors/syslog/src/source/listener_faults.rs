@@ -2,8 +2,8 @@
 //!
 //! Layer: test harness, outside the product layer order.
 //!
-//! - **Owns.** Host-supplied accept-fault subscriptions and the address of the selected listener.
-//! - **Depends on.** Execution-sensitive TCP listeners, broadcast channels and watch channels.
+//! - **Owns.** Retaining one armed accept failure until its selected listener acknowledges it.
+//! - **Depends on.** Execution-sensitive TCP listeners and watch channels.
 //! - **Must not know.** Product configuration, Plexus, graph ownership, or host runtime state.
 
 #![cfg_attr(
@@ -19,18 +19,18 @@ use std::net::SocketAddr;
 use error_stack::Report;
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
-    sync::{broadcast, watch},
+    sync::watch,
 };
 
 use super::SyslogListenerError;
 
 #[derive(Clone, Default)]
 pub(super) struct ConfiguredListenerFaults {
-    faults: Option<broadcast::Sender<(String, watch::Sender<bool>)>>,
+    faults: Option<watch::Sender<Option<(String, watch::Sender<bool>)>>>,
 }
 
 impl ConfiguredListenerFaults {
-    pub(super) fn new(faults: broadcast::Sender<(String, watch::Sender<bool>)>) -> Self {
+    pub(super) fn new(faults: watch::Sender<Option<(String, watch::Sender<bool>)>>) -> Self {
         Self {
             faults: Some(faults),
         }
@@ -45,7 +45,7 @@ impl ConfiguredListenerFaults {
 }
 
 pub(super) struct ConfiguredStreamAccept {
-    faults: Option<broadcast::Receiver<(String, watch::Sender<bool>)>>,
+    faults: Option<watch::Receiver<Option<(String, watch::Sender<bool>)>>>,
     bind_addr: String,
 }
 
@@ -67,15 +67,30 @@ impl ConfiguredStreamAccept {
             return listener.accept().await;
         };
         loop {
+            {
+                let pending = faults.borrow_and_update();
+                if let Some((address, fired)) = pending.as_ref()
+                    && address == &self.bind_addr
+                    && fired.send_if_modified(|seen| {
+                        if *seen {
+                            false
+                        } else {
+                            *seen = true;
+                            true
+                        }
+                    })
+                {
+                    return Err(std::io::Error::other(
+                        "injected Syslog stream accept failure",
+                    ));
+                }
+            }
             nervix_primitives::select! {
                 accepted = listener.accept() => return accepted,
-                fault = faults.recv() => match fault {
-                    Ok((address, fired)) if address == self.bind_addr => {
-                        fired.send_replace(true);
-                        return Err(std::io::Error::other("injected Syslog stream accept failure"));
+                changed = faults.changed() => {
+                    if changed.is_err() {
+                        return listener.accept().await;
                     }
-                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(broadcast::error::RecvError::Closed) => return listener.accept().await,
                 }
             }
         }

@@ -26,7 +26,7 @@ mod source;
 
 pub use config::{
     DEFAULT_MAX_MESSAGE_SIZE, MAX_UDP_PAYLOAD_SIZE, SyslogClientConfig, SyslogConfigError,
-    SyslogDirection, SyslogFraming, SyslogProtocol,
+    SyslogDeadlineScope, SyslogDirection, SyslogFraming, SyslogProtocol,
 };
 pub use sink::{SyslogSink, SyslogSinkConfig};
 #[cfg(feature = "benchmarks")]

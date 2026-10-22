@@ -50,16 +50,21 @@ mod consensus;
 mod domain_clock;
 mod domain_resume;
 mod execution;
+mod model_publication;
 mod pause;
 mod relocation_commit;
 mod restarted_voter;
 mod shutdown_handoff;
 mod standalone_transaction;
+#[cfg(test)]
+mod syslog_tests;
 
 pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use execution::NodeExecution;
+use model_publication::ModelPublicationRefusal;
+pub use model_publication::ModelPublicationRefusalKind;
 use pause::TestPause;
 use relocation_commit::RelocationCommitRefusal;
 use restarted_voter::StartupVoterGossip;
@@ -130,6 +135,9 @@ struct FaultInjectionState {
     /// One-shot, domain-scoped leader refusals of the next relocation commit, each keeping whether
     /// it was delivered.
     refused_relocation_commits: DashMap<DomainName, RelocationCommitRefusal, RandomState>,
+    /// One-shot, domain-scoped leader refusals of the next transaction model step publication and
+    /// of the pause release after it, each keeping how far it was delivered.
+    refused_model_publications: DashMap<DomainName, ModelPublicationRefusal, RandomState>,
     /// One-shot, domain-scoped failures consumed at the entity drain observation boundary.
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
     /// A stale drain observation on one node omits already buffered relay-owner batches.
@@ -228,8 +236,9 @@ struct FaultInjectionState {
     state_replica_installation_failing: AtomicBool,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
     /// A scenario can fail one stream accept on a selected bound address, and observe that the
-    /// source consumed the fault before checking its established connections.
-    syslog_listener_faults: broadcast::Sender<(String, watch::Sender<bool>)>,
+    /// source consumed the fault before checking its established connections. The armed request
+    /// remains available until acknowledged; another request cannot overwrite it before then.
+    syslog_listener_faults: watch::Sender<Option<(String, watch::Sender<bool>)>>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
     domain_drain_timeout: RwLock<Option<Duration>>,
     entity_gate_deadline: RwLock<Option<Duration>>,
@@ -426,7 +435,7 @@ pub(crate) struct LeadershipTransferRequest {
 impl Default for FaultInjection {
     fn default() -> Self {
         let (leadership_transfers, _) = broadcast::channel(16);
-        let (syslog_listener_faults, _) = broadcast::channel(16);
+        let (syslog_listener_faults, _) = watch::channel(None);
         Self {
             inner: Arc::new(FaultInjectionState {
                 emitter_faults: DashMap::default(),
@@ -437,6 +446,7 @@ impl Default for FaultInjection {
                 failed_entity_gate_engagements: DashMap::default(),
                 handoff_engagement_transport_failures: DashMap::default(),
                 refused_relocation_commits: DashMap::default(),
+                refused_model_publications: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
                 stale_owner_buffer_drain_reports: DashMap::default(),
                 forced_domain_drain_timeouts: DashMap::default(),
@@ -1946,18 +1956,24 @@ impl FaultInjection {
     pub fn fail_next_syslog_stream_accept(&self, bind_addr: String) -> watch::Receiver<bool> {
         let (fired, observed) = watch::channel(false);
         assert!(
-            self.inner
-                .syslog_listener_faults
-                .send((bind_addr, fired))
-                .is_ok(),
+            self.inner.syslog_listener_faults.receiver_count() > 0,
             "a Syslog source must be subscribed before its listener fault is armed"
         );
+        self.inner.syslog_listener_faults.send_modify(|pending| {
+            if let Some((_, fired)) = pending {
+                assert!(
+                    *fired.borrow(),
+                    "observe the armed Syslog listener fault before arming another"
+                );
+            }
+            *pending = Some((bind_addr, fired));
+        });
         observed
     }
 
     pub(crate) fn syslog_listener_faults(
         &self,
-    ) -> broadcast::Sender<(String, watch::Sender<bool>)> {
+    ) -> watch::Sender<Option<(String, watch::Sender<bool>)>> {
         self.inner.syslog_listener_faults.clone()
     }
 

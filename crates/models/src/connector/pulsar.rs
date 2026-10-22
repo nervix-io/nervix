@@ -31,11 +31,11 @@ use super::{
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, KafkaIngestMode,
-    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue, PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind, TopicName,
+    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    KafkaIngestMode, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm,
+    OptionPresence, OptionValue, PositionClass, SinkBody, SinkClientReference, SinkEntity,
+    SinkReference, SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope,
+    SourceReference, SourceReferenceKind, TopicName,
 };
 
 configured_client!(Pulsar: unpooled, config Nervix, CreateClientPulsar => PulsarConfigEntry);
@@ -247,7 +247,8 @@ const PULSAR_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for PulsarTopicSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
+        // A Pulsar message carries its properties as a list, in the order the producer wrote them.
+        headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: SourceMetadataScope::Headers,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Pulsar),
@@ -330,7 +331,8 @@ pub struct PulsarTopicSink {
 
 impl SinkEntity for PulsarTopicSink {
     const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: true,
+        // The producer keeps a message's properties in a map: one value per name, the last written.
+        headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
         reference: SinkReferenceKind::Client(ConnectorKind::Pulsar),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },

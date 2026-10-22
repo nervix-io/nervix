@@ -307,8 +307,11 @@ the node discarded after a RabbitMQ, SQS or MQTT source reconnected, because the
 what the lost connection did not acknowledge; see
 [Connector Crates And The Connector Contract](connector-contract.md). It renders
 `nervix_ingestor_decode_rejections_total` and `last decode rejection:` as well; see
-[When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload). `SHOW CREATE` round-trips the
-full clause.
+[When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload). It renders
+`nervix_ingestor_oversized_payloads_total`, the payloads the node's source dropped because they
+exceed their client's message size bound, such as a Syslog UDP datagram larger than
+`max_message_size`; see [Oversized payloads](connector-contract.md#oversized-payloads).
+`SHOW CREATE` round-trips the full clause.
 
 ## When The Codec Refuses A Payload
 
@@ -507,6 +510,30 @@ The `name` argument can be any expression that returns `STRING`. Both functions 
 - `RABBITMQ QUEUE` exposes AMQP message headers, converting typed AMQP values to strings
 - `SQS QUEUE` exposes message attributes, converting string, number, and binary values to strings
 
+Each of these sources declares a [header model](./connector-contract.md#header-models), which
+`DESCRIBE INGESTOR` shows as its `headers:` line. The model decides what the two functions find:
+
+<!-- connector-matrix:ingest-headers:start -->
+| Ingestor | Header model | What `read_header` and `read_headers` find |
+| --- | --- | --- |
+| `HTTP REQUEST` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| `HTTP ENDPOINT` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `PULSAR TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| `SQS QUEUE` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| `WEBSOCKETS ENDPOINT` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+
+`CLIENT PRODUCER`, `MQTT TOPIC`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` carry no transport headers and refuse `read_header` and `read_headers`.
+<!-- connector-matrix:ingest-headers:end -->
+
+`read_headers` returns a name's values in the order its model keeps them, at most one of them where
+the model keeps one value per name. A source whose model records names in lowercase is read in
+lowercase: `read_header("x-tenant")` finds the field an HTTP peer sent as `X-Tenant`, while
+`read_header("X-Tenant")` finds nothing. Every other source matches a name exactly, letter case
+included.
+
 The same captured source envelope remains available while a supported ingestor constructs an
 `ON MESSAGE ERROR SEND TO` record, so its error-route `SET` may also call `read_header` and
 `read_headers`.
@@ -519,10 +546,9 @@ SET route = read_header(lower(input.route_header))
 WHERE read_header("tenant") = output.tenant
 ```
 
-`MQTT TOPIC`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `SYSLOG LISTENER`, `ZEROMQ PULL`,
-`WEBSOCKETS CONNECTION`, and `CLIENT PRODUCER` ingestors do not support header reads. Leader-side
-validation rejects these functions for a source without header support, with a message that names
-the source's phrase, such as `MQTT TOPIC ingestors do not support read_header or read_headers`.
+Leader-side validation rejects these functions for a source that carries no transport headers, the
+sources the table above lists after it, with a message that names the source's phrase, such as
+`MQTT TOPIC ingestors do not support read_header or read_headers`.
 
 ## TLS Client Configuration
 
@@ -531,8 +557,7 @@ For outbound ingestor clients, TLS is configured on the `CLIENT`, not on the `IN
 General pattern:
 
 ```nspl,ignore
-CREATE [IF NOT EXISTS] CLIENT <name>
-  TYPE <kind>
+CREATE [IF NOT EXISTS] <kind> CLIENT <name>
   MOUNT <tls_resource> VERSION <n>|LATEST
   CONFIG {
     ...
@@ -569,8 +594,7 @@ an `mqtts` broker certificate against that host; see [MQTT](#mqtt).
 Example Kafka TLS client:
 
 ```nspl
-CREATE IF NOT EXISTS CLIENT kafka_tls
-  TYPE KAFKA
+CREATE IF NOT EXISTS KAFKA CLIENT kafka_tls
   MOUNT dev_tls VERSION 1
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9094',
@@ -582,8 +606,7 @@ CREATE IF NOT EXISTS CLIENT kafka_tls
 Example HTTP TLS client:
 
 ```nspl
-CREATE IF NOT EXISTS CLIENT http_tls
-  TYPE HTTP
+CREATE IF NOT EXISTS HTTP CLIENT http_tls
   MOUNT dev_tls VERSION 1
   CONFIG {
     'endpoint' = 'https://127.0.0.1:18443/http/notifications',
@@ -595,21 +618,39 @@ CREATE IF NOT EXISTS CLIENT http_tls
 
 ## Client Deadlines
 
-A client's `timeout_ms` and `connect_timeout_ms` mean the same thing for every connector that reads
-them. `timeout_ms` bounds the whole of one request or operation: name resolution, connection setup,
-TLS and the answer. `connect_timeout_ms` bounds establishing a connection: name resolution, the
-address attempts, TLS and the protocol's own handshake. Each value is a positive whole number of
-milliseconds.
+A client's `timeout_ms`, `connect_timeout_ms` and `idle_timeout_ms` mean the same thing for every
+connector that reads them. `timeout_ms` bounds the whole of one request or operation: name
+resolution, connection setup, TLS and the answer. `connect_timeout_ms` bounds establishing a
+connection: name resolution, the address attempts, TLS and the protocol's own handshake.
+`idle_timeout_ms` bounds how long a connection may carry nothing while its connector waits to read
+from it. Each value is a positive whole number of milliseconds.
 
 `HTTP` and `PROMETHEUS` clients read `timeout_ms`. `RABBITMQ`, `REDIS` and `WEBSOCKETS` clients read
 `connect_timeout_ms`, and allow 30 seconds when it is left out. A `ZEROMQ PULL` ingestor reads
-neither key, so nothing bounds its connection; see [ZeroMQ](#zeromq). A `RABBITMQ` client's deadline
-covers resolving the broker, the address attempts, TLS, the AMQP handshake, opening the ingestor's
-channel, setting its prefetch window and starting its consumer. A request or connection that runs
-out of its deadline becomes the ingestor's transient status, and the ingestor retries on its
-policy; a connection that runs out of `connect_timeout_ms` is reported naming the key and its
-bound. [Connector Capabilities](connector-capabilities.md) lists each entity's network waits and
-what bounds each one, including the waits nothing bounds yet.
+none of these keys, so nothing bounds its connection; see [ZeroMQ](#zeromq). A `RABBITMQ` client's
+deadline covers resolving the broker, the address attempts, TLS, the AMQP handshake, opening the
+ingestor's channel, setting its prefetch window and starting its consumer. A request or connection
+that runs out of its deadline becomes the ingestor's transient status, and the ingestor retries on
+its policy; a connection that runs out of `connect_timeout_ms` is reported naming the key and its
+bound.
+
+A `SYSLOG LISTENER` serves many senders, so a sender that stalls is not the ingestor's status. A TLS
+listener's client bounds the TLS handshake of each connection it accepts by `connect_timeout_ms`, 30
+seconds when it is left out, and a TCP or TLS listener's client may set `idle_timeout_ms`. A
+connection that runs out of either is closed, and the listener goes on reading the others; see
+[Syslog](syslog.md). [Connector Capabilities](connector-capabilities.md) lists each entity's network
+waits and what bounds each one, including the waits nothing bounds yet.
+
+For a `KAFKA` client, `socket.timeout.ms` also bounds each admitted source control job, including
+executor queueing, metadata and partition inspection, offset lookups, watermarks and seeks. Its
+native default is 60 seconds, and librdkafka accepts 10 through 300000 milliseconds. The job's
+native waits share its remaining budget rather than restarting the timeout per partition.
+Exhausted executor admission and an expired budget become transient ingestor failures and follow
+its retry policy. Kafka control jobs have their own bounded workers, so a slow broker cannot take
+filesystem or consensus worker permits. This does not bound a consumer-group commit's native
+retry lifetime: the caller waits at most 30 seconds and retains that one commit until its exact
+answer arrives before submitting another. Native subscribe, assign and unsubscribe cannot be
+cancelled; their caller's budget limits waiting while an already-running call keeps its worker.
 
 ## Client Ingestors
 
@@ -618,7 +659,7 @@ complete native graph through admission, application ACK, credit, forwarding and
 
 A client ingestor, declared under the `CLIENT PRODUCER` head, admits typed batches that applications
 submit through a Nervix session instead of reading an external system. There is no
-`CREATE CLIENT`, codec, `DECODE USING`, transport header, or `NO ACK` mode: a submitted batch
+external connector client, codec, `DECODE USING`, transport header, or `NO ACK` mode: a submitted batch
 already carries the ingestor's input schema, and every batch is acknowledged.
 
 ```nspl
@@ -846,20 +887,20 @@ under the same head. `DECODE USING <codec>`, the timestamp, the filter, the rout
 
 | Head | Reads | Section |
 | --- | --- | --- |
-| `HTTP REQUEST` | Responses to the requests a `TYPE HTTP` client sends on a cadence | [`HTTP REQUEST`](#http-request) |
+| `HTTP REQUEST` | Responses to the requests an `HTTP CLIENT` sends on a cadence | [`HTTP REQUEST`](#http-request) |
 | `HTTP ENDPOINT` | Requests to a `TYPE HTTP` endpoint | [Endpoints](#http-endpoint-and-websockets-endpoint) |
 | `WEBSOCKETS ENDPOINT` | Frames on connections to a `TYPE WEBSOCKETS` endpoint | [Endpoints](#http-endpoint-and-websockets-endpoint) |
-| `WEBSOCKETS CONNECTION` | Frames on the outbound connection of a `TYPE WEBSOCKETS` client | [`WEBSOCKETS CONNECTION`](#websockets-connection) |
-| `KAFKA TOPIC` | A topic, through a `TYPE KAFKA` client | [Kafka](#kafka) |
-| `PULSAR TOPIC` | A topic, through a `TYPE PULSAR` client | [Pulsar](#pulsar) |
-| `RABBITMQ QUEUE` | A queue, through a `TYPE RABBITMQ` client | [RabbitMQ](#rabbitmq) |
-| `REDIS PUBSUB` | A channel, through a `TYPE REDIS` client | [Redis Pub/Sub](#redis-pubsub) |
-| `MQTT TOPIC` | A topic filter, through a `TYPE MQTT` client | [MQTT](#mqtt) |
-| `NATS SUBJECT` | A subject, through a `TYPE NATS` client | [NATS](#nats) |
-| `ZEROMQ PULL` | The PULL socket of a `TYPE ZEROMQ` client | [ZeroMQ](#zeromq) |
-| `SYSLOG LISTENER` | The listener a `TYPE SYSLOG` client declares | [Syslog](#syslog) |
-| `SQS QUEUE` | A queue, through a `TYPE SQS` client | [SQS](#sqs) |
-| `PROMETHEUS QUERY` | A PromQL query, through a `TYPE PROMETHEUS` client | [Prometheus](#prometheus) |
+| `WEBSOCKETS CONNECTION` | Frames on the outbound connection of a `WEBSOCKETS CLIENT` | [`WEBSOCKETS CONNECTION`](#websockets-connection) |
+| `KAFKA TOPIC` | A topic, through a `KAFKA CLIENT` | [Kafka](#kafka) |
+| `PULSAR TOPIC` | A topic, through a `PULSAR CLIENT` | [Pulsar](#pulsar) |
+| `RABBITMQ QUEUE` | A queue, through a `RABBITMQ CLIENT` | [RabbitMQ](#rabbitmq) |
+| `REDIS PUBSUB` | A channel, through a `REDIS CLIENT` | [Redis Pub/Sub](#redis-pubsub) |
+| `MQTT TOPIC` | A topic filter, through an `MQTT CLIENT` | [MQTT](#mqtt) |
+| `NATS SUBJECT` | A subject, through a `NATS CLIENT` | [NATS](#nats) |
+| `ZEROMQ PULL` | The PULL socket of a `ZEROMQ CLIENT` | [ZeroMQ](#zeromq) |
+| `SYSLOG LISTENER` | The listener a `SYSLOG CLIENT` declares | [Syslog](#syslog) |
+| `SQS QUEUE` | A queue, through an `SQS CLIENT` | [SQS](#sqs) |
+| `PROMETHEUS QUERY` | A PromQL query, through a `PROMETHEUS CLIENT` | [Prometheus](#prometheus) |
 | `CLIENT PRODUCER` | Batches applications submit through their sessions | [Client Ingestors](#client-ingestors) |
 
 ### `HTTP REQUEST`
@@ -884,7 +925,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `EVERY 1s` (duration); required |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |
 | Every live node | no; scheduled owner |
@@ -930,15 +971,15 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers'` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
-| Buffers | messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it |
-| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>offset lookups, watermarks and seeks: fixed 5s<br>subscribe, assign and unsubscribe: unbounded |
-| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>receive.message.max.bytes 100000000 |
+| Buffers | messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
+| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded |
+| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
@@ -1032,7 +1073,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | Not offered: The current topic declaration exposes properties as headers but no separate typed broker metadata namespace. |
 | Every live node | no; scheduled owner |
@@ -1149,7 +1190,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | Not offered: The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace. |
 | Every live node | no; scheduled owner |
@@ -1235,7 +1276,7 @@ See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md
 
 Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both modes keep reading and
 keep the subscriber healthy; payloads are either retained locally within the declared bound or
-discarded and counted. A `TYPE REDIS` client declares connection-pool bounds even when only
+discarded and counted. A `REDIS CLIENT` declares connection-pool bounds even when only
 ingestors reference it; see [Database Client Connection Pools](database-client-pools.md).
 Each subscription owns a separate connection. It resolves the `addr` hostname through the node's
 asynchronous DNS resolver on initial subscribe and every resume after a disconnect; it does not
@@ -1358,7 +1399,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); required |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | Not offered: The current subject declaration exposes message headers but no typed subject or JetStream metadata namespace. |
 | Every live node | no; scheduled owner |
@@ -1483,9 +1524,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | none |
 | Acknowledgement confirmation | none |
 | Buffers | frames read from TCP and TLS connections: at most 64 frames; when full, holds back what fills it |
-| Network waits | the TLS handshake of an accepted connection: unbounded<br>reading a connection: unbounded |
+| Network waits | the TLS handshake of an accepted connection: `connect_timeout_ms`; 30s when omitted<br>reading a connection: `idle_timeout_ms`; unbounded when omitted |
 | Driver limits | Datagrams wait in the kernel's UDP receive buffer, which drops what does not fit. |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
 See the [SYSLOG LISTENER capability and mirror reference](connector-capabilities.md#syslog-listener-ingest).
 <!-- connector-matrix:ingest-syslog-listener:end -->
@@ -1522,7 +1563,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | Not offered: The current queue declaration exposes message attributes through headers but no separate typed receipt metadata namespace. |
 | Every live node | no; scheduled owner |
@@ -1581,6 +1622,7 @@ visibility timeout ends.
 CREATE PROMETHEUS QUERY INGESTOR <name>
   FROM <client>
   (QUERY 'up')
+  [MAX BODY SIZE 16MiB]
   (EVERY 15s)
   MODE <mode>
   ON QUIESCE <quiesce>
@@ -1596,14 +1638,14 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | PROMETHEUS client |
 | Locator and validation rule | Not offered: QUERY is a PromQL expression option rather than an external entity name. |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | `QUERY 'up'` (string literal); required<br>`EVERY 15s` (duration); required |
+| Options in statement order | `QUERY 'up'` (string literal); required<br>`MAX BODY SIZE 16MiB` (byte size); optional; default 16MiB<br>`EVERY 15s` (duration); required |
 | Headers | Not offered: The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | Not offered: The current query result is decoded as payload; no separate typed query or evaluation-time metadata namespace is declared. |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | the query response: unbounded |
+| Buffers | the query response: set by MAX BODY SIZE; when exceeded, fails the poll; the next poll reads again<br>samples the host takes in as one intake batch: at most 1024 samples; when full, holds back what fills it |
 | Network waits | a query: name resolution, connection, TLS and the response: `timeout_ms`; required |
 | Driver limits | Response heads above 100 headers or 417,792 bytes are refused. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
@@ -1612,6 +1654,19 @@ See the [PROMETHEUS QUERY capability and mirror reference](connector-capabilitie
 <!-- connector-matrix:ingest-prometheus-query:end -->
 
 Prometheus samples are flattened into JSON before codec decoding.
+`MAX BODY SIZE <bytes>`, written between `QUERY` and `EVERY`, bounds how many bytes of one query
+response a poll reads; a statement that leaves it out reads at most `16MiB`. The size is a whole
+number greater than zero followed by `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`, and
+`SHOW CREATE` renders it as written. A response whose announced length or whose body exceeds the
+bound fails the poll before any of its samples is delivered: `DESCRIBE INGESTOR` shows the failure
+as the ingestor's transient error, such as `transient error: failed to read from prometheus source:
+Prometheus query response exceeds MAX BODY SIZE 16MiB`, and the next poll queries again.
+`DESCRIBE INGESTOR` prints the bound in effect, whether the statement wrote it or not, as
+`prometheus max body size: 16MiB`.
+The samples of one response enter the graph in intake batches of at most 1024 samples, and each
+batch is decoded and routed as its own group, so a large vector is never taken in as one batch of
+any size. The remaining samples wait while a batch is routed, and the next query waits until every
+sample of the current one has entered the graph.
 The first query becomes due after one `EVERY` interval. Nervix supplies each anchored due instant
 as Prometheus's evaluation time; a slow query coalesces missed occurrences and returned samples are
 evaluated with a fresh domain execution snapshot.
@@ -1620,7 +1675,7 @@ and delivers retained results in order after resume. A scrape whose `ON INGESTIO
 the node's extension workers full waits for them; see
 [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
 
-The ingestor reads through a `TYPE PROMETHEUS` client. Every key of its `CONFIG` is Nervix's own:
+The ingestor reads through a `PROMETHEUS CLIENT`. Every key of its `CONFIG` is Nervix's own:
 
 | Key | Required | Value |
 | --- | --- | --- |
@@ -1630,15 +1685,14 @@ The ingestor reads through a `TYPE PROMETHEUS` client. Every key of its `CONFIG`
 | `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
 
 ```nspl
-CREATE CLIENT prom_main
-  TYPE PROMETHEUS
+CREATE PROMETHEUS CLIENT prom_main
   CONFIG {
     'addr' = 'https://prometheus.example.com/monitoring',
     'timeout_ms' = 5000
   };
 ```
 
-`CREATE CLIENT` refuses a configuration that cannot configure a query source, and names the key:
+`CREATE PROMETHEUS CLIENT` refuses a configuration that cannot configure a query source, and names the key:
 a key the client does not declare, a key written twice, a missing `addr` or `timeout_ms`, an
 `addr` that is not such a URL, a `timeout_ms` that is not a positive whole number of
 milliseconds, or one of `tls_cert_file` and `tls_key_file` without the other. For example,
@@ -1671,7 +1725,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |
 | Options in statement order | No entity-specific options. |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
 | Metadata | Not offered: HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields. |
 | Every live node | yes |
@@ -1706,7 +1760,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK MAX 8 ACK TIMEOUT 5s |
 | Options in statement order | No entity-specific options. |
-| Headers | `read_header`, `read_headers` |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
 | Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |
 | Every live node | yes |
@@ -1859,7 +1913,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [WEBSOCKETS CONNECTION capability and mirror reference](connector-capabilities.md#websockets-connection-ingest).
 <!-- connector-matrix:ingest-websockets-connection:end -->
 
-This opens an outbound WebSocket connection through a `TYPE WEBSOCKETS` client and decodes text or
+This opens an outbound WebSocket connection through a `WEBSOCKETS CLIENT` and decodes text or
 binary frames.
 For `ws` and `wss`, each initial connection and resume resolves the URL host through the node's
 asynchronous resolver. It tries the returned addresses in order within one 30-second budget for
@@ -1890,8 +1944,7 @@ new session on the new owner.
 `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors are different because
 their listeners execute on every live cluster node.
 
-Outbound WebSocket clients can declare `WITH SIGNALING PROTOCOL <name>` after
-`TYPE WEBSOCKETS`. Server-side WebSocket endpoints can declare the same clause
+A `WEBSOCKETS CLIENT` can declare `WITH SIGNALING PROTOCOL <name>` after its name. Server-side WebSocket endpoints can declare the same clause
 after `TYPE WEBSOCKETS`.
 
 A signaling protocol declares a wire format and expresses the whole handshake as

@@ -118,7 +118,7 @@ Feature: Drain node
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING drain_event_codec
         TO stalled_output INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT drain_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT drain_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -301,8 +301,7 @@ Feature: Drain node
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
-      CREATE CLIENT wait_kafka
-        TYPE KAFKA
+      CREATE KAFKA CLIENT wait_kafka
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -428,8 +427,7 @@ Feature: Drain node
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'

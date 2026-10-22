@@ -42,6 +42,8 @@ impl HttpIngestorStartPlan {
             },
             every,
             cadence_start: DomainCadenceStart::Immediate,
+            // A poll answers at most one message, its response body.
+            intake_batch: NonZeroUsize::MIN,
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "http",
         }

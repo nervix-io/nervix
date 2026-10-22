@@ -35,6 +35,7 @@ nonzero_ext = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 shuttle = { workspace = true, optional = true }
+strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "io-util",
@@ -52,7 +53,11 @@ url = { workspace = true }
 bolero = { workspace = true }
 criterion = { workspace = true }
 nervix-model-harness = { workspace = true }
+# The connection deadline checks run on a paused clock.
+nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-test-environment = { workspace = true }
+# The TLS handshake deadline check accepts connections with a generated server identity.
+rcgen = { workspace = true }
 tempfile = { workspace = true }
 
 [[bench]]
