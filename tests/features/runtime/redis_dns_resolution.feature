@@ -27,7 +27,9 @@ Feature: Redis name resolution
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
-        'tls_ca_file' = '{{dev_tls}}/ca.pem'
+        'tls_ca_file' = '{{dev_tls}}/ca.pem',
+        'subscription_buffer_messages' = '1024',
+        'idle_timeout_ms' = '30000'
       };
       CREATE REDIS PUBSUB INGESTOR redis_in
         FROM redis_main CHANNEL 'dns_in_{{test_id}}' MODE NO ACK
@@ -88,7 +90,9 @@ Feature: Redis name resolution
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 0 MAX 1 MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{redis_tls_dns_addr}}',
-        'tls_ca_file' = '{{dev_tls}}/ca.pem'
+        'tls_ca_file' = '{{dev_tls}}/ca.pem',
+        'subscription_buffer_messages' = '1024',
+        'idle_timeout_ms' = '30000'
       };
       CREATE REDIS PUBSUB INGESTOR redis_in
         FROM redis_main CHANNEL 'dns_in_{{test_id}}' MODE NO ACK
@@ -128,7 +132,9 @@ Feature: Redis name resolution
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 CONFIG {
-        'addr' = '{{redis_forwarded_addr}}'
+        'addr' = '{{redis_forwarded_addr}}',
+        'subscription_buffer_messages' = '1024',
+        'idle_timeout_ms' = '30000'
       };
       CREATE REDIS PUBSUB INGESTOR redis_in
         FROM redis_main CHANNEL 'dns_in_{{test_id}}' MODE NO ACK

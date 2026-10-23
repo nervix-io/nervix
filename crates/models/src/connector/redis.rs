@@ -6,8 +6,8 @@
 //!   Models with their delivery mode, the channel name a source subscribes to with the rule it
 //!   follows, and what each entity declares.
 //! - **Depends on.** The shared source and sink declarations and the names a body references.
-//! - **Must not know.** The Redis driver, its configuration keys, or how a channel is subscribed
-//!   or published to.
+//! - **Must not know.** The Redis driver, how a connection is opened, or how a channel is
+//!   subscribed or published to.
 
 #![cfg_attr(
     nervix_lint,
@@ -64,8 +64,11 @@ pub struct RedisPubSubSource {
 /// What the connector of a REDIS PUBSUB ingestor holds and how long it waits.
 const REDIS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
-        holds: "messages the driver reads ahead of the host",
-        bound: BufferBound::Unbounded,
+        holds: "messages read ahead of intake",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("subscription_buffer_messages"),
+            overflow: BufferOverflow::Backpressure,
+        },
     }],
     waits: &[
         DeclaredWait {
@@ -76,8 +79,11 @@ const REDIS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredWait {
-            wait: "reading the next message",
-            bound: WaitBound::Unbounded,
+            wait: "idle subscription activity, including its PING probe",
+            bound: WaitBound::Key {
+                key: DeadlineKey::IdleTimeout,
+                omitted: OmittedDeadline::Required,
+            },
         },
     ],
     driver_limits: &[],

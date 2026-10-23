@@ -617,6 +617,19 @@ A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLo
 check or failed Redis protocol setup is also a connection failure. None rejects an input message
 or changes Redis Pub/Sub's server-acceptance boundary for `PUBLISH`.
 
+A Redis source client must declare `subscription_buffer_messages` and `idle_timeout_ms`.
+A missing key is `RedisPubSubSourceError::MissingConfiguration`, naming only that key; a capacity
+outside the bounded channel's range is `InvalidBufferCapacity`, and an invalid idle deadline keeps
+`ClientConfigError::InvalidDeadline` beneath `InvalidIdleTimeout`. These are source configuration
+failures before a subscription opens, not record rejections.
+
+Redis subscription protocol and read failures retain their driver causes beneath
+`RedisPubSubSourceError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
+the shared `DeadlineElapsed` with `idle_timeout_ms` and its configured bound beneath `IdleProbe`
+and `SourceError::Read`. The host displays that transient failure and reconnects on its existing
+policy. Reader task failures retain the typed join cause. A source explicitly ending its lifetime
+joins its reader; it owes no further read outcome after intake ends.
+
 A connection that runs out of the client's `connect_timeout_ms` keeps the connector contract's
 `DeadlineElapsed` as its innermost cause, naming the step that did not finish, the key and its
 bound, beneath the connector's own context: `RabbitMqConnectError::Unreachable` or `TlsHandshake`
@@ -737,6 +750,13 @@ acknowledgement, rather than failures to decode a record. A control call that ex
 `socket.timeout.ms` budget reports `KafkaSourceError::ControlTimeout` with that bound. Metadata,
 watermark, timestamp and seek failures preserve the driver's typed cause beneath the operation
 that failed.
+
+A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
+and a refused charge keeps `AdmissionError` beneath `KafkaSourceError::RetirementAdmission`. It
+fails the source's open or the partition inspector's start, as transiently as a refused control
+call; see [Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement). A
+retirement has no caller to fail, so its supervisor reports a destruction job that panicked at
+`debug`.
 
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a

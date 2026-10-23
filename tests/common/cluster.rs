@@ -132,7 +132,7 @@ use super::{
     phase_deadline::PhaseDeadline,
     port_pool::{next_ports, release_test_ports},
     raw_session::{TestUpload, send_upload},
-    redis_client::TestRedisClient,
+    redis_client::{TestRedisClient, publish_burst},
     scenario_phase::ScenarioIdentity,
     status_request::{
         STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, STATUS_WAIT_BUDGET, StatusEndpoint,
@@ -4822,10 +4822,26 @@ async fn publish_redis_burst(
 ) -> io::Result<()> {
     let client = TestRedisClient::open(dependencies.get(REDIS_ADDR)?)?;
     let mut connection = client.connect().await?;
-    for _ in 0..count {
+    let deadline = Instant::now() + BROKER_TIMEOUT;
+    loop {
         nervix_primitives::task::consume_budget().await;
-        publish_redis_to_subscriber(&mut connection, channel, payload).await?;
+        let counts: Vec<(String, usize)> = redis::cmd("PUBSUB")
+            .arg("NUMSUB")
+            .arg(channel)
+            .query_async(&mut connection)
+            .await
+            .map_err(io::Error::other)?;
+        if counts.iter().any(|(_, subscribers)| *subscribers > 0) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "timed out waiting for a Redis burst subscriber on channel '{channel}'"
+            )));
+        }
+        sleep(POLL_INTERVAL).await;
     }
+    publish_burst(&mut connection, channel, payload, count).await?;
     sleep(POLL_INTERVAL).await;
     Ok(())
 }

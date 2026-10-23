@@ -276,8 +276,8 @@ resolves the configured `redis://` or `rediss://` hostname through the node reso
 initial subscribe and resume, and opens a dedicated TCP or TLS stream. It tries the returned
 addresses in order inside the client's `connect_timeout_ms`, 30 seconds by default, shared by DNS,
 TCP, TLS, Redis setup, and subscribe.
-It hands the stream and the original client's settings to Redis's `PubSub::new`, so the driver
-still performs its authentication, database selection and protocol setup before `SUBSCRIBE`. A Unix socket remains
+The source uses Redis's command encoder and asynchronous RESP parser for authentication,
+database selection, protocol negotiation and `SUBSCRIBE` on that stream. A Unix socket remains
 a direct Unix connection with no DNS query. The dedicated subscription never occupies a pooled
 command connection.
 
@@ -296,6 +296,22 @@ reject a record or confirm a publish; the host resumes the source and retries fa
 according to its existing policy. A Pub/Sub connection broken by the broker or network is dropped
 and reopened with a new lookup, while an established connection is not interrupted solely because
 its answer expires.
+
+One subscription reader owns that socket and a bounded handoff to intake. The client key
+`subscription_buffer_messages` is required for a source and declares a positive whole message
+capacity that fits the bounded channel. The reader
+reserves a handoff slot before decoding another frame; a full handoff stops transport reads and
+TCP applies backpressure. The message bound is separate from the host's byte-bounded quiesce
+buffer and from wire-parser and kernel byte buffers. `BUFFER` and `DROP` retain their host-owned
+retention and drop counters. Redis Pub/Sub supplies no replay after a disconnect.
+
+The source client's required `idle_timeout_ms` bounds a silent active read. After half the
+interval the reader sends `PING` on the subscription connection; activity must arrive within the
+remaining half. Activity means a complete Redis message or probe reply. Both RESP2 and RESP3 are
+supported. Waiting for handoff room precedes the read and
+does not spend its idle interval. A failed probe closes the connection and reaches the host's
+existing reconnect policy. Source suspend and close abort and join the exact reader before a
+replacement can open; queued messages are otherwise delivered before a terminal read failure.
 
 ### DNS for MQTT
 
@@ -453,9 +469,8 @@ accepted.
 No driver call that parks its thread runs on an asynchronous worker. A connector runs such a call
 in the executor's storage class with a declared deadline as its bound, or as a declared owner of the
 runtime's blocking pool. Kafka source control calls use the connector storage class: metadata,
-watermark and timestamp lookups, seeks and assignments run off the async workers. Consumer
-destruction remains an exception: it can wait for librdkafka's threads on the thread that drops
-the last consumer handle.
+watermark and timestamp lookups, seeks and assignments run off the async workers, and so does the
+destruction of a consumer, as [Kafka consumer retirement](#kafka-consumer-retirement) describes.
 
 Network control calls have their own bounded connector storage admission, separate from filesystem
 and consensus storage. A broker that does not answer therefore cannot consume those classes'
@@ -484,6 +499,38 @@ These annotations describe this chapter's existing lifecycle; they supply no run
 ownership proof. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns their
 syntax, inheritance, diagnostics and operation-specific repair expectations.
 
+#### Kafka consumer retirement
+
+Destroying a Kafka consumer is native work that waits. Every consumer Nervix creates has a group,
+a partition inspector's included, and rust-rdkafka closes such a consumer by polling it in steps of
+100 milliseconds until librdkafka reports it closed. A consumer that joined its group waits there
+for the coordinator to answer its LeaveGroup request, which librdkafka gives five seconds whatever
+`socket.timeout.ms` says, and librdkafka then joins its threads.
+
+A source or partition inspector shares its consumer with the driver jobs it admits, and any of them
+can hold the last handle. A source goes when its host's task ends after the source's loop, or when
+composing its ingestor's instances fails; an inspector goes when its watch ends; a control job keeps
+running after its caller is cancelled, and a job the connector queue refuses lets its handle go
+unrun; and a consumer-group commit can be answered after its source is gone. Whichever of them lets
+the last handle go hands the consumer to its retirement and carries on at once, on an async worker
+and on a connector worker alike. The retirement destroys the consumer in one connector storage job.
+A full queue holds that job until a place frees instead of refusing it, because nothing could
+present the consumer again, and the job runs under a commands charge the consumer took when it was
+created, so retiring a consumer asks the node for nothing it could refuse. A consumer that cannot
+take that charge is not created: the source's open or the inspector's start fails with the transient
+`KafkaSourceError::RetirementAdmission`. Nothing waits for a retirement and nothing cancels it,
+since a destruction cannot stop part way. It takes the native consumer alone, never the source's
+host or its intake, and Nervix never hands a consumer to another source, so a replacement source
+opens a consumer of its own.
+
+A joined consumer whose coordinator does not answer holds a connector worker for those five
+seconds. A broker that stops answering while its consumers retire therefore delays the node's other
+Kafka control calls queued behind them, never its async workers. The `connector_storage` class's
+`nervix_execution_jobs_running` and `nervix_execution_jobs_pending` count retirements with the other
+Kafka jobs. Node shutdown does not wait for a retirement: the process's runtime finishes or
+performs it as it stops after terminal teardown, as
+[Terminal Teardown](./shutdown.md#terminal-teardown) describes.
+
 ### Bounds and deadlines
 
 Every entity declares, beside the rest of its declaration, what its connector holds and how long
@@ -511,7 +558,7 @@ deadline keys mean the same thing for every connector:
 | --- | --- |
 | `timeout_ms` | The whole of one request or operation: name resolution, connection setup, TLS and the answer. |
 | `connect_timeout_ms` | Establishing a connection: name resolution, the address attempts, TLS and the protocol's own handshake. |
-| `idle_timeout_ms` | How long a connection may carry nothing while its connector waits to read from it, after which the connector closes it. |
+| `idle_timeout_ms` | Silence while actively reading an established connection, including its liveness probe; expiry closes the connection. Transport backpressure is outside an active read. |
 
 A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or by
 `idle_timeout_ms`, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
@@ -825,7 +872,7 @@ when its transport stays connected with bounded memory while nothing reads it:
 | ZeroMQ | Waits for a place | `PULL` messages stay in the kernel buffers, and then the pushing peers' sends wait. |
 | Syslog | Waits for a place | The kernel drops UDP datagrams beyond the socket's receive buffer; TCP and TLS connections fill the listener's 64-frame queue and then push back on their senders. |
 | MQTT | Refused and counted | The event loop, which sends the keep-alive, runs only while the loop reads, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
-| Redis Pub/Sub | Refused and counted | The client's connection task reads every message into an unbounded queue. |
+| Redis Pub/Sub | Refused and counted | The dedicated reader holds at most `subscription_buffer_messages` messages and applies TCP backpressure when full. Keeping the host polling also keeps idle probes active. |
 | WebSocket client | Refused and counted | Server pings go unanswered while frames are unread, and a server that pings closes the connection. |
 | `KAFKA TOPIC` in `MODE NO ACK` | Refused and counted | A consumer-group member that does not poll for `max.poll.interval.ms` leaves its group, and a domain-offset instance would keep its partitions through an ownership handoff. |
 | `PULSAR TOPIC` in `MODE NO ACK` | Refused and counted | The consumer engine blocks on a full receive queue, and the consumer's close, which suspension and stop perform, then waits on it. |
