@@ -10,9 +10,14 @@ suites_file="${script_dir}/suites.json"
 report_program="${script_dir}/suite-report.jq"
 # shellcheck source=require-jq.sh
 source "${script_dir}/require-jq.sh"
+# shellcheck source=verifier-self-check.sh
+source "${script_dir}/verifier-self-check.sh"
 # A run's teardown after its own --timeout is bounded on its own and fits this reserve, the
 # runner's teardown_reserve_seconds; a shard's step budget keeps it for the last run.
 teardown_reserve_minutes=15
+# The suite executes the verifier self-check once, before its first run, within its bound; a
+# shard's step budget funds that preparation beside its runs, in whole minutes.
+preparation_minutes=$(((chaos_verifier_self_check_seconds + 59) / 60))
 # How long cleanup waits by default for a suite controller or run that still executes to finish its
 # exit work, within the CI cleanup step's bound, before it kills what remains.
 cleanup_wait_seconds=300
@@ -27,9 +32,11 @@ Usage:
   just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY
   just chaos suite report [--expect-shards N] SUITE_JSON...
 
-SUITE names a suite of suites.json, such as smoke or soak. Each entry runs as its own
-`just chaos run` command with the entry's budget as --timeout, and every entry runs even after one
-fails. --shard runs one shard of the suite and --entry the named entries; both may be combined.
+SUITE names a suite of suites.json, such as smoke or soak. Before its first run the suite executes
+the verifier self-check, tests/self-test.sh, once, and every run adopts the record of that passing
+check instead of executing its own. Each entry runs as its own `just chaos run` command with the
+entry's budget as --timeout, and every entry runs even after one fails. --shard runs one shard of
+the suite and --entry the named entries; both may be combined.
 An image that declares a Deloxide diagnostic selection in its io.nervix.diagnostic.selection label
 runs as a diagnostic image: every run judges the deadlock evidence of every process its nodes
 started, and an entry passes only with a passing evidence verdict. --image-kind KIND refuses an
@@ -41,9 +48,9 @@ directory per run and one console log per entry under logs/. It exits 0 when eve
 1 when any failed or did not run, 2 for a setup error before any run, and 128 plus the signal
 number when it was interrupted.
 
-shards prints the CI matrix of a suite: each shard's entries, its execution budget, the step
-budget that adds one run teardown reserve, and the job budget that adds the CI reserve for evidence,
-cleanup and upload.
+shards prints the CI matrix of a suite: each shard's entries, its execution budget, the preparation
+budget of its one verifier self-check, the step budget that adds both and one run teardown reserve,
+and the job budget that adds the CI reserve for evidence, cleanup and upload.
 
 cleanup ends what a suite left behind. A suite controller that still executes receives one TERM,
 and a run whose controller is gone receives one itself; each has --wait seconds, 300 by default,
@@ -125,8 +132,8 @@ validate_definitions() {
               (if ($entry.run | type == "array" and length > 0 and all(.[]; type == "string")) | not
                then "\($suite)/\($id): run must list the arguments of just chaos run" else empty end),
               (if ($entry.run | type == "array")
-                  and any($entry.run[]; IN("--image", "--artifacts", "--run-id", "--timeout", "--keep"))
-               then "\($suite)/\($id): the suite sets --image, --artifacts, --run-id and --timeout itself and never keeps resources" else empty end),
+                  and any($entry.run[]; IN("--image", "--artifacts", "--run-id", "--timeout", "--verifier-self-check", "--keep"))
+               then "\($suite)/\($id): the suite sets --image, --artifacts, --run-id, --timeout and --verifier-self-check itself and never keeps resources" else empty end),
               (if ($entry | has("note")) and ($entry.note | type != "string")
                then "\($suite)/\($id): note must be a string" else empty end),
               (($entry | keys) - ["id", "shard", "budget_minutes", "run", "note"] | .[]
@@ -187,14 +194,16 @@ list_suites() {
 print_shards() {
     local suite="$1"
     require_suite "${suite}"
-    jq -c --arg suite "${suite}" --argjson teardown "${teardown_reserve_minutes}" '
+    jq -c --arg suite "${suite}" --argjson teardown "${teardown_reserve_minutes}" \
+        --argjson preparation "${preparation_minutes}" '
         .ci_reserve_minutes as $reserve
         | .suites[$suite].entries
         | group_by(.shard)
         | map({shard: .[0].shard,
                entries: map(.id),
-               execution_minutes: (map(.budget_minutes) | add)}
-              | .step_minutes = .execution_minutes + $teardown
+               execution_minutes: (map(.budget_minutes) | add),
+               preparation_minutes: $preparation}
+              | .step_minutes = .execution_minutes + .preparation_minutes + $teardown
               | .job_minutes = .step_minutes + $reserve)' "${suites_file}"
 }
 
@@ -457,6 +466,109 @@ on_suite_signal() {
     fi
 }
 
+# Executes the verifier self-check, tests/self-test.sh, once and within its bound, before the first
+# run. It leads a session of its own as a run does, so a signal reaches it only as the suite's one
+# TERM and cleanup can end what it leaves when the suite is gone. A check that passed for the
+# scripts it started with leaves verifier-self-check.json, the record every run adopts instead of
+# executing its own check. A check that failed, or whose scripts changed while it executed, fails
+# the suite as a controller failure before any run; a signal leaves the suite to end as it does
+# while a run executes.
+execute_verifier_self_check() {
+    local scripts boot started_at started_epoch
+    scripts="$(chaos_scripts_identity "${script_dir}")"
+    boot="$(chaos_boot_identity)"
+    started_at="$(now)"
+    started_epoch="$(date +%s)"
+    printf '\n==> chaos suite %s: verifier self-check\n' "${suite_name}"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.verifier_self_check = {status: "running", started_at: $started_at,
+                                          bound_seconds: $bound, output: "verifier-self-test.txt"}' \
+        --arg started_at "${started_at}" --argjson bound "${chaos_verifier_self_check_seconds}"
+    child_signalled=false
+    setsid timeout --kill-after=5s "${chaos_verifier_self_check_seconds}s" "${script_dir}/tests/self-test.sh" \
+        --evidence "${suite_dir}/verifier-self-test" >"${suite_dir}/verifier-self-test.txt" 2>&1 &
+    child_pid=$!
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.verifier_self_check.process = {pid: $pid,
+            start_ticks: (if $start == "" then null else ($start | tonumber) end)}' \
+        --argjson pid "${child_pid}" --arg start "$(process_start_ticks "${child_pid}")"
+    # A signal that arrived before the check's process was known still reaches it.
+    if [[ -n "${suite_signal}" ]]; then
+        on_suite_signal "${suite_signal}"
+    fi
+    local exit_status
+    while true; do
+        exit_status=0
+        wait "${child_pid}" || exit_status=$?
+        # A signal interrupts wait while the check still ends; wait again for its status.
+        if ((exit_status <= 128)) || ! kill -0 "${child_pid}" 2>/dev/null; then
+            break
+        fi
+    done
+    child_pid=""
+    local finished_at duration
+    finished_at="$(now)"
+    duration=$(($(date +%s) - started_epoch))
+    local status=passed
+    local message=""
+    if [[ -n "${suite_signal}" ]]; then
+        status=interrupted
+    elif [[ "${exit_status}" -ne 0 ]]; then
+        status=failed
+        message="the verifier self-check exited ${exit_status}; see verifier-self-test.txt"
+    elif [[ "$(chaos_scripts_identity "${script_dir}")" != "${scripts}" ]]; then
+        status=failed
+        message="the chaos scripts in ${script_dir} changed while the verifier self-check executed"
+    fi
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.verifier_self_check += {status: $status, exit_code: ($exit | tonumber),
+                                           finished_at: $finished_at, duration_seconds: $duration}' \
+        --arg status "${status}" --arg exit "${exit_status}" --arg finished_at "${finished_at}" \
+        --argjson duration "${duration}"
+    case "${status}" in
+        interrupted)
+            return 0
+            ;;
+        failed)
+            # The dollars in this jq filter are jq variables, not shell expansion.
+            # shellcheck disable=SC2016
+            update_record '.status = "failed"
+                | .entries |= map(. + {status: "not-started", reason: "the verifier self-check failed"})
+                | .error = {category: "controller", message: $message}' \
+                --arg message "${message}"
+            render_summary
+            printf 'chaos suite controller failure: %s\n' "${message}" >&2
+            exit 1
+            ;;
+    esac
+    local record_path="${suite_dir}/verifier-self-check.json"
+    local tmp_path
+    tmp_path="$(mktemp "${suite_dir}/.verifier-self-check.XXXXXX")"
+    jq -n \
+        --arg suite_id "${suite_id}" \
+        --arg started_at "${started_at}" \
+        --arg finished_at "${finished_at}" \
+        --argjson duration "${duration}" \
+        --argjson bound "${chaos_verifier_self_check_seconds}" \
+        --arg output_sha256 "$(openssl dgst -sha256 -r "${suite_dir}/verifier-self-test.txt" | awk '{ print $1 }')" \
+        --arg scripts "${scripts}" \
+        --arg boot "${boot}" \
+        '{status: "passed", exit_code: 0, suite_id: $suite_id,
+          started_at: $started_at, finished_at: $finished_at, duration_seconds: $duration,
+          bound_seconds: $bound, output: "verifier-self-test.txt", output_sha256: $output_sha256,
+          scripts_sha256: $scripts, boot_id: $boot}' >"${tmp_path}"
+    mv "${tmp_path}" "${record_path}"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.verifier_self_check += {record: "verifier-self-check.json", scripts_sha256: $scripts}' \
+        --arg scripts "${scripts}"
+    printf '==> chaos suite %s: verifier self-check passed in %d s; every run adopts its record\n' \
+        "${suite_name}" "${duration}"
+}
+
 run_suite() {
     suite_name="$1"
     shift
@@ -552,6 +664,11 @@ run_suite() {
         || suite_error 'the suite needs a tee that takes -p, as the tee of GNU coreutils does'
     # Listing, planning, reporting and cleanup read the suite records with any jq; the runs need 1.8.
     chaos_jq_supported || suite_error "the chaos scripts need jq 1.8 or later, not $(chaos_jq_found)"
+    # A verifier self-check record names the boot it ran on, so a run adopts it only on that boot.
+    chaos_boot_identity >/dev/null \
+        || suite_error 'the suite needs the boot identity of a Linux worker, /proc/sys/kernel/random/boot_id'
+    chaos_scripts_identity "${script_dir}" >/dev/null \
+        || suite_error "the identity of the chaos scripts in ${script_dir} cannot be computed"
 
     mkdir -p "${artifact_root}"
     artifact_root="$(cd "${artifact_root}" && pwd)"
@@ -686,6 +803,10 @@ run_suite() {
         --arg kernel "${kernel}" --arg docker "${docker_version}" --arg compose "${compose_version}" \
         --arg cpus "${cpus}" --arg memory "${memory_bytes}"
 
+    # Every run judges with the same external verifiers on this worker; the suite proves them once
+    # here rather than in every run's own budget.
+    execute_verifier_self_check
+
     local entry_count entry_index
     entry_count="$(jq '.entries | length' "${suite_dir}/suite.json")"
     for ((entry_index = 0; entry_index < entry_count; entry_index++)); do
@@ -717,7 +838,7 @@ run_suite() {
         child_signalled=false
         setsid bash "${script_dir}/chaos.sh" run "${run_arguments[@]}" \
             --image "${run_image}" --artifacts "${suite_dir}" --run-id "${run_id}" \
-            --timeout "${budget_seconds}" \
+            --timeout "${budget_seconds}" --verifier-self-check "${suite_dir}/verifier-self-check.json" \
             > >(trap '' INT HUP; exec tee -p "${suite_dir}/logs/${entry_id}.log") 2>&1 &
         child_pid=$!
         # The dollars in this jq filter are jq variables, not shell expansion.
@@ -799,14 +920,17 @@ kill_run_session() {
 }
 
 # Ends the processes a suite left executing. A controller that still executes receives one TERM,
-# which it passes to its run as on any signal, and a run whose controller is gone receives one TERM
-# itself. Each has until WAIT_SECONDS have passed to finish its exit work; then the controller and
-# whatever remains of each run's session are killed. Sets cleanup_controller to absent, finished
-# or killed, and records in run_terminated and run_killed which runs cleanup signalled and how many
-# processes of each it killed.
+# which it passes to its run or verifier self-check as on any signal, and a run or check whose
+# controller is gone receives one TERM itself. Each has until WAIT_SECONDS have passed to finish its
+# exit work; then the controller and whatever remains of each session are killed. Sets
+# cleanup_controller to absent, finished or killed, records in run_terminated and run_killed which
+# runs cleanup signalled and how many processes of each it killed, and in verifier_terminated and
+# verifier_killed the same for a verifier self-check that still executed.
 cleanup_controller=absent
 declare -A run_terminated=()
 declare -A run_killed=()
+verifier_terminated=false
+verifier_killed=""
 end_suite_processes() {
     local wait_seconds="$1"
     local deadline=$((SECONDS + wait_seconds))
@@ -816,6 +940,13 @@ end_suite_processes() {
     local runs=()
     mapfile -t runs < <(jq -r '.entries[] | select(.process.pid != null)
         | "\(.run_id) \(.process.pid) \(.process.start_ticks // "")"' "${suite_dir}/suite.json")
+    # The verifier self-check executes before every run, so it is the only process of the suite
+    # besides its controller while its record says it is running.
+    local verifier_pid verifier_start
+    verifier_pid="$(jq -r 'select(.verifier_self_check.status == "running")
+        | .verifier_self_check.process.pid // empty' "${suite_dir}/suite.json")"
+    verifier_start="$(jq -r 'select(.verifier_self_check.status == "running")
+        | .verifier_self_check.process.start_ticks // empty' "${suite_dir}/suite.json")"
     local run run_id pid start_ticks
     local controller_executed=false
     if process_executes "${controller_pid}" "${controller_start}"; then
@@ -832,6 +963,11 @@ end_suite_processes() {
                 run_terminated["${run_id}"]=true
             fi
         done
+        if [[ -n "${verifier_pid}" ]] && process_executes "${verifier_pid}" "${verifier_start}"; then
+            printf 'chaos suite cleanup: the verifier self-check outlived its controller; it receives TERM\n'
+            kill -TERM "${verifier_pid}" 2>/dev/null || true
+            verifier_terminated=true
+        fi
     fi
     while ((SECONDS < deadline)); do
         local executing=false
@@ -844,6 +980,9 @@ end_suite_processes() {
                 executing=true
             fi
         done
+        if [[ -n "${verifier_pid}" ]] && process_executes "${verifier_pid}" "${verifier_start}"; then
+            executing=true
+        fi
         if [[ "${executing}" == false ]]; then
             break
         fi
@@ -867,6 +1006,12 @@ end_suite_processes() {
             printf 'chaos suite cleanup: killed %d processes left of run %s\n' "${killed_count}" "${run_id}"
         fi
     done
+    if [[ -n "${verifier_pid}" ]]; then
+        verifier_killed="$(kill_run_session "${verifier_pid}" "${verifier_start}")"
+        if ((verifier_killed > 0)); then
+            printf 'chaos suite cleanup: killed %d processes left of the verifier self-check\n' "${verifier_killed}"
+        fi
+    fi
 }
 
 # Ends what a suite left behind, waiting for a controller or run that still executes before it
@@ -945,14 +1090,23 @@ cleanup_suite() {
             then . + {status: "not-started", reason: "the suite ended before this entry started"}
             else . end)
         | if .status == "preparing" or .status == "running" then .status = "interrupted" else . end
-        | .cleanup = {at: $at, controller: $controller, runs: $runs}' \
-        --arg at "$(now)" --arg controller "${cleanup_controller}" --argjson runs "${cleanups}"
+        | if .verifier_self_check.status == "running" then .verifier_self_check.status = "interrupted" else . end
+        | .cleanup = {at: $at, controller: $controller, runs: $runs}
+        | if $verifier_killed == "" then .
+          else .cleanup.verifier_self_check = {terminated: $verifier_terminated,
+                                               killed_processes: ($verifier_killed | tonumber)} end' \
+        --arg at "$(now)" --arg controller "${cleanup_controller}" --argjson runs "${cleanups}" \
+        --argjson verifier_terminated "${verifier_terminated}" --arg verifier_killed "${verifier_killed}"
     render_summary
     printf 'chaos suite cleanup: %s\n' "${suite_dir}"
     jq -r '
         (if .cleanup.controller == "finished" then "  suite controller: finished after its TERM"
          elif .cleanup.controller == "killed" then "  suite controller: killed after the wait"
          else empty end),
+        (.cleanup.verifier_self_check // empty
+         | "  verifier self-check: interrupted"
+           + (if .terminated then ", ended by TERM" else "" end)
+           + (if .killed_processes > 0 then ", \(.killed_processes) processes killed" else "" end)),
         (.cleanup.runs[]
          | "  \(.run_id): exit \(.exit_code)"
            + (if .terminated then ", ended by TERM" else "" end)

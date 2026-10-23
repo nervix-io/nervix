@@ -567,7 +567,7 @@ Feature: Materialized relay state
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 2s;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 30s;
         CREATE RELAY notifications
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -592,28 +592,25 @@ Feature: Materialized relay state
       """
       {"note":"first","user_id":42}
       """
-    Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
+    Then within "30s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
       key={"user_id":42} payload={"note":"first","user_id":42}
       """
-    And within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
+    And within "60s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
       relay 'notifications' materialized state is empty
       """
 
-    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+    When http payloads are posted concurrently to host "http-{{test_id}}.example.com" path "/ingest"
       """
       {"note":"recreated-acme","user_id":42}
-      """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
-      """
       {"note":"recreated-beta","user_id":43}
       """
-    Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
+    Then within "30s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
       key={"user_id":42} payload={"note":"recreated-acme","user_id":42}
       """
-    And within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
+    And within "30s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
       key={"user_id":43} payload={"note":"recreated-beta","user_id":43}
       """

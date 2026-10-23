@@ -6,7 +6,8 @@
 //!   configuration names, the BSON document each mapped row becomes, the mapped values it has no
 //!   BSON representation for, the documents the server's document limit refuses, the insert or
 //!   bulk write every write becomes under the emitter's `BATCH` limits and the exact BSON size of
-//!   what it carries, the upsert model of a conflict action, and write-error classification.
+//!   what it carries, the upsert model of a conflict action, write-error classification, and the
+//!   account a failed write gives of each document it carried.
 //! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
 //!   and the `mongodb` driver.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -24,9 +25,12 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
-use std::{ops::Range, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet, btree_map},
+    ops::Range,
+    path::PathBuf,
+};
 
-use ahash::HashMap;
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
     Int8Array, Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
@@ -39,7 +43,10 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use mongodb::{
     Client as DriverClient, Collection, Namespace,
     bson::{Binary, Bson, Document, RawDocumentBuf, doc, spec::BinarySubtype},
-    error::{Error as DriverError, ErrorKind, PartialBulkWriteResult},
+    error::{
+        BulkWriteError, Error as DriverError, ErrorKind, InsertManyError, PartialBulkWriteResult,
+        WriteConcernError,
+    },
     options::{
         ClientOptions, Tls, TlsOptions, UpdateOneModel as MongoDbUpdateOneModel,
         WriteModel as MongoDbWriteModel,
@@ -433,6 +440,8 @@ impl MongoDbSink {
         documents
     }
 
+    /// Answers for the rows of an `insert_many` the driver reported as failed: by the server's
+    /// account of each document when it gave one, and otherwise by leaving every row unresolved.
     fn apply_insert_many_error(
         rows: &[WrittenRow],
         error: DriverError,
@@ -442,98 +451,235 @@ impl MongoDbSink {
             outcome.fail(safe_infrastructure_error("insert_many request"));
             return;
         };
-        if insert_error.write_concern_error.is_some() {
-            outcome.fail(safe_infrastructure_error("insert_many write concern"));
-            return;
-        }
-        let Some(write_errors) = insert_error.write_errors.as_ref() else {
-            outcome.fail(safe_infrastructure_error("insert_many request"));
-            return;
-        };
-        let errors = write_errors
-            .iter()
-            .map(|error| (error.index, error.code))
-            .collect::<Vec<_>>();
-        Self::apply_insert_many_write_errors(rows, &errors, outcome);
+        WriteAnswers::insert_many(insert_error).apply(rows, outcome);
     }
 
-    fn apply_insert_many_write_errors(
-        rows: &[WrittenRow],
-        write_errors: &[(usize, i32)],
-        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
-    ) {
-        let errors = write_errors.iter().copied().collect::<HashMap<_, _>>();
-        let mut has_infrastructure_error = errors.len() != write_errors.len()
-            || write_errors
-                .iter()
-                .any(|(index, code)| *index >= rows.len() || !is_record_write_error(*code));
-        for (local_index, row) in rows.iter().enumerate() {
-            if let Some(code) = errors.get(&local_index) {
-                if is_record_write_error(*code) {
-                    outcome.reject(RejectedSinkRecord::external(
-                        row.position,
-                        row.occurred_at,
-                        format!("MongoDB rejected document with code {code}"),
-                    ));
-                } else {
-                    has_infrastructure_error = true;
-                }
-            } else {
-                outcome.deliver(row.position);
-            }
-        }
-        if has_infrastructure_error {
-            outcome.fail(safe_infrastructure_error("insert_many request"));
-        }
-    }
-
+    /// Answers for the rows of a `bulk_write` the driver reported as failed: by the server's
+    /// account of each operation when it gave one, and otherwise by leaving every row unresolved.
     fn apply_bulk_write_error(
         rows: &[WrittenRow],
         error: DriverError,
         outcome: &mut PerRecordOutcome<SinkRecordPosition>,
     ) {
         let ErrorKind::BulkWrite(bulk_error) = error.kind.as_ref() else {
-            outcome.fail(safe_infrastructure_error("bulk write request"));
+            outcome.fail(safe_infrastructure_error("bulk_write request"));
             return;
         };
-        if !bulk_error.write_concern_errors.is_empty() {
-            outcome.fail(safe_infrastructure_error("bulk write concern"));
+        WriteAnswers::bulk_write(bulk_error).apply(rows, outcome);
+    }
+}
+
+/// What MongoDB answered for each document of one unordered write it reported as failed, by the
+/// document's index in that write.
+///
+/// The server attempts every document of an unordered write. It applies each one it does not
+/// refuse, names each one it refuses with the code of the refusal, and reports a write concern it
+/// could not satisfy beside the documents it applied, which a write concern failure never undoes.
+/// So even a failed write says which of its documents are stored.
+struct WriteAnswers {
+    request: FailedRequest,
+    /// The refusals the server reported, by the index of the document each one names.
+    refusals: BTreeMap<usize, Refusal>,
+    /// The write concern the server could not satisfy for the documents it applied.
+    unsatisfied_write_concern: Option<UnsatisfiedWriteConcern>,
+}
+
+/// The request a failed write was sent as, which decides how the server reports the documents it
+/// applied.
+#[derive(strum::AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+enum FailedRequest {
+    /// An unordered `insert_many`, which names only the documents it refused: the server applied
+    /// every other one.
+    InsertMany,
+    /// A verbose `bulk_write`, which reports a result for each operation it applied, by its
+    /// index.
+    BulkWrite { applied: BTreeSet<usize> },
+}
+
+/// How the server refused one document of a write.
+enum Refusal {
+    /// One refusal, with the code it carries.
+    Code(i32),
+    /// More than one refusal of the same document, which leaves its outcome unknown.
+    Repeated,
+}
+
+/// A write concern the server could not satisfy, as it named it.
+struct UnsatisfiedWriteConcern {
+    code: i32,
+    /// The name of the code, when the server gave one.
+    code_name: Option<String>,
+}
+
+/// What one document of a failed write resolves to.
+enum DocumentAnswer {
+    /// The server applied the document.
+    Delivered,
+    /// The server refused the document for good, with this code.
+    Rejected { code: i32 },
+    /// Nothing says whether the server applied the document.
+    Unresolved,
+}
+
+impl WriteAnswers {
+    /// The answers of an unordered `insert_many`. The driver names each refused document by its
+    /// index in the whole insert, across the commands it divides the insert into, and reports the
+    /// insert as failed only after every command was answered.
+    fn insert_many(error: &InsertManyError) -> Self {
+        let mut answers = Self::new(
+            FailedRequest::InsertMany,
+            error.write_concern_error.as_ref(),
+        );
+        if let Some(write_errors) = &error.write_errors {
+            for write_error in write_errors {
+                answers.refuse(write_error.index, write_error.code);
+            }
+        }
+        answers
+    }
+
+    /// The answers of a verbose `bulk_write`. A bulk write the driver stopped early reports results
+    /// only for the operations it applied before it stopped, so every later operation stays
+    /// unresolved.
+    fn bulk_write(error: &BulkWriteError) -> Self {
+        let mut applied = BTreeSet::new();
+        // Every bulk write asks for verbose results; a summary names no operation.
+        if let Some(PartialBulkWriteResult::Verbose(results)) = &error.partial_result {
+            applied.extend(results.insert_results.keys().copied());
+            applied.extend(results.update_results.keys().copied());
+            applied.extend(results.delete_results.keys().copied());
+        }
+        let mut answers = Self::new(
+            FailedRequest::BulkWrite { applied },
+            error.write_concern_errors.first(),
+        );
+        for (index, write_error) in &error.write_errors {
+            answers.refuse(*index, write_error.code);
+        }
+        answers
+    }
+
+    fn new(request: FailedRequest, write_concern: Option<&WriteConcernError>) -> Self {
+        let mut unsatisfied_write_concern = None;
+        if let Some(write_concern) = write_concern {
+            let code_name = if write_concern.code_name.is_empty() {
+                None
+            } else {
+                Some(write_concern.code_name.clone())
+            };
+            unsatisfied_write_concern = Some(UnsatisfiedWriteConcern {
+                code: write_concern.code,
+                code_name,
+            });
+        }
+        Self {
+            request,
+            refusals: BTreeMap::new(),
+            unsatisfied_write_concern,
+        }
+    }
+
+    /// Records the server's refusal of the document at `index` with `code`.
+    fn refuse(&mut self, index: usize, code: i32) {
+        match self.refusals.entry(index) {
+            btree_map::Entry::Vacant(entry) => {
+                entry.insert(Refusal::Code(code));
+            }
+            btree_map::Entry::Occupied(mut entry) => {
+                *entry.get_mut() = Refusal::Repeated;
+            }
+        }
+    }
+
+    /// What the server answered for the document at `index`.
+    ///
+    /// A refusal decides the document, even beside a result for it: a document refused for good
+    /// is rejected, and any other refusal leaves it unresolved for the host to retry.
+    fn answer(&self, index: usize) -> DocumentAnswer {
+        match self.refusals.get(&index) {
+            Some(Refusal::Code(code)) if is_record_write_error(*code) => {
+                return DocumentAnswer::Rejected { code: *code };
+            }
+            Some(Refusal::Code(_) | Refusal::Repeated) => return DocumentAnswer::Unresolved,
+            None => {}
+        }
+        let applied = match &self.request {
+            FailedRequest::InsertMany => true,
+            FailedRequest::BulkWrite { applied } => applied.contains(&index),
+        };
+        if applied {
+            DocumentAnswer::Delivered
+        } else {
+            DocumentAnswer::Unresolved
+        }
+    }
+
+    /// Whether an answer names a document beyond the `documents` the write carried, which leaves
+    /// the server's account of the write in doubt.
+    fn names_foreign_document(&self, documents: usize) -> bool {
+        if self.refusals.range(documents..).next().is_some() {
+            return true;
+        }
+        match &self.request {
+            FailedRequest::InsertMany => false,
+            FailedRequest::BulkWrite { applied } => applied.range(documents..).next().is_some(),
+        }
+    }
+
+    /// Answers for every row of the write, whose index in the write is its position in `rows`:
+    /// a document the server applied is delivered, one it refused for good is rejected with its
+    /// code, and every other row stays unresolved.
+    ///
+    /// The write fails, for the host to retry what it left unresolved on its backoff, when a row
+    /// is unresolved, when an answer names a document the write did not carry, or when the server
+    /// could not satisfy the write concern. The documents it applied stay delivered even then:
+    /// writing them again would store them twice.
+    fn apply(&self, rows: &[WrittenRow], outcome: &mut PerRecordOutcome<SinkRecordPosition>) {
+        let mut leaves_unresolved = false;
+        for (index, row) in rows.iter().enumerate() {
+            match self.answer(index) {
+                DocumentAnswer::Delivered => outcome.deliver(row.position),
+                DocumentAnswer::Rejected { code } => {
+                    outcome.reject(RejectedSinkRecord::external(
+                        row.position,
+                        row.occurred_at,
+                        format!("MongoDB rejected document with code {code}"),
+                    ));
+                }
+                DocumentAnswer::Unresolved => leaves_unresolved = true,
+            }
+        }
+        if let Some(write_concern) = &self.unsatisfied_write_concern {
+            outcome.fail(write_concern.failure(&self.request));
             return;
         }
-        let mut accounted = vec![false; rows.len()];
-        if let Some(PartialBulkWriteResult::Verbose(result)) = bulk_error.partial_result.as_ref() {
-            for local_index in result
-                .insert_results
-                .keys()
-                .chain(result.update_results.keys())
-                .chain(result.delete_results.keys())
-            {
-                if let Some(row) = rows.get(*local_index) {
-                    outcome.deliver(row.position);
-                    accounted[*local_index] = true;
-                }
+        if leaves_unresolved || self.names_foreign_document(rows.len()) {
+            outcome.fail(self.request.failure());
+        }
+    }
+}
+
+impl FailedRequest {
+    /// The failure of this request when the server's answers leave it unresolved.
+    fn failure(&self) -> Report<SinkPublishError> {
+        safe_infrastructure_error(&format!("{} request", self.as_ref()))
+    }
+}
+
+impl UnsatisfiedWriteConcern {
+    /// The failure of `request` whose write concern this is. It names the server's code, never a
+    /// document the request carried.
+    fn failure(&self, request: &FailedRequest) -> Report<SinkPublishError> {
+        let request = request.as_ref();
+        let code = self.code;
+        let message = match &self.code_name {
+            Some(code_name) => {
+                format!("MongoDB {request} write concern failed with code {code} ({code_name})")
             }
-        }
-        let mut has_infrastructure_error = false;
-        for (local_index, error) in &bulk_error.write_errors {
-            let Some(row) = rows.get(*local_index) else {
-                has_infrastructure_error = true;
-                continue;
-            };
-            if is_record_write_error(error.code) {
-                outcome.reject(RejectedSinkRecord::external(
-                    row.position,
-                    row.occurred_at,
-                    format!("MongoDB rejected document with code {}", error.code),
-                ));
-                accounted[*local_index] = true;
-            } else {
-                has_infrastructure_error = true;
-            }
-        }
-        if has_infrastructure_error || accounted.iter().any(|accounted| !accounted) {
-            outcome.fail(safe_infrastructure_error("bulk write request"));
-        }
+            None => format!("MongoDB {request} write concern failed with code {code}"),
+        };
+        Report::new(SinkPublishError::Publish { sink: MONGODB }).attach_printable(message)
     }
 }
 
@@ -1109,6 +1255,10 @@ impl<'a> MappedBsonColumn<'a> {
 mod tests {
     use arrow_array::types::UInt64Type;
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use mongodb::{
+        error::{BulkWriteError, InsertManyError, WriteConcernError, WriteError},
+        results::{DeleteResult, InsertOneResult, UpdateResult, VerboseBulkWriteResult},
+    };
     use nervix_models::{MessageErrorCode, MessageErrorOperation};
     use nervix_primitives::sync::StdArc;
 
@@ -1141,7 +1291,19 @@ mod tests {
             occurred_at: Timestamp::from_unix_nanos(3),
         });
 
-        MongoDbSink::apply_insert_many_write_errors(&rows, &[(1, 11000), (2, 91)], &mut outcome);
+        let insert_error: InsertManyError = mongodb::bson::from_document(doc! {
+            "writeErrors": [
+                { "index": 1, "code": 11000, "errmsg": "E11000 duplicate key error" },
+                { "index": 2, "code": 91, "errmsg": "The server is in quiesce mode" },
+            ],
+        })
+        .expect("a server's insert reply deserializes");
+
+        MongoDbSink::apply_insert_many_error(
+            &rows,
+            DriverError::from(ErrorKind::InsertMany(insert_error)),
+            &mut outcome,
+        );
 
         let outcome = outcome.into_parts();
         assert_eq!(
@@ -1304,6 +1466,389 @@ mod tests {
             },
             occurred_at: Timestamp::from_unix_nanos(1),
         }
+    }
+
+    /// The write concern error a single-member replica set reports for a write that asks for a
+    /// second data-bearing member, after it applied the write.
+    fn unsatisfiable_write_concern() -> WriteConcernError {
+        mongodb::bson::from_document(doc! {
+            "code": 100,
+            "codeName": "UnsatisfiableWriteConcern",
+            "errmsg": "Not enough data-bearing nodes",
+        })
+        .expect("a server's write concern error deserializes")
+    }
+
+    /// An unordered insert whose write concern failed still applied every document it did not
+    /// refuse, so those are delivered and only the refused one is rejected: resending them would
+    /// store them twice. The write still fails, so the host retries what remains on its backoff.
+    #[test]
+    fn an_insert_whose_write_concern_failed_delivers_the_documents_it_wrote() {
+        let rows = [written_row(0), written_row(1), written_row(2)];
+        let mut insert_error: InsertManyError = mongodb::bson::from_document(doc! {
+            "writeErrors": [{ "index": 1, "code": 11000, "errmsg": "E11000 duplicate key error" }],
+        })
+        .expect("a server's insert reply deserializes");
+        insert_error.write_concern_error = Some(unsatisfiable_write_concern());
+        let mut outcome = PerRecordOutcome::empty();
+
+        MongoDbSink::apply_insert_many_error(
+            &rows,
+            DriverError::from(ErrorKind::InsertMany(insert_error)),
+            &mut outcome,
+        );
+
+        let outcome = outcome.into_parts();
+        assert_eq!(outcome.delivered, [rows[0].position, rows[2].position]);
+        assert_eq!(outcome.rejected.len(), 1);
+        assert_eq!(outcome.rejected[0].id, rows[1].position);
+        assert!(
+            outcome.infrastructure_error.is_some(),
+            "a write concern the server could not satisfy fails the write"
+        );
+    }
+
+    /// A bulk write whose write concern failed reports a result for every upsert it applied, so
+    /// those are delivered, a refused one is rejected, and a row it reported nothing for is left
+    /// unresolved for the host to retry.
+    #[test]
+    fn a_bulk_write_whose_write_concern_failed_delivers_the_upserts_it_wrote() {
+        let rows = [
+            written_row(0),
+            written_row(1),
+            written_row(2),
+            written_row(3),
+        ];
+        let mut written = VerboseBulkWriteResult::default();
+        written.update_results.insert(0, UpdateResult::default());
+        written.update_results.insert(2, UpdateResult::default());
+        let mut bulk_error = BulkWriteError::default();
+        bulk_error.partial_result = Some(PartialBulkWriteResult::Verbose(written));
+        bulk_error.write_errors.insert(
+            1,
+            mongodb::bson::from_document::<WriteError>(doc! {
+                "code": 11000,
+                "errmsg": "E11000 duplicate key error",
+            })
+            .expect("a server's write error deserializes"),
+        );
+        bulk_error
+            .write_concern_errors
+            .push(unsatisfiable_write_concern());
+        let mut outcome = PerRecordOutcome::empty();
+
+        MongoDbSink::apply_bulk_write_error(
+            &rows,
+            DriverError::from(ErrorKind::BulkWrite(bulk_error)),
+            &mut outcome,
+        );
+
+        let outcome = outcome.into_parts();
+        assert_eq!(outcome.delivered, [rows[0].position, rows[2].position]);
+        assert_eq!(outcome.rejected.len(), 1);
+        assert_eq!(outcome.rejected[0].id, rows[1].position);
+        assert!(
+            outcome.infrastructure_error.is_some(),
+            "the unanswered upsert and the write concern fail the write"
+        );
+    }
+
+    /// The write concern failure names the request and the server's code, which is what an
+    /// emitter reports as its transient error.
+    #[test]
+    fn a_write_concern_failure_names_the_request_and_the_server_code() {
+        let rows = [written_row(0)];
+        let mut insert_error: InsertManyError =
+            mongodb::bson::from_document(doc! {}).expect("an empty insert reply deserializes");
+        insert_error.write_concern_error = Some(unsatisfiable_write_concern());
+        let mut outcome = PerRecordOutcome::empty();
+
+        MongoDbSink::apply_insert_many_error(
+            &rows,
+            DriverError::from(ErrorKind::InsertMany(insert_error)),
+            &mut outcome,
+        );
+
+        let outcome = outcome.into_parts();
+        assert_eq!(outcome.delivered, [rows[0].position]);
+        let failure = outcome
+            .infrastructure_error
+            .expect("the write concern fails the write");
+        assert_eq!(
+            failure_message(&failure),
+            Some(
+                "MongoDB insert_many write concern failed with code 100 \
+                 (UnsatisfiableWriteConcern)"
+            )
+        );
+    }
+
+    #[test]
+    fn a_write_concern_without_a_code_name_retains_its_numeric_code() {
+        use meticulous::OptionExt as _;
+
+        let rows = [written_row(0)];
+        let mut write_concern = unsatisfiable_write_concern();
+        write_concern.code_name.clear();
+        let answers = WriteAnswers::new(FailedRequest::InsertMany, Some(&write_concern));
+        let mut outcome = PerRecordOutcome::empty();
+
+        answers.apply(&rows, &mut outcome);
+
+        let outcome = outcome.into_parts();
+        assert_eq!(outcome.delivered, [rows[0].position]);
+        assert!(outcome.rejected.is_empty());
+        let failure = outcome
+            .infrastructure_error
+            .assured("the unsatisfied write concern always fails the request");
+        assert_eq!(
+            failure_message(&failure),
+            Some("MongoDB insert_many write concern failed with code 100")
+        );
+    }
+
+    /// The message an emitter reports for `failure`: its first printable attachment.
+    fn failure_message(failure: &Report<SinkPublishError>) -> Option<&str> {
+        for frame in failure.frames() {
+            if let Some(message) = frame.downcast_ref::<String>() {
+                return Some(message);
+            }
+        }
+        None
+    }
+
+    /// The codes a generated refusal carries: each code a document is rejected for, then codes of
+    /// failures the host retries.
+    const REFUSAL_CODES: [i32; 8] = [121, 10334, 11000, 2, 64, 91, 11600, 11602];
+
+    /// The codes a generated write concern failure carries: a write concern that timed out, one
+    /// the set can never satisfy, an unknown write concern mode, and a primary that shut down or
+    /// stepped down after it applied the write.
+    const WRITE_CONCERN_CODES: [i32; 5] = [64, 100, 79, 91, 11602];
+
+    /// One more than the largest index a generated answer names, beyond the twelve rows the
+    /// largest generated write carries, so some answers name documents the write never carried.
+    const ANSWERED_INDEXES: u8 = 16;
+
+    /// A refusal a server reports for a failed write: the document it names and its code.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct GeneratedRefusal {
+        document: u8,
+        code: u8,
+    }
+
+    impl GeneratedRefusal {
+        fn document(&self) -> usize {
+            usize::from(self.document % ANSWERED_INDEXES)
+        }
+
+        fn code(&self) -> i32 {
+            REFUSAL_CODES[usize::from(self.code) % REFUSAL_CODES.len()]
+        }
+    }
+
+    /// A failed unordered write of one to twelve rows and everything a server may answer for it:
+    /// the operations a bulk write reports it applied, refusals, repeated refusals of one
+    /// document of an insert, answers naming documents beyond the write, and a write concern
+    /// failure.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct FailedWriteCase {
+        rows: u8,
+        bulk_write: bool,
+        /// The operations a bulk write applied, each byte naming its index and which kind of
+        /// result reports it.
+        #[generator(bolero::generator::produce_with::<Vec<u8>>().len(0_usize..=16))]
+        applied: Vec<u8>,
+        #[generator(bolero::generator::produce_with::<Vec<GeneratedRefusal>>().len(0_usize..=16))]
+        refusals: Vec<GeneratedRefusal>,
+        write_concern: Option<u8>,
+    }
+
+    impl FailedWriteCase {
+        fn rows(&self) -> Vec<WrittenRow> {
+            let count = usize::from(self.rows % 12) + 1;
+            (0..count).map(written_row).collect()
+        }
+
+        fn write_concern_error(&self) -> Option<WriteConcernError> {
+            let code =
+                WRITE_CONCERN_CODES[usize::from(self.write_concern?) % WRITE_CONCERN_CODES.len()];
+            let error = mongodb::bson::from_document(doc! {
+                "code": code,
+                "codeName": "GeneratedWriteConcernFailure",
+                "errmsg": "generated write concern failure",
+            })
+            .expect("a generated write concern error deserializes");
+            Some(error)
+        }
+
+        /// The driver's error for this write, exactly as the sink receives it.
+        fn driver_error(&self) -> DriverError {
+            if !self.bulk_write {
+                let mut write_errors = Vec::with_capacity(self.refusals.len());
+                for refusal in &self.refusals {
+                    write_errors.push(doc! {
+                        "index": i64::try_from(refusal.document()).expect("an index fits i64"),
+                        "code": refusal.code(),
+                        "errmsg": "generated refusal",
+                    });
+                }
+                let mut insert_error: InsertManyError =
+                    mongodb::bson::from_document(doc! { "writeErrors": write_errors })
+                        .expect("a generated insert reply deserializes");
+                insert_error.write_concern_error = self.write_concern_error();
+                return DriverError::from(ErrorKind::InsertMany(insert_error));
+            }
+            let mut results = VerboseBulkWriteResult::default();
+            for applied in &self.applied {
+                let index = usize::from(applied % ANSWERED_INDEXES);
+                match applied / ANSWERED_INDEXES % 3 {
+                    0 => {
+                        results
+                            .insert_results
+                            .insert(index, InsertOneResult::default());
+                    }
+                    1 => {
+                        results
+                            .update_results
+                            .insert(index, UpdateResult::default());
+                    }
+                    _ => {
+                        results
+                            .delete_results
+                            .insert(index, DeleteResult::default());
+                    }
+                }
+            }
+            let mut bulk_error = BulkWriteError::default();
+            bulk_error.partial_result = Some(PartialBulkWriteResult::Verbose(results));
+            for refusal in &self.refusals {
+                let write_error = mongodb::bson::from_document::<WriteError>(doc! {
+                    "code": refusal.code(),
+                    "errmsg": "generated refusal",
+                })
+                .expect("a generated write error deserializes");
+                bulk_error
+                    .write_errors
+                    .insert(refusal.document(), write_error);
+            }
+            bulk_error
+                .write_concern_errors
+                .extend(self.write_concern_error());
+            DriverError::from(ErrorKind::BulkWrite(bulk_error))
+        }
+
+        /// Every code the server reported for each refused document. A bulk write reports one
+        /// refusal per operation, its last; an insert reports each refusal it made.
+        fn reported_refusals(&self) -> BTreeMap<usize, Vec<i32>> {
+            let mut reported = BTreeMap::<usize, Vec<i32>>::new();
+            for refusal in &self.refusals {
+                let codes = reported.entry(refusal.document()).or_default();
+                if self.bulk_write {
+                    codes.clear();
+                }
+                codes.push(refusal.code());
+            }
+            reported
+        }
+
+        /// The operations a bulk write reports it applied.
+        fn reported_applied(&self) -> BTreeSet<usize> {
+            let mut applied = BTreeSet::new();
+            if self.bulk_write {
+                for operation in &self.applied {
+                    applied.insert(usize::from(operation % ANSWERED_INDEXES));
+                }
+            }
+            applied
+        }
+    }
+
+    /// Every row of a failed unordered write is answered once, exactly as the server's answers
+    /// decide it: delivered when the server applied it and refused it nowhere, rejected when one
+    /// refusal for good names it, and otherwise left unresolved. The write fails exactly when a
+    /// row is unresolved, an answer names a document beyond the write, or the write concern
+    /// failed, and that failure names the request and the write concern's code.
+    #[test]
+    fn bolero_failed_write_answers_partition_the_write() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(256)
+            .with_type::<FailedWriteCase>()
+            .for_each(|case| {
+                let rows = case.rows();
+                let mut outcome = PerRecordOutcome::empty();
+                if case.bulk_write {
+                    MongoDbSink::apply_bulk_write_error(&rows, case.driver_error(), &mut outcome);
+                } else {
+                    MongoDbSink::apply_insert_many_error(&rows, case.driver_error(), &mut outcome);
+                }
+                let outcome = outcome.into_parts();
+
+                let refusals = case.reported_refusals();
+                let applied = case.reported_applied();
+                let mut delivered = Vec::new();
+                let mut rejected = Vec::new();
+                let mut unresolved = false;
+                for (index, row) in rows.iter().enumerate() {
+                    let codes: &[i32] = match refusals.get(&index) {
+                        Some(codes) => codes,
+                        None => &[],
+                    };
+                    match codes {
+                        [code] if is_record_write_error(*code) => {
+                            rejected.push((row.position, *code));
+                        }
+                        [] if !case.bulk_write || applied.contains(&index) => {
+                            delivered.push(row.position);
+                        }
+                        _ => unresolved = true,
+                    }
+                }
+                let names_foreign_document = refusals.range(rows.len()..).next().is_some()
+                    || applied.range(rows.len()..).next().is_some();
+
+                assert_eq!(outcome.delivered, delivered);
+                let mut observed_rejections = Vec::with_capacity(outcome.rejected.len());
+                for rejection in &outcome.rejected {
+                    observed_rejections.push((rejection.id, rejection.error.message.clone()));
+                }
+                let mut expected_rejections = Vec::with_capacity(rejected.len());
+                for (position, code) in rejected {
+                    expected_rejections.push((
+                        position,
+                        format!("MongoDB rejected document with code {code}"),
+                    ));
+                }
+                // The reference answers each row once, so equal answers answer each row once too.
+                assert_eq!(observed_rejections, expected_rejections);
+
+                let request = if case.bulk_write {
+                    "bulk_write"
+                } else {
+                    "insert_many"
+                };
+                let expected_failure = match case.write_concern_error() {
+                    Some(write_concern) => Some(format!(
+                        "MongoDB {request} write concern failed with code {} \
+                         (GeneratedWriteConcernFailure)",
+                        write_concern.code
+                    )),
+                    None if unresolved || names_foreign_document => {
+                        Some(format!("MongoDB {request} request failed"))
+                    }
+                    None => None,
+                };
+                match (&outcome.infrastructure_error, &expected_failure) {
+                    (Some(failure), Some(expected)) => {
+                        assert_eq!(failure_message(failure), Some(expected.as_str()));
+                    }
+                    (None, None) => {}
+                    (observed, expected) => {
+                        panic!("the write failed as {observed:?}, but should fail as {expected:?}");
+                    }
+                }
+            });
     }
 
     /// An inserted document is measured as the driver writes it, with the `_id` it prepends to a

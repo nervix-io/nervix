@@ -61,10 +61,10 @@ stateDiagram-v2
     COMMITTING --> FAILED: first definitive failure / retain applied prefix
     OPEN --> REVERTED: REVERT or clean session close
     OPEN --> EXPIRED: unbound idle timeout
-    COMMITTED --> [*]: tombstone retention expires
-    FAILED --> [*]: tombstone retention expires
-    REVERTED --> [*]: tombstone retention expires
-    EXPIRED --> [*]: tombstone retention expires
+    COMMITTED --> [*]: aged and no applying command needs it
+    FAILED --> [*]: aged and no applying command needs it
+    REVERTED --> [*]: aged and no applying command needs it
+    EXPIRED --> [*]: aged and no applying command needs it
 ```
 
 ## Three Levels Of Impact
@@ -308,8 +308,12 @@ The control plane persists report identity, operation summaries, step plans, app
 outcomes, and the topology needed to reconstruct before and after views. Header, operation, and
 step records are keyed; topology is content-addressed into bounded node and edge records shared
 across report revisions. A finished transaction retains its frozen report with its tombstone for
-the configured retention period, **15 minutes by default**, including after subsequent graph
-changes. Retention cleanup removes the transaction's report records and topology content no other
+at least the configured retention period, **15 minutes by default**, including after subsequent graph
+changes. An applying command request that targets the transaction, or an applying ordinary
+command named by its mutation owner, retains the tombstone, commit plan and report beyond that
+age. This includes an ordinary command's planning refresh attempts. Once no applying execution
+needs the transaction, its original terminal timestamp determines cleanup eligibility.
+Retention cleanup removes the transaction's report records and topology content no other
 retained report references. Once its tombstone is reclaimed, inspection by id returns unknown.
 
 Transaction positions and operation numbers, commit-plan step counts, accepted and applied
