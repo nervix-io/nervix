@@ -31,6 +31,8 @@ pub enum IngestorMetadataScope {
     Kafka,
     /// The peer a syslog message arrived from: `peer_addr`.
     Syslog,
+    /// The text or binary kind of one WebSockets connection data frame.
+    Websockets,
 }
 
 /// One typed field a metadata namespace declares: its name and its exact type. Every field is
@@ -62,6 +64,11 @@ const SYSLOG_FIELDS: &[IngestorMetadataField] = &[IngestorMetadataField {
     ty: ParseAsType::String,
 }];
 
+const WEBSOCKETS_FIELDS: &[IngestorMetadataField] = &[IngestorMetadataField {
+    name: "frame_type",
+    ty: ParseAsType::String,
+}];
+
 impl IngestorMetadataScope {
     /// The one declaration of this namespace's fields, in order. The schema fields a program is
     /// validated against and the Arrow columns a host builds are both read from it, so neither
@@ -71,6 +78,7 @@ impl IngestorMetadataScope {
             Self::Headers => &[],
             Self::Kafka => KAFKA_FIELDS,
             Self::Syslog => SYSLOG_FIELDS,
+            Self::Websockets => WEBSOCKETS_FIELDS,
         }
     }
 

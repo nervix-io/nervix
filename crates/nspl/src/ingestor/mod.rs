@@ -2070,6 +2070,7 @@ mod tests {
             transport(&parsed).source,
             IngestorEntity::Websockets(WebsocketsIngestor::Connection(
                 WebsocketsConnectionIngestor {
+                    headers: Vec::new(),
                     client: nervix_models::ClientName::try_from("ws_main")
                         .expect("valid client identifier"),
                     mode: WebsocketsIngestMode::NoAck,

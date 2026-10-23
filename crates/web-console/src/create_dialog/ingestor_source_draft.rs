@@ -378,6 +378,7 @@ impl IngestorEntityDraft {
             IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection) => {
                 WebsocketsConnectionIngestor {
                     client: self.client()?,
+                    headers: Vec::new(),
                     mode: WebsocketsIngestMode::NoAck,
                     quiesce,
                 }

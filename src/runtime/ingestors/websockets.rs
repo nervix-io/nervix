@@ -39,6 +39,7 @@ impl WebsocketsConnectionIngestorStartPlan {
     ) -> error_stack::Result<IngestorStart, IngestorStartError> {
         let WebsocketsConnectionIngestorStartPlan {
             client,
+            headers,
             mode,
             signaling_protocol,
         } = self;
@@ -64,6 +65,7 @@ impl WebsocketsConnectionIngestorStartPlan {
         };
         let connector = WebsocketsConnectionIngestorPlan::new(
             resolved.entries,
+            headers,
             signaling_protocol,
             dns.clone(),
         )

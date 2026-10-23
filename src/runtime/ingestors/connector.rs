@@ -689,6 +689,13 @@ impl RuntimeIngestorHost {
         metadata: &IngestMetadataRow<'_>,
     ) -> IngestorIntakeResult<BufferedIngestMetadata> {
         match metadata {
+            IngestMetadataRow::Websockets {
+                frame_type,
+                headers,
+            } => Ok(BufferedIngestMetadata::Websockets {
+                frame_type: *frame_type,
+                headers: (*headers).clone(),
+            }),
             IngestMetadataRow::Syslog { peer_addr } => Ok(BufferedIngestMetadata::Syslog {
                 peer_addr: *peer_addr,
             }),
@@ -2093,6 +2100,10 @@ mod confirmation_tests;
 #[cfg(test)]
 #[path = "connector_read_tests.rs"]
 mod read_tests;
+
+#[cfg(test)]
+#[path = "connector_metadata_tests.rs"]
+mod metadata_tests;
 
 #[cfg(test)]
 #[path = "connector_poll_tests.rs"]

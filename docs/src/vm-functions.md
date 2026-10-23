@@ -1065,7 +1065,9 @@ type or row count, or a side error that names a row outside the call, is a batch
 The injectors:
 
 - **Header reads.** `IngestHeaderFunctionInjector` answers header reads from the ingest metadata of
-  one execution.
+  one execution. Outbound WebSockets supply their connection's captured response headers, including
+  after quiesce replay; the metadata builder writes the retained frame kind into a typed STRING
+  column before VM execution.
 - **Window aggregates.** `WindowAggregateResults` answers window aggregates from the accumulators at
   emission.
 - **UDFs.** `nervix-roto`'s `UdfExecutor` answers UDF calls:

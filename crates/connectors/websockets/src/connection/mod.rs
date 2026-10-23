@@ -34,6 +34,6 @@ pub use ingestor::{
 };
 pub use signaling::{
     CompiledSignalingProtocol, SignalingDataEmitter, SignalingFrameEncodeError,
-    SignalingProtobufDescriptors, SignalingProtocolCompileError, WebsocketSignalingError,
-    WebsocketSignalingSession,
+    SignalingProtobufDescriptors, SignalingProtocolCompileError, WebsocketDataFrame,
+    WebsocketSignalingError, WebsocketSignalingSession,
 };

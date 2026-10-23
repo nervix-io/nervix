@@ -18,7 +18,7 @@ use error_stack::{Context, Report};
 use nervix_models::{
     BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind, EndpointName,
     EndpointType, FieldName, IngestorEntityKind, ModelKind, ModelName, PrometheusClientConfigError,
-    RelayName,
+    RelayName, WebsocketsClientConfigError, WebsocketsUpgradeHeadersError,
 };
 use thiserror::Error;
 
@@ -155,6 +155,21 @@ pub(crate) enum RegistryError {
         domain: DomainName,
         client: ClientName,
         issue: PrometheusClientConfigError,
+    },
+    #[error(
+        "{} client '{client}' in domain '{domain}' cannot use its CONFIG: {issue}",
+        ConnectorKind::Websockets
+    )]
+    InvalidWebsocketsClientConfig {
+        domain: DomainName,
+        client: ClientName,
+        issue: WebsocketsClientConfigError,
+    },
+    #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its HEADERS: {issue}")]
+    InvalidWebsocketsUpgradeHeaders {
+        domain: DomainName,
+        ingestor: ModelName,
+        issue: WebsocketsUpgradeHeadersError,
     },
     #[error("branch '{branch}' in domain '{domain}' uses BYTES in field '{field}'")]
     BranchFieldContainsBytes {

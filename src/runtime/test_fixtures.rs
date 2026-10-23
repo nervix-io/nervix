@@ -122,7 +122,8 @@ pub(super) fn ingest_metadata_for_test(
     scope: super::IngestorMetadataScope,
     rows: &[nervix_connector::IngestMetadataRow<'_>],
 ) -> super::IngestFilterMapMetadata {
-    let mut builders = super::IngestMetadataBuilders::new(scope, rows.len());
+    let mut builders = super::IngestMetadataBuilders::new(scope, rows.len())
+        .expect("the fixture's metadata row capacity fits");
     for row in rows {
         builders
             .append(row)

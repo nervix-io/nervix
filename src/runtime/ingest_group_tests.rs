@@ -748,10 +748,10 @@ fn pending_ingest_group_reports_structural_close_errors() {
     ));
 
     let mut missing_records = PendingIngestGroup::new(IngestorMetadataScope::Headers, 1);
-    missing_records.metadata = Some(IngestMetadataBuilders::new(
-        IngestorMetadataScope::Headers,
-        1,
-    ));
+    missing_records.metadata = Some(
+        IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
+            .expect("one header metadata row fits"),
+    );
     let missing_record_error = expect_failure(
         missing_records.into_rows(),
         "a closed group must have opened a record builder",
@@ -762,7 +762,8 @@ fn pending_ingest_group_reports_structural_close_errors() {
     ));
 
     let mut metadata_mismatch = PendingIngestGroup::new(IngestorMetadataScope::Headers, 1);
-    let mut metadata = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1);
+    let mut metadata = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
+        .expect("one header metadata row fits");
     metadata
         .append(&IngestMetadataRow::Headers {
             headers: &NoIngestHeaders,
@@ -782,7 +783,8 @@ fn pending_ingest_group_reports_structural_close_errors() {
     ));
 
     let mut decoded_mismatch = PendingIngestGroup::new(IngestorMetadataScope::Headers, 1);
-    let mut metadata = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1);
+    let mut metadata = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
+        .expect("one header metadata row fits");
     metadata
         .append(&IngestMetadataRow::Headers {
             headers: &NoIngestHeaders,

@@ -154,7 +154,7 @@ fn source_surface(kind: IngestorEntityKind) -> IngestorSurface {
             unlocated(NO_ACK, FLEXIBLE, &[])
         }
         IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection) => {
-            unlocated(NO_ACK, PUSH, &[])
+            unlocated(NO_ACK, PUSH, &[("HEADERS", false)])
         }
     }
 }

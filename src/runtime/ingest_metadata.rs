@@ -13,6 +13,8 @@
 
 use arrow_buffer::BooleanBuffer;
 use nervix_connector::{IngestMetadataRow, NoIngestHeaders};
+use nervix_models::WebsocketsFrameType;
+use strum::IntoEnumIterator as _;
 
 use super::*;
 
@@ -72,6 +74,14 @@ pub(super) type IngestMetadataResult<T> = Result<T, Report<IngestMetadataError>>
 
 #[derive(Debug, Error)]
 pub(super) enum IngestMetadataError {
+    #[error(
+        "WebSockets metadata capacity for {row_bound} rows with {label_bytes} bytes per frame \
+         label exceeds the address space"
+    )]
+    WebsocketsCapacityOverflow {
+        row_bound: usize,
+        label_bytes: usize,
+    },
     #[error("ingest metadata builders for {builders:?} cannot append a {row:?} row")]
     BuilderScopeMismatch {
         builders: IngestorMetadataScope,
@@ -113,6 +123,7 @@ pub(super) struct KafkaIntegrationBuilders {
 /// The Kafka columns live behind one allocation taken when the group opens, so the variants
 /// stay comparable in size.
 pub(super) enum IngestIntegrationBuilders {
+    Websockets { frame_type: StringBuilder },
     Kafka(Box<KafkaIntegrationBuilders>),
     Syslog { peer_addr: StringBuilder },
     Headers,
@@ -145,11 +156,29 @@ impl IngestMetadataBuilders {
     /// Opens a builder set for `scope`, sizing the integration fields for `row_bound` rows.
     ///
     /// Header builders start empty because most sources carry no headers at all.
+    /// A frame-label capacity outside the address space returns a typed error before allocation.
     #[inline(never)]
-    pub(super) fn new(scope: IngestorMetadataScope, row_bound: usize) -> Self {
-        #[cfg(test)]
-        INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(count.get() + 1));
+    pub(super) fn new(
+        scope: IngestorMetadataScope,
+        row_bound: usize,
+    ) -> IngestMetadataResult<Self> {
         let integration = match scope {
+            IngestorMetadataScope::Websockets => {
+                let mut maximum_label_bytes = 0;
+                for kind in WebsocketsFrameType::iter() {
+                    maximum_label_bytes = maximum_label_bytes.max(kind.as_ref().len());
+                }
+                let label_capacity =
+                    row_bound.checked_mul(maximum_label_bytes).ok_or_else(|| {
+                        Report::new(IngestMetadataError::WebsocketsCapacityOverflow {
+                            row_bound,
+                            label_bytes: maximum_label_bytes,
+                        })
+                    })?;
+                IngestIntegrationBuilders::Websockets {
+                    frame_type: StringBuilder::with_capacity(row_bound, label_capacity),
+                }
+            }
             IngestorMetadataScope::Kafka => {
                 IngestIntegrationBuilders::Kafka(Box::new(KafkaIntegrationBuilders {
                     topic: StringBuilder::with_capacity(row_bound, 0),
@@ -164,13 +193,15 @@ impl IngestMetadataBuilders {
         };
         let item_field =
             || StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
-        Self {
+        #[cfg(test)]
+        INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(count.get() + 1));
+        Ok(Self {
             scope,
             integration,
             header_names: ListBuilder::new(StringBuilder::new()).with_field(item_field()),
             header_values: ListBuilder::new(StringBuilder::new()).with_field(item_field()),
             rows: 0,
-        }
+        })
     }
 
     // Keep Arrow's builder machinery behind this boundary. Inlining it into the source collector
@@ -182,45 +213,56 @@ impl IngestMetadataBuilders {
                                    appends the bounded row metadata")
     )]
     pub(super) fn append(&mut self, row: &IngestMetadataRow<'_>) -> IngestMetadataResult<()> {
-        let headers = match (&mut self.integration, row) {
-            (
-                IngestIntegrationBuilders::Kafka(kafka),
-                IngestMetadataRow::Kafka {
-                    topic,
-                    partition,
-                    offset,
-                    headers,
-                },
-            ) => {
-                kafka.topic.append_value(topic);
-                kafka.partition.append_value(*partition);
-                kafka.offset.append_value(*offset);
-                Some(*headers)
-            }
-            (
-                IngestIntegrationBuilders::Syslog { peer_addr },
-                IngestMetadataRow::Syslog {
-                    peer_addr: source_peer_addr,
-                },
-            ) => {
-                // The address renders straight into the builder's value buffer, so a peer
-                // address does not allocate a string per message.
-                use std::fmt::Write as _;
-                write!(peer_addr, "{source_peer_addr}")
-                    .assured("fmt::Write over an in-memory string builder has no failure mode");
-                peer_addr.append_value("");
-                None
-            }
-            (IngestIntegrationBuilders::Headers, IngestMetadataRow::Headers { headers }) => {
-                Some(*headers)
-            }
-            (_, row) => {
-                return Err(Report::new(IngestMetadataError::BuilderScopeMismatch {
-                    builders: self.scope,
-                    row: row.scope(),
-                }));
-            }
-        };
+        let headers: Option<&dyn nervix_connector::IngestMessageHeaders> =
+            match (&mut self.integration, row) {
+                (
+                    IngestIntegrationBuilders::Websockets { frame_type },
+                    IngestMetadataRow::Websockets {
+                        frame_type: kind,
+                        headers,
+                    },
+                ) => {
+                    frame_type.append_value(kind.as_ref());
+                    Some(headers.as_ref())
+                }
+                (
+                    IngestIntegrationBuilders::Kafka(kafka),
+                    IngestMetadataRow::Kafka {
+                        topic,
+                        partition,
+                        offset,
+                        headers,
+                    },
+                ) => {
+                    kafka.topic.append_value(topic);
+                    kafka.partition.append_value(*partition);
+                    kafka.offset.append_value(*offset);
+                    Some(*headers)
+                }
+                (
+                    IngestIntegrationBuilders::Syslog { peer_addr },
+                    IngestMetadataRow::Syslog {
+                        peer_addr: source_peer_addr,
+                    },
+                ) => {
+                    // The address renders straight into the builder's value buffer, so a peer
+                    // address does not allocate a string per message.
+                    use std::fmt::Write as _;
+                    write!(peer_addr, "{source_peer_addr}")
+                        .assured("fmt::Write over an in-memory string builder has no failure mode");
+                    peer_addr.append_value("");
+                    None
+                }
+                (IngestIntegrationBuilders::Headers, IngestMetadataRow::Headers { headers }) => {
+                    Some(*headers)
+                }
+                (_, row) => {
+                    return Err(Report::new(IngestMetadataError::BuilderScopeMismatch {
+                        builders: self.scope,
+                        row: row.scope(),
+                    }));
+                }
+            };
         if let Some(headers) = headers {
             let (names, values) = (&mut self.header_names, &mut self.header_values);
             headers.visit(&mut |name, value| {
@@ -240,6 +282,10 @@ impl IngestMetadataBuilders {
         INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(count.get() + 1));
         let rows = self.rows;
         let integration_columns = match &mut self.integration {
+            IngestIntegrationBuilders::Websockets { frame_type } => {
+                let frame_type: ArrayRef = StdArc::new(frame_type.finish());
+                vec![frame_type]
+            }
             IngestIntegrationBuilders::Kafka(kafka) => {
                 let topic: ArrayRef = StdArc::new(kafka.topic.finish());
                 let partition: ArrayRef = StdArc::new(kafka.partition.finish());
@@ -289,7 +335,7 @@ impl IngestFilterMapMetadata {
     /// The metadata of `rows` messages that arrived without transport headers or integration
     /// fields, as every row of a client batch does.
     pub(super) fn headerless(rows: usize) -> IngestMetadataResult<Self> {
-        let mut builders = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, rows);
+        let mut builders = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, rows)?;
         let row = IngestMetadataRow::Headers {
             headers: &NoIngestHeaders,
         };
@@ -560,8 +606,25 @@ mod tests {
     }
 
     #[test]
+    fn websockets_metadata_refuses_an_unaddressable_capacity() {
+        let error = match IngestMetadataBuilders::new(IngestorMetadataScope::Websockets, usize::MAX)
+        {
+            Ok(_) => panic!("an unaddressable frame-label capacity must fail before allocation"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.current_context(),
+            IngestMetadataError::WebsocketsCapacityOverflow {
+                row_bound: usize::MAX,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn metadata_shape_failures_keep_their_typed_context() {
-        let mut kafka_builders = IngestMetadataBuilders::new(IngestorMetadataScope::Kafka, 1);
+        let mut kafka_builders = IngestMetadataBuilders::new(IngestorMetadataScope::Kafka, 1)
+            .expect("one Kafka metadata row fits");
         let mismatch = kafka_builders
             .append(&IngestMetadataRow::Headers {
                 headers: &NoIngestHeaders,
@@ -584,7 +647,8 @@ mod tests {
             IngestMetadataError::BuildIntegrationColumns
         ));
 
-        let mut header_builders = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1);
+        let mut header_builders = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
+            .expect("one header metadata row fits");
         header_builders
             .append(&IngestMetadataRow::Headers {
                 headers: &NoIngestHeaders,
@@ -603,7 +667,8 @@ mod tests {
             }
         ));
 
-        let mut builders = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1);
+        let mut builders = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
+            .expect("one header metadata row fits");
         builders
             .append(&IngestMetadataRow::Headers {
                 headers: &NoIngestHeaders,

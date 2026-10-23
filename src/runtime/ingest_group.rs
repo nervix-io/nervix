@@ -53,6 +53,8 @@ pub(in crate::runtime) enum IngestGroupRecordOperation {
 
 #[derive(Debug, Clone, Copy, strum::Display)]
 pub(in crate::runtime) enum IngestMetadataOperation {
+    #[strum(serialize = "open ingest metadata")]
+    Open,
     #[strum(serialize = "append ingest metadata")]
     Append,
     #[strum(serialize = "finish ingest metadata")]
@@ -586,10 +588,19 @@ impl PendingIngestGroup {
             }));
         }
 
-        let (scope, row_bound) = (self.scope, self.row_bound);
+        if self.metadata.is_none() {
+            self.metadata = Some(
+                IngestMetadataBuilders::new(self.scope, self.row_bound).change_context(
+                    IngestGroupError::Metadata {
+                        operation: IngestMetadataOperation::Open,
+                    },
+                )?,
+            );
+        }
         let builders = self
             .metadata
-            .get_or_insert_with(|| IngestMetadataBuilders::new(scope, row_bound));
+            .as_mut()
+            .verified("this group opens its metadata builders immediately above");
         for (row, payload_acks) in metadata.iter().zip(acks) {
             let messages = self
                 .undispatched_payloads

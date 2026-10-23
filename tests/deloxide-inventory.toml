@@ -144,6 +144,7 @@ tags = [
   "@metrics_checkpoint_handoff",
   "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
+  "@websocket_declaration_lifecycle",
   "@mqtt_source_retirement",
   "@pulsar_source_retirement",
   "@forced_failover_delivery",
@@ -2770,6 +2771,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/entity_gate.rs"
 workloads = [
+  "scenario.websocket-declaration-buffer",
+  "stress.websocket-declaration-buffer",
   "scenario.syslog-suspend-handoff",
   "stress.syslog-suspend-handoff",
   "scenario.endpoint-ack-decision",
@@ -2819,6 +2822,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.websocket-declaration-buffer",
+  "stress.websocket-declaration-buffer",
   "scenario.syslog-suspend-handoff",
   "stress.syslog-suspend-handoff",
   "scenario.redis-subscription-quiesce",
@@ -3130,6 +3135,26 @@ id = "stress.endpoint-ack-fanout"
 invariant = "Every binding receives a shared request before its response waits for all graph acknowledgements, and each window returns its own slot."
 invocation = "stress-endpoint-acknowledgement"
 scenario = "Shared endpoint intake reaches both consumers before either acknowledgement"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Public connection metadata retention and replay reaches tracked entity engagement and quiesce-buffer ownership. Socket waits and ping timer ordering remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/websocket_connection_declaration.feature"
+id = "scenario.websocket-declaration-buffer"
+invariant = "Both text and binary frames retain their exact upgrade response headers through BUFFER and a codec change on one and three nodes."
+invocation = "scenarios"
+scenario = "A buffered WebSockets connection preserves upgrade headers and frame types through a codec change"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Public connection metadata retention and replay reaches tracked entity engagement and quiesce-buffer ownership. Socket waits and ping timer ordering remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/websocket_connection_declaration.feature"
+id = "stress.websocket-declaration-buffer"
+invariant = "Both text and binary frames retain their exact upgrade response headers through BUFFER and a codec change on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "A buffered WebSockets connection preserves upgrade headers and frame types through a codec change"
 selections = ["deloxide-stress"]
 
 [[workload]]

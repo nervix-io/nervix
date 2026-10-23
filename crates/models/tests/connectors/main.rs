@@ -313,7 +313,12 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             reference: IngestorReferenceKind::Endpoint(EndpointType::Http),
         },
         IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection) => {
-            headers_only(None, ConnectorKind::Websockets)
+            IngestorDeclaration {
+                headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
+                metadata: IngestorMetadataScope::Websockets,
+                every_node: false,
+                reference: IngestorReferenceKind::Client(ConnectorKind::Websockets),
+            }
         }
         IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),

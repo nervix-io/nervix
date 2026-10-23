@@ -3208,15 +3208,32 @@ impl IngestorBodyNspl for WebsocketsConnectionIngestor {
     fn body_to_nspl(&self) -> String {
         let Self {
             client,
+            headers,
             mode,
             quiesce,
         } = self;
         let mode = match mode {
             WebsocketsIngestMode::NoAck => NO_ACK,
         };
+        let upgrade = if headers.is_empty() {
+            String::new()
+        } else {
+            let fields: Vec<_> = headers
+                .iter()
+                .map(|header| {
+                    format!(
+                        "{} = {}",
+                        string_literal(&header.name),
+                        string_literal(&header.value)
+                    )
+                })
+                .collect();
+            format!(" HEADERS {{ {} }}", fields.join(", "))
+        };
         format!(
-            "{} MODE {} ON QUIESCE {}",
+            "{}{} MODE {} ON QUIESCE {}",
             client.as_str(),
+            upgrade,
             mode,
             ingest_quiesce_to_nspl(quiesce)
         )
@@ -5580,6 +5597,7 @@ mod tests {
                     "ws_ingestor",
                     decoded(WebsocketsConnectionIngestor {
                         client: named("ws_main"),
+                        headers: Vec::new(),
                         mode: WebsocketsIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     }),

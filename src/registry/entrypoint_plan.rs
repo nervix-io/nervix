@@ -44,6 +44,8 @@ use crate::runtime_schema::compile_schema;
 /// Why the ingestors and reingestors of a schedule cannot be planned.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum EntrypointPlanError {
+    #[error("ingestor '{ingestor}' has invalid upgrade headers")]
+    InvalidWebsocketsUpgradeHeaders { ingestor: IngestorName },
     #[error("scheduled {kind:?} '{node}' is configured as another node")]
     NodeIdentityMismatch { kind: ModelKind, node: ModelName },
     #[error("ingestor '{ingestor}' reads missing {kind:?} '{reference}'")]

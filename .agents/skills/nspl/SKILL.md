@@ -17,6 +17,8 @@ requirements, metadata types, each side's header model, batching and the reasons
 differ. Read headers the way the source's model records them, such as lowercase HTTP field names,
 and on an emitter that keeps one value per header name write each literal header name once: a repeated
 literal name is refused when the statement is validated.
+For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
+headers, response-header reads, frame metadata and the closed client CONFIG key set.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion

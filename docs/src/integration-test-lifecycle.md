@@ -590,6 +590,14 @@ The native collector marks its owned build directory as a Cargo cache while hold
 lock, so Cargo recognizes it for guarded cleanup. Later phases rebuild any required artifact
 through the configured cache.
 
+Native CI jobs and the BuildKit builder also set `KACHE_AUTO_RECOVER_MIN_FREE_BYTES=68719476736`
+(64 GiB). Kache 1.2.1 otherwise disables free-space recovery in CI. This floor enables reclamation
+of eligible cached artifacts when free space falls below it, while the cache budget above scales
+with the actual cache filesystem. Artifacts still shared with active build targets are retained;
+target-directory recovery stays disabled. The floor is a trigger checked at kache's existing
+cadence, and active build outputs and concurrent writes still consume storage. The compiler
+wrapper, remote publication and coverage executable identity checks keep their contracts.
+
 During the build the daemon publishes each entry the build stores: kache records a durable upload
 intent, uploads the entry in the background, and retries an upload that failed for a retryable
 reason every five seconds.
@@ -1493,6 +1501,11 @@ until that node has ended.
 - The scenario-local WebSocket lifecycle peer records Close frames and reconnect instants through
   a bounded channel. Cleanup aborts and joins its listener task before returning its reserved port;
   socket ownership stays in that task, so the same cancellation releases its active connection.
+  The declaration peer also records an opening client ending an incomplete upgrade, then accepts
+  another connection with its pending payload gate intact. The BUFFER/codec-change outlines end a
+  partial upgrade and await that cancellation event before starting their one- or three-node
+  cluster. Other handshake errors and established-connection failures still fail the fixture and
+  its After hook.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes, and the
   endpoints it stood in front of a shared dependency, are released once those nodes have ended.
 - The ZeroMQ and syslog ports drawn for the scenario return to the pool after their nodes and
@@ -2308,7 +2321,7 @@ scenarios in one process, their nodes contended on it and missed startup and req
 that a plain diagnostic build of the same scenarios met.
 [Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
 them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
-owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 108
+owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 110
 lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
 bounded at 40. The six transaction-retention and ten endpoint ACK examples run in separate serial
