@@ -47,7 +47,8 @@ use crate::registry::{
             validate_emitter_publishing_contract, validate_endpoint_paths,
             validate_http_emitter_client, validate_http_literal_request_fields,
             validate_http_request_expressions, validate_ingestor_filter_where_for_internal_schemas,
-            validate_ingestor_source, validate_sqs_fifo_group_expression, validate_vhost_hostnames,
+            validate_ingestor_source, validate_kafka_client, validate_sqs_fifo_group_expression,
+            validate_vhost_hostnames,
         },
         expression::add_udf_dependency_edges,
         materialized_state::{
@@ -234,8 +235,8 @@ impl DomainState {
                 Model::WireAvroSchema(schema) => {
                     ensure_wire_schema_has_fields(domain, identifier, schema)?;
                 }
-                Model::ClientKafka(_)
-                | Model::ClientPulsar(_)
+                Model::ClientKafka(client) => validate_kafka_client(domain, identifier, client)?,
+                Model::ClientPulsar(_)
                 | Model::ClientHttp(_)
                 | Model::ClientSentry(_)
                 | Model::ClientOtel(_)

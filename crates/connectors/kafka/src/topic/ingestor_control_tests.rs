@@ -20,17 +20,55 @@ use nervix_execution::{
 };
 use nervix_models::{ClientConfigEntry, KafkaTopicName};
 use nervix_primitives::sync::{oneshot, watch};
-use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext};
+use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext, types::RDKafkaRespErr};
 
 use super::{
     GroupCommitRequest, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
     KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaGroupCommit, KafkaOffsetPosition,
     KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode,
-    KafkaTopicIngestorPlan,
+    KafkaTopicIngestorPlan, TopicPartitionInspector,
     commit_tests::{cluster, plan as group_plan, publish, read_positions, subscribed_source},
 };
 
 struct UnreachedOffsets;
+
+#[nervix_primitives::test]
+async fn an_admitted_partition_inspection_preserves_a_named_missing_topic() {
+    let broker = cluster();
+    broker
+        .topic_error(
+            "orders",
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART,
+        )
+        .assured("the test broker reports its topic as missing");
+    let plan = group_plan(&broker, KafkaGroupCommit::EachAcknowledgedBatch);
+    let inspector = TopicPartitionInspector::new(
+        &plan.config,
+        "metadata-missing-topic".to_string(),
+        plan.executor,
+    )
+    .assured("the inspector accepts the test broker configuration");
+
+    let report = inspector
+        .partitions("orders")
+        .await
+        .expect_err("the broker reports the topic as missing");
+
+    assert!(matches!(
+        report.current_context(),
+        KafkaTopicIngestorError::MissingTopic { topic } if topic == "orders"
+    ));
+    broker
+        .topic_error("orders", RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR)
+        .assured("the test broker now exposes the provisioned topic");
+    assert_eq!(
+        inspector
+            .partitions("orders")
+            .await
+            .assured("the same inspector observes the provisioned topic"),
+        vec![0]
+    );
+}
 
 #[nervix_primitives::test]
 async fn rejecting_a_delivered_record_admits_its_seek_and_reads_that_offset_again() {

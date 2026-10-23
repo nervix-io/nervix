@@ -75,6 +75,50 @@ Feature: Graceful shutdown
       kind=junction name=bystander_route owner=node-1 replicas=- transition_from=node-3 state_recovery=complete
       """
 
+  @shutdown_handoff_bystander_preparation
+  Scenario: A stopping owner hands its work over within its drain budget while a bystander's runtime preparation is held
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When leadership is transferred to node "node-1"
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA bystander_event ( id I64 );
+      CREATE RELAY bystander_input SCHEMA bystander_event UNBRANCHED;
+      CREATE RELAY bystander_output SCHEMA bystander_event UNBRANCHED;
+      CREATE JUNCTION bystander_route FROM bystander_input UNBRANCHED
+        TO bystander_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE JUNCTION bystander_echo FROM bystander_input UNBRANCHED
+        TO bystander_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      RELOCATE RELAY bystander_input ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY bystander_output ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE JUNCTION bystander_route ONTO NODE node-3 IGNORE PREFERENCES;
+      RELOCATE JUNCTION bystander_echo ONTO NODE node-3 IGNORE PREFERENCES;
+      CORDON NODE node-2;
+      """
+    Then node "node-1" eventually reports status containing "kind=junction name=bystander_route owner=node-3"
+    And node "node-1" eventually reports status containing "kind=junction name=bystander_echo owner=node-3"
+    When runtime preparation on node "node-2" is paused
+    And node "node-3" is gracefully stopped
+    Then the last shutdown of node "node-3" reports its drain-support phase "Completed"
+    And node "node-2" reaches its runtime preparation pause
+    When runtime preparation on node "node-2" is released
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      kind=junction name=bystander_route owner=node-1 replicas=- transition_from=node-3 state_recovery=complete
+      """
+    And the last command output contains
+      """
+      kind=junction name=bystander_echo owner=node-1 replicas=- transition_from=node-3 state_recovery=complete
+      """
+
   Scenario: Graceful shutdown preserves an operator cordon across restart
     Given graceful shutdown drain is enabled
     And the production sticky scheduler is configured

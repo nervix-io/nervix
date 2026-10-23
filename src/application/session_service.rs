@@ -60,7 +60,9 @@ use super::{
     command_result::{
         CommandDiagnostic, CommandDisposition, CommandOrigin, CommandResponse, CommandResult,
     },
-    completion::{ApplicationRevisionPhase, wait_for_application_revision},
+    completion::{
+        ApplicationRevisionParticipants, ApplicationRevisionPhase, wait_for_application_revision,
+    },
     configured_choices::{ConfiguredChoices, ConfiguredQuery},
     describe_output::placement_runtime_node_ref_suggestions,
     model_mutation::command_error,
@@ -339,6 +341,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 interconnect,
                 state.revision,
                 ApplicationRevisionPhase::RuntimePrepared,
+                ApplicationRevisionParticipants::EveryLiveNode,
                 deadline,
             );
             tokio::pin!(preparation);
@@ -419,6 +422,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 interconnect,
                 state.revision,
                 ApplicationRevisionPhase::RuntimeReady,
+                ApplicationRevisionParticipants::EveryLiveNode,
                 deadline,
             );
             tokio::pin!(readiness);

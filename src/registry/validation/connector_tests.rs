@@ -16,19 +16,20 @@ use std::fs;
 
 use nervix_models::{
     AckMode, AckWindow, AlterEmitter, AlterEmitterOperation, ClientConfigEntry, ClientName,
-    CodecName, CodecWireFormat, CreateClientHttp, CreateClientPrometheus, CreateClientS3,
-    CreateClientSqs, CreateWireSchema, EmitterEntityKind, ErrorPolicies, FlushPolicy,
-    GeneralErrorPolicy, HttpEmitterEntity, HttpEndpointIngestor, HttpIngestor, IcebergCatalog,
-    IcebergTableEmitter, IngestorEntity, IngestorName, JsonType, KafkaConsumerGroupName,
-    KafkaEmitter, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode, KafkaTopicEmitter,
-    KafkaTopicIngestor, MaterializedRelayState, MessageErrorPolicy, MqttIngestMode, MqttIngestor,
-    MqttQos, MqttSession, MqttTopicIngestor, NatsEmitter, NatsSubjectEmitter, OtelLogsEmitter,
-    OtelMetric, OtelValueMapping, OutputBranch, PostgresEmitter, PostgresTableEmitter,
-    ProcessorInputs, ProcessorOutputs, PrometheusApiRootError, PrometheusClientConfigError,
-    PrometheusClientKey, PulsarEmitter, PulsarEmitterEntity, PulsarTopicEmitter, RabbitMqEmitter,
-    RabbitMqEmitterEntity, RabbitMqQueueEmitter, RetryPolicy, SentryEmitter, SentryEventEmitter,
-    SignalingProtobufConfig, SqsEmitterEntity, SyslogCollectorEmitter, SyslogEmitter,
-    SyslogListenerIngestor, WireSchemaField, WireSchemaName, ZeroMqEmitter, ZeroMqPushEmitter,
+    CodecName, CodecWireFormat, CreateClientHttp, CreateClientKafka, CreateClientPrometheus,
+    CreateClientS3, CreateClientSqs, CreateWireSchema, EmitterEntityKind, ErrorPolicies,
+    FlushPolicy, GeneralErrorPolicy, HttpEmitterEntity, HttpEndpointIngestor, HttpIngestor,
+    IcebergCatalog, IcebergTableEmitter, IngestorEntity, IngestorName, JsonType,
+    KafkaConsumerGroupName, KafkaEmitter, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode,
+    KafkaTopicEmitter, KafkaTopicIngestor, MaterializedRelayState, MessageErrorPolicy,
+    MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor, NatsEmitter,
+    NatsSubjectEmitter, OtelLogsEmitter, OtelMetric, OtelValueMapping, OutputBranch,
+    PostgresEmitter, PostgresTableEmitter, ProcessorInputs, ProcessorOutputs,
+    PrometheusApiRootError, PrometheusClientConfigError, PrometheusClientKey, PulsarEmitter,
+    PulsarEmitterEntity, PulsarTopicEmitter, RabbitMqEmitter, RabbitMqEmitterEntity,
+    RabbitMqQueueEmitter, RetryPolicy, SentryEmitter, SentryEventEmitter, SignalingProtobufConfig,
+    SqsEmitterEntity, SyslogCollectorEmitter, SyslogEmitter, SyslogListenerIngestor,
+    WireSchemaField, WireSchemaName, ZeroMqEmitter, ZeroMqPushEmitter,
 };
 use nonzero_ext::nonzero;
 
@@ -2157,6 +2158,61 @@ fn apply_batch_rejects_duplicate_vhost_hostnames() {
     );
 
     let _ = fs::remove_dir_all(path);
+}
+
+#[test]
+fn a_kafka_client_may_not_set_a_key_nervix_decides_in_any_spelling() {
+    let domain = DomainName::parse("default").expect("valid domain");
+    let identifier: ModelName = named("kafka_main");
+    let bootstrap = ClientConfigEntry {
+        key: "bootstrap.servers".to_string(),
+        value: "localhost:9092".to_string(),
+    };
+    for spelling in ["allow.auto.create.topics", "Allow.Auto.Create.Topics"] {
+        let client = CreateClientKafka {
+            name: named("kafka_main"),
+            mount: None,
+            config: vec![
+                bootstrap.clone(),
+                ClientConfigEntry {
+                    key: spelling.to_string(),
+                    value: "false".to_string(),
+                },
+            ],
+        };
+
+        let error = validate_kafka_client(&domain, &identifier, &client)
+            .expect_err("a Kafka client may not decide whether a consumer creates topics");
+
+        assert_eq!(
+            error.current_context(),
+            &RegistryError::NervixOwnedClientConfigKey {
+                domain: domain.clone(),
+                client: identifier.clone(),
+                key: NervixOwnedConfigKey::KafkaAllowAutoCreateTopics,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "client 'kafka_main' in domain 'default' cannot set CONFIG key \
+             'allow.auto.create.topics': Nervix never lets a Kafka consumer create the topic it \
+             reads"
+        );
+    }
+
+    let client = CreateClientKafka {
+        name: named("kafka_main"),
+        mount: None,
+        config: vec![
+            bootstrap,
+            ClientConfigEntry {
+                key: "auto.offset.reset".to_string(),
+                value: "earliest".to_string(),
+            },
+        ],
+    };
+    validate_kafka_client(&domain, &identifier, &client)
+        .expect("a Kafka client that leaves the keys Nervix decides alone is valid");
 }
 
 #[test]

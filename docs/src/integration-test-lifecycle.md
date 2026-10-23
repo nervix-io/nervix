@@ -811,11 +811,13 @@ The harness keeps these boundaries explicit.
   and exit statuses belong to the process boundary, which only the server-process fixture crosses.
   See [Shutdown And Recovery](./shutdown.md#stop-requests).
   A real-process cluster can deliver `SIGKILL` to all three voters before waiting for any child to
-  exit. On restart it launches all existing stores before awaiting readiness, so no one voter is
-  required to answer without the persisted quorum. A start and a whole restart end once every node
-  reports, through its public status endpoint, the same leader, all three voters, and a
-  `connected` application-health target for every other node, as an in-process cluster's
-  construction does.
+  exit. On restart it supervises every persisted voter's full startup concurrently, including
+  executable preparation, launch, readiness and any lost-bind relaunch, within each startup's
+  original deadline. One voter's executable preparation cannot postpone another's readiness
+  probes, and peers that must move listeners can relaunch while the others await the persisted
+  quorum. A start and a whole restart end once every node reports, through its public status
+  endpoint, the same leader, all three voters, and a `connected` application-health target for
+  every other node, as an in-process cluster's construction does.
   It can also fault one voter while the other two keep the quorum: `SIGKILL`, after which a step
   waits for that child to exit and checks the signal, or `SIGSTOP`, which freezes the process with
   its connections open, so its peers hear nothing from it and see no reset until `SIGCONT` lets it
@@ -2749,10 +2751,11 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 The scenarios of `tests/features/cluster/server_process_ports.feature` have a listener of their own
 hold a drawn port: at a single process's start, for its web console and for its gRPC listener, at
 the bootstrap member of a three-process cluster, for its interconnect listener, and at a restarted
-member, for its gRPC listener. Each asserts that the startup relaunched exactly once, moved exactly
-that listener, and binds another port for it. A last scenario starts a process whose startup ends
-with another report, a web console certificate without its key, and asserts that the startup fails
-with the process's own exit after one launch.
+member, for its gRPC listener. A whole-cluster restart also holds two persisted peers' gRPC ports
+and requires both peers to relaunch while all voters recover together. Each asserts that the
+startup relaunched exactly once, moved exactly that listener, and binds another port for it.
+A last scenario starts a process whose startup ends with another report, a web console certificate
+without its key, and asserts that the startup fails with the process's own exit after one launch.
 
 The scenarios tagged `@node_bound_port_taken`, in `tests/features/runtime/zeromq_ingestion.feature`
 and `tests/features/runtime/syslog_support.feature`, have another socket take the port a scenario

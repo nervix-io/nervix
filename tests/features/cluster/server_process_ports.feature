@@ -28,6 +28,15 @@ Feature: Server process listener ports
     And server process node "node-2" restarts from its existing database
     Then server process node "node-2" was relaunched once because another socket held its "gRPC" port
 
+  Scenario: All persisted voters recover together when two peers must move their gRPC listeners
+    Given a 3 node nervix-server process cluster is started
+    When all server processes receive SIGKILL
+    And another socket holds the "gRPC" port of server process node "node-2"
+    And another socket holds the "gRPC" port of server process node "node-3"
+    And all server processes restart from their existing databases
+    Then server process node "node-2" was relaunched once because another socket held its "gRPC" port
+    And server process node "node-3" was relaunched once because another socket held its "gRPC" port
+
   Scenario: A server process whose startup ends for another reason is not launched again
     When a nervix-server process is started with command-line option "--web-console-tls-cert" set to "/nonexistent/web-console.pem"
     Then the server process startup fails at once with exit status 1 without another launch

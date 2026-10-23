@@ -670,12 +670,18 @@ Nervix writes the new schedule only after that drain succeeds. A drain writes an
 group or independent node at a time. Placement consolidation gates all of its moved groups together
 and publishes its model and assignments in one schedule update. Only moved runtime nodes restart;
 unaffected nodes and branches keep their sessions, buffers, state, and in-flight work. The gate is
-released after the destination owners activate the published runtime revision. A fence or drain
-timeout releases the old graph without writing the candidate schedule. If activation fails after a
-schedule commit, the gate stays closed until its lease deadline rather than opening before the
-destination is ready. That holds on every node that keeps running; a node that stops ends the leases
-it holds with its runtime, as [Ownership Handoff During Shutdown](shutdown.md#ownership-handoff-during-shutdown)
-describes.
+released after the destination owners activate the published runtime revision. Before they
+activate, the hold's participants must have prepared that revision, so each of them routes by it
+once its fence opens. `DRAIN NODE`, `RELOCATE`, and placement and model changes wait longer: they
+activate the destination only once every live node has prepared the revision and is ready at it,
+the barrier [Command Completion](command-completion.md#all-live-node-barriers) defines for every
+command. The ownership move of a graceful-shutdown drain waits only for the participants, within
+the stopping node's unit deadline, so a node that runs none of the unit cannot spend that node's
+drain budget. A fence or drain timeout releases the old graph without writing the candidate
+schedule. If activation fails after a schedule commit, the gate stays closed until its lease
+deadline rather than opening before the destination is ready. That holds on every node that keeps
+running; a node that stops ends the leases it holds with its runtime, as
+[Ownership Handoff During Shutdown](shutdown.md#ownership-handoff-during-shutdown) describes.
 
 Pending `REQUIRED WAIT` materialized records cannot finish a planned drain because the dependency is
 absent. They do not block the handoff; destroying the old task negatively acknowledges their
