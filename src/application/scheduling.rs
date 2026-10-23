@@ -2393,6 +2393,10 @@ impl SessionServiceImpl {
                     let mut partitions =
                         match inspector.partitions(spec_for_task.topic.as_str()).await {
                             Ok(partitions) => partitions,
+                            // The ingestor's own source reports a topic the broker does not have,
+                            // so the watcher records it as a topic without partitions and
+                            // publishes the real schedule once the topic is provisioned.
+                            Err(error) if error.current_context().is_missing_topic() => Vec::new(),
                             Err(error) => {
                                 service.broadcast_error(format!(
                                     "failed to inspect Kafka partitions for ingestor '{}' in \
