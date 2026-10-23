@@ -20,7 +20,9 @@ Feature: Stalled peers
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 CONFIG {
         'addr' = 'redis://{{redis_peer}}',
-        'connect_timeout_ms' = '1000'
+        'connect_timeout_ms' = '1000',
+        'subscription_buffer_messages' = '1024',
+        'idle_timeout_ms' = '30000'
       };
       CREATE REDIS PUBSUB INGESTOR redis_in
         FROM redis_main CHANNEL 'stalled_{{test_id}}' MODE NO ACK
@@ -66,7 +68,9 @@ Feature: Stalled peers
         ON GENERAL ERROR LOG;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 0 MAX 1 CONFIG {
         'addr' = 'redis://{{redis_peer}}',
-        'connect_timeout_ms' = '1000'
+        'connect_timeout_ms' = '1000',
+        'subscription_buffer_messages' = '1024',
+        'idle_timeout_ms' = '30000'
       };
       CREATE REDIS PUBSUB EMITTER redis_out FROM notifications
         TO redis_main CHANNEL 'stalled_{{test_id}}'

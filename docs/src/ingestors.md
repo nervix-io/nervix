@@ -652,6 +652,11 @@ retry lifetime: the caller waits at most 30 seconds and retains that one commit 
 answer arrives before submitting another. Native subscribe, assign and unsubscribe cannot be
 cancelled; their caller's budget limits waiting while an already-running call keeps its worker.
 
+Redis Pub/Sub requires `idle_timeout_ms` in its source client's `CONFIG`. It bounds silence on an
+established subscription, including its same-connection liveness probe; time waiting for room in
+the bounded read-ahead handoff is outside that active read. A failed probe reports the key and its
+bound as a transient status and the host reconnects on its policy.
+
 ## Client Ingestors
 
 The [Client Ingestors And Emitters](./client-io-architecture.md) architecture chapter follows a
@@ -978,8 +983,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
 | Buffers | messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
-| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded |
-| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>receive.message.max.bytes 100000000 |
+| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |
+| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
@@ -1022,6 +1027,11 @@ another node, the new owner's consumer joins the group as soon as it starts, but
 partitions, and records flow again, only after that expiry. A graceful stop or an ownership move
 leaves the group first, so its partitions move without that wait. `OFFSET BY DOMAIN` assigns
 partitions through the domain schedule and waits for no group session.
+
+Stopping or dropping a Kafka ingestor returns without waiting for its consumers to be destroyed.
+The node destroys each one on its connector control workers, where a consumer that joined its group
+waits up to five seconds for the coordinator to answer its LeaveGroup request; see
+[Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement).
 
 Under `OFFSET BY CONSUMER GROUP`, `MODE NO ACK` is the consumer's auto-commit: the consumer
 commits the positions it has read on its own schedule, `auto.commit.interval.ms`, without waiting
@@ -1266,10 +1276,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | messages the driver reads ahead of the host: unbounded |
-| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>reading the next message: unbounded |
+| Buffers | messages read ahead of intake: set by subscription_buffer_messages; when full, holds back what fills it |
+| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |
 | Driver limits | None declared. |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-ingest).
 <!-- connector-matrix:ingest-redis-pubsub:end -->
@@ -1283,6 +1293,23 @@ asynchronous DNS resolver on initial subscribe and every resume after a disconne
 consume a pooled command connection. For `rediss://`, TLS verifies the original hostname and
 uses the configured CA and optional client identity. DNS and connection failures follow the
 source's existing retry cadence; Redis Pub/Sub does not replay messages missed while disconnected.
+
+A Redis source client must set `subscription_buffer_messages` and `idle_timeout_ms` in its
+`CONFIG`. The message capacity bounds read-ahead separately from `BUFFER MAX SIZE`, which bounds
+retained payload bytes during quiesce. It is a positive whole number that fits the bounded channel.
+For example, choose `'subscription_buffer_messages' = '1024'` and `'idle_timeout_ms' = '30000'`
+for a 1,024-message handoff and a 30-second idle interval. A full message handoff stops TCP reads; quiesced
+intake still applies its declared `BUFFER` overflow policy or counts the messages `DROP` discards.
+Malformed capacity values fail source initialization.
+
+`idle_timeout_ms` is a positive whole number of schedulable milliseconds. The
+subscription sends a same-connection `PING` after half that interval without activity and requires
+activity within the remaining half. Activity means a complete Redis message or probe reply.
+A failed probe is a transient read failure visible in
+`DESCRIBE INGESTOR`, followed by the existing reconnect backoff. A healthy idle connection stays
+subscribed. Time spent waiting for read-ahead room is outside an active idle read. Neither the
+message capacity nor the quiesce byte bound includes kernel buffers or bytes in a partial wire
+frame. Configure both bounds for the expected payload sizes.
 
 ### MQTT
 

@@ -25,6 +25,13 @@ redirect, reconnects there, and reports which node it reached:
 connected to leader 'node-2'
 ```
 
+The console reports the leader each time its session connects, so the notice appears again when
+the session reconnects: after a lost connection, after a command whose outcome is not yet known, or
+after a leader change. A reconnect keeps the session's place: the console connects again where the
+redirect took it, selects its domain, attaches its clock, restores its subscription tabs and
+attaches its transaction again, and then sends its pending commands under their execution
+references.
+
 ## Signing In
 
 Without credentials in the URL the console shows a login form for a registry user. Two other forms
@@ -563,6 +570,10 @@ archive, and **Download again** retries one that stopped for such a reason.
 A download the leader refuses, because the archive expired, a download already collected it, or the
 node that assembled it restarted, ends with that reason; the backup itself completed, and running
 it again assembles a new archive.
+
+A backup whose answer a lost connection took is sent again under its execution reference once the
+session reconnects, and the leader answers with the backup's recorded outcome instead of running it
+again; the archive then downloads as it would have.
 
 The console records each backup it sends in the browser tab's session storage until the archive is
 downloaded. Reloading the page while the backup runs or downloads sends the same backup again under

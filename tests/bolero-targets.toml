@@ -2920,6 +2920,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/iceberg/src/table_projection/__fuzz__/table_projection__tests__bolero_staged_columns_land_in_the_table_columns_of_their_names/corpus"
+domain_version = 1
+features = []
+id = "iceberg-table-projection"
+invariant = "Over generated table schemas, required columns, nullable mappings, column orders and subsets, a projection is refused exactly when a required column is left out or mapped from an expression that can produce a null, naming the first such column; otherwise every staged value lands unchanged in the table column of its name, in the table's Arrow form, and every column VALUES leaves out is null."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-connector-iceberg"
+random_iterations = 256
+source = "crates/connectors/iceberg/src/table_projection/tests.rs"
+test = "table_projection::tests::bolero_staged_columns_land_in_the_table_columns_of_their_names"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/mqtt/src/__fuzz__/tests__bolero_measured_packets_are_the_bytes_the_client_writes/corpus"
 domain_version = 1
 features = []

@@ -20,6 +20,7 @@ shuttle = [
 ahash = { workspace = true }
 arch-into = { workspace = true }
 arrow-array = { workspace = true }
+arrow-buffer = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
@@ -48,6 +49,7 @@ reqwest_iceberg = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }
 tempfile = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
 typetag = { workspace = true }

@@ -623,6 +623,19 @@ A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLo
 check or failed Redis protocol setup is also a connection failure. None rejects an input message
 or changes Redis Pub/Sub's server-acceptance boundary for `PUBLISH`.
 
+A Redis source client must declare `subscription_buffer_messages` and `idle_timeout_ms`.
+A missing key is `RedisPubSubSourceError::MissingConfiguration`, naming only that key; a capacity
+outside the bounded channel's range is `InvalidBufferCapacity`, and an invalid idle deadline keeps
+`ClientConfigError::InvalidDeadline` beneath `InvalidIdleTimeout`. These are source configuration
+failures before a subscription opens, not record rejections.
+
+Redis subscription protocol and read failures retain their driver causes beneath
+`RedisPubSubSourceError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
+the shared `DeadlineElapsed` with `idle_timeout_ms` and its configured bound beneath `IdleProbe`
+and `SourceError::Read`. The host displays that transient failure and reconnects on its existing
+policy. Reader task failures retain the typed join cause. A source explicitly ending its lifetime
+joins its reader; it owes no further read outcome after intake ends.
+
 A connection that runs out of the client's `connect_timeout_ms` keeps the connector contract's
 `DeadlineElapsed` as its innermost cause, naming the step that did not finish, the key and its
 bound, beneath the connector's own context: `RabbitMqConnectError::Unreachable` or `TlsHandshake`
@@ -735,6 +748,13 @@ acknowledgement, rather than failures to decode a record. A control call that ex
 `socket.timeout.ms` budget reports `KafkaSourceError::ControlTimeout` with that bound. Metadata,
 watermark, timestamp and seek failures preserve the driver's typed cause beneath the operation
 that failed.
+
+A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
+and a refused charge keeps `AdmissionError` beneath `KafkaSourceError::RetirementAdmission`. It
+fails the source's open or the partition inspector's start, as transiently as a refused control
+call; see [Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement). A
+retirement has no caller to fail, so its supervisor reports a destruction job that panicked at
+`debug`.
 
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
@@ -1044,11 +1064,20 @@ predicate, its relay. The decision fails before a new emitter plan or remote con
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
 opening an external sink may fail independently and follows the emitter's retry policy.
 
-The Iceberg sink checks its mapped schema against the loaded table while opening. A mapped column
-absent from the table or with an incompatible type returns `SinkStartError::InvalidConfiguration`
-before staging records. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg
-conversion error beneath that context. The check compares names and nested types after narrowing
-UTC datetimes to microseconds; table changes after open can still fail a later catalog commit.
+The Iceberg sink plans how its commits write the mapped columns into the table, matching them to
+the table's columns by name, once while opening and again against the table's current schema before
+each commit writes data files. A plan the table cannot take is an `IcebergColumnError` naming the
+column: a mapped column absent from the table (`Missing`) or of an incompatible Iceberg type
+(`TypeMismatch`, which carries both types), a required table column `VALUES` leaves out
+(`UnmappedRequired`), and a required column mapped from an expression that can produce a null
+(`NullableIntoRequired`), or whose nested values the table requires and the expression can leave
+null (`NullableNestedIntoRequired`). While opening, the error stays beneath
+`SinkStartError::InvalidConfiguration`, before staging records; before a commit, beneath
+`SinkPublishError::Commit`, so the commit keeps its staged rows and their acknowledgements. Either
+way the report attaches the error's own description, which the emitter shows as its transient error
+while it retries. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg conversion
+error beneath `IcebergColumnError::MappedSchema`. The plan compares names and nested types after
+narrowing UTC datetimes to microseconds.
 
 An Iceberg commit charges the bulk memory class for the staged files it reads back with
 `Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The

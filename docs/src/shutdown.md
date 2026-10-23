@@ -704,6 +704,11 @@ both follow.
 
 ### Sources
 
+A Redis Pub/Sub source stops its dedicated reader and joins it before close or suspend returns.
+Its bounded read-ahead queue is volatile, unadmitted input and is discarded when that subscription
+ends. Redis Pub/Sub provides no acknowledgement or replay for those messages; an idle probe does
+not change that delivery contract.
+
 An MQTT execution stop or ownership move retains its persistent broker sessions for resume.
 Removing or changing the declared input retires its external state separately, after its exact
 source tasks stop; a stopped domain still holds the typed plan needed for cleanup. See
@@ -952,6 +957,15 @@ remains. Connections that peers opened to the node close at once, together with 
 serving their streams, so a peer's request the node has not answered fails instead of completing.
 A forced ending skips this entirely, so peers observe the connections ending exactly as they do
 when a process crashes.
+
+Runtime teardown stops a Kafka ingestor's instances like any other source's, and each stopped
+instance hands its consumer to its retirement on the connector storage workers; see
+[Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement). Teardown does not
+wait for those retirements. The process's runtime does, as it stops once the application has
+returned: a retirement already running finishes, within the five seconds a joined consumer's
+coordinator has to answer its LeaveGroup request, and a consumer still waiting for a worker is
+destroyed by the runtime's stop, once the runtime runs no async work. The shutdown deadline bounds
+both, and a forced ending skips them as it skips every other destructor.
 
 The node's own OTLP trace exporter is a process service. After the application returns, its tracing
 guard closes resolver installation and asks the SDK to flush before the process drops its Tokio

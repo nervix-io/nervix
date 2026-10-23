@@ -24,7 +24,7 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE PULSAR CLIENT pulsar_main CONFIG { 'addr' = 'pulsar://127.0.0.1:6650' };
       CREATE RABBITMQ CLIENT rabbit_main CONFIG { 'addr' = 'amqp://127.0.0.1:5672' };
-      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379' };
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379', 'subscription_buffer_messages' = '1024', 'idle_timeout_ms' = '30000' };
       CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1883' };
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = 'nats://127.0.0.1:4222' };
       CREATE PROMETHEUS CLIENT prom_main CONFIG { 'addr' = 'http://127.0.0.1:9090', 'timeout_ms' = 5000 };
@@ -382,7 +382,7 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE VHOST edge http-{{test_id}}-kinded-references.example.com;
       CREATE ENDPOINT http_ingress ON edge PATH '/events' TYPE HTTP;
       CREATE ENDPOINT ws_ingress ON edge PATH '/stream' TYPE WEBSOCKETS;
-      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379' };
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379', 'subscription_buffer_messages' = '1024', 'idle_timeout_ms' = '30000' };
       """
     When these NSPL commands fail with "HTTP ENDPOINT ingestor 'web_source' in domain '{{domain}}' requires a TYPE HTTP endpoint, but endpoint 'ws_ingress' is TYPE WEBSOCKETS"
       """
@@ -425,7 +425,7 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE ENDPOINT http_ingress ON edge PATH '/events' TYPE HTTP;
       CREATE ENDPOINT ws_ingress ON edge PATH '/stream' TYPE WEBSOCKETS;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379' };
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379', 'subscription_buffer_messages' = '1024', 'idle_timeout_ms' = '30000' };
       """
     Then the current leader node is saved as placeholder "leader"
     When the CLI suggests for "CREATE |" on node "{{leader}}"
