@@ -258,3 +258,9 @@ checks = [
   "handoff_tests::shuttle_report_handoff_close_preserves_admitted_reports_and_counts_refusals",
 ]
 name = "nervix-deadlock"
+
+[[package]]
+checks = [
+  "source::tests::shuttle_a_decoded_frame_racing_suspension_is_handed_off_once",
+]
+name = "nervix-connector-syslog"

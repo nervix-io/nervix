@@ -69,6 +69,7 @@ use nervix_primitives::{
     sync::{
         CancellationToken, StdArc,
         blocking::{Mutex as BlockingMutex, OnceLock},
+        watch,
     },
     task::AbortOnDropHandle,
     time::Instant,
@@ -501,6 +502,9 @@ struct ScenarioWorld {
     /// A Syslog stream connection holding back the end of a frame it began, until a step writes
     /// the rest.
     syslog_split_sender: Option<SyslogSplitSender>,
+    /// One established Syslog connection kept open across a forced listener accept failure.
+    syslog_live_sender: Option<nervix_primitives::net::TcpStream>,
+    syslog_listener_fault: Option<watch::Receiver<bool>>,
     /// A connection to a Syslog listener that sends nothing, until a step observes its end.
     syslog_silent_client: Option<SilentSyslogClient>,
     placeholders: BTreeMap<String, String>,
@@ -11297,6 +11301,46 @@ async fn given_health_responses_fail(world: &mut ScenarioWorld, responding_node_
         .fail_health_responses_from(&responding_node_id);
 }
 
+#[given(expr = "application revision responses from node {string} pause before responding")]
+async fn given_application_revision_responses_are_paused(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster()
+        .pause_application_revision_responses_from(&node_id);
+}
+
+#[then(expr = "the application revision response pause on node {string} is reached")]
+async fn then_application_revision_response_pause_is_reached(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        world
+            .cluster()
+            .wait_for_application_revision_response_pause(&node_id),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("application revision response pause on '{node_id}' was not reached: {error}")
+    });
+}
+
+#[when(expr = "application revision responses from node {string} are released")]
+async fn when_application_revision_responses_are_released(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster()
+        .release_application_revision_responses_from(&node_id);
+}
+
 #[when(expr = "application health probes from node {string} to node {string} fail")]
 async fn when_directed_health_probes_fail(
     world: &mut ScenarioWorld,
@@ -13362,6 +13406,61 @@ async fn then_kafka_consumer_group_eventually_has_consumers(
         .expect("kafka consumer group did not reach expected member count");
 }
 
+#[then(expr = "Kafka topic {string} does not exist")]
+async fn then_kafka_topic_does_not_exist(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    let exists = world
+        .cluster()
+        .kafka_topic_exists(&topic)
+        .expect("failed to read Kafka topic metadata");
+    assert!(
+        !exists,
+        "Kafka topic '{topic}' exists, but nothing in the scenario created it"
+    );
+}
+
+/// The consumer group names a step's docstring lists, one per line.
+fn kafka_consumer_group_names(world: &ScenarioWorld, step: &Step) -> BTreeSet<String> {
+    let mut groups = BTreeSet::new();
+    for line in docstring(step).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        groups.insert(expand_placeholders(world, line));
+    }
+    groups
+}
+
+#[then(expr = "within {string} Kafka lists these consumer groups")]
+async fn then_within_kafka_lists_these_consumer_groups(
+    world: &mut ScenarioWorld,
+    within: String,
+    #[step] step: &Step,
+) {
+    let within = parse_duration_text(&within).expect("within must be a valid duration");
+    let groups = kafka_consumer_group_names(world, step);
+    world
+        .cluster()
+        .wait_for_kafka_consumer_groups_listed(&groups, true, within)
+        .await
+        .expect("Kafka did not list the consumer groups");
+}
+
+/// A consumer group that must never exist: one check, since waiting would not strengthen it.
+#[then(expr = "Kafka lists none of these consumer groups")]
+async fn then_kafka_lists_none_of_these_consumer_groups(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let groups = kafka_consumer_group_names(world, step);
+    world
+        .cluster()
+        .wait_for_kafka_consumer_groups_listed(&groups, false, Duration::ZERO)
+        .await
+        .expect("Kafka lists consumer groups");
+}
+
 /// Joins a member that Nervix does not run to the group. It takes the topic's first partitions from
 /// Nervix's consumers and holds them, reading without committing, until it leaves.
 #[when(expr = "an external member joins Kafka consumer group {string} on topic {string}")]
@@ -14224,6 +14323,7 @@ async fn when_these_nspl_commands_are_attempted_on_node(
 }
 
 #[when("these NSPL commands begin executing in the background")]
+#[when("these Plexus commands begin executing in the background")]
 #[when("these Plexus statements begin executing in the background")]
 async fn when_these_nspl_commands_begin_executing_in_the_background(
     world: &mut ScenarioWorld,
@@ -23638,6 +23738,7 @@ async fn given_rabbitmq_queue_exists(world: &mut ScenarioWorld, queue: String) {
 }
 
 #[given(expr = "Kafka topic {string} exists with {int} partitions")]
+#[when(expr = "the operator provisions Kafka topic {string} with {int} partitions")]
 async fn given_kafka_topic_exists_with_partitions(
     world: &mut ScenarioWorld,
     topic: String,
@@ -25533,6 +25634,133 @@ async fn when_syslog_tcp_messages_are_published_with_mixed_framing_to(
         .shutdown()
         .await
         .expect("failed to close Syslog TCP test sender");
+}
+
+#[when(expr = "a Syslog TCP sender publishes {int} numbered frames to node {string} at {string}")]
+async fn when_syslog_tcp_sender_publishes_numbered_frames(
+    world: &mut ScenarioWorld,
+    count: usize,
+    node_id: String,
+    addr: String,
+) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let addr = node_syslog_ingestor_addr(world, &node_id, &addr);
+    let mut stream = connect_syslog_tcp(&addr).await;
+    let mut frames = Vec::new();
+    for sequence in 0..count {
+        let message = format!(
+            "<34>1 2003-10-11T22:14:15.003Z edge-1 handoff 123 ID47 - handoff-{sequence:04}"
+        );
+        frames.extend_from_slice(message.len().to_string().as_bytes());
+        frames.push(b' ');
+        frames.extend_from_slice(message.as_bytes());
+    }
+    stream
+        .write_all(&frames)
+        .await
+        .expect("the Syslog sender writes every numbered frame");
+    stream
+        .shutdown()
+        .await
+        .expect("the Syslog sender closes after writing its frames");
+}
+
+#[when(expr = "a live Syslog TCP sender connects to node {string} at {string}")]
+async fn when_live_syslog_sender_connects(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    addr: String,
+) {
+    let addr = node_syslog_ingestor_addr(world, &node_id, &addr);
+    world.syslog_live_sender = Some(connect_syslog_tcp(&addr).await);
+}
+
+#[when(expr = "the live Syslog TCP sender writes message {string}")]
+async fn when_live_syslog_sender_writes(world: &mut ScenarioWorld, message: String) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let sender = world
+        .syslog_live_sender
+        .as_mut()
+        .expect("a live Syslog sender must be connected");
+    let payload = format!("<34>1 2003-10-11T22:14:15.003Z edge-1 listener 123 ID47 - {message}");
+    sender
+        .write_all(&syslog_stream_frame("octet-counted", &payload))
+        .await
+        .expect("the established Syslog connection stays writable");
+}
+
+#[when(expr = "a fresh Syslog TCP sender writes message {string} to node {string} at {string}")]
+async fn when_fresh_syslog_sender_writes(
+    world: &mut ScenarioWorld,
+    message: String,
+    node_id: String,
+    addr: String,
+) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let addr = node_syslog_ingestor_addr(world, &node_id, &addr);
+    let mut sender = connect_syslog_tcp(&addr).await;
+    let payload = format!("<34>1 2003-10-11T22:14:15.003Z edge-1 listener 123 ID47 - {message}");
+    sender
+        .write_all(&syslog_stream_frame("octet-counted", &payload))
+        .await
+        .expect("a new connection writes after listener rebind");
+    sender.shutdown().await.expect("the new sender closes");
+}
+
+#[when(
+    expr = "the Syslog listener on node {string} at {string} fails its next accept through the \
+            fault hook"
+)]
+async fn when_syslog_listener_accept_fails(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    addr: String,
+) {
+    let addr = node_syslog_ingestor_addr(world, &node_id, &addr);
+    world.syslog_listener_fault = Some(world.fault_injection.fail_next_syslog_stream_accept(addr));
+}
+
+#[then("the Syslog listener accept fault fires")]
+async fn then_syslog_listener_accept_fault_fires(world: &mut ScenarioWorld) {
+    let mut fired = world
+        .syslog_listener_fault
+        .take()
+        .expect("the listener fault must be armed");
+    nervix_primitives::time::timeout(Duration::from_secs(10), async {
+        while !*fired.borrow() {
+            fired
+                .changed()
+                .await
+                .expect("the listener fault remains observable");
+        }
+    })
+    .await
+    .expect("the source consumes the injected accept failure");
+}
+
+#[then(expr = "within {string} the relay subscription receives {int} numbered Syslog frames once")]
+async fn then_relay_subscription_receives_numbered_syslog_frames_once(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: usize,
+) {
+    let expected = (0..count)
+        .map(|sequence| vec![format!("\"message\":\"handoff-{sequence:04}\"")])
+        .collect::<Vec<_>>();
+    receive_expected_fragment_sets(world, &duration, expected, UnmatchedPayloads::Fail, None).await;
+}
+
+/// Resolve the configured listener address to the selected node's bound address.
+fn node_syslog_ingestor_addr(world: &ScenarioWorld, node_id: &str, configured: &str) -> String {
+    let node_id = expand_placeholders(world, node_id);
+    let configured = expand_placeholders(world, configured);
+    world
+        .cluster()
+        .syslog_ingestor_addr(&node_id, &configured)
+        .expect("failed to resolve node-local Syslog ingestor address")
 }
 
 /// A TCP connection to a Syslog listener, retried while the listener starts.
@@ -32079,6 +32307,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.broker_observer = None;
                 world.syslog_udp_observer = None;
                 world.syslog_split_sender = None;
+                world.syslog_live_sender = None;
+                world.syslog_listener_fault = None;
                 world.syslog_silent_client = None;
                 world.producers = client_producers::ScenarioProducers::default();
                 stop_receivers(world).await;

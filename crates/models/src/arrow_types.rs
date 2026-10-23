@@ -162,11 +162,19 @@ mod tests {
             described(SourceMetadataScope::Syslog),
             Some(vec![("peer_addr".to_owned(), DataType::Utf8, true)])
         );
+        assert_eq!(
+            described(SourceMetadataScope::Websockets),
+            Some(vec![("frame_type".to_owned(), DataType::Utf8, true)])
+        );
     }
 
     #[test]
     fn a_metadata_scope_s_columns_are_the_schema_fields_a_program_is_validated_against() {
-        for scope in [SourceMetadataScope::Kafka, SourceMetadataScope::Syslog] {
+        for scope in [
+            SourceMetadataScope::Kafka,
+            SourceMetadataScope::Syslog,
+            SourceMetadataScope::Websockets,
+        ] {
             assert_eq!(
                 scope.arrow_schema(),
                 Some(SchemaField::arrow_schema(&scope.fields())),

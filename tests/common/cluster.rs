@@ -126,7 +126,7 @@ use super::{
     },
     node_startup::{
         ATTEMPT_READINESS_BUDGET, AttemptCleanup, NODE_STARTUP_BUDGET, NodeStartup, StartableNode,
-        StartupPorts, cluster_startup_budget,
+        StartupPorts, StartupRetryPolicy, cluster_startup_budget,
     },
     node_stop::{NodeStopClock, NodeStopEnding, NodeStopProgress, NodeStopRecord},
     peer_addressing::{
@@ -1027,20 +1027,23 @@ impl Cluster {
     /// Start a node without waiting for it to catch up with the leader.
     ///
     /// A scenario whose subject is a node that cannot apply what the leader committed waits for
-    /// its own condition instead, and the retry [`Cluster::start_node`] performs would restart a
-    /// node that had already consumed the failure the scenario armed. Its budget is therefore one
-    /// attempt's readiness rather than the whole per-node startup budget, which exists for the
-    /// retries this path must not perform.
+    /// its own condition. Only a lost early listener bind permits another launch, before runtime
+    /// initialization could consume the failure it armed. Every launch, failed-task cleanup and
+    /// pause shares one readiness attempt's budget; a readiness timeout is terminal here.
     pub(crate) async fn start_node_without_catching_up(&mut self, node_id: &str) -> io::Result<()> {
         let handle = self
             .nodes
             .get_mut(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        handle.launch()?;
-        handle
-            .readiness(1, PhaseDeadline::after(ATTEMPT_READINESS_BUDGET))
-            .await
-            .map_err(io::Error::other)
+        let node = node_name(&handle.spec.node_id);
+        NodeStartup::start(
+            &node,
+            handle,
+            PhaseDeadline::after(ATTEMPT_READINESS_BUDGET),
+            StartupRetryPolicy::BindBeforeRuntime,
+        )
+        .await
+        .map_err(io::Error::other)
     }
 
     /// Names a setting `node_id` starts with from its next launch on, over the cluster's own.
@@ -1136,7 +1139,7 @@ impl Cluster {
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         let node = node_name(&handle.spec.node_id);
         let budget = construction.nested(NODE_STARTUP_BUDGET);
-        NodeStartup::start(&node, handle, budget)
+        NodeStartup::start(&node, handle, budget, StartupRetryPolicy::Transient)
             .await
             .map_err(io::Error::other)
     }
@@ -1733,6 +1736,48 @@ impl Cluster {
                 return Err(io::Error::other(format!(
                     "timed out waiting for kafka consumer group '{group}' to have {expected} \
                      members, got {actual}"
+                )));
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Whether the Kafka broker knows `topic`. The metadata request names the topic from a
+    /// consumer, which never lets the broker create it.
+    pub(crate) fn kafka_topic_exists(&self, topic: &str) -> io::Result<bool> {
+        let partitions = kafka_topic_partition_count(&self.dependencies, topic)?;
+        Ok(partitions.is_some())
+    }
+
+    /// Waits until the broker lists every group of `groups`, when `listed` is true, or none of
+    /// them, when it is false.
+    pub(crate) async fn wait_for_kafka_consumer_groups_listed(
+        &self,
+        groups: &BTreeSet<String>,
+        listed: bool,
+        within: Duration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + within;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let broker_groups = kafka_listed_consumer_groups(&self.dependencies)?;
+            let present = groups
+                .intersection(&broker_groups)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let settled = if listed {
+                present == *groups
+            } else {
+                present.is_empty()
+            };
+            if settled {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                let expected = if listed { "all" } else { "none" };
+                return Err(io::Error::other(format!(
+                    "expected Kafka to list {expected} of consumer groups {groups:?} within \
+                     {within:?}; it lists {present:?} of them"
                 )));
             }
             sleep(POLL_INTERVAL).await;
@@ -2533,6 +2578,22 @@ impl Cluster {
     ) {
         self.fault_injection
             .arm_health_response_pause(node_name(probing_node_id), node_name(responding_node_id));
+    }
+
+    pub(crate) fn pause_application_revision_responses_from(&self, node_id: &str) {
+        self.fault_injection
+            .pause_application_revision_responses_from(node_name(node_id));
+    }
+
+    pub(crate) async fn wait_for_application_revision_response_pause(&self, node_id: &str) {
+        self.fault_injection
+            .wait_for_application_revision_response_pause(&node_name(node_id))
+            .await;
+    }
+
+    pub(crate) fn release_application_revision_responses_from(&self, node_id: &str) {
+        self.fault_injection
+            .release_application_revision_responses_from(&node_name(node_id));
     }
 
     pub(crate) fn fail_health_responses_from(&self, responding_node_id: &str) {
@@ -5428,6 +5489,29 @@ fn kafka_consumer_group_member_count(
         .find(|info| info.name() == group)
         .ok_or_else(|| io::Error::other(format!("kafka consumer group '{group}' not found")))?;
     Ok(info.members().len())
+}
+
+/// The consumer groups the Kafka broker lists. A group with neither members nor committed offsets
+/// does not exist on the broker, so the listing leaves it out.
+fn kafka_listed_consumer_groups(
+    dependencies: &DependencyEndpoints,
+) -> io::Result<BTreeSet<String>> {
+    let mut client_config = kafka_client_config(dependencies)?;
+    let consumer: BaseConsumer = client_config
+        .set(
+            "group.id",
+            format!("nervix-cucumber-admin-{}", Uuid::now_v7().as_simple()),
+        )
+        .create()
+        .map_err(io::Error::other)?;
+    let group_list = consumer
+        .fetch_group_list(None, Duration::from_secs(10))
+        .map_err(io::Error::other)?;
+    let mut listed = BTreeSet::new();
+    for group in group_list.groups() {
+        listed.insert(group.name().to_string());
+    }
+    Ok(listed)
 }
 
 fn kafka_consumer_group_next_offset(

@@ -340,7 +340,11 @@ second pass after the gate deadline reclaims work that was active during the fir
 An ownership handoff sends engagement, drain status and release only to the hold's participants:
 the live nodes that run part of the moved unit's boundary, as
 [Control Plane](./control-plane.md#planned-ownership-handoffs-and-failover) defines them. A slow or
-lossy link to any other node therefore takes no part in the handoff's preparation deadline.
+lossy link to any other node therefore takes no part in the handoff's preparation deadline. The
+ownership move of a graceful-shutdown drain also asks only the participants whether they have
+prepared the published runtime revision before the destination activates, so such a link takes no
+part in its activation deadline either. Every other planned handoff activates after the
+cluster-wide runtime-revision barrier of the command that moved it.
 Ownership-handoff engagement answers after admission is fenced and its force flush is requested.
 The coordinator then queries the exact operation's drain status. A participant publishes its capture
 freeze before returning a drained status, and capture requires that coordination identity's freeze
@@ -1695,6 +1699,16 @@ the leader leaves the command pending. This avoids conflicting completion sets w
 health is asymmetric: a connected follower may still probe an unreachable peer successfully after
 the leader has retired that peer. Revision and HTTPS listener progress requests remain bound to the
 reported incarnation.
+
+An `application_revision` progress query samples the answering incarnation's authoritative,
+runtime-prepared and runtime-ready revisions. These direct observations supplement gossip. A
+completion barrier keeps observing published progress and availability while its query batch is
+pending; a reply is unnecessary once valid publications satisfy the barrier. The batch is retained
+across state changes, rather than restarted on each publication. Its owned runtime task keeps
+polling queries while the barrier reads the leader's participant view, so a probe granted an
+executor permit keeps progressing while that view request waits. Ending the barrier aborts its
+probe task. Queries retain their transport deadlines, and the barrier retains its command deadline
+and leader-tenure and incarnation checks.
 
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application

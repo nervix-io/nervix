@@ -546,7 +546,9 @@ The connector helper errors for OTEL, Syslog, WebSocket signaling, Postgres, MyS
 carry `error_stack::Report` from the failing operation. A caller adds context at a connector or
 host ownership transition; it does not recreate the top-level error from its formatted text.
 Syslog TLS material reports keep the file, certificate or rustls cause, and stream frame reports
-remain beneath the connection failure. WebSocket signaling compilation and execution retain jaq,
+remain beneath the connection failure. Its configured accept capability maps socket failures into
+`SyslogListenerError::StreamAccept` before the listener returns them to the source owner; the test
+injector follows the same typed path. WebSocket signaling compilation and execution retain jaq,
 frame encoding and transport causes. The runtime's Syslog source-plan and signaling compilation
 errors keep those reports as typed fields while preserving their startup messages.
 
@@ -738,6 +740,14 @@ served and never the errors, statistics or other events waiting in the producer'
 that gives up only after every record's report was served is no failure. A flush that fails
 otherwise, or whose blocking task does not complete, keeps that cause beneath
 `SinkFinishError::Flush`.
+
+A Kafka source classifies an unknown topic from a subscription or topic metadata as
+`KafkaSourceError::MissingTopic`, retaining the driver's typed `KafkaError` as an attachment.
+The named topic is the semantic failure shown in `DESCRIBE INGESTOR` until the operator provisions
+it. Partition watches recognize this variant as an empty topology; other inspection failures keep
+their existing reporting path. A Kafka client's attempt to set `allow.auto.create.topics` is
+`RegistryError::NervixOwnedClientConfigKey`, naming the domain, client and owned key without its
+configured value. The source and both inspectors enforce `false` after pass-through configuration.
 
 A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaSourceError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
@@ -953,6 +963,13 @@ is created. The refusal names the connector, the client and the domain, with the
 `PrometheusClientConfigError` beneath it naming the key. Where the key's value breaks its address
 or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
 domain 'shop' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string`.
+A `WEBSOCKETS CLIENT` uses the same validation boundary with
+`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint or positive-duration values,
+TLS keys on `ws`, and unpaired identity files are typed refusals naming their key, client and domain.
+`WebsocketsUpgradeHeadersError` names the connection ingestor and offending field without printing
+its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
+cause if a source cannot produce its validated header collection. Rendered client values are
+validated again by the connector before opening transport.
 An emitter whose sink keeps one value per header name and whose `INVOKE` clause writes one literal
 header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
 emitter, the sink's connector and entity, the header as the sink's
@@ -1157,6 +1174,13 @@ harness requested stop leaves the readiness timeout as the retry cause. Cleanup 
 remaining absolute startup budget; exhaustion with the task still running retains that task and
 reports its pending cleanup. [Integration Test Lifecycle](./integration-test-lifecycle.md#node-startup)
 owns these harness bounds and the distinction from product shutdown deadlines.
+
+The WebSocket declaration fixture treats `Protocol(HandshakeIncomplete)` during an opening
+upgrade as a cancelled attempt. It records that outcome and keeps its payload gate for the next
+completed upgrade. Other handshake errors and established-stream failures preserve their typed
+tungstenite cause beneath the I/O error; a fixture task ending with one still fails the scenario's
+After hook. [Fixture cleanup](./integration-test-lifecycle.md#what-cleanup-releases) owns the
+listener's lifetime.
 
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
@@ -1381,6 +1405,11 @@ guest-requested state reset reports on its own, and an ingest group's failure to
 branch entrypoint, which the group's flush also returns to its caller. A branch whose domain
 routing can no longer be read fails the acknowledgements it was handed with that routing failure
 directly, without a policy or a runtime event.
+A WebSockets ingest metadata builder checks its frame-label capacity before allocation. A row bound
+whose byte estimate exceeds the address space returns `IngestMetadataError::WebsocketsCapacityOverflow`;
+the ingest group retains it below its `open ingest metadata` operation and the source's general-error
+policy reports that chain.
+
 Each failure reports its owner's typed context above the cause it kept:
 
 - `RouteOutputError`, which every node that buffers route output shares, for holding a route's
@@ -2199,6 +2228,11 @@ and retry waits, then joins them before withdrawing their routes. This cancellat
 terminal task ending; replica synchronization supplies any missed checkpoint availability hint.
 
 ### Panic Classes And Guarded Dependencies
+
+Application-revision probe batches run on tasks owned by their completion barriers. Transport
+failures leave the affected incarnation pending. A probe task's unexpected panic resumes on its
+barrier with the original panic payload. The barrier owns the task's only abort handle, and ending
+the barrier cancels that task without reporting intentional cancellation as a command failure.
 
 Broken internal guarantees take the explicit panic classes `assured` for a construction or platform
 guarantee, `verified` for a condition checked on the current path, and `todo` for a deliberately
