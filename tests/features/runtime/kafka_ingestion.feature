@@ -642,6 +642,89 @@ Feature: Kafka ingestion
       | 1            |
       | 3            |
 
+  # Each of the eight instances joined the group, so destroying its consumer waits for an answer to
+  # its LeaveGroup request, which librdkafka gives five seconds. The retirements hold the node's two
+  # connector workers for as long as the broker holds that answer.
+  @kafka_consumer_retirement
+  Scenario Outline: A Kafka ingestor dropped on <cluster_size> nodes retires its consumers on the connector workers while another ingestor delivers
+    Given a mock Kafka broker serves topic "retired_{{test_id}}"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA retired_event ( seq I64 );
+      CREATE WIRE JSON SCHEMA retired_event_wire MODE STRICT ( seq integer );
+      CREATE CODEC retired_event_codec
+        FROM WIRE JSON SCHEMA retired_event_wire TO SCHEMA retired_event;
+      CREATE RELAY retired_events SCHEMA retired_event UNBRANCHED;
+      CREATE KAFKA CLIENT retiring_kafka CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR retiring_source
+        FROM retiring_kafka TOPIC 'retired_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'retired_group_{{test_id}}' INSTANCES 8
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING retired_event_codec
+        TO retired_events INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE VHOST edge retire-{{test_id}}.example.com;
+      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR healthy_source
+        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retired_event_codec
+        TO retired_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION retirement_subscription TO retired_events;
+      START;
+      """
+    And mock Kafka message is published to topic "retired_{{test_id}}"
+      """
+      {"seq":1}
+      """
+    Then within "60s" the relay subscription receives a payload
+      """
+      "seq":1
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "retiring_source" is saved as placeholder "kafka_owner"
+    Given the mock Kafka broker holds every answer
+    When these Plexus statements are executed on the leader node
+      """
+      DROP INGESTOR retiring_source;
+      """
+    Then within "30s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_running" with labels eventually reaches at least 1
+      """
+      class="connector_storage"
+      """
+    When http payload is posted to host "retire-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":42}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "seq":42
+      """
+    When the mock Kafka broker releases its answers
+    Then within "60s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_pending" with labels eventually equals 0
+      """
+      class="connector_storage"
+      """
+    And within "60s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_running" with labels eventually equals 0
+      """
+      class="connector_storage"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Kafka ACK PARALLEL applies FILTER WHERE and route WHERE across a whole batch of interleaved branches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
