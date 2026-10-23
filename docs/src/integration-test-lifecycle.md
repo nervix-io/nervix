@@ -586,7 +586,9 @@ benchmark collector has exported coverage and recorded completion, `just clean-c
 releases that instrumented target's dev-profile build outputs. Both steps run only after their
 preceding checks succeed. Exported reports, completion records, raw profiles,
 compiler evidence and the source tree remain available; a failed phase keeps its build outputs.
-Later phases rebuild any required artifact through the configured cache.
+The native collector marks its owned build directory as a Cargo cache while holding its build
+lock, so Cargo recognizes it for guarded cleanup. Later phases rebuild any required artifact
+through the configured cache.
 
 During the build the daemon publishes each entry the build stores: kache records a durable upload
 intent, uploads the entry in the background, and retries an upload that failed for a retryable
