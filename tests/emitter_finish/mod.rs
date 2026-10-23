@@ -1,4 +1,4 @@
-//! Public proofs that STOP finishes an emitter's emitter, outside the product layer order.
+//! Public proofs that STOP finishes an emitter's connector, outside the product layer order.
 //!
 //! Layer: test harness.
 //! - **Owns.** A STOP that runs while a stallable endpoint holds a broker connection paused and

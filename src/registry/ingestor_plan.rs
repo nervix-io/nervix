@@ -150,6 +150,17 @@ pub(crate) enum KafkaOffsetPlan {
     Domain(KafkaDomainOffsetPlacement),
 }
 
+impl KafkaOffsetPlan {
+    fn decide(mode: &KafkaOffsetMode, primary_node: Option<&ClusterNodeName>) -> Self {
+        match mode {
+            KafkaOffsetMode::ConsumerGroup(group) => Self::ConsumerGroup(group.clone()),
+            KafkaOffsetMode::Domain => Self::Domain(KafkaDomainOffsetPlacement {
+                primary_node: primary_node.cloned(),
+            }),
+        }
+    }
+}
+
 /// The cluster node that originates a Kafka ingestor's domain offsets. An ingestor planned without
 /// a placement, as a graph is before the cluster schedules it, has no originating node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -832,16 +843,7 @@ impl IngestorConnectorPlan {
                 })),
                 Model::ClientKafka(resolved),
             ) => {
-                let offsets = match offset_mode {
-                    KafkaOffsetMode::ConsumerGroup(group) => {
-                        KafkaOffsetPlan::ConsumerGroup(group.clone())
-                    }
-                    KafkaOffsetMode::Domain => {
-                        KafkaOffsetPlan::Domain(KafkaDomainOffsetPlacement {
-                            primary_node: scheduled.primary_node.clone(),
-                        })
-                    }
-                };
+                let offsets = KafkaOffsetPlan::decide(offset_mode, scheduled.primary_node.as_ref());
                 Ok(Self::Kafka(KafkaIngestorStartPlan::Topic(
                     KafkaTopicIngestorStartPlan {
                         client: IngestorClientSpec::resolved(
@@ -1040,8 +1042,17 @@ impl IngestorConnectorPlan {
                     mode,
                     quiesce,
                     ..
-                }))
-                | IngestorEntity::Websockets(WebsocketsIngestor::Endpoint(
+                })),
+                Model::Endpoint(resolved),
+            ) => {
+                let intake =
+                    EndpointIntakeStartPlan::decide(name, expected, resolved, mode, quiesce)?;
+                Ok(Self::Http(HttpIngestorStartPlan::Endpoint(
+                    HttpEndpointIngestorStartPlan(intake),
+                )))
+            }
+            (
+                IngestorEntity::Websockets(WebsocketsIngestor::Endpoint(
                     WebsocketsEndpointIngestor {
                         endpoint: expected,
                         mode,
@@ -1053,17 +1064,9 @@ impl IngestorConnectorPlan {
             ) => {
                 let intake =
                     EndpointIntakeStartPlan::decide(name, expected, resolved, mode, quiesce)?;
-                Ok(match source {
-                    IngestorEntity::Http(_) => Self::Http(HttpIngestorStartPlan::Endpoint(
-                        HttpEndpointIngestorStartPlan(intake),
-                    )),
-                    IngestorEntity::Websockets(_) => {
-                        Self::Websockets(WebsocketsIngestorStartPlan::Endpoint(
-                            WebsocketsEndpointIngestorStartPlan(intake),
-                        ))
-                    }
-                    _ => unreachable!("the matched entity is an HTTP or WebSockets endpoint"),
-                })
+                Ok(Self::Websockets(WebsocketsIngestorStartPlan::Endpoint(
+                    WebsocketsEndpointIngestorStartPlan(intake),
+                )))
             }
             (
                 IngestorEntity::Websockets(WebsocketsIngestor::Connection(

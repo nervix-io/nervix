@@ -135,8 +135,8 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
                 if outcome == AckOutcome::Ack {
                     assert!(
                         emitter_confirmed.load(Ordering::SeqCst),
-                        "a source acknowledgement completed before the batching emitter's emitter \
-                         confirmed the payload carrying it"
+                        "a source acknowledgement completed before the batching emitter's \
+                         connector confirmed the payload carrying it"
                     );
                     assert!(
                         sibling_confirmed.load(Ordering::SeqCst),

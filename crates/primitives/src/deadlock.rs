@@ -5,7 +5,7 @@
 //! wait-for graph. When a waiting thread closes a cycle in that graph, every thread in the cycle
 //! waits for a lock another one holds, and none of them can proceed: an active deadlock. `install`
 //! starts the detector that reports such a cycle while its threads are still blocked, and hands each
-//! report, as a [`Finding`], to the installer's emitter on a thread of its own.
+//! report, as a [`Finding`], to the installer's sink on a thread of its own.
 //! A `deloxide-order` build also records bounded acquisition history and correlates the vendor's
 //! historical order cycles with held and requested modes, source sites and lock lifetimes. Such a
 //! potential cycle does not assert that any thread is blocked. Runtime selection is retained in the
@@ -29,7 +29,7 @@
 //! - **Depends on.** Deloxide in a `deloxide` build, the standard library's threads, and the native
 //!   capability's lock-free queue and concurrent map.
 //! - **Must not know.** What a finding means for the process that reports it: whether it is
-//!   rendered, recorded as evidence, or ends the process belongs to the emitter the installer supplies.
+//!   rendered, recorded as evidence, or ends the process belongs to the sink the installer supplies.
 
 #![cfg_attr(
     nervix_lint,
@@ -487,7 +487,7 @@ pub enum Finding {
     ActiveCycle(ActiveCycle),
     /// Historical acquisition order, without a claim that threads currently cannot progress.
     PotentialCycle(PotentialCycle),
-    /// Findings the detector made while the hand-off to the emitter was full, which it could not
+    /// Findings the detector made while the hand-off to the sink was full, which it could not
     /// describe. Each is at least one more cycle.
     Overflow {
         lost: NonZeroU64,

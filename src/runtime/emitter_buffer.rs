@@ -632,7 +632,7 @@ pub(super) struct EmitterBatchBuffer {
     buffered_messages: Arc<EmitterBufferedMessages>,
 }
 
-/// What one flush hands the emitter's emitter: the buffered batches, and the batch payloads, HTTP
+/// What one flush hands the emitter's connector: the buffered batches, and the batch payloads, HTTP
 /// requests or row requests earlier attempts prepared from their rows and retained.
 pub(super) struct EmitterPublication<'a> {
     pub(super) batches: &'a mut [EmitterPublishBatch],

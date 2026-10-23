@@ -194,7 +194,7 @@ relay. Do not use them to scan across branches.
 - Every multi-input emitter source declares the same payload schema. Its sources may use different
   branch names, but each source retains its own branch through collection and external publish;
   node-wide materialized dependencies and message-error relays match every source branch exactly.
-- Every emitter emitter declares its transport-supported `MODE` in the documented position and
+- Every emitter declares its transport-supported `MODE` in the documented position and
   supplies the complete retry policy plus the confirmation window and timeout when that mode
   confirms asynchronously. No operational mode variable is inferred.
 - For Pulsar receipt deadlines and the final wait after `NO ACK` acceptance, read

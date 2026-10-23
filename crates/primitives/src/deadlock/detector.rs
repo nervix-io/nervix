@@ -1,11 +1,11 @@
-//! Installing the detector, and handing each cycle it reports to the installer's emitter.
+//! Installing the detector, and handing each cycle it reports to the installer's sink.
 //!
 //! Deloxide reports a cycle by calling one process-wide callback on a dispatcher thread of its own,
 //! through a channel it never bounds, and it catches a panic in that callback and carries on: a
 //! callback that fails cannot fail the process. So the callback here does as little as it can. It
 //! copies the report's identities into a bounded queue, counts a report the full queue refuses, and
 //! wakes the findings thread; it takes no lock, writes no log and cannot panic. The findings thread
-//! correlates each report with the registry and calls the emitter, and an emitter that panics aborts the
+//! correlates each report with the registry and calls the sink, and a sink that panics aborts the
 //! process, because a finding it failed to handle must not pass for no finding at all.
 //!
 //! Deloxide prints a banner on standard output when it starts. Standard output carries a node's
@@ -47,8 +47,8 @@ use crate::{
     unmodeled::sync::atomic::{AtomicBool, Ordering},
 };
 
-/// How many reports wait for the emitter at most. The first active cycle normally ends a diagnostic
-/// process, so the queue needs room only for the cycles detected while the emitter handles it.
+/// How many reports wait for the sink at most. The first active cycle normally ends a diagnostic
+/// process, so the queue needs room only for the cycles detected while the sink handles it.
 const HANDOFF_CAPACITY: usize = 64;
 
 const FINDINGS_THREAD: &str = "nervix-deadlock-findings";
@@ -115,7 +115,7 @@ pub enum InstallError {
     SelectionUnavailable { selection: DiagnosticSelection },
     #[error("this process has already installed, or tried to install, its deadlock detector")]
     AlreadyClaimed,
-    #[error("the thread that hands deadlock findings to their emitter could not be started")]
+    #[error("the thread that hands deadlock findings to their sink could not be started")]
     StartFindingsThread,
     #[error("standard output could not be redirected while the deadlock detector starts")]
     SilenceStandardOutput,
@@ -145,28 +145,28 @@ pub(crate) fn require_installed() {
     );
 }
 
-/// Install this process's deadlock detector, and deliver every finding to `emitter` on a thread of its
+/// Install this process's deadlock detector, and deliver every finding to `sink` on a thread of its
 /// own, one at a time and in the order the detector made them.
 ///
 /// Install once, before any tracked lock is constructed and before any runtime worker starts, and
 /// after the process has registered the signals it must not lose: the detector's threads exist from
 /// then on. Nothing uninstalls it. A second call fails, whether or not the first succeeded.
 ///
-/// `emitter` runs on the findings thread and decides what a finding means for the process. It must not
-/// wait for a tracked lock, which a blocked thread may hold. A emitter that panics aborts the process.
-pub fn install<Reporter>(reporter: Reporter) -> Result<Detector, Report<InstallError>>
+/// `sink` runs on the findings thread and decides what a finding means for the process. It must not
+/// wait for a tracked lock, which a blocked thread may hold. A sink that panics aborts the process.
+pub fn install<Sink>(sink: Sink) -> Result<Detector, Report<InstallError>>
 where
-    Reporter: FnMut(Finding) + Send + 'static,
+    Sink: FnMut(Finding) + Send + 'static,
 {
-    install_selected(DiagnosticSelection::for_build(false), reporter)
+    install_selected(DiagnosticSelection::for_build(false), sink)
 }
 
-pub fn install_selected<Reporter>(
+pub fn install_selected<Sink>(
     selection: DiagnosticSelection,
-    reporter: Reporter,
+    sink: Sink,
 ) -> Result<Detector, Report<InstallError>>
 where
-    Reporter: FnMut(Finding) + Send + 'static,
+    Sink: FnMut(Finding) + Send + 'static,
 {
     if !selection.is_available() {
         return Err(Report::new(InstallError::SelectionUnavailable {
@@ -183,7 +183,7 @@ where
         let handoff = Arc::clone(&handoff);
         thread::Builder::new()
             .name(FINDINGS_THREAD.to_string())
-            .spawn(move || handoff.deliver(reporter))
+            .spawn(move || handoff.deliver(sink))
             .change_context(InstallError::StartFindingsThread)?
     };
     // Nothing joins the findings thread: it runs for the life of the process.
@@ -362,15 +362,15 @@ impl Handoff {
 
     /// The findings thread: deliver every report, and the count of lost ones, until the process
     /// ends.
-    fn deliver<Reporter>(&self, mut reporter: Reporter)
+    fn deliver<Sink>(&self, mut sink: Sink)
     where
-        Reporter: FnMut(Finding),
+        Sink: FnMut(Finding),
     {
         loop {
             while let Ok(report) = self.reports.pop() {
                 deliver_one(|| match report {
                     CycleReport::Active(report) => {
-                        reporter(Finding::ActiveCycle(report.describe(Registry::global())))
+                        sink(Finding::ActiveCycle(report.describe(Registry::global())))
                     }
                     CycleReport::Potential(report) => {
                         let registry = Registry::global();
@@ -380,14 +380,14 @@ impl Handoff {
                             report.locks,
                             report.total_edges,
                         ) {
-                            reporter(Finding::PotentialCycle(cycle));
+                            sink(Finding::PotentialCycle(cycle));
                         }
                     }
                 });
             }
             if let Some(lost) = self.reports.take_lost() {
                 deliver_one(|| {
-                    reporter(Finding::Overflow {
+                    sink(Finding::Overflow {
                         lost,
                         source: OverflowSource::Handoff,
                     })
@@ -395,7 +395,7 @@ impl Handoff {
             }
             if let Some(lost) = Registry::global().history.take_lost() {
                 deliver_one(|| {
-                    reporter(Finding::Overflow {
+                    sink(Finding::Overflow {
                         lost,
                         source: OverflowSource::OrderHistory,
                     })
@@ -404,7 +404,7 @@ impl Handoff {
             if self.reports.is_closed() {
                 return;
             }
-            // Context overflow can occur without a Deloxide cycle and must still reach the emitter.
+            // Context overflow can occur without a Deloxide cycle and must still reach the sink.
             thread::park_timeout(std::time::Duration::from_millis(100));
         }
     }
@@ -428,7 +428,7 @@ impl ActiveReport {
     }
 }
 
-/// Run one delivery to the emitter. A delivery that panics leaves a finding unhandled, so the process
+/// Run one delivery to the sink. A delivery that panics leaves a finding unhandled, so the process
 /// aborts rather than pass for one that found nothing.
 fn deliver_one<Delivery>(delivery: Delivery)
 where
@@ -438,7 +438,7 @@ where
         return;
     }
     let message =
-        b"nervix deadlock detector: a finding could not be delivered to its emitter; aborting \
+        b"nervix deadlock detector: a finding could not be delivered to its sink; aborting \
                     so the run cannot pass\n";
     let mut written = 0;
     while written < message.len() {

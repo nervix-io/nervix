@@ -173,7 +173,7 @@ and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, sup
 deduplicator, reorderer, emitter, ingestor, reingestor, generator, and placement changes;
 Nervix classifies the complete model diff and no user-facing pause command exists. Capacity and
 expression-only junction changes and emitter flush changes are dynamic; relay schema or branching
-changes pause the domain; structural junction, emitter emitter/client/codec/collect/publishing-mode or
+changes pause the domain; structural junction, emitter/client/codec/collect/publishing-mode or
 attachment changes, ingestor,
 emitter source-predicate, and relay materialized-state changes gate and drain only affected
 entities. Changing emitter `FROM` membership pauses the domain because it changes topology.
