@@ -385,7 +385,7 @@ impl EmitterSinkStarter {
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
                 })?;
-                let mapped_schema = projection.mapped_schema().clone();
+                let mapped_schema = projection.value_schema();
                 let opened = IcebergSink::new(
                     IcebergSinkConfig {
                         backend: sink.backend,

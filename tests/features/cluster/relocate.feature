@@ -1555,8 +1555,8 @@ Feature: Relocating runtime nodes onto a named cluster node
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER stalled_emitter FROM abort_staged
-        TO ZEROMQ abort_sink MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+      CREATE ZEROMQ PUSH EMITTER stalled_emitter FROM abort_staged
+        TO abort_sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING abort_event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;

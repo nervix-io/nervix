@@ -17,6 +17,7 @@
 
 use std::fmt::{Display, Formatter};
 
+use meticulous::ResultExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -28,11 +29,15 @@ use super::{
     OtelSink, OtelSinkEntity, PostgresSink, PostgresSinkEntity, PropertyDeclaration, PulsarSink,
     PulsarSinkEntity, RabbitMqSink, RabbitMqSinkEntity, RedisSink, RedisSinkEntity,
     RuntimeCapability, SentrySink, SentrySinkEntity, SqsSink, SqsSinkEntity, SyslogSink,
-    SyslogSinkEntity, ZeroMqSink, ZeroMqSinkEntity, entity_union::entity_union,
+    SyslogSinkEntity, ZeroMqSink, ZeroMqSinkEntity, entity_union::emitter_destinations,
 };
 use crate::{
-    ClientName, ConnectorKind, EmitterBatchLegality, EmitterPublishingMode,
-    EmitterPublishingModeKind, Expression, SchemaName,
+    AlterEmitterError, ClickHouseEmitterMode, ClientEmitterMode, ClientName, ConnectorKind,
+    EmitterBatchLegality, EmitterPublishing, EmitterPublishingModeKind, Expression,
+    HttpEmitterMode, IcebergEmitterMode, KafkaEmitterMode, MongoDbEmitterMode, MqttEmitterMode,
+    MySqlEmitterMode, NatsEmitterMode, OtelEmitterMode, PostgresEmitterMode, PulsarEmitterMode,
+    RabbitMqEmitterMode, RedisEmitterMode, SchemaName, SentryEmitterMode, SqsEmitterMode,
+    SyslogEmitterMode, ZeroMqEmitterMode,
 };
 
 /// One column, attribute or field a direct `VALUES` sink writes, and the expression that computes
@@ -94,6 +99,8 @@ pub struct SinkClientReference<'a> {
 pub enum SinkReference<'a> {
     /// The configured client the sink publishes through.
     Client(SinkClientReference<'a>),
+    /// An object-store client whose concrete connector is resolved during planning.
+    StorageClient(&'a ClientName),
     /// The schema of the native batches session consumers receive.
     Schema(&'a SchemaName),
 }
@@ -103,8 +110,7 @@ pub enum SinkReference<'a> {
 pub enum SinkReferenceKind {
     /// A configured client of one connector.
     Client(ConnectorKind),
-    /// A configured client of any one of these connectors, which the statement names before it
-    /// with `ON <connector>`: the object store an Iceberg sink writes its data files to.
+    /// A configured client of any one of these connectors, resolved from its configured client: the object store an Iceberg destination writes its data files to.
     StorageClient(&'static [ConnectorKind]),
     /// The schema of the native batches session consumers receive.
     Schema,
@@ -119,6 +125,24 @@ impl SinkReferenceKind {
             Self::Client(declared) => declared == connector,
             Self::StorageClient(declared) => declared.contains(&connector),
             Self::Schema => false,
+        }
+    }
+}
+
+impl Display for SinkReferenceKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Client(connector) => f.write_str(connector.keyword()),
+            Self::StorageClient(connectors) => {
+                for (index, connector) in connectors.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(" or ")?;
+                    }
+                    f.write_str(connector.keyword())?;
+                }
+                Ok(())
+            }
+            Self::Schema => f.write_str("SCHEMA"),
         }
     }
 }
@@ -237,7 +261,7 @@ pub trait SinkEntity {
 
 /// What the body of one sink statement states: what it publishes to and through, and the values it
 /// writes directly.
-pub trait SinkBody {
+pub trait SinkBody: EmitterPublication {
     /// The client the body publishes through, or the schema its session consumers receive.
     fn reference(&self) -> SinkReference<'_>;
 
@@ -275,33 +299,33 @@ pub trait SinkEntityKind {
     fn capabilities(&self) -> EmitSinkCapabilities;
 }
 
-entity_union! {
+emitter_destinations! {
     /// The destination an emitter publishes to, nested by the connector that serves it and the
     /// entity it writes.
     pub enum EmitSink as SinkBody;
     /// The connector and entity of a sink, as capability decisions read them before an emitter is
     /// fully parsed.
     pub enum EmitSinkKind as SinkEntityKind;
-    kinds {}
+    pub enum EmitterModeChange;
     models {
-        Client(ClientSink, ClientSinkEntity),
-        Http(HttpSink, HttpSinkEntity),
-        Kafka(KafkaSink, KafkaSinkEntity),
-        Pulsar(PulsarSink, PulsarSinkEntity),
-        RabbitMq(RabbitMqSink, RabbitMqSinkEntity),
-        Redis(RedisSink, RedisSinkEntity),
-        Mqtt(MqttSink, MqttSinkEntity),
-        Nats(NatsSink, NatsSinkEntity),
-        ZeroMq(ZeroMqSink, ZeroMqSinkEntity),
-        Sqs(SqsSink, SqsSinkEntity),
-        Sentry(SentrySink, SentrySinkEntity),
-        Syslog(SyslogSink, SyslogSinkEntity),
-        Otel(OtelSink, OtelSinkEntity),
-        ClickHouse(ClickHouseSink, ClickHouseSinkEntity),
-        Postgres(PostgresSink, PostgresSinkEntity),
-        MySql(MySqlSink, MySqlSinkEntity),
-        MongoDb(MongoDbSink, MongoDbSinkEntity),
-        Iceberg(IcebergSink, IcebergSinkEntity),
+        Client(ClientSink, ClientSinkEntity, ClientEmitterMode),
+        Http(HttpSink, HttpSinkEntity, HttpEmitterMode),
+        Kafka(KafkaSink, KafkaSinkEntity, KafkaEmitterMode),
+        Pulsar(PulsarSink, PulsarSinkEntity, PulsarEmitterMode),
+        RabbitMq(RabbitMqSink, RabbitMqSinkEntity, RabbitMqEmitterMode),
+        Redis(RedisSink, RedisSinkEntity, RedisEmitterMode),
+        Mqtt(MqttSink, MqttSinkEntity, MqttEmitterMode),
+        Nats(NatsSink, NatsSinkEntity, NatsEmitterMode),
+        ZeroMq(ZeroMqSink, ZeroMqSinkEntity, ZeroMqEmitterMode),
+        Sqs(SqsSink, SqsSinkEntity, SqsEmitterMode),
+        Sentry(SentrySink, SentrySinkEntity, SentryEmitterMode),
+        Syslog(SyslogSink, SyslogSinkEntity, SyslogEmitterMode),
+        Otel(OtelSink, OtelSinkEntity, OtelEmitterMode),
+        ClickHouse(ClickHouseSink, ClickHouseSinkEntity, ClickHouseEmitterMode),
+        Postgres(PostgresSink, PostgresSinkEntity, PostgresEmitterMode),
+        MySql(MySqlSink, MySqlSinkEntity, MySqlEmitterMode),
+        MongoDb(MongoDbSink, MongoDbSinkEntity, MongoDbEmitterMode),
+        Iceberg(IcebergSink, IcebergSinkEntity, IcebergEmitterMode),
     }
 }
 
@@ -332,12 +356,6 @@ impl EmitSinkKind {
     pub fn capabilities(self) -> EmitSinkCapabilities {
         self.entity().capabilities()
     }
-
-    /// Whether a sink of this pair can publish under `mode`: its entity declares the mode's kind.
-    pub fn accepts_publishing_mode(self, mode: &EmitterPublishingMode) -> bool {
-        self.capabilities()
-            .accepts_publishing_mode_kind(mode.kind())
-    }
 }
 
 impl EmitSink {
@@ -346,13 +364,29 @@ impl EmitSink {
         self.kind().connector()
     }
 
+    /// The entity-owned publication policy, borrowed for inspection.
+    pub fn publishing(&self) -> EmitterPublishing<'_> {
+        self.body().publishing()
+    }
+
+    pub fn mode_change(&self) -> EmitterModeChange {
+        self.body().mode_change()
+    }
+
+    pub(crate) fn replace_mode(
+        &mut self,
+        mode: &EmitterModeChange,
+    ) -> error_stack::Result<(), AlterEmitterError> {
+        self.body_mut().replace_mode(mode)
+    }
+
     pub fn capabilities(&self) -> EmitSinkCapabilities {
         self.kind().capabilities()
     }
 
-    /// The NSPL keyword of the sink's connector, as `DESCRIBE` and diagnostics name it.
+    /// The Plexus connector and entity phrase, as inspection and diagnostics name it.
     pub fn transport_label(&self) -> &'static str {
-        self.connector().keyword()
+        self.kind().phrase()
     }
 
     /// What this sink's body names to publish to.
@@ -364,6 +398,7 @@ impl EmitSink {
     pub fn client(&self) -> Option<&ClientName> {
         match self.reference() {
             SinkReference::Client(reference) => Some(reference.client),
+            SinkReference::StorageClient(client) => Some(client),
             SinkReference::Schema(_) => None,
         }
     }
@@ -379,21 +414,12 @@ impl EmitSink {
     }
 
     /// The expressions a direct `VALUES` sink sends across its external boundary, in written order.
+    pub fn value_mappings(&self) -> SinkValueMappings<'_> {
+        self.body().value_mappings()
+    }
+
     pub fn direct_value_mappings(&self) -> impl Iterator<Item = &SinkValueMapping> {
         self.body().value_mappings().iter()
-    }
-
-    pub fn accepts_publishing_mode(&self, mode: &EmitterPublishingMode) -> bool {
-        self.kind().accepts_publishing_mode(mode)
-    }
-
-    /// The connector a client this sink publishes through must configure. A sink that serves
-    /// session consumers publishes through no client.
-    pub fn client_connector(&self) -> Option<ConnectorKind> {
-        match self.reference() {
-            SinkReference::Client(reference) => Some(reference.connector),
-            SinkReference::Schema(_) => None,
-        }
     }
 
     pub fn requires_codec(&self) -> bool {
@@ -418,12 +444,34 @@ impl EmitSink {
     /// Whether `other` is this sink published through a possibly different client: the same
     /// connector and entity, with every field but the client equal.
     pub fn same_definition(&self, other: &Self) -> bool {
+        if self.kind() != other.kind() {
+            return false;
+        }
         let mut rebound = other.clone();
         match (self.client(), rebound.client_mut()) {
             (Some(client), Some(rebound_client)) => *rebound_client = client.clone(),
             (None, None) => {}
             (Some(_), None) | (None, Some(_)) => return false,
         }
+        rebound
+            .replace_mode(&self.mode_change())
+            .verified("the exact entity kinds were compared above");
         *self == rebound
     }
+}
+
+/// The exact entity a concrete emitter destination represents.
+pub trait EmitterEntityModel {
+    const KIND: EmitSinkKind;
+    type PublishingMode;
+}
+
+/// A borrowed publication policy and a typed update of that entity's policy.
+pub trait EmitterPublication {
+    fn publishing(&self) -> EmitterPublishing<'_>;
+    fn mode_change(&self) -> EmitterModeChange;
+    fn replace_mode(
+        &mut self,
+        mode: &EmitterModeChange,
+    ) -> error_stack::Result<(), AlterEmitterError>;
 }

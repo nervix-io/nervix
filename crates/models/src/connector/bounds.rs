@@ -58,7 +58,7 @@ impl DeclaredBounds {
     /// The deadline keys the entity's waits name, each once, in the order of [`DeadlineKey`].
     ///
     /// An entity declares a handful of waits in one constant, so scanning them for each of the
-    /// two keys is bounded by the declaration.
+    /// declared keys is bounded by the declaration.
     pub fn deadline_keys(&self) -> Vec<DeadlineKey> {
         let mut keys = Vec::new();
         for key in <DeadlineKey as strum::IntoEnumIterator>::iter() {
@@ -179,8 +179,9 @@ pub enum DeadlineKey {
     /// TLS and the protocol's own handshake included.
     #[strum(serialize = "connect_timeout_ms")]
     ConnectTimeout,
-    /// `idle_timeout_ms`: how long a connection may carry nothing while its connector waits to read
-    /// from it, after which the connector closes it.
+    /// `idle_timeout_ms`: silence while a connector actively reads an established connection,
+    /// including its liveness probe; expiry closes the connection. Transport backpressure is
+    /// outside an active read.
     #[strum(serialize = "idle_timeout_ms")]
     IdleTimeout,
 }

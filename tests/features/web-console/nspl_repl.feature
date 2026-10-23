@@ -449,9 +449,9 @@ Feature: Web console NSPL REPL
     And selector ".suggestions" contains "read_headers"
     When selector ".prompt-row input" is filled with "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
     Then selector ".suggestions" does not contain "read_header"
-    When selector ".prompt-row input" is filled with "CREATE EMITTER sink FROM incoming TO KAFKA broker TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_"
+    When selector ".prompt-row input" is filled with "CREATE KAFKA TOPIC EMITTER sink FROM incoming TO broker TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_"
     Then selector ".suggestions" contains "write_header"
-    When selector ".prompt-row input" is filled with "CREATE EMITTER sink FROM incoming TO SENTRY client MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_"
+    When selector ".prompt-row input" is filled with "CREATE SENTRY EVENT EMITTER sink FROM incoming TO client MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_"
     Then selector ".suggestions" does not contain "write_header"
 
   Scenario: Web console autocompletes entities queued in an open transaction
@@ -1549,7 +1549,7 @@ Feature: Web console NSPL REPL
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
       CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE ZEROMQ CLIENT zeromq_main CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };
-      CREATE EMITTER zeromq_notifications FROM notifications TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE ZEROMQ PUSH EMITTER zeromq_notifications FROM notifications TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -1739,12 +1739,12 @@ Feature: Web console NSPL REPL
         INHERIT ALL
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG;
-      CREATE EMITTER kafka_security_events FROM security_events TO KAFKA kafka_auth TOPIC datalake_security_events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING activity_codec
+      CREATE KAFKA TOPIC EMITTER kafka_security_events FROM security_events TO kafka_auth TOPIC 'datalake_security_events' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING activity_codec
         INHERIT ALL
         FLUSH EACH 1s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED EMITTER iceberg_connected_sessions FROM connected_sessions TO ICEBERG ON S3 s3_lakehouse TABLE datalake_connected_sessions VALUES { 'tenant_id' = input.tenant_id, 'device_id' = input.device_id, 'event_type' = input.event_type, 'value' = input.value } LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s FLUSH EACH 10s MAX BATCH SIZE 8MiB
+      CREATE DETACHED ICEBERG TABLE EMITTER iceberg_connected_sessions FROM connected_sessions TO s3_lakehouse TABLE 'datalake_connected_sessions' LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'tenant_id' = input.tenant_id, 'device_id' = input.device_id, 'event_type' = input.event_type, 'value' = input.value } FLUSH EACH 10s MAX BATCH SIZE 8MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
@@ -2034,12 +2034,12 @@ Feature: Web console NSPL REPL
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-      CREATE EMITTER redis_battery_alerts FROM battery_alerts TO REDIS PUBSUB redis_alerts CHANNEL battery_alerts MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING telemetry_codec
+      CREATE REDIS PUBSUB EMITTER redis_battery_alerts FROM battery_alerts TO redis_alerts CHANNEL 'battery_alerts' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING telemetry_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER redis_maintenance_alerts FROM maintenance_alerts TO REDIS PUBSUB redis_alerts CHANNEL maintenance_alerts MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING telemetry_codec
+      CREATE REDIS PUBSUB EMITTER redis_maintenance_alerts FROM maintenance_alerts TO redis_alerts CHANNEL 'maintenance_alerts' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING telemetry_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

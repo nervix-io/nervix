@@ -36,7 +36,7 @@ Feature: Pulsar emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER pulsar_notifications FROM notifications TO PULSAR pulsar_main TOPIC notifications_out_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE PULSAR TOPIC EMITTER pulsar_notifications FROM notifications TO pulsar_main TOPIC 'notifications_out_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -111,8 +111,8 @@ Feature: Pulsar emission
       CREATE PULSAR CLIENT pulsar_sink CONFIG {
         'addr' = '{{pulsar_stallable_addr}}'
       };
-      CREATE ATTACHED EMITTER pulsar_boundary FROM notifications
-        TO PULSAR pulsar_sink TOPIC pulsar_boundary_out_{{test_id}}
+      CREATE ATTACHED PULSAR TOPIC EMITTER pulsar_boundary FROM notifications
+        TO pulsar_sink TOPIC 'pulsar_boundary_out_{{test_id}}'
           MODE <publishing_mode>
           ENCODE USING notification_codec
         INHERIT ALL
@@ -137,12 +137,12 @@ Feature: Pulsar emission
     And within "5s" Kafka consumer group "pulsar_boundary_group_{{test_id}}" next offset for topic "pulsar_boundary_in_{{test_id}}" partition 0 is "at least 1"
 
     # A batch payload is one publish, so batching keeps each mode's completion point: producer
-    # acceptance for NO_ACK and the broker receipt of the one message for ACK.
+    # acceptance for NO ACK and the broker receipt of the one message for ACK.
     Examples:
       | cluster_size | publishing_mode                                                       | offset_condition | batch                              | payload          |
-      | 1            | NO_ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |                                    | {"user_id":42}   |
-      | 3            | NO_ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |                                    | {"user_id":42}   |
+      | 1            | NO ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |                                    | {"user_id":42}   |
+      | 3            | NO ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |                                    | {"user_id":42}   |
       | 1            | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | below 1          |                                    | {"user_id":42}   |
       | 3            | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | below 1          |                                    | {"user_id":42}   |
-      | 3            | NO_ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
+      | 3            | NO ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
       | 1            | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | below 1          | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |

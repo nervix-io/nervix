@@ -21,13 +21,13 @@ Feature: Altering emitters
         'addr' = 'tcp://127.0.0.1:63002',
         'bind' = 'false'
       };
-      CREATE EMITTER event_sink FROM outgoing
-        TO ZEROMQ sink_a MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
+      CREATE ZEROMQ PUSH EMITTER event_sink FROM outgoing
+        TO sink_a MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH EACH 30s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      ALTER EMITTER event_sink
-        SET TO ZEROMQ sink_b MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s,
+      ALTER ZEROMQ PUSH EMITTER event_sink
+        SET TO sink_b MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec,
         SET COLLECT FOR 10ms MAX BATCH SIZE 512KiB,
         SET DETACHED,
         SET FLUSH IMMEDIATE;
@@ -35,10 +35,10 @@ Feature: Altering emitters
       """
     Then the last command output contains
       """
-      CREATE DETACHED EMITTER event_sink
+      CREATE DETACHED ZEROMQ PUSH EMITTER event_sink
         FROM outgoing COLLECT FOR 10ms MAX BATCH SIZE 512KiB
-        TO ZEROMQ sink_b
-          MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        TO sink_b
+          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -77,8 +77,8 @@ Feature: Altering emitters
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER event_sink FROM outgoing
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
+      CREATE ZEROMQ PUSH EMITTER event_sink FROM outgoing
+        TO sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH EACH 30s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -90,7 +90,7 @@ Feature: Altering emitters
     Then the observed broker does not receive a payload within "300ms"
     When these NSPL commands are executed on the leader node
       """
-      ALTER EMITTER event_sink SET FLUSH IMMEDIATE;
+      ALTER ZEROMQ PUSH EMITTER event_sink SET FLUSH IMMEDIATE;
       """
     Then the last command output contains
       """
@@ -137,8 +137,8 @@ Feature: Altering emitters
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER event_sink FROM outgoing
-        TO ZEROMQ sink_a MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
+      CREATE ZEROMQ PUSH EMITTER event_sink FROM outgoing
+        TO sink_a MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -153,7 +153,7 @@ Feature: Altering emitters
       """
     When these NSPL commands are executed on the leader node
       """
-      ALTER EMITTER event_sink SET CLIENT sink_b, SET DETACHED;
+      ALTER ZEROMQ PUSH EMITTER event_sink SET CLIENT sink_b, SET DETACHED;
       """
     Then the last command output contains
       """
@@ -206,8 +206,8 @@ Feature: Altering emitters
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER event_sink FROM outgoing
-        TO ZEROMQ sink_a MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
+      CREATE ZEROMQ PUSH EMITTER event_sink FROM outgoing
+        TO sink_a MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -222,7 +222,7 @@ Feature: Altering emitters
       """
     When these NSPL commands are executed on the leader node
       """
-      ALTER EMITTER event_sink
+      ALTER ZEROMQ PUSH EMITTER event_sink
         ADD FROM replacement,
         DROP FROM outgoing,
         SET CLIENT sink_b,

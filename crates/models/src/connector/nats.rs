@@ -30,12 +30,11 @@ use super::{
 };
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
-    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
-    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
-    SubjectName,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, HeaderLayout, HeaderModel,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
+    LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Nats: unpooled, config NervixWithAddressQuery, CreateClientNats => NatsConfigEntry);
@@ -252,8 +251,9 @@ connector_sources! {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct NatsSubjectSink {
+    pub mode: NatsSubjectPublishingMode,
     pub client: ClientName,
-    pub subject: SubjectName,
+    pub subject: NatsPublishSubjectName,
 }
 
 impl SinkEntity for NatsSubjectSink {
@@ -265,15 +265,10 @@ impl SinkEntity for NatsSubjectSink {
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[
-            EmitterPublishingModeKind::NoAck,
-            EmitterPublishingModeKind::NatsJetStream,
-        ],
+        publishing_modes: NatsSubjectPublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
             keywords: "SUBJECT",
-            name: LocatorName::Unquoted {
-                label: "subject_name",
-            },
+            name: LocatorName::External(NatsPublishSubjectName::DECLARATION),
         }),
         options: &[],
         envelope: &[],
@@ -299,8 +294,31 @@ connector_sinks! {
     connector Nats = "NATS";
     /// What a NATS sink writes.
     pub enum NatsSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum NatsEmitterMode;
     /// The entities a NATS sink writes.
     pub enum NatsSinkEntity {
-        Subject(NatsSubjectSink) = "SUBJECT";
+        Subject(NatsSubjectSink, NatsSubjectPublishingMode) = "SUBJECT";
     }
+}
+
+super::publishing::emitter_modes! {
+    pub enum NatsSubjectPublishingMode {
+        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
+        JetStream { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => NatsJetStream,
+    }
+}
+
+super::external_name::external_names! {
+    /// A NATS publication subject, without subscription wildcards.
+    pub struct NatsPublishSubjectName => nats_publication_subject,
+        label "nats_publish_subject", example "orders.Created";
+}
+
+fn nats_publication_subject(text: &str) -> Result<(), ExternalNameError> {
+    nats_subject_rule(text)?;
+    if let Some(ch) = text.chars().find(|ch| matches!(ch, '*' | '>')) {
+        return Err(ExternalNameError::InvalidChar { ch });
+    }
+    Ok(())
 }

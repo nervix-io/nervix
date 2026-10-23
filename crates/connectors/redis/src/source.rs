@@ -3,11 +3,11 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The dedicated subscription connection each source instance reads a channel
-//!   through, including DNS, TCP, TLS, Redis's own protocol setup and the SUBSCRIBE, all within
-//!   the client's `connect_timeout_ms`.
+//!   through, including DNS, TCP, TLS and protocol setup within `connect_timeout_ms`, the bounded
+//!   read-ahead handoff, and liveness probes within `idle_timeout_ms`.
 //! - **Depends on.** The connector contract, node DNS resolver, typed client configuration
 //!   entries, `error-stack`, Tokio and `redis`.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -21,25 +21,28 @@
     )
 )]
 
-use std::io;
+mod subscription;
+
+use std::{io, num::NonZeroUsize};
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
-use futures_util::StreamExt as _;
 use nervix_connector::{
     BrokerSourceConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMetadataRow,
     NoIngestHeaders, RustlsClientConfigSource, SourceBatch, SourceBatchRequest, SourceConnector,
     SourceError, SourceMessage, SourceReadCancellation, SourceResult, SourceResume,
-    client_config_value,
+    client_config_value, optional_client_config_value,
 };
 use nervix_dns::{DnsLookupFailure, DnsResolver, LookupShare, OperationBudget};
-use nervix_models::{ClientConfigEntry, RedisChannelName};
-use nervix_primitives::{net::TcpStream, sync::StdArc, time::timeout};
-use redis::{
-    Client as RedisClient, ConnectionAddr, Msg,
-    aio::{PubSub, PubSubStream},
+use nervix_models::{ClientConfigEntry, ConnectorKind, RedisChannelName};
+use nervix_primitives::{
+    net::TcpStream,
+    sync::{Semaphore, StdArc},
+    time::timeout,
 };
+use redis::{Client as RedisClient, ConnectionAddr, Msg};
 use rustls_pki_types::ServerName;
+use subscription::RedisSubscription;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsConnector;
@@ -56,6 +59,12 @@ pub enum RedisPubSubSourceError {
     /// The client's `connect_timeout_ms` breaks the deadline rule, which the cause beneath names.
     #[error("invalid Redis client connect_timeout_ms")]
     InvalidConnectTimeout,
+    #[error("invalid {connector} client idle_timeout_ms", connector = ConnectorKind::Redis)]
+    InvalidIdleTimeout,
+    #[error("{connector} subscription requires client config key '{key}'", connector = ConnectorKind::Redis)]
+    MissingConfiguration { key: &'static str },
+    #[error("{connector} subscription_buffer_messages must be between 1 and {maximum}", connector = ConnectorKind::Redis)]
+    InvalidBufferCapacity { maximum: usize },
     #[error("failed to build Redis client")]
     BuildClient,
     #[error("resolving Redis subscription host '{host}' failed: {failure}")]
@@ -73,6 +82,16 @@ pub enum RedisPubSubSourceError {
     UnsupportedAddress,
     #[error("failed to subscribe to Redis channel '{channel}'")]
     Subscribe { channel: String },
+    #[error("failed to initialize the {connector} subscription protocol", connector = ConnectorKind::Redis)]
+    SubscriptionSetup,
+    #[error("failed to read the {connector} subscription", connector = ConnectorKind::Redis)]
+    SubscriptionRead,
+    #[error("{connector} subscription idle probe failed", connector = ConnectorKind::Redis)]
+    IdleProbe,
+    #[error("{connector} subscription reader task failed", connector = ConnectorKind::Redis)]
+    SubscriptionTask,
+    #[error("unexpected {connector} subscription response during {operation}", connector = ConnectorKind::Redis)]
+    UnexpectedResponse { operation: &'static str },
     #[error("Redis subscription closed")]
     SubscriptionClosed,
 }
@@ -88,6 +107,8 @@ pub struct RedisPubSubSourcePlan {
     tls: Option<StdArc<rustls::ClientConfig>>,
     channel: RedisChannelName,
     connect_timeout: ConfiguredDeadline,
+    idle_timeout: ConfiguredDeadline,
+    buffer_messages: NonZeroUsize,
 }
 
 trait RedisStream: AsyncRead + AsyncWrite {}
@@ -106,6 +127,14 @@ impl RedisPubSubSourcePlan {
             redis_client(&addr, &config).change_context(RedisPubSubSourceError::BuildClient)?;
         let connect_timeout = ConfiguredDeadline::connect(&config)
             .change_context(RedisPubSubSourceError::InvalidConnectTimeout)?;
+        let idle_timeout = ConfiguredDeadline::idle(&config)
+            .change_context(RedisPubSubSourceError::InvalidIdleTimeout)?;
+        let Some(idle_timeout) = idle_timeout else {
+            return Err(Report::new(RedisPubSubSourceError::MissingConfiguration {
+                key: "idle_timeout_ms",
+            }));
+        };
+        let buffer_messages = Self::buffer_messages(&config)?;
         let tls = match client.get_connection_info().addr() {
             ConnectionAddr::TcpTls { .. } => {
                 let config = RustlsClientConfigSource::new(&config)
@@ -121,7 +150,29 @@ impl RedisPubSubSourcePlan {
             tls,
             channel,
             connect_timeout,
+            idle_timeout,
+            buffer_messages,
         })
+    }
+
+    fn buffer_messages(config: &[ClientConfigEntry]) -> RedisPubSubSourceResult<NonZeroUsize> {
+        let Some(value) = optional_client_config_value(config, "subscription_buffer_messages")
+        else {
+            return Err(Report::new(RedisPubSubSourceError::MissingConfiguration {
+                key: "subscription_buffer_messages",
+            }));
+        };
+        let invalid = || RedisPubSubSourceError::InvalidBufferCapacity {
+            maximum: Semaphore::MAX_PERMITS,
+        };
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(Report::new(invalid()));
+        }
+        let capacity = value.parse::<NonZeroUsize>().change_context(invalid())?;
+        if capacity.get() > Semaphore::MAX_PERMITS {
+            return Err(Report::new(invalid()));
+        }
+        Ok(capacity)
     }
 
     /// The operation budget one subscription is established within.
@@ -136,42 +187,32 @@ impl RedisPubSubSourcePlan {
             .change_context(RedisPubSubSourceError::NotEstablished)
     }
 
-    async fn subscribe(&self) -> RedisPubSubSourceResult<PubSubStream> {
+    async fn subscribe(&self) -> RedisPubSubSourceResult<RedisSubscription> {
         let budget = self.budget();
         let stream = self.connect_with_budget(&budget).await?;
-        let setup = timeout(
+        let subscribed = timeout(
             budget.remaining(),
-            PubSub::new(self.client.get_connection_info().redis_settings(), stream),
+            RedisSubscription::open(
+                stream,
+                self.client.get_connection_info().redis_settings(),
+                self.channel.as_str(),
+                self.buffer_messages,
+                self.idle_timeout,
+            ),
         )
         .await;
-        let mut pubsub = match setup {
-            Ok(Ok(pubsub)) => pubsub,
-            Ok(Err(source)) => {
-                return Err(Report::new(RedisPubSubSourceError::Connect {
-                    reason: source.to_string(),
-                }));
-            }
-            Err(_) => return Err(self.not_established("Redis's setup of the subscription")),
-        };
-        let subscribed = timeout(budget.remaining(), pubsub.subscribe(self.channel.as_str())).await;
         let subscribe_failed = || RedisPubSubSourceError::Subscribe {
             channel: self.channel.as_str().to_string(),
         };
         match subscribed {
-            Ok(Ok(())) => Ok(pubsub.into_on_message()),
-            Ok(Err(source)) => {
-                Err(Report::new(subscribe_failed()).attach_printable(source.to_string()))
-            }
-            Err(_) => Err(Report::new(
-                self.connect_timeout
-                    .elapsed("subscribing to the Redis channel"),
-            )
-            .change_context(subscribe_failed())),
+            Ok(Ok(subscription)) => Ok(subscription),
+            Ok(Err(error)) => Err(error.change_context(subscribe_failed())),
+            Err(_) => Err(self.not_established("Redis's setup of the subscription")),
         }
     }
 
     /// Open a fresh stream for every resume. Redis's Pub/Sub convenience method uses its default
-    /// system resolver, so the connector opens the transport and lets Redis set up the protocol.
+    /// system resolver, so the connector owns the transport used by the subscription reader.
     #[cfg(test)]
     async fn connect(&self) -> RedisPubSubSourceResult<ConnectedStream> {
         let budget = self.budget();
@@ -303,7 +344,7 @@ impl SourceMessage for RedisPubSubSourceMessage {
 /// One Redis Pub/Sub source instance: its subscription stream, absent while reconnecting.
 pub struct RedisPubSubSource {
     plan: RedisPubSubSourcePlan,
-    stream: Option<PubSubStream>,
+    stream: Option<RedisSubscription>,
 }
 
 #[async_trait]
@@ -322,7 +363,12 @@ impl SourceConnector for RedisPubSubSource {
     }
 
     async fn suspend(&mut self) -> SourceResult<()> {
-        self.stream = None;
+        if let Some(stream) = self.stream.take() {
+            stream
+                .close()
+                .await
+                .change_context(SourceError::Suspend { connector: REDIS })?;
+        }
         Ok(())
     }
 
@@ -339,7 +385,12 @@ impl SourceConnector for RedisPubSubSource {
     }
 
     async fn close(&mut self) -> SourceResult<()> {
-        self.stream = None;
+        if let Some(stream) = self.stream.take() {
+            stream
+                .close()
+                .await
+                .change_context(SourceError::Close { connector: REDIS })?;
+        }
         Ok(())
     }
 }
@@ -357,15 +408,17 @@ impl BrokerSourceConnector for RedisPubSubSource {
         let Some(stream) = self.stream.as_mut() else {
             return Ok(SourceBatch::ResumeRequired);
         };
-        let Some(received) = cancellation.unless_cancelled(stream.next()).await else {
+        let Some(received) = cancellation.unless_cancelled(stream.next_message()).await else {
             return Ok(SourceBatch::Interrupted {
                 gathered: Vec::new(),
             });
         };
-        let Some(message) = received else {
-            self.stream = None;
-            return Err(Report::new(RedisPubSubSourceError::SubscriptionClosed)
-                .change_context(SourceError::Read { connector: REDIS }));
+        let message = match received {
+            Ok(message) => message,
+            Err(error) => {
+                self.stream = None;
+                return Err(error.change_context(SourceError::Read { connector: REDIS }));
+            }
         };
         Ok(SourceBatch::Messages(vec![RedisPubSubSourceMessage {
             message,
@@ -394,6 +447,7 @@ mod tests {
         time::Duration,
     };
 
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_connector::DeadlineElapsed;
     use nervix_dns::{DnsLookupError, DnsLookupFailure};
     use nervix_models::DeadlineKey;
@@ -403,12 +457,49 @@ mod tests {
     use super::*;
     use crate::test_fixture::Fixture;
 
+    #[test]
+    fn subscription_capacity_is_positive_and_fits_the_bounded_channel() {
+        for capacity in [1, 2, Semaphore::MAX_PERMITS] {
+            let value = capacity.to_string();
+            let parsed = RedisPubSubSourcePlan::buffer_messages(&[entry(
+                "subscription_buffer_messages",
+                &value,
+            )])
+            .assured("the table contains admitted message capacities");
+            assert_eq!(parsed.get(), capacity);
+        }
+        let above_channel_limit = Semaphore::MAX_PERMITS
+            .checked_add(1)
+            .assured("the channel's permit ceiling is below usize::MAX")
+            .to_string();
+        for value in [
+            "0",
+            "-1",
+            "+2",
+            "1.5",
+            "",
+            above_channel_limit.as_str(),
+            "18446744073709551616",
+        ] {
+            let error = RedisPubSubSourcePlan::buffer_messages(&[entry(
+                "subscription_buffer_messages",
+                value,
+            )])
+            .expect_err("the capacity is not an admitted positive message count");
+            assert!(matches!(
+                error.current_context(),
+                RedisPubSubSourceError::InvalidBufferCapacity { .. }
+            ));
+        }
+    }
+
     fn plan(addr: &str, dns: DnsResolver) -> RedisPubSubSourcePlan {
         RedisPubSubSourcePlan::new(
-            vec![ClientConfigEntry {
-                key: "addr".to_string(),
-                value: addr.to_string(),
-            }],
+            vec![
+                entry("addr", addr),
+                entry("subscription_buffer_messages", "1024"),
+                entry("idle_timeout_ms", "30000"),
+            ],
             RedisChannelName::parse("events").expect("a plain channel name parses"),
             dns,
         )
@@ -430,6 +521,8 @@ mod tests {
                 vec![
                     entry("addr", "redis://127.0.0.1:6379"),
                     entry("connect_timeout_ms", value),
+                    entry("subscription_buffer_messages", "1024"),
+                    entry("idle_timeout_ms", "30000"),
                 ],
                 RedisChannelName::parse("events").expect("a plain channel name parses"),
                 fixture.dns.clone(),
@@ -465,6 +558,8 @@ mod tests {
             vec![
                 entry("addr", &format!("redis://127.0.0.1:{port}")),
                 entry("connect_timeout_ms", "200"),
+                entry("subscription_buffer_messages", "1024"),
+                entry("idle_timeout_ms", "30000"),
             ],
             RedisChannelName::parse("events").expect("a plain channel name parses"),
             fixture.dns,
@@ -473,8 +568,7 @@ mod tests {
         let error = nervix_primitives::time::timeout(Duration::from_secs(10), plan.subscribe())
             .await
             .expect("connect_timeout_ms bounds the subscription")
-            .err()
-            .expect("a server that never answers cannot be subscribed to");
+            .expect_err("a server that never answers cannot be subscribed to");
         let elapsed = error
             .frames()
             .find_map(|frame| frame.downcast_ref::<DeadlineElapsed>())

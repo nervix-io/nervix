@@ -23,6 +23,12 @@ tables, the operator limits and the reported failures. [WASM State And Recovery]
 Interconnect](./interconnect.md), [Data-Plane Concurrency](./data-plane-concurrency.md) and
 [Shutdown And Recovery](./shutdown.md) keep the contracts of the mechanisms backup and restore use.
 
+Canonical emitter documents use Plexus connector/entity heads and complete typed destination bodies.
+Restore reads those documents through the current composed grammar into semantic Models. Each
+entity owns its publishing policy and exact external locator; Iceberg retains its storage-client
+reference for planning. The registry's binary Model record header identifies this current stored
+shape, and restoration uses the same validated Model-to-plan boundary as ordinary configuration.
+
 ## Ownership By Layer
 
 | Layer | Owner | What it owns |

@@ -16,7 +16,7 @@
 use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
-use strum::{AsRefStr, EnumDiscriminants, EnumIter, EnumString, IntoStaticStr};
+use strum::{AsRefStr, EnumIter, EnumString, IntoStaticStr};
 use thiserror::Error;
 
 use crate::{
@@ -38,7 +38,6 @@ pub struct CreateEmitter {
     pub batch: Option<crate::EmitterBatchPolicy>,
     pub flush_policy: FlushPolicy,
     pub error_policies: ErrorPolicies,
-    pub publishing_mode: EmitterPublishingMode,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default)]
@@ -75,6 +74,12 @@ impl CreateEmitter {
         &mut self,
         alter: &AlterEmitter,
     ) -> error_stack::Result<(), AlterEmitterError> {
+        if self.sink.kind() != alter.kind {
+            return Err(Report::new(AlterEmitterError::EmitterKindMismatch {
+                stored: self.sink.kind(),
+                requested: alter.kind,
+            }));
+        }
         if self.name != alter.emitter {
             return Err(Report::new(AlterEmitterError::EmitterNameMismatch {
                 stored: self.name.clone(),
@@ -107,7 +112,7 @@ impl CreateEmitter {
     /// Both the standalone check and an alteration report a violation from here, each in its own
     /// error, so neither has to rebuild the other's report.
     fn batch_contract_violation(&self) -> Option<EmitterBatchContractError> {
-        let sink = self.sink.transport_label();
+        let sink = self.sink.kind().phrase();
         let legality = self.sink.batch_legality();
         let Some(batch) = &self.batch else {
             return match legality {
@@ -197,21 +202,21 @@ impl CreateEmitter {
                 };
                 self.from.r#where.remove(index);
             }
-            AlterEmitterOperation::SetSink {
-                sink,
-                publishing_mode,
+            AlterEmitterOperation::SetTo {
+                destination,
                 body,
+                construction,
             } => {
-                if !sink.accepts_publishing_mode(publishing_mode) {
-                    return Err(Report::new(AlterEmitterError::PublishingModeUnsupported {
-                        sink: sink.transport_label().to_string(),
-                        mode: publishing_mode.kind_label().to_string(),
+                if self.sink.kind() != destination.kind() {
+                    return Err(Report::new(AlterEmitterError::DestinationKindMismatch {
+                        stored: self.sink.kind(),
+                        requested: destination.kind(),
                     }));
                 }
-                self.sink = sink.clone();
-                self.publishing_mode = publishing_mode.clone();
-                if let Some(body) = body {
-                    self.body = body.clone();
+                self.sink = destination.clone();
+                self.body = body.clone();
+                if let Some(construction) = construction {
+                    self.construction = construction.clone();
                 }
             }
             AlterEmitterOperation::SetClient { client } => {
@@ -244,28 +249,7 @@ impl CreateEmitter {
                 self.mode = *mode;
             }
             AlterEmitterOperation::SetPublishingMode { mode } => {
-                let selected = match (self.sink.as_ref(), mode) {
-                    (
-                        EmitSink::Client(_),
-                        EmitterPublishingMode::BrokerAck {
-                            window,
-                            ack_timeout,
-                            retry_policy,
-                        },
-                    ) => EmitterPublishingMode::ClientAck {
-                        window: *window,
-                        ack_timeout: ack_timeout.clone(),
-                        retry_policy: retry_policy.clone(),
-                    },
-                    _ => mode.clone(),
-                };
-                if !self.sink.accepts_publishing_mode(&selected) {
-                    return Err(Report::new(AlterEmitterError::PublishingModeUnsupported {
-                        sink: self.sink.transport_label().to_string(),
-                        mode: mode.kind_label().to_string(),
-                    }));
-                }
-                self.publishing_mode = selected;
+                self.sink.replace_mode(mode)?;
             }
             AlterEmitterOperation::SetBatch { policy } => {
                 self.batch = Some(*policy);
@@ -320,6 +304,7 @@ impl CreateEmitter {
 )]
 pub struct AlterEmitter {
     pub emitter: EmitterName,
+    pub kind: crate::EmitSinkKind,
     pub operations: Vec<AlterEmitterOperation>,
 }
 
@@ -341,10 +326,10 @@ pub enum AlterEmitterOperation {
     AlterFromDropWhere {
         relay: RelayName,
     },
-    SetSink {
-        sink: Box<EmitSink>,
-        publishing_mode: EmitterPublishingMode,
-        body: Option<EmitterBody>,
+    SetTo {
+        destination: Box<EmitSink>,
+        body: EmitterBody,
+        construction: Option<crate::RouteConstruction>,
     },
     SetClient {
         client: ClientName,
@@ -361,7 +346,7 @@ pub enum AlterEmitterOperation {
         mode: AckMode,
     },
     SetPublishingMode {
-        mode: EmitterPublishingMode,
+        mode: crate::EmitterModeChange,
     },
     SetBatch {
         policy: crate::EmitterBatchPolicy,
@@ -378,6 +363,16 @@ pub enum AlterEmitterOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AlterEmitterError {
+    #[error("ALTER {requested} EMITTER targets an emitter declared as {stored}")]
+    EmitterKindMismatch {
+        stored: crate::EmitSinkKind,
+        requested: crate::EmitSinkKind,
+    },
+    #[error("{stored} EMITTER cannot change its destination to {requested}")]
+    DestinationKindMismatch {
+        stored: crate::EmitSinkKind,
+        requested: crate::EmitSinkKind,
+    },
     #[error("ALTER targets emitter `{requested}`, but the stored emitter is `{stored}`")]
     EmitterNameMismatch {
         stored: EmitterName,
@@ -393,14 +388,12 @@ pub enum AlterEmitterError {
     CannotDropLastInput,
     #[error("emitter encoding is not configured")]
     EncodeNotConfigured,
-    #[error("CLIENT emitters do not name an external client")]
+    #[error("CLIENT CONSUMER emitters do not name an external client")]
     ClientUnsupported,
-    #[error("HTTP emitters select an absent body with SET TO HTTP ... WITHOUT BODY")]
+    #[error("HTTP REQUEST emitters select an absent body with SET TO ... WITHOUT BODY")]
     HttpDropEncode,
-    #[error("COMMIT policy is only supported by Iceberg emitters")]
+    #[error("COMMIT policy is only supported by ICEBERG TABLE emitters")]
     CommitPolicyUnsupported,
-    #[error("{sink} emitters do not support publishing mode {mode}")]
-    PublishingModeUnsupported { sink: String, mode: String },
     #[error("emitter batching is not configured")]
     BatchNotConfigured,
     #[error(transparent)]
@@ -431,64 +424,67 @@ pub enum EmitterBatchContractError {
     },
 }
 
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    EnumDiscriminants,
-)]
-#[strum_discriminants(name(EmitterPublishingModeKind), derive(Hash, EnumIter))]
-pub enum EmitterPublishingMode {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
+pub enum EmitterPublishingModeKind {
+    ClientAck,
+    NoAck,
+    BrokerAck,
+    MqttQos0,
+    MqttQos1,
+    MqttQos2,
+    NatsJetStream,
+    SqsSingle,
+    SqsBatch,
+    RequestAck,
+}
+
+/// A borrowed observation of an entity-owned publication policy. It is never stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitterPublishing<'a> {
     ClientAck {
-        window: AckWindow,
-        ack_timeout: String,
-        retry_policy: RetryPolicy,
+        window: &'a AckWindow,
+        ack_timeout: &'a str,
+        retry_policy: &'a RetryPolicy,
     },
     NoAck {
-        retry_policy: RetryPolicy,
+        retry_policy: &'a RetryPolicy,
     },
     BrokerAck {
-        window: AckWindow,
-        ack_timeout: String,
-        retry_policy: RetryPolicy,
+        window: &'a AckWindow,
+        ack_timeout: &'a str,
+        retry_policy: &'a RetryPolicy,
     },
     MqttQos0 {
-        retry_policy: RetryPolicy,
+        retry_policy: &'a RetryPolicy,
     },
     MqttQos1 {
-        window: AckWindow,
-        ack_timeout: String,
-        retry_policy: RetryPolicy,
+        window: &'a AckWindow,
+        ack_timeout: &'a str,
+        retry_policy: &'a RetryPolicy,
     },
     MqttQos2 {
-        window: AckWindow,
-        ack_timeout: String,
-        retry_policy: RetryPolicy,
+        window: &'a AckWindow,
+        ack_timeout: &'a str,
+        retry_policy: &'a RetryPolicy,
     },
     NatsJetStream {
-        window: AckWindow,
-        ack_timeout: String,
-        retry_policy: RetryPolicy,
+        window: &'a AckWindow,
+        ack_timeout: &'a str,
+        retry_policy: &'a RetryPolicy,
     },
     SqsSingle {
-        retry_policy: RetryPolicy,
+        retry_policy: &'a RetryPolicy,
     },
     SqsBatch {
-        retry_policy: RetryPolicy,
+        retry_policy: &'a RetryPolicy,
     },
     RequestAck {
-        retry_policy: RetryPolicy,
+        retry_policy: &'a RetryPolicy,
     },
 }
 
-impl EmitterPublishingMode {
-    pub fn retry_policy(&self) -> &RetryPolicy {
+impl<'a> EmitterPublishing<'a> {
+    pub fn retry_policy(self) -> &'a RetryPolicy {
         match self {
             Self::ClientAck { retry_policy, .. }
             | Self::NoAck { retry_policy }
@@ -502,8 +498,7 @@ impl EmitterPublishingMode {
             | Self::RequestAck { retry_policy } => retry_policy,
         }
     }
-
-    pub fn ack_timeout(&self) -> Option<&str> {
+    pub fn ack_timeout(self) -> Option<&'a str> {
         match self {
             Self::ClientAck { ack_timeout, .. }
             | Self::BrokerAck { ack_timeout, .. }
@@ -517,14 +512,22 @@ impl EmitterPublishingMode {
             | Self::RequestAck { .. } => None,
         }
     }
-
-    pub fn kind_label(&self) -> &'static str {
+    pub fn kind_label(self) -> &'static str {
         self.kind().label()
     }
-
-    /// Which publishing mode this is, whatever window and durations it writes.
-    pub fn kind(&self) -> EmitterPublishingModeKind {
-        EmitterPublishingModeKind::from(self)
+    pub fn kind(self) -> EmitterPublishingModeKind {
+        match self {
+            Self::ClientAck { .. } => EmitterPublishingModeKind::ClientAck,
+            Self::NoAck { .. } => EmitterPublishingModeKind::NoAck,
+            Self::BrokerAck { .. } => EmitterPublishingModeKind::BrokerAck,
+            Self::MqttQos0 { .. } => EmitterPublishingModeKind::MqttQos0,
+            Self::MqttQos1 { .. } => EmitterPublishingModeKind::MqttQos1,
+            Self::MqttQos2 { .. } => EmitterPublishingModeKind::MqttQos2,
+            Self::NatsJetStream { .. } => EmitterPublishingModeKind::NatsJetStream,
+            Self::SqsSingle { .. } => EmitterPublishingModeKind::SqsSingle,
+            Self::SqsBatch { .. } => EmitterPublishingModeKind::SqsBatch,
+            Self::RequestAck { .. } => EmitterPublishingModeKind::RequestAck,
+        }
     }
 }
 
@@ -533,7 +536,7 @@ impl EmitterPublishingModeKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::ClientAck | Self::BrokerAck | Self::RequestAck => "ACK",
-            Self::NoAck => "NO_ACK",
+            Self::NoAck => "NO ACK",
             Self::MqttQos0 => "QOS 0",
             Self::MqttQos1 => "QOS 1 ACK",
             Self::MqttQos2 => "QOS 2 ACK",
@@ -549,7 +552,7 @@ impl EmitterPublishingModeKind {
             Self::ClientAck | Self::BrokerAck => {
                 "ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s"
             }
-            Self::NoAck => "NO_ACK RETRY POLICY BACKOFF 1s MAX 30s",
+            Self::NoAck => "NO ACK RETRY POLICY BACKOFF 1s MAX 30s",
             Self::MqttQos0 => "QOS 0 RETRY POLICY BACKOFF 1s MAX 30s",
             Self::MqttQos1 => "QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
             Self::MqttQos2 => "QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",

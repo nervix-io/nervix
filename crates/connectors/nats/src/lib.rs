@@ -54,7 +54,7 @@ use nervix_connector::{
     SinkFinishError, SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkRecord,
     SinkRecordId, SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
 };
-use nervix_models::{ClientConfigEntry, SubjectName};
+use nervix_models::{ClientConfigEntry, NatsPublishSubjectName};
 use nervix_primitives::{
     sync::{
         StdArc,
@@ -70,7 +70,7 @@ const NATS: &str = "nats";
 
 /// Whether a NATS sink publishes through core NATS or waits for JetStream to store each record.
 ///
-/// A NATS sink publishes through its own client even without an acknowledgement, so `MODE NO_ACK`
+/// A NATS sink publishes through its own client even without an acknowledgement, so `MODE NO ACK`
 /// decides [`NatsPublishingMode::Core`] rather than a broker mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NatsPublishingMode {
@@ -82,7 +82,7 @@ pub enum NatsPublishingMode {
 /// backoff.
 pub struct NatsSinkConfig {
     pub config: Vec<ClientConfigEntry>,
-    pub subject: SubjectName,
+    pub subject: NatsPublishSubjectName,
     pub mode: NatsPublishingMode,
     pub retry_policy: ParsedRetryPolicy,
 }
@@ -96,7 +96,7 @@ pub struct NatsSink {
 /// How this sink publishes, together with whatever that way of publishing needs.
 ///
 /// A JetStream context exists only for `MODE ACK`, and the bound and the unflushed records of a
-/// core write only for `MODE NO_ACK`, so pairing each with the mode that requires it means the
+/// core write only for `MODE NO ACK`, so pairing each with the mode that requires it means the
 /// publish path reads one value instead of matching a mode and then hoping a separately stored
 /// value agrees with it.
 enum NatsDelivery {
