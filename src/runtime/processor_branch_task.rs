@@ -75,8 +75,22 @@ pub(super) enum ProcessorBranchLifetime {
     Appeared,
 }
 
+/// What a processor's branches publish when they are asked to checkpoint, decided by who asks.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ProcessorCheckpointPurpose {
+    /// A quiesced backup cut reads the state store next. A branch publishes the state its periodic
+    /// snapshot may not hold yet. A WASM branch publishes nothing: the checkpoint that completed
+    /// its last callback already holds the guest state on its owner and its replicas, and saving
+    /// the guest again would wait for those replicas inside the cut.
+    BackupCut,
+    /// An ownership handoff moves the processor next, so every branch checkpoints its live state,
+    /// a WASM guest included.
+    OwnershipHandoff,
+}
+
 pub(super) enum ProcessorBranchCommand {
     Checkpoint {
+        purpose: ProcessorCheckpointPurpose,
         response: oneshot::Sender<OwnershipHandoffResult<()>>,
     },
     Stop(ProcessorBranchStopMode),
@@ -130,6 +144,7 @@ pub(super) struct ProcessorBranchHandoff {
 
 pub(super) enum ProcessorNodeCommand {
     Checkpoint {
+        purpose: ProcessorCheckpointPurpose,
         response: oneshot::Sender<OwnershipHandoffResult<PersistedRuntimeStateEntry>>,
     },
     Handoff {
@@ -498,7 +513,7 @@ pub(super) async fn run_processor_node_runtime(
             RelayInteractionEvent::Command(command) => match command {
                 // The branches the processor has not restored exist only in its lifecycle, so it
                 // cannot checkpoint them or reset their guest state yet.
-                ProcessorNodeCommand::Checkpoint { response } if pending_restore.is_some() => {
+                ProcessorNodeCommand::Checkpoint { response, .. } if pending_restore.is_some() => {
                     response
                         .send(Err(Report::new(
                             OwnershipHandoffError::BranchesUnrestored {
@@ -531,11 +546,15 @@ pub(super) async fn run_processor_node_runtime(
                         )))
                         .means_peer_left("WASM state reset schedule application requester");
                 }
-                ProcessorNodeCommand::Checkpoint { response } => {
+                ProcessorNodeCommand::Checkpoint { purpose, response } => {
                     let result = nervix_primitives::expect_lint!(
                         nervix::lifecycle_call,
                         "the explicit checkpoint command captures the retained branch generations",
-                        checkpoint_all_processor_branch_instances(processor.clone(), &instances)
+                        checkpoint_all_processor_branch_instances(
+                            processor.clone(),
+                            &instances,
+                            purpose
+                        )
                     )
                     .await;
                     response
@@ -1604,11 +1623,15 @@ async fn run_processor_branch_task(
             biased;
             command = command_rx.recv() => {
                 match command {
-                    Some(ProcessorBranchCommand::Checkpoint { response }) => {
+                    Some(ProcessorBranchCommand::Checkpoint { purpose, response }) => {
                         let result = match domain_clock.snapshot() {
                             Ok(snapshot) => {
                                 branch
-                                    .checkpoint_processor_live_state(&processor, snapshot.now())
+                                    .checkpoint_processor_live_state(
+                                        &processor,
+                                        snapshot.now(),
+                                        purpose,
+                                    )
                                     .await
                             }
                             Err(error) => Err(OwnershipHandoffError::checkpoint(format!(
@@ -1883,6 +1906,7 @@ pub(super) async fn stop_processor_branch_task(
 pub(super) async fn checkpoint_all_processor_branch_instances(
     processor: impl Into<ModelName>,
     instances: &BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
+    purpose: ProcessorCheckpointPurpose,
 ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
     let processor = processor.into();
     let states = instances.states();
@@ -1891,7 +1915,7 @@ pub(super) async fn checkpoint_all_processor_branch_instances(
         let (response, receiver) = oneshot::channel();
         entry
             .commands
-            .send(ProcessorBranchCommand::Checkpoint { response })
+            .send(ProcessorBranchCommand::Checkpoint { purpose, response })
             .await
             .map_err(|_| {
                 OwnershipHandoffError::checkpoint(format!(

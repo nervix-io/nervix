@@ -131,10 +131,11 @@ impl ScheduledNodeTask {
 
     pub(super) async fn checkpoint_via(
         commands: &mpsc::Sender<ProcessorNodeCommand>,
+        purpose: ProcessorCheckpointPurpose,
     ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
         let (response, receiver) = oneshot::channel();
         commands
-            .send(ProcessorNodeCommand::Checkpoint { response })
+            .send(ProcessorNodeCommand::Checkpoint { purpose, response })
             .await
             .map_err(|_| {
                 OwnershipHandoffError::checkpoint(

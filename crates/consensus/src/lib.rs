@@ -103,6 +103,7 @@ mod records;
 mod replication;
 mod restore;
 mod retention;
+mod settings;
 mod snapshot;
 pub use command_execution::{
     CommandExecution, CommandExecutionAdmissionError, CommandExecutionAdmissionPolicy,
@@ -119,6 +120,12 @@ pub use restore::{
     RestoredResource,
 };
 pub use retention::RaftRetentionPolicy;
+pub use settings::{
+    RaftCoveredLogBytesRetained, RaftCoveredLogEntriesRetained, RaftElectionTimeoutMax,
+    RaftElectionTimeoutMin, RaftHeartbeatInterval, RaftRetainedLogCap, RaftRetentionBounds,
+    RaftRetentionSettings, RaftSnapshotByteThreshold, RaftSnapshotEntryThreshold, RaftTimingError,
+    RaftTimings,
+};
 pub use snapshot::{SealedSnapshot, SnapshotRetention};
 mod storage;
 mod storage_fault;
@@ -131,6 +138,9 @@ use replication::AppendPath;
 use storage::FjallLogReader;
 use storage::FjallStore;
 mod transaction;
+mod transaction_retention;
+#[cfg(test)]
+mod transaction_retention_tests;
 use connectivity_fault::ConnectivityFault;
 use domain_mutation::{DomainMutationAdmission, DomainMutationError};
 #[cfg(any(test, feature = "testing"))]
@@ -866,10 +876,8 @@ pub struct ConsensusSettings {
     pub interconnect_advertise_addr: NodeEndpoint,
     pub interconnect: Transport,
     pub executor: nervix_execution::Executor,
-    pub raft_heartbeat_interval: Duration,
-    pub raft_election_timeout_min: Duration,
-    pub raft_election_timeout_max: Duration,
-    pub raft_retention: RaftRetentionPolicy,
+    pub raft_timings: RaftTimings,
+    pub raft_retention: RaftRetentionSettings,
 }
 
 /// One node as cluster discovery currently describes it.
@@ -2075,28 +2083,31 @@ impl Consensus {
     where
         Recorder: AppendStreamOpenRecorder,
     {
-        let retention = settings.raft_retention;
+        let retention = settings.raft_retention.policy();
         let heartbeat_interval =
-            u64::try_from(settings.raft_heartbeat_interval.as_millis()).unwrap_or(u64::MAX);
+            u64::try_from(settings.raft_timings.heartbeat_interval().as_millis())
+                .unwrap_or(u64::MAX);
         let election_timeout_min =
-            u64::try_from(settings.raft_election_timeout_min.as_millis()).unwrap_or(u64::MAX);
+            u64::try_from(settings.raft_timings.election_timeout_min().as_millis())
+                .unwrap_or(u64::MAX);
         // A follower that acknowledged replication sent within the last heartbeat interval already
         // knows what a heartbeat would tell it, so sustained writes send none. The window never
         // takes more than half of the gap before the minimum election timeout, which keeps one
         // interval plus the window below that timeout and leaves the rest for delivery.
-        let heartbeat_min_interval = match election_timeout_min.checked_sub(heartbeat_interval) {
-            Some(election_gap) => heartbeat_interval.min(election_gap / 2),
-            // `validate` rejects an election timeout that does not exceed the heartbeat interval.
-            None => 0,
-        };
+        let election_gap = election_timeout_min
+            .checked_sub(heartbeat_interval)
+            .assured("RaftTimings keeps the minimum election timeout above the heartbeat interval");
+        let heartbeat_min_interval = heartbeat_interval.min(election_gap / 2);
         let config = StdArc::new(
             Config {
                 cluster_name: settings.cluster_name,
                 heartbeat_interval,
                 heartbeat_min_interval: Some(heartbeat_min_interval),
                 election_timeout_min,
-                election_timeout_max: u64::try_from(settings.raft_election_timeout_max.as_millis())
-                    .unwrap_or(u64::MAX),
+                election_timeout_max: u64::try_from(
+                    settings.raft_timings.election_timeout_max().as_millis(),
+                )
+                .unwrap_or(u64::MAX),
                 // A restarted voter may time out before discovery reconnects it to a healthy
                 // leader. Pre-vote lets the current quorum reject that stale candidate without
                 // advancing the term and tearing down the leader's replication streams.
@@ -2572,6 +2583,19 @@ impl Observer {
     }
     pub async fn current_transactions(&self) -> BTreeMap<String, ReplicatedTransaction> {
         (&self.inner.store.inner.state().transactions).into()
+    }
+    /// Whether the current replicated state has an aged transaction no applying execution needs.
+    pub async fn has_removable_finished_transactions(
+        &self,
+        finished_before: nervix_models::Timestamp,
+    ) -> bool {
+        !self
+            .inner
+            .store
+            .inner
+            .state()
+            .finished_transaction_removals(finished_before)
+            .is_empty()
     }
     pub async fn current_transaction(&self, id: &str) -> Option<ReplicatedTransaction> {
         self.inner.store.inner.state().transactions.get(id).cloned()
@@ -6142,28 +6166,13 @@ fn apply_consensus_command_at(
             }
         }
         ConsensusCommand::RemoveFinishedTransactions { finished_before } => {
-            let removed_ids = state
-                .transactions
-                .iter()
-                .filter_map(|(id, transaction)| {
-                    let TransactionState::Finished(finished) = &transaction.state else {
-                        return None;
-                    };
-                    (finished.finished_at <= *finished_before).then(|| id.clone())
-                })
-                .collect::<Vec<_>>();
-            let before = state.transactions.len();
-            state.transactions.retain(|_, transaction| {
-                let TransactionState::Finished(finished) = &transaction.state else {
-                    return true;
-                };
-                finished.finished_at > *finished_before
-            });
+            let removed_ids = state.finished_transaction_removals(*finished_before);
             for id in &removed_ids {
+                state.transactions.remove(id);
                 state.transaction_commit_plans.remove(id);
             }
             state.transaction_reports.remove_transactions(&removed_ids);
-            changes.transactions_changed = state.transactions.len() != before;
+            changes.transactions_changed = !removed_ids.is_empty();
         }
     }
     AppliedConsensusCommand::applied(changes)

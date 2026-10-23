@@ -47,8 +47,7 @@ Feature: Postgres emission
         CONFIG {
           'addr' = '{{postgres_addr}}'
         };
-        CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client INSERT TO TABLE notifications_pg_out_{{test_id}} VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+        CREATE POSTGRES TABLE EMITTER to_pg FROM notifications TO postgres_client TABLE 'notifications_pg_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -126,8 +125,7 @@ Feature: Postgres emission
         CONFIG {
           'addr' = '{{postgres_addr}}'
         };
-        CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client INSERT TO TABLE notifications_pg_conflict_{{test_id}} VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } ON CONFLICT <conflict_target> <conflict_action> MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+        CREATE POSTGRES TABLE EMITTER to_pg FROM notifications TO postgres_client TABLE 'notifications_pg_conflict_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } ON CONFLICT <conflict_target> <conflict_action> BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -209,16 +207,14 @@ Feature: Postgres emission
       CONFIG {
         'addr' = '{{postgres_addr}}'
       };
-      CREATE EMITTER to_pg
+      CREATE POSTGRES TABLE EMITTER to_pg
       FROM notifications
-      TO POSTGRES postgres_client INSERT TO TABLE poison_pg_{{test_id}}
-      VALUES {
+      TO postgres_client TABLE 'poison_pg_{{test_id}}'
+      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
         "postgres_user_id" = input.user_id,
         "postgres_now" = NOW() AS STRING,
         "postgres_action" = LOWER(input.action)
-      }
-      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-      BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+      } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
       SET error_code = error.code,
@@ -323,11 +319,9 @@ Feature: Postgres emission
         CONFIG {
           'addr' = '{{postgres_addr}}'
         };
-      CREATE EMITTER to_pg FROM notifications
-        TO POSTGRES postgres_shared INSERT TO TABLE poison_pg_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER to_pg FROM notifications
+        TO postgres_shared TABLE 'poison_pg_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO emitter_errors
         SET error_code = error.code,
@@ -335,17 +329,13 @@ Feature: Postgres emission
             source_user_id = input.user_id,
             source_action = input.action
         ON GENERAL ERROR LOG;
-      CREATE EMITTER first_writer FROM first_notifications
-        TO POSTGRES postgres_shared INSERT TO TABLE first_held_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER first_writer FROM first_notifications
+        TO postgres_shared TABLE 'first_held_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER second_writer FROM second_notifications
-        TO POSTGRES postgres_shared INSERT TO TABLE second_held_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER second_writer FROM second_notifications
+        TO postgres_shared TABLE 'second_held_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION emitter_errors_subscription TO emitter_errors;
       START;
@@ -455,16 +445,14 @@ Feature: Postgres emission
       CONFIG {
         'addr' = '{{postgres_addr}}'
       };
-      CREATE EMITTER to_pg
+      CREATE POSTGRES TABLE EMITTER to_pg
       FROM notifications
-      TO POSTGRES postgres_client INSERT TO TABLE values_error_pg_{{test_id}}
-      VALUES {
+      TO postgres_client TABLE 'values_error_pg_{{test_id}}'
+      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
         "postgres_user_id" = input.user_id / input.denominator,
         "postgres_now" = NOW() AS STRING,
         "postgres_action" = LOWER(input.action)
-      }
-      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-      BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+      } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
       SET error_code = error.code,
@@ -535,12 +523,10 @@ Feature: Postgres emission
       CREATE POSTGRES CLIENT postgres_client POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = '{{postgres_addr}}'
       };
-      CREATE EMITTER to_pg
+      CREATE POSTGRES TABLE EMITTER to_pg
       FROM notifications
-      TO POSTGRES postgres_client INSERT TO TABLE batch_pg_{{test_id}}
-      VALUES { "postgres_user_id" = input.user_id }
-      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-      BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      TO postgres_client TABLE 'batch_pg_{{test_id}}'
+      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { "postgres_user_id" = input.user_id } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;

@@ -15,10 +15,7 @@
     )
 )]
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::{Report, ResultExt};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -72,6 +69,7 @@ mod application;
 mod describe;
 mod impact;
 mod inspection;
+mod limits;
 mod rendering;
 mod request;
 pub(in crate::application) mod restored;
@@ -79,18 +77,10 @@ mod standalone;
 pub(in crate::application) use impact::{QuiescenceAttempt, TransactionStepImpactRecorder};
 use inspection::transaction_inspection_status;
 pub use inspection::{InspectedReportError, InspectingSession, TransactionInspectionOutcome};
-
-pub(in crate::application) const DEFAULT_TRANSACTION_IDLE_TIMEOUT: Duration =
-    Duration::from_secs(15 * 60);
-
-pub(in crate::application) const DEFAULT_TRANSACTION_TOMBSTONE_RETENTION: Duration =
-    Duration::from_secs(15 * 60);
-
-pub(in crate::application) const DEFAULT_TRANSACTION_MAX_STATEMENTS: usize = 256;
-
-pub(in crate::application) const DEFAULT_TRANSACTION_MAX_SOURCE_BYTES: u64 = 1024 * 1024;
-
-pub(in crate::application) const DEFAULT_TRANSACTION_MAX_OPEN: usize = 1024;
+pub use limits::{
+    TransactionBounds, TransactionIdleTimeout, TransactionLimits, TransactionMaxOpen,
+    TransactionMaxSourceBytes, TransactionMaxStatements, TransactionTombstoneRetention,
+};
 
 /// Recovery is independent across transactions, but its background work remains bounded per node.
 /// One held executor still leaves capacity for unrelated domains and for later candidates.
@@ -2483,7 +2473,6 @@ impl SessionServiceImpl {
         self.reconcile_persistent_commands(command_retry_fence, command_retry_fence)
             .await;
         let transactions = self.inner.consensus.current_transactions().await;
-        let mut tombstone_removal_required = false;
 
         for transaction in transactions.values() {
             nervix_primitives::task::consume_budget().await;
@@ -2521,15 +2510,17 @@ impl SessionServiceImpl {
                     }
                 }
                 TransactionState::Committing(_) => {}
-                TransactionState::Finished(finished) => {
+                TransactionState::Finished(_) => {
                     self.inner.transaction_bindings.remove(&transaction.id);
-                    if finished.finished_at <= finished_before {
-                        tombstone_removal_required = true;
-                    }
                 }
                 TransactionState::Open(_) => {}
             }
         }
+        let tombstone_removal_required = self
+            .inner
+            .consensus
+            .has_removable_finished_transactions(finished_before)
+            .await;
         if tombstone_removal_required
             && let Err(error) = self
                 .inner

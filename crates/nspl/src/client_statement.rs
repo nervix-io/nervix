@@ -3,13 +3,9 @@ use std::ops::Range;
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    Backup, BuiltinFunctionScope, CanonicalNsplError, ClickHouseSinkEntity, CreateSubscription,
-    DeleteSubscription, DescribeBackup, DomainName, EmitSinkKind, HttpSinkEntity,
-    IcebergSinkEntity, IngestSourceKind, KafkaSinkEntity, ModelKind, MongoDbSinkEntity,
-    MqttSinkEntity, MySqlSinkEntity, NatsSinkEntity, OtelSinkEntity, PostgresSinkEntity,
-    PulsarSinkEntity, RabbitMqSinkEntity, RedisSinkEntity, RelayName, Restore, SchemaName,
-    SemanticReference, SentrySinkEntity, SourceReferenceKind, SqsSinkEntity, Statement,
-    SyslogSinkEntity, UploadResource, WireSchemaName, ZeroMqSinkEntity,
+    Backup, BuiltinFunctionScope, CanonicalNsplError, CreateSubscription, DeleteSubscription,
+    DescribeBackup, DomainName, EmitSinkKind, IngestSourceKind, ModelKind, RelayName, Restore,
+    SchemaName, SemanticReference, SourceReferenceKind, Statement, UploadResource, WireSchemaName,
 };
 
 use crate::{
@@ -456,13 +452,6 @@ fn junction_output_relay(tokens: &[Token]) -> Option<RelayName> {
         .into_output()
 }
 
-fn known_keyword(token: &Token) -> Option<Keyword> {
-    match token {
-        Token::Word(Word::KnownWord { iden, .. }) => Some(*iden),
-        _ => None,
-    }
-}
-
 /// The connector and entity the head of the ingestor statement being written names, which every
 /// later clause of the statement reads.
 fn ingestor_source_kind(tokens: &[Token]) -> Option<IngestSourceKind> {
@@ -478,55 +467,16 @@ fn ingestor_source_kind(tokens: &[Token]) -> Option<IngestSourceKind> {
 }
 
 fn emitter_sink_kind(tokens: &[Token]) -> Option<EmitSinkKind> {
-    let emitter = tokens
-        .iter()
-        .position(|token| known_keyword(token) == Some(Keyword::Emitter))?;
-    // A relay or the emitter itself may be named `to`, so the sink clause is the first `TO` that a
-    // sink's connector keyword follows.
-    for (offset, token) in tokens[emitter..].iter().enumerate() {
-        if known_keyword(token) != Some(Keyword::To) {
-            continue;
-        }
-        let to = emitter.checked_add(offset)?;
-        if let Some(kind) = sink_kind_after(tokens, to) {
-            return Some(kind);
-        }
-    }
-    None
-}
-
-/// The connector and entity a sink clause names, when `to` is the position of its `TO`.
-fn sink_kind_after(tokens: &[Token], to: usize) -> Option<EmitSinkKind> {
-    match known_keyword(tokens.get(to.checked_add(1)?)?)? {
-        Keyword::Http => Some(EmitSinkKind::Http(HttpSinkEntity::Request)),
-        Keyword::Kafka => Some(EmitSinkKind::Kafka(KafkaSinkEntity::Topic)),
-        Keyword::Pulsar => Some(EmitSinkKind::Pulsar(PulsarSinkEntity::Topic)),
-        Keyword::Rabbitmq => Some(EmitSinkKind::RabbitMq(RabbitMqSinkEntity::Queue)),
-        Keyword::Redis => Some(EmitSinkKind::Redis(RedisSinkEntity::PubSub)),
-        Keyword::Mqtt => Some(EmitSinkKind::Mqtt(MqttSinkEntity::Topic)),
-        Keyword::Nats => Some(EmitSinkKind::Nats(NatsSinkEntity::Subject)),
-        Keyword::Zeromq => Some(EmitSinkKind::ZeroMq(ZeroMqSinkEntity::Push)),
-        Keyword::Sqs => Some(EmitSinkKind::Sqs(SqsSinkEntity::Queue)),
-        Keyword::Sentry => Some(EmitSinkKind::Sentry(SentrySinkEntity::Event)),
-        Keyword::Syslog => Some(EmitSinkKind::Syslog(SyslogSinkEntity::Collector)),
-        Keyword::Otel => otel_sink_kind(tokens.get(to.checked_add(3)?)?),
-        Keyword::Clickhouse => Some(EmitSinkKind::ClickHouse(ClickHouseSinkEntity::Table)),
-        Keyword::Postgres => Some(EmitSinkKind::Postgres(PostgresSinkEntity::Table)),
-        Keyword::Mysql => Some(EmitSinkKind::MySql(MySqlSinkEntity::Table)),
-        Keyword::Mongodb => Some(EmitSinkKind::MongoDb(MongoDbSinkEntity::Collection)),
-        Keyword::Iceberg => Some(EmitSinkKind::Iceberg(IcebergSinkEntity::Table)),
-        _ => None,
-    }
-}
-
-/// The OTEL entity a sink body names by its signal keyword, which follows the client's name.
-fn otel_sink_kind(signal: &Token) -> Option<EmitSinkKind> {
-    match known_keyword(signal)? {
-        Keyword::Logs => Some(EmitSinkKind::Otel(OtelSinkEntity::Logs)),
-        Keyword::Traces => Some(EmitSinkKind::Otel(OtelSinkEntity::Traces)),
-        Keyword::Metric => Some(EmitSinkKind::Otel(OtelSinkEntity::Metrics)),
-        _ => None,
-    }
+    let create = kw(Keyword::Create)
+        .ignore_then(if_not_exists_clause())
+        .ignore_then(ack_mode().or_not())
+        .ignore_then(crate::emitter::head_kind());
+    let alter = kw(Keyword::Alter).ignore_then(crate::emitter::head_kind());
+    choice((create, alter))
+        .then_ignore(any().repeated())
+        .then_ignore(end())
+        .parse(tokens)
+        .into_output()
 }
 
 enum SchemaFieldContext {
@@ -829,8 +779,8 @@ fn expects_local_path(head: &str) -> bool {
 mod tests {
     use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{
-        ClientSinkEntity, ClientSourceEntity, CreateStatement, HttpSourceEntity, KafkaSinkEntity,
-        Model, MqttSourceEntity, RequestedResourceVersion, SentrySinkEntity,
+        ClientSourceEntity, CreateStatement, HttpSourceEntity, KafkaSinkEntity, Model,
+        MqttSourceEntity, RequestedResourceVersion, SentrySinkEntity,
     };
 
     use super::*;
@@ -909,7 +859,7 @@ mod tests {
             SourceReferenceKind::Endpoint(nervix_models::EndpointType::Http),
         );
 
-        let emitter = "CREATE EMITTER orders_out FROM orders TO KAFKA ";
+        let emitter = "CREATE KAFKA TOPIC EMITTER orders_out FROM orders TO ";
         assert!(
             suggest_client_expectations(emitter, emitter.len()).contains(
                 &CompletionExpectation::Semantic(SemanticReference::Model(ModelKind::Client))
@@ -950,8 +900,8 @@ mod tests {
             ))
         ));
 
-        let kafka = "CREATE EMITTER sink FROM incoming TO KAFKA broker TOPIC events MODE NO_ACK \
-                     RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_";
+        let kafka = "CREATE KAFKA TOPIC EMITTER sink FROM incoming TO broker TOPIC 'events' MODE \
+                     NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_";
         assert!(suggest_client_expectations(kafka, kafka.len()).contains(
             &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
                 BuiltinFunctionScope::EmitterInvocation(EmitSinkKind::Kafka(
@@ -960,8 +910,8 @@ mod tests {
             ))
         ));
 
-        let sentry = "CREATE EMITTER sink FROM incoming TO SENTRY client MODE ACK RETRY POLICY \
-                      BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_";
+        let sentry = "CREATE SENTRY EVENT EMITTER sink FROM incoming TO client MODE ACK RETRY \
+                      POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_";
         assert!(suggest_client_expectations(sentry, sentry.len()).contains(
             &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
                 BuiltinFunctionScope::EmitterInvocation(EmitSinkKind::Sentry(
@@ -1006,31 +956,27 @@ mod tests {
     #[test]
     fn an_emitter_s_tokens_name_the_sink_pair_a_client_serves() {
         for kind in EmitSinkKind::all() {
-            // A session consumer's sink publishes through no client and writes no header, so an
-            // invocation after it has the ordinary scope: the lookup names every other pair.
-            let expected = match kind {
-                EmitSinkKind::Client(ClientSinkEntity::Consumer) => None,
-                _ => Some(kind),
-            };
             for seed in 0..4 {
                 let bytes = generator_bytes(seed);
                 let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
                 let emitter = arbitrary.create_emitter_to(kind);
                 let tokens = canonical_tokens(Model::Emitter(emitter));
-                assert_eq!(emitter_sink_kind(&tokens), expected, "{kind:?}");
+                assert_eq!(emitter_sink_kind(&tokens), Some(kind), "{kind:?}");
             }
         }
     }
 
     #[test]
-    fn an_otel_sink_without_its_signal_names_no_pair() {
-        let unfinished = "CREATE EMITTER sink FROM incoming TO OTEL collector";
-        let tokens = completion_tokens(unfinished).assured("the statement prefix lexes");
-        assert_eq!(emitter_sink_kind(&tokens), None);
-
-        let unsignalled = "CREATE EMITTER sink FROM incoming TO OTEL collector VALUES";
-        let tokens = completion_tokens(unsignalled).assured("the statement prefix lexes");
-        assert_eq!(emitter_sink_kind(&tokens), None);
+    fn an_otel_head_names_its_entity_before_the_body_is_written() {
+        for (entity, kind) in [
+            ("LOGS", nervix_models::OtelSinkEntity::Logs),
+            ("TRACES", nervix_models::OtelSinkEntity::Traces),
+            ("METRICS", nervix_models::OtelSinkEntity::Metrics),
+        ] {
+            let tokens = completion_tokens(&format!("CREATE OTEL {entity} EMITTER telemetry"))
+                .expect("prefix lexes");
+            assert_eq!(emitter_sink_kind(&tokens), Some(EmitSinkKind::Otel(kind)));
+        }
     }
 
     #[test]

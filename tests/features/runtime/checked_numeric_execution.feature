@@ -347,9 +347,9 @@ Feature: Checked numeric execution
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-      CREATE EMITTER operand_sink
+      CREATE ZEROMQ PUSH EMITTER operand_sink
         FROM operands
-        TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING operand_codec
+        TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING operand_codec
         INHERIT ALL
         SET left = input.left % input.divisor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB

@@ -17,18 +17,18 @@ use std::fs;
 use nervix_models::{
     AckMode, AckWindow, AlterEmitter, AlterEmitterOperation, ClientConfigEntry, ClientName,
     CodecName, CodecWireFormat, CreateClientHttp, CreateClientPrometheus, CreateClientS3,
-    CreateClientSqs, CreateWireSchema, EmitSinkKind, EmitterPublishingMode, ErrorPolicies,
-    FlushPolicy, GeneralErrorPolicy, HttpEndpointSource, HttpSinkEntity, HttpSource,
-    IcebergCatalog, IcebergStorageBackend, IcebergTableSink, IngestSource, IngestorName, JsonType,
-    KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaSink, KafkaSource,
-    KafkaTopicSink, KafkaTopicSource, MaterializedRelayState, MessageErrorPolicy, MqttIngestMode,
-    MqttQos, MqttSession, MqttSource, MqttTopicSource, NatsSink, NatsSubjectSink, OtelLogsSink,
-    OtelMetric, OtelValueMapping, OutputBranch, PostgresSink, PostgresTableSink, ProcessorInputs,
-    ProcessorOutputs, PrometheusApiRootError, PrometheusClientConfigError, PrometheusClientKey,
-    PulsarSink, PulsarSinkEntity, PulsarTopicSink, RabbitMqQueueSink, RabbitMqSink,
-    RabbitMqSinkEntity, RetryPolicy, SentryEventSink, SentrySink, SignalingProtobufConfig,
-    SqsSinkEntity, SyslogCollectorSink, SyslogListenerSource, SyslogSink, WireSchemaField,
-    WireSchemaName, ZeroMqPushSink, ZeroMqSink,
+    CreateClientSqs, CreateWireSchema, EmitSinkKind, ErrorPolicies, FlushPolicy,
+    GeneralErrorPolicy, HttpEndpointSource, HttpSinkEntity, HttpSource, IcebergCatalog,
+    IcebergTableSink, IngestSource, IngestorName, JsonType, KafkaConsumerGroupName,
+    KafkaIngestMode, KafkaOffsetMode, KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource,
+    MaterializedRelayState, MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, MqttSource,
+    MqttTopicSource, NatsSink, NatsSubjectSink, OtelLogsSink, OtelMetric, OtelValueMapping,
+    OutputBranch, PostgresSink, PostgresTableSink, ProcessorInputs, ProcessorOutputs,
+    PrometheusApiRootError, PrometheusClientConfigError, PrometheusClientKey, PulsarSink,
+    PulsarSinkEntity, PulsarTopicSink, RabbitMqQueueSink, RabbitMqSink, RabbitMqSinkEntity,
+    RetryPolicy, SentryEventSink, SentrySink, SignalingProtobufConfig, SqsSinkEntity,
+    SyslogCollectorSink, SyslogListenerSource, SyslogSink, WireSchemaField, WireSchemaName,
+    ZeroMqPushSink, ZeroMqSink,
 };
 use nonzero_ext::nonzero;
 
@@ -161,7 +161,7 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     };
     let models = ModelIndex::new();
 
-    emitter.publishing_mode = EmitterPublishingMode::NoAck {
+    *kafka_publication(&mut emitter) = nervix_models::KafkaTopicPublishingMode::NoAck {
         retry_policy: RetryPolicy {
             backoff: "0s".to_string(),
             max_backoff: "1s".to_string(),
@@ -176,7 +176,7 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     .expect_err("zero retry backoff must be rejected");
     assert!(format!("{error:#}").contains("BACKOFF must be greater than zero"));
 
-    emitter.publishing_mode = EmitterPublishingMode::BrokerAck {
+    *kafka_publication(&mut emitter) = nervix_models::KafkaTopicPublishingMode::Ack {
         window: AckWindow::Sequential,
         ack_timeout: "0s".to_string(),
         retry_policy: RetryPolicy {
@@ -193,29 +193,20 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     .expect_err("zero confirmation timeout must be rejected");
     assert!(format!("{error:#}").contains("ACK TIMEOUT must be greater than zero"));
 
-    emitter.publishing_mode = EmitterPublishingMode::MqttQos0 {
-        retry_policy: RetryPolicy {
-            backoff: "10ms".to_string(),
-            max_backoff: "1s".to_string(),
-        },
-    };
-    let error = validate_emitter_publishing_contract(
-        &domain,
-        &ModelName::from(&emitter.name),
-        &models,
-        &emitter,
-    )
-    .expect_err("foreign publishing modes must be rejected");
-    assert!(format!("{error:#}").contains("KAFKA emitter does not support MODE QOS 0"));
-
     *emitter.sink = EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+        mode: nervix_models::SqsQueuePublishingMode::Single {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("sqs_main"),
-        queue: "events".to_string(),
+        queue: nervix_models::SqsQueueName::parse("events").expect("valid queue"),
         fifo_group: Some(SqsFifoGroup::Expression(Expression::Literal(
             nervix_models::Literal::String("group".to_string()),
         ))),
     }));
-    emitter.publishing_mode = EmitterPublishingMode::SqsSingle {
+    *sqs_publication(&mut emitter) = nervix_models::SqsQueuePublishingMode::Single {
         retry_policy: RetryPolicy {
             backoff: "1s".to_string(),
             max_backoff: "100ms".to_string(),
@@ -230,7 +221,9 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     .expect_err("retry maxima below their initial backoff must be rejected");
     assert!(format!("{error:#}").contains("must be at least BACKOFF"));
 
-    if let EmitterPublishingMode::SqsSingle { retry_policy } = &mut emitter.publishing_mode {
+    if let nervix_models::SqsQueuePublishingMode::Single { retry_policy } =
+        sqs_publication(&mut emitter)
+    {
         retry_policy.max_backoff = "1s".to_string();
     }
     let error = validate_emitter_publishing_contract(
@@ -262,13 +255,14 @@ fn publishing_contract_checks_the_batch_clause_against_its_sink() {
     let identifier = ModelName::from(&emitter.name);
     let models = ModelIndex::new();
     emitter.body = nervix_models::EmitterBody::Values;
-    emitter.publishing_mode = EmitterPublishingMode::RequestAck {
-        retry_policy: RetryPolicy {
-            backoff: "10ms".to_string(),
-            max_backoff: "1s".to_string(),
-        },
-    };
+
     *emitter.sink = EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
+        mode: nervix_models::PostgresTablePublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("postgres_main"),
         table: named("events"),
         values: Vec::new(),
@@ -278,7 +272,7 @@ fn publishing_contract_checks_the_batch_clause_against_its_sink() {
     let error = validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
         .expect_err("a Postgres emitter without BATCH must be rejected");
     assert!(
-        format!("{error:#}").contains("POSTGRES emitters require BATCH MAX MESSAGES"),
+        format!("{error:#}").contains("POSTGRES TABLE emitters require BATCH MAX MESSAGES"),
         "unexpected error: {error:#}"
     );
 
@@ -287,14 +281,20 @@ fn publishing_contract_checks_the_batch_clause_against_its_sink() {
         .expect("a Postgres emitter with BATCH is valid");
 
     *emitter.sink = EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+        mode: nervix_models::SqsQueuePublishingMode::Single {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("sqs_main"),
-        queue: "events".to_string(),
+        queue: nervix_models::SqsQueueName::parse("events").expect("valid queue"),
         fifo_group: None,
     }));
     emitter.body = nervix_models::EmitterBody::Codec {
         codec: named("event_codec"),
     };
-    emitter.publishing_mode = EmitterPublishingMode::SqsBatch {
+    *sqs_publication(&mut emitter) = nervix_models::SqsQueuePublishingMode::Batch {
         retry_policy: RetryPolicy {
             backoff: "10ms".to_string(),
             max_backoff: "1s".to_string(),
@@ -337,6 +337,12 @@ fn batching_emitters_require_a_codec_container_their_sink_can_publish() {
         .expect("a protobuf codec with BATCH MESSAGE has a batch container");
 
     *emitter.sink = EmitSink::Sentry(SentrySink::Event(SentryEventSink {
+        mode: nervix_models::SentryEventPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("sentry_main"),
     }));
     let Model::Codec(mut json) = jaq_native_codec("event_codec", "event_schema", None, Some("."))
@@ -347,7 +353,7 @@ fn batching_emitters_require_a_codec_container_their_sink_can_publish() {
         .expect_err("a batching Sentry emitter needs ON EMITTING BATCH");
     assert!(
         format!("{error:#}").contains(
-            "SENTRY emitter requires codec 'event_codec' to declare an ON EMITTING BATCH"
+            "SENTRY EVENT emitter requires codec 'event_codec' to declare an ON EMITTING BATCH"
         ),
         "unexpected error: {error:#}"
     );
@@ -390,6 +396,12 @@ fn direct_values_sensitivity_reports_the_typed_external_target() {
             .assured("input.secret is a valid expression"),
     };
     *emitter.sink = EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
+        mode: nervix_models::PostgresTablePublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("database"),
         table: named("events"),
         values: vec![mapping],
@@ -404,7 +416,7 @@ fn direct_values_sensitivity_reports_the_typed_external_target() {
         RegistryError::SensitiveEmitterValue {
             domain: error_domain,
             emitter: error_emitter,
-            sink: "POSTGRES",
+            sink: "POSTGRES TABLE",
             target,
         } if error_domain == &domain
             && error_emitter == &identifier
@@ -444,6 +456,12 @@ fn direct_values_type_failure_keeps_the_vm_compile_cause() {
             .expect("a missing field is still a valid expression"),
     };
     *emitter.sink = EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
+        mode: nervix_models::PostgresTablePublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("database"),
         table: named("events"),
         values: vec![mapping],
@@ -476,6 +494,12 @@ fn http_request_type_failure_keeps_the_vm_compile_cause() {
     let identifier = ModelName::from(&emitter.name);
     emitter.body = nervix_models::EmitterBody::WithoutBody;
     *emitter.sink = EmitSink::Http(HttpSink::Request(HttpRequestSink {
+        mode: nervix_models::HttpRequestPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("api"),
         method: nervix_nspl::parse_expression("input.value")
             .expect("a field reference is a valid expression"),
@@ -518,15 +542,16 @@ fn otel_mapping_contract_validates_signal_keys_before_runtime() {
     };
     let identifier = ModelName::from(&emitter.name);
     emitter.body = nervix_models::EmitterBody::Values;
-    emitter.publishing_mode = EmitterPublishingMode::RequestAck {
-        retry_policy: RetryPolicy {
-            backoff: "10ms".to_string(),
-            max_backoff: "1s".to_string(),
-        },
-    };
+
     let models = ModelIndex::new();
 
     *emitter.sink = EmitSink::from(OtelLogsSink {
+        mode: nervix_models::OtelLogsPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("otel_main"),
         mappings: OtelMappings {
             values: vec![otel_mapping("time"), otel_mapping("body")],
@@ -563,6 +588,12 @@ fn otel_mapping_contract_validates_signal_keys_before_runtime() {
     );
 
     *emitter.sink = EmitSink::from(OtelMetricsSink {
+        mode: nervix_models::OtelMetricsPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("otel_main"),
         metric: OtelMetric {
             name: "requests".to_string(),
@@ -636,18 +667,19 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
         unreachable!("emitter helper must build an emitter model")
     };
     valid.sink = Box::new(EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+        mode: nervix_models::SqsQueuePublishingMode::Single {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("sqs_main"),
-        queue: "events.fifo".to_string(),
+        queue: nervix_models::SqsQueueName::parse("events.fifo").expect("valid queue"),
         fifo_group: Some(SqsFifoGroup::Expression(
             nervix_nspl::parse_expression("input.value").expect("valid FIFO group expression"),
         )),
     })));
-    valid.publishing_mode = EmitterPublishingMode::SqsSingle {
-        retry_policy: RetryPolicy {
-            backoff: "10ms".to_string(),
-            max_backoff: "1s".to_string(),
-        },
-    };
+
     registry
         .apply_batch(&domain, vec![Model::Emitter(valid.clone())])
         .expect("non-sensitive STRING FIFO expressions should be accepted");
@@ -694,6 +726,7 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
         .apply_mutation_batch(
             &domain,
             vec![RegistryMutation::AlterEmitter(AlterEmitter {
+                kind: EmitSinkKind::Sqs(nervix_models::SqsSinkEntity::Queue),
                 emitter: named("branch_fifo"),
                 operations: vec![AlterEmitterOperation::AddFrom {
                     relay: named("events"),
@@ -738,14 +771,14 @@ fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
             codec: named("events_codec"),
         },
         sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+            mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: named("zeromq_main"),
         }))),
-        publishing_mode: EmitterPublishingMode::NoAck {
-            retry_policy: RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
-            },
-        },
         batch: None,
         flush_policy: FlushPolicy::Each {
             interval: "100ms".to_string(),
@@ -769,9 +802,15 @@ fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
         &schema,
     )
     .expect_err("ZeroMQ emitters must reject write_header");
-    assert!(format!("{error:#}").contains("ZEROMQ emitters do not support write_header"));
+    assert!(format!("{error:#}").contains("ZEROMQ PUSH emitters do not support write_header"));
 
     *emitter.sink = EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink {
+        mode: nervix_models::SyslogCollectorPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("syslog_main"),
     }));
     let error = super::effective_emitter_filter_map_schema(
@@ -783,9 +822,15 @@ fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
         &schema,
     )
     .expect_err("Syslog emitters must reject write_header");
-    assert!(format!("{error:#}").contains("SYSLOG emitters do not support write_header"));
+    assert!(format!("{error:#}").contains("SYSLOG COLLECTOR emitters do not support write_header"));
 
     *emitter.sink = EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
+        mode: nervix_models::KafkaTopicPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("kafka_main"),
         topic: named("events_out"),
     }));
@@ -824,15 +869,15 @@ fn a_repeated_literal_header_write_is_refused_where_the_sink_keeps_one_value_per
             codec: named("events_codec"),
         },
         sink: Box::new(EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
+            mode: nervix_models::PulsarTopicPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: named("pulsar_main"),
             topic: named("events_out"),
         }))),
-        publishing_mode: EmitterPublishingMode::NoAck {
-            retry_policy: RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
-            },
-        },
         batch: None,
         flush_policy: FlushPolicy::Each {
             interval: "100ms".to_string(),
@@ -888,13 +933,25 @@ fn a_repeated_literal_header_write_is_refused_where_the_sink_keeps_one_value_per
     );
 
     *emitter.sink = EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+        mode: nervix_models::SqsQueuePublishingMode::Single {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("sqs_main"),
-        queue: "events".to_string(),
+        queue: nervix_models::SqsQueueName::parse("events").expect("valid queue"),
         fifo_group: None,
     }));
     refused(&emitter, EmitSinkKind::Sqs(SqsSinkEntity::Queue), "route");
 
     *emitter.sink = EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink {
+        mode: nervix_models::RabbitMqQueuePublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("rabbitmq_main"),
         queue: named("events_out"),
     }));
@@ -906,6 +963,12 @@ fn a_repeated_literal_header_write_is_refused_where_the_sink_keeps_one_value_per
 
     // HTTP records field names in lowercase, so two spellings of one name are one name.
     *emitter.sink = EmitSink::Http(HttpSink::Request(HttpRequestSink {
+        mode: nervix_models::HttpRequestPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("api"),
         method: Expression::Literal(nervix_models::Literal::String("POST".to_string())),
         path: Expression::Literal(nervix_models::Literal::String("/events".to_string())),
@@ -923,6 +986,12 @@ fn a_repeated_literal_header_write_is_refused_where_the_sink_keeps_one_value_per
 
     // Names that differ in letter case are two names where a sink keeps them exactly.
     *emitter.sink = EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
+        mode: nervix_models::PulsarTopicPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("pulsar_main"),
         topic: named("events_out"),
     }));
@@ -934,11 +1003,23 @@ fn a_repeated_literal_header_write_is_refused_where_the_sink_keeps_one_value_per
     )
     .expect("valid construction");
     *emitter.sink = EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
+        mode: nervix_models::KafkaTopicPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("kafka_main"),
         topic: named("events_out"),
     }));
     validate(&emitter).expect("a Kafka record keeps both headers");
     *emitter.sink = EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
+        mode: nervix_models::NatsSubjectPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("nats_main"),
         subject: named("events_out"),
     }));
@@ -950,6 +1031,12 @@ fn a_repeated_literal_header_write_is_refused_where_the_sink_keeps_one_value_per
     )
     .expect("valid construction");
     *emitter.sink = EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
+        mode: nervix_models::PulsarTopicPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("pulsar_main"),
         topic: named("events_out"),
     }));
@@ -1223,7 +1310,8 @@ fn an_emitter_publishing_contract_says_why_a_duration_names_no_duration() {
             },
         ];
         for (retry_policy, clause) in retry_policies.into_iter().zip(["BACKOFF", "MAX"]) {
-            emitter.publishing_mode = EmitterPublishingMode::NoAck { retry_policy };
+            *kafka_publication(&mut emitter) =
+                nervix_models::KafkaTopicPublishingMode::NoAck { retry_policy };
             let error = validate_emitter_publishing_contract(
                 &domain,
                 &ModelName::from(&emitter.name),
@@ -1237,7 +1325,7 @@ fn an_emitter_publishing_contract_says_why_a_duration_names_no_duration() {
             );
         }
 
-        emitter.publishing_mode = EmitterPublishingMode::BrokerAck {
+        *kafka_publication(&mut emitter) = nervix_models::KafkaTopicPublishingMode::Ack {
             window: AckWindow::Sequential,
             ack_timeout: value.to_string(),
             retry_policy: RetryPolicy {
@@ -1803,14 +1891,14 @@ fn sentry_emitter_rejects_http_client() {
         unreachable!("emitter helper must build an emitter model")
     };
     sentry_emitter.sink = Box::new(EmitSink::Sentry(SentrySink::Event(SentryEventSink {
+        mode: nervix_models::SentryEventPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("sentry_main"),
     })));
-    sentry_emitter.publishing_mode = EmitterPublishingMode::RequestAck {
-        retry_policy: RetryPolicy {
-            backoff: "250ms".to_string(),
-            max_backoff: "30s".to_string(),
-        },
-    };
 
     let error = registry
         .apply_batch(
@@ -1834,8 +1922,9 @@ fn sentry_emitter_rejects_http_client() {
         .expect_err("Sentry emitter must reject an HTTP client");
 
     assert!(
-        format!("{error:#}")
-            .contains("SENTRY emitter requires a SENTRY client, found HTTP client 'sentry_main'"),
+        format!("{error:#}").contains(
+            "SENTRY EVENT emitter requires a SENTRY client, found HTTP client 'sentry_main'"
+        ),
         "unexpected error: {error:#}"
     );
 
@@ -1977,7 +2066,12 @@ fn an_iceberg_emitter_rejects_a_catalog_client_of_another_connector() {
     iceberg_emitter.body = nervix_models::EmitterBody::Values;
     iceberg_emitter.construction = nervix_models::RouteConstruction::default();
     iceberg_emitter.sink = Box::new(EmitSink::from(IcebergTableSink {
-        backend: IcebergStorageBackend::S3,
+        mode: nervix_models::IcebergTablePublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("lake"),
         table: named("events"),
         values: vec![nervix_models::IcebergValueMapping {
@@ -1992,12 +2086,6 @@ fn an_iceberg_emitter_rejects_a_catalog_client_of_another_connector() {
         commit_each: "100ms".to_string(),
         max_commit_size: "1MiB".to_string(),
     }));
-    iceberg_emitter.publishing_mode = EmitterPublishingMode::RequestAck {
-        retry_policy: RetryPolicy {
-            backoff: "250ms".to_string(),
-            max_backoff: "30s".to_string(),
-        },
-    };
 
     let error = registry
         .apply_batch(
@@ -2014,11 +2102,12 @@ fn an_iceberg_emitter_rejects_a_catalog_client_of_another_connector() {
                 Model::Emitter(iceberg_emitter),
             ],
         )
-        .expect_err("an ICEBERG emitter must reject a KAFKA catalog client");
+        .expect_err("an ICEBERG TABLE emitter must reject a KAFKA catalog client");
 
     assert_invalid_model_reason(
         &error,
-        "ICEBERG emitter requires an ICEBERG_REST catalog client, found KAFKA client 'catalog'",
+        "ICEBERG TABLE emitter requires an ICEBERG_REST catalog client, found KAFKA client \
+         'catalog'",
     );
 
     let _ = fs::remove_dir_all(path);
@@ -2125,4 +2214,22 @@ fn a_prometheus_client_is_created_only_with_a_config_its_source_can_use() {
         .expect("a Prometheus client with an API root and a timeout must be created");
 
     let _ = fs::remove_dir_all(path);
+}
+
+fn kafka_publication(
+    emitter: &mut nervix_models::CreateEmitter,
+) -> &mut nervix_models::KafkaTopicPublishingMode {
+    let EmitSink::Kafka(nervix_models::KafkaSink::Topic(destination)) = emitter.sink.as_mut()
+    else {
+        panic!("Kafka fixture");
+    };
+    &mut destination.mode
+}
+fn sqs_publication(
+    emitter: &mut nervix_models::CreateEmitter,
+) -> &mut nervix_models::SqsQueuePublishingMode {
+    let EmitSink::Sqs(SqsSink::Queue(destination)) = emitter.sink.as_mut() else {
+        panic!("SQS fixture");
+    };
+    &mut destination.mode
 }

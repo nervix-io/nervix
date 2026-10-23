@@ -78,9 +78,9 @@ CREATE CLIENT PRODUCER INGESTOR live_readings
     ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id, occurred_at = input.occurred_at, error_code = error.code, error_message = error.message
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED EMITTER observed_readings
+CREATE ATTACHED CLIENT CONSUMER EMITTER observed_readings
   FROM readings
-  TO CLIENT SCHEMA observed_reading
+  TO SCHEMA observed_reading
     MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s
   INHERIT ALL
   BATCH MAX MESSAGES 256 MAX SIZE 256KiB
@@ -88,9 +88,9 @@ CREATE ATTACHED EMITTER observed_readings
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED EMITTER rejection_notices
+CREATE ATTACHED CLIENT CONSUMER EMITTER rejection_notices
   FROM rejected_readings
-  TO CLIENT SCHEMA rejected_reading
+  TO SCHEMA rejected_reading
     MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s
   INHERIT ALL
   BATCH MAX MESSAGES 64 MAX SIZE 64KiB

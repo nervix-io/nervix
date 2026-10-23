@@ -44,8 +44,8 @@ Feature: RabbitMQ name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER rabbit_out FROM notifications
-      TO RABBITMQ rabbit_main QUEUE dns_out_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE ATTACHED RABBITMQ QUEUE EMITTER rabbit_out FROM notifications
+      TO rabbit_main QUEUE 'dns_out_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -152,8 +152,8 @@ Feature: RabbitMQ name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER rabbit_out FROM notifications
-      TO RABBITMQ rabbit_main QUEUE dns_out_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE ATTACHED RABBITMQ QUEUE EMITTER rabbit_out FROM notifications
+      TO rabbit_main QUEUE 'dns_out_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -228,8 +228,8 @@ Feature: RabbitMQ name resolution
       CREATE RABBITMQ CLIENT rabbitmq_sink CONFIG {
         'addr' = '{{rabbitmq_forwarded_addr}}'
       };
-      CREATE ATTACHED EMITTER rabbitmq_boundary FROM notifications
-        TO RABBITMQ rabbitmq_sink QUEUE rabbitmq_dns_boundary_out_{{test_id}}
+      CREATE ATTACHED RABBITMQ QUEUE EMITTER rabbitmq_boundary FROM notifications
+        TO rabbitmq_sink QUEUE 'rabbitmq_dns_boundary_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 300ms
             RETRY POLICY BACKOFF 100ms MAX 200ms
           ENCODE USING notification_codec
@@ -294,8 +294,8 @@ Feature: RabbitMQ name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER rabbit_out FROM notifications
-      TO RABBITMQ rabbit_main QUEUE dns_out_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE ATTACHED RABBITMQ QUEUE EMITTER rabbit_out FROM notifications
+      TO rabbit_main QUEUE 'dns_out_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE

@@ -24,10 +24,10 @@ use super::{
     entity_union::connector_sinks,
 };
 use crate::{
-    ClientName, CollectionName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality,
-    EmitterBodyForm, EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice,
-    OptionDeclaration, OptionForm, OptionPresence, SinkBody, SinkClientReference, SinkEntity,
-    SinkReference, SinkReferenceKind, SinkValueMapping, SinkValueMappings,
+    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
+    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SinkValueMapping,
+    SinkValueMappings,
 };
 
 configured_client!(MongoDb: pooled, config NervixWithAddressQuery, CreateClientMongoDb => MongoDbConfigEntry);
@@ -39,8 +39,9 @@ pub type MongoDbValueMapping = SinkValueMapping;
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct MongoDbCollectionSink {
+    pub mode: MongoDbCollectionPublishingMode,
     pub client: ClientName,
-    pub collection: CollectionName,
+    pub collection: MongoDbCollectionName,
     pub values: Vec<MongoDbValueMapping>,
     pub conflict_action: MongoDbConflictAction,
 }
@@ -87,12 +88,10 @@ impl SinkEntity for MongoDbCollectionSink {
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        publishing_modes: MongoDbCollectionPublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
-            keywords: "INSERT TO COLLECTION",
-            name: LocatorName::Unquoted {
-                label: "collection_name",
-            },
+            keywords: "COLLECTION",
+            name: LocatorName::External(MongoDbCollectionName::DECLARATION),
         }),
         options: &[OptionDeclaration {
             keywords: "ON CONFLICT",
@@ -137,8 +136,22 @@ connector_sinks! {
     connector MongoDb = "MONGODB";
     /// What a MongoDB sink writes.
     pub enum MongoDbSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum MongoDbEmitterMode;
     /// The entities a MongoDB sink writes.
     pub enum MongoDbSinkEntity {
-        Collection(MongoDbCollectionSink) = "COLLECTION";
+        Collection(MongoDbCollectionSink, MongoDbCollectionPublishingMode) = "COLLECTION";
     }
+}
+
+super::publishing::emitter_modes! {
+    pub enum MongoDbCollectionPublishingMode {
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+    }
+}
+
+super::external_name::external_names! {
+    /// The case-preserving external collection identifier this connector publishes to.
+    pub struct MongoDbCollectionName => super::external_name::external_identifier,
+        label "mongodb_collection", example "Orders";
 }

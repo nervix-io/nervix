@@ -30,12 +30,12 @@ use super::{
 };
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue, PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity,
-    SinkReference, SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind, TopicName,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, HeaderLayout, HeaderModel,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
+    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind,
 };
 
 configured_client!(Kafka: unpooled, config Driver, CreateClientKafka => KafkaConfigEntry);
@@ -137,6 +137,10 @@ const KAFKA_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
             wait: "subscribe, assign and unsubscribe",
             bound: WaitBound::Unbounded,
         },
+        DeclaredWait {
+            wait: "destroying a consumer that joined its group, for its LeaveGroup answer",
+            bound: WaitBound::Driver("5 s per LeaveGroup request"),
+        },
     ],
     driver_limits: &[
         "Every librdkafka key passes through, so a client can change each driver default above.",
@@ -144,6 +148,9 @@ const KAFKA_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
          unanswered after its caller's 30 s deadline retains its worker and the source's one \
          in-flight commit until the native call ends. Native subscribe, assign and unsubscribe \
          have no cancellable deadline; their caller waits socket.timeout.ms at most.",
+        "A consumer whose last handle is gone is destroyed by one connector control job, which \
+         waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s \
+         LeaveGroup timeout.",
         "receive.message.max.bytes 100000000",
     ],
 };
@@ -190,12 +197,21 @@ const KAFKA_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
             wait: "delivery under ACK",
             bound: WaitBound::Clause("ACK TIMEOUT"),
         },
+        DeclaredWait {
+            wait: "destroying a producer, for its polling thread and the reports of the records \
+                   its purge failed",
+            bound: WaitBound::Driver("100 ms poll, then a 500 ms flush"),
+        },
     ],
     driver_limits: &[
         "Every librdkafka key passes through, so a client can change each driver default above.",
         "message.max.bytes 1000000",
         "A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through \
          ON MESSAGE ERROR.",
+        "A producer whose last handle is gone is destroyed by one connector control job, which \
+         waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms \
+         poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still \
+         resolving a name included.",
     ],
 };
 
@@ -327,8 +343,9 @@ connector_sources! {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct KafkaTopicSink {
+    pub mode: KafkaTopicPublishingMode,
     pub client: ClientName,
-    pub topic: TopicName,
+    pub topic: KafkaTopicName,
 }
 
 impl SinkEntity for KafkaTopicSink {
@@ -339,15 +356,10 @@ impl SinkEntity for KafkaTopicSink {
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[
-            EmitterPublishingModeKind::NoAck,
-            EmitterPublishingModeKind::BrokerAck,
-        ],
+        publishing_modes: KafkaTopicPublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
             keywords: "TOPIC",
-            name: LocatorName::Unquoted {
-                label: "topic_name",
-            },
+            name: LocatorName::External(KafkaTopicName::DECLARATION),
         }),
         options: &[],
         envelope: &[],
@@ -373,8 +385,17 @@ connector_sinks! {
     connector Kafka = "KAFKA";
     /// What a Kafka sink writes.
     pub enum KafkaSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum KafkaEmitterMode;
     /// The entities a Kafka sink writes.
     pub enum KafkaSinkEntity {
-        Topic(KafkaTopicSink) = "TOPIC";
+        Topic(KafkaTopicSink, KafkaTopicPublishingMode) = "TOPIC";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum KafkaTopicPublishingMode {
+        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
     }
 }

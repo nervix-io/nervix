@@ -16,19 +16,20 @@ use nervix_models::{
     DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
     DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace, DomainTimeRate,
-    DrainNode, DropModel, DropNode, EmitterPublishingMode, ExistingUserPolicy, FieldName,
-    HttpSourceEntity, IngestSourceKind, IngestorAlteration, InspectionFormat, KafkaSourceEntity,
-    LookupQuery, ModelKind, ModelName, MqttSourceEntity, NatsSourceEntity, NodeRef,
-    PlacementPolicy, PrometheusSourceEntity, PulsarSourceEntity, RabbitMqSourceEntity,
-    RebindResource, RebindResourceMembers, RebindResourceSelection, RedisSourceEntity,
-    RelayBranching, RelayName, Relocation, RelocationMember, RelocationPreferenceOverride,
-    RelocationPreferenceStrategy, RelocationSelection, ResetWasmBranchField, ResetWasmState,
-    ResetWasmStateScope, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
-    ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements, ShowRelayMaterializedState,
-    ShowTransactions, ShowUdfs, SqsSourceEntity, StartDomain, Statement, StopDomain,
-    SubscriptionBinding, SubscriptionLiteral, SyslogSourceEntity, TransactionInspectionRequest,
-    TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
-    WebsocketsSourceEntity, ZeroMqSourceEntity,
+    DrainNode, DropModel, DropNode, EmitSinkKind, EmitterBatchLegality, EmitterBodyForm,
+    ExistingUserPolicy, FieldName, HttpSourceEntity, IngestSourceKind, IngestorAlteration,
+    InspectionFormat, KafkaSourceEntity, LookupQuery, ModelKind, ModelName, MqttSourceEntity,
+    NatsSourceEntity, NodeRef, PlacementPolicy, PrometheusSourceEntity, PulsarSourceEntity,
+    RabbitMqSourceEntity, RebindResource, RebindResourceMembers, RebindResourceSelection,
+    RedisSourceEntity, RelayBranching, RelayName, Relocation, RelocationMember,
+    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
+    ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore, RestoreLifecycle,
+    RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate, ShowIngestors,
+    ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SinkReferenceKind,
+    SqsSourceEntity, StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionLiteral,
+    SyslogSourceEntity, TransactionInspectionRequest, TransactionInspectionTarget,
+    TransactionOperationNumber, UncordonNode, UploadResource, WebsocketsSourceEntity,
+    ZeroMqSourceEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -219,6 +220,26 @@ impl StatementVariant {
             Statement::DescribeTransaction(_) => Self::DescribeTransaction,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum EmitterOperationForm {
+    AddFrom,
+    DropFrom,
+    SetWhere,
+    DropWhere,
+    SetTo,
+    SetClient,
+    SetEncode,
+    DropEncode,
+    SetCollect,
+    DropCollect,
+    SetAttachment,
+    SetMode,
+    SetBatch,
+    DropBatch,
+    SetFlush,
+    SetCommit,
 }
 
 impl Arbitrary<'_> {
@@ -464,9 +485,15 @@ impl Arbitrary<'_> {
                 })
             }
             StatementVariant::AlterEmitter => {
-                let operations = self.operations(Self::alter_emitter_operation);
+                let kinds = EmitSinkKind::all().collect::<Vec<_>>();
+                let count = NonZeroUsize::new(kinds.len())
+                    .assured("the vocabulary declares emitter entities");
+                let kind = kinds[self.entropy.index(count)];
+                let operations =
+                    self.operations(|arbitrary| arbitrary.alter_emitter_operation(kind));
                 Statement::AlterEmitter(AlterEmitter {
                     emitter: self.name(),
+                    kind,
                     operations,
                 })
             }
@@ -733,29 +760,6 @@ impl Arbitrary<'_> {
         RelocationMember::new(kind, self.model_name_of(kind))
     }
 
-    /// A publishing mode written on its own, without the sink it applies to.
-    ///
-    /// NSPL spells a client acknowledgement exactly as a broker one, and an emitter applying a
-    /// standalone mode to its client sink turns one into the other, so the NSPL domain writes a
-    /// client acknowledgement as the broker acknowledgement it reads as.
-    fn standalone_publishing_mode(&self, mode: EmitterPublishingMode) -> EmitterPublishingMode {
-        match (self.domain, mode) {
-            (
-                Domain::Nspl,
-                EmitterPublishingMode::ClientAck {
-                    window,
-                    ack_timeout,
-                    retry_policy,
-                },
-            ) => EmitterPublishingMode::BrokerAck {
-                window,
-                ack_timeout,
-                retry_policy,
-            },
-            (_, mode) => mode,
-        }
-    }
-
     /// The kind a `DROP` names: one NSPL spells, or in the vocabulary domain any kind at all.
     fn drop_kind(&mut self) -> ModelKind {
         match self.domain {
@@ -1020,65 +1024,96 @@ impl Arbitrary<'_> {
             .assured("a route list holds at least one route")
     }
 
-    fn alter_emitter_operation(&mut self) -> AlterEmitterOperation {
-        match self.entropy.byte() % 16 {
-            0 => AlterEmitterOperation::AddFrom {
+    fn alter_emitter_operation(&mut self, kind: EmitSinkKind) -> AlterEmitterOperation {
+        let mut choices = vec![
+            EmitterOperationForm::AddFrom,
+            EmitterOperationForm::DropFrom,
+            EmitterOperationForm::SetWhere,
+            EmitterOperationForm::DropWhere,
+            EmitterOperationForm::SetTo,
+            EmitterOperationForm::SetCollect,
+            EmitterOperationForm::DropCollect,
+            EmitterOperationForm::SetAttachment,
+            EmitterOperationForm::SetMode,
+            EmitterOperationForm::SetFlush,
+        ];
+        let capabilities = kind.capabilities();
+        if let SinkReferenceKind::Client(_) | SinkReferenceKind::StorageClient(_) =
+            capabilities.reference
+        {
+            choices.push(EmitterOperationForm::SetClient);
+        }
+        if let EmitterBodyForm::Codec | EmitterBodyForm::CodecOrWithoutBody = capabilities.body {
+            choices.extend([
+                EmitterOperationForm::SetEncode,
+                EmitterOperationForm::DropEncode,
+            ]);
+        }
+        if !matches!(capabilities.batch, EmitterBatchLegality::Unavailable { .. }) {
+            choices.extend([
+                EmitterOperationForm::SetBatch,
+                EmitterOperationForm::DropBatch,
+            ]);
+        }
+        if capabilities.option("COMMIT EACH").is_some() {
+            choices.push(EmitterOperationForm::SetCommit);
+        }
+        let count = NonZeroUsize::new(choices.len())
+            .assured("every entity accepts the shared input and attachment operations");
+        match choices[self.entropy.index(count)] {
+            EmitterOperationForm::AddFrom => AlterEmitterOperation::AddFrom {
                 relay: self.name(),
                 where_clause: self.optional_expression(),
             },
-            1 => AlterEmitterOperation::DropFrom { relay: self.name() },
-            2 => AlterEmitterOperation::AlterFromSetWhere {
+            EmitterOperationForm::DropFrom => {
+                AlterEmitterOperation::DropFrom { relay: self.name() }
+            }
+            EmitterOperationForm::SetWhere => AlterEmitterOperation::AlterFromSetWhere {
                 relay: self.name(),
                 where_clause: self.expression(),
             },
-            3 => AlterEmitterOperation::AlterFromDropWhere { relay: self.name() },
-            4 => {
-                // Moving an emitter to an HTTP sink restates what the request carries, and moving
-                // it to a client consumer selects native output; every other sink keeps the
-                // emitter's own payload selection.
-                let emitter = self.create_emitter();
-                let body = match emitter.sink.as_ref() {
-                    nervix_models::EmitSink::Http(_) | nervix_models::EmitSink::Client(_) => {
-                        Some(emitter.body)
-                    }
-                    _ => None,
-                };
-                AlterEmitterOperation::SetSink {
-                    sink: emitter.sink,
-                    publishing_mode: emitter.publishing_mode,
-                    body,
+            EmitterOperationForm::DropWhere => {
+                AlterEmitterOperation::AlterFromDropWhere { relay: self.name() }
+            }
+            EmitterOperationForm::SetTo => {
+                let emitter = self.create_emitter_to(kind);
+                let construction =
+                    if emitter.construction == nervix_models::RouteConstruction::default() {
+                        None
+                    } else {
+                        Some(emitter.construction)
+                    };
+                AlterEmitterOperation::SetTo {
+                    destination: emitter.sink,
+                    body: emitter.body,
+                    construction,
                 }
             }
-            5 => AlterEmitterOperation::SetClient {
+            EmitterOperationForm::SetClient => AlterEmitterOperation::SetClient {
                 client: self.name(),
             },
-            6 => AlterEmitterOperation::SetEncodeUsing { codec: self.name() },
-            7 => AlterEmitterOperation::DropEncode,
-            8 => AlterEmitterOperation::SetCollect {
+            EmitterOperationForm::SetEncode => {
+                AlterEmitterOperation::SetEncodeUsing { codec: self.name() }
+            }
+            EmitterOperationForm::DropEncode => AlterEmitterOperation::DropEncode,
+            EmitterOperationForm::SetCollect => AlterEmitterOperation::SetCollect {
                 policy: self.collect_policy(),
             },
-            9 => AlterEmitterOperation::DropCollect,
-            10 => AlterEmitterOperation::SetAttachment {
+            EmitterOperationForm::DropCollect => AlterEmitterOperation::DropCollect,
+            EmitterOperationForm::SetAttachment => AlterEmitterOperation::SetAttachment {
                 mode: self.ack_mode(),
             },
-            11 => {
-                let emitter = self.create_emitter();
-                AlterEmitterOperation::SetPublishingMode {
-                    mode: self.standalone_publishing_mode(emitter.publishing_mode),
-                }
-            }
-            12 => {
-                let emitter = self.create_emitter();
-                match emitter.batch {
-                    Some(policy) => AlterEmitterOperation::SetBatch { policy },
-                    None => AlterEmitterOperation::DropBatch,
-                }
-            }
-            13 => AlterEmitterOperation::DropBatch,
-            14 => AlterEmitterOperation::SetFlush {
+            EmitterOperationForm::SetMode => AlterEmitterOperation::SetPublishingMode {
+                mode: self.emit_sink_of(kind).mode_change(),
+            },
+            EmitterOperationForm::SetBatch => AlterEmitterOperation::SetBatch {
+                policy: self.batch_policy(),
+            },
+            EmitterOperationForm::DropBatch => AlterEmitterOperation::DropBatch,
+            EmitterOperationForm::SetFlush => AlterEmitterOperation::SetFlush {
                 flush_policy: self.flush_policy(),
             },
-            _ => AlterEmitterOperation::SetCommit {
+            EmitterOperationForm::SetCommit => AlterEmitterOperation::SetCommit {
                 commit_each: self.duration(),
                 max_commit_size: self.byte_size(),
             },

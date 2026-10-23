@@ -238,6 +238,46 @@ fn bolero_model_roundtrip_canonical_nspl() {
 }
 
 #[test]
+fn postgres_update_corpus_keeps_a_mapped_column_to_update() {
+    let seeds: [&[u8]; 2] = [
+        include_bytes!(
+            "__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_nspl/corpus/\
+             postgres-update-column"
+        ),
+        include_bytes!(
+            "__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_nspl/corpus/\
+             postgres_update_covering_every_column"
+        ),
+    ];
+    for bytes in seeds {
+        let mut arbitrary = Arbitrary::new(bytes, Domain::Nspl);
+        let Model::Emitter(emitter) = arbitrary.model() else {
+            panic!("current emitter seed");
+        };
+        let nervix_models::EmitSink::Postgres(nervix_models::PostgresSink::Table(destination)) =
+            emitter.sink.as_ref()
+        else {
+            panic!("current Postgres destination");
+        };
+        let nervix_models::PostgresConflictAction::DoUpdate { target } =
+            &destination.conflict_action
+        else {
+            panic!("current update policy");
+        };
+        assert!(!target.is_empty());
+        assert!(
+            destination
+                .values
+                .iter()
+                .any(|mapping| !target.contains(&mapping.column))
+        );
+        assert_statement_round_trips(&ClientStatement::Server(Statement::Create(
+            nervix_models::CreateStatement::new(Box::new(Model::Emitter(emitter)), false),
+        )));
+    }
+}
+
+#[test]
 fn statement_corpus_reaches_resumed_restore() {
     let bytes = include_bytes!(
         "__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_nspl/corpus/\
@@ -334,9 +374,9 @@ fn calls_and_scopes_named_like_clause_keywords_round_trip_in_every_region() {
         "CREATE REORDERER peaks_in_order FROM sensors WHERE max(input.readings) > 0 BY \
          (input.first + input.second) * 2 MAX TIME 10s UNBRANCHED TO ordered_readings INHERIT ALL \
          FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
-        "CREATE EMITTER send FROM source WHERE output.total > 0 TO HTTP api METHOD input.method \
-         PATH (input.prefix + input.tenant) * 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s \
-         WITHOUT BODY FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        "CREATE HTTP REQUEST EMITTER send FROM source WHERE output.total > 0 TO api METHOD \
+         input.method PATH (input.prefix + input.tenant) * 2 MODE ACK RETRY POLICY BACKOFF 250ms \
+         MAX 30s WITHOUT BODY FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         "CREATE JUNCTION peaks FROM sensors WHERE (max(input.readings) > 10) FILTER WHERE \
          (output.total > 0) UNBRANCHED TO alerts INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
         "CREATE DEDUPLICATOR distinct_peaks FROM sensors FILTER WHERE max(input.readings) > 0 \

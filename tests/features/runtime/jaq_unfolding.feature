@@ -325,7 +325,7 @@ Feature: JAQ codec unfolding
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER held_events_forward FROM held_events TO KAFKA kafka_main TOPIC held_events_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING split_event_wire_codec
+      CREATE KAFKA TOPIC EMITTER held_events_forward FROM held_events TO kafka_main TOPIC 'held_events_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING split_event_wire_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -412,7 +412,7 @@ Feature: JAQ codec unfolding
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER held_events_forward FROM held_events TO KAFKA kafka_main TOPIC held_events_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING split_event_wire_codec
+      CREATE KAFKA TOPIC EMITTER held_events_forward FROM held_events TO kafka_main TOPIC 'held_events_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING split_event_wire_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

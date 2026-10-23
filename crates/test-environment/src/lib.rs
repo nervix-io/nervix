@@ -156,6 +156,14 @@ pub const REDIS_ADDR: &str = "redis_addr";
 pub const REDIS_TLS_ADDR: &str = "redis_tls_addr";
 pub const MQTT_ADDR: &str = "mqtt_addr";
 pub const MQTT_TLS_ADDR: &str = "mqtt_tls_addr";
+/// A listener of the same MQTT broker that holds a client to a keep-alive of
+/// [`MQTT_SHORT_KEEPALIVE`]: it announces that keep-alive in every CONNACK, checks it every second,
+/// and lets a subscriber hold as many unacknowledged publishes as its own Receive Maximum asks
+/// for, where the default listener holds it to 32.
+pub const MQTT_SHORT_KEEPALIVE_ADDR: &str = "mqtt_short_keepalive_addr";
+/// The keep-alive the listener at [`MQTT_SHORT_KEEPALIVE_ADDR`] holds its clients to. The broker
+/// closes a connection that sends nothing for one and a half of it.
+pub const MQTT_SHORT_KEEPALIVE: Duration = Duration::from_secs(10);
 pub const NATS_ADDR: &str = "nats_addr";
 pub const NATS_TLS_ADDR: &str = "nats_tls_addr";
 pub const SQS_ENDPOINT: &str = "sqs_endpoint";
@@ -168,6 +176,7 @@ pub const MYSQL_ADDR: &str = "mysql_addr";
 pub const MYSQL_TLS_ADDR: &str = "mysql_tls_addr";
 pub const MONGODB_ADDR: &str = "mongodb_addr";
 pub const MONGODB_TLS_ADDR: &str = "mongodb_tls_addr";
+pub const MONGODB_REPLICA_SET_ADDR: &str = "mongodb_replica_set_addr";
 pub const PROMETHEUS_ADDR: &str = "prometheus_addr";
 pub const PROMETHEUS_TLS_ADDR: &str = "prometheus_tls_addr";
 pub const MOCK_HTTP_ADDR: &str = "mock_http_addr";
@@ -598,13 +607,32 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             return Ok(());
         }
         let tls = self.ensure_tls()?.clone();
+        let short_keepalive = MQTT_SHORT_KEEPALIVE.as_secs().to_string();
         let container = self
             .start_container("mqtt", 1883.tcp(), "MQTT", || {
                 GenericImage::new("emqx/emqx", "5.8.4")
                     .with_exposed_port(1883.tcp())
+                    .with_exposed_port(1884.tcp())
                     .with_exposed_port(8883.tcp())
                     .with_wait_for(WaitFor::message_on_either_std("EMQX 5.8.4 is running now"))
                     .with_env_var("EMQX_LISTENERS__TCP__DEFAULT__BIND", "0.0.0.0:1883")
+                    // The broker announces this keep-alive in every CONNACK of the zone's listener
+                    // and checks every second whether a client sent anything within one and a half
+                    // of it, where its own default check runs every 30 seconds.
+                    .with_env_var(
+                        "EMQX_ZONES__SHORT_KEEPALIVE__MQTT__SERVER_KEEPALIVE",
+                        short_keepalive.as_str(),
+                    )
+                    .with_env_var(
+                        "EMQX_ZONES__SHORT_KEEPALIVE__MQTT__KEEPALIVE_CHECK_INTERVAL",
+                        "1s",
+                    )
+                    .with_env_var("EMQX_ZONES__SHORT_KEEPALIVE__MQTT__MAX_INFLIGHT", "65535")
+                    .with_env_var("EMQX_LISTENERS__TCP__SHORT_KEEPALIVE__BIND", "0.0.0.0:1884")
+                    .with_env_var(
+                        "EMQX_LISTENERS__TCP__SHORT_KEEPALIVE__ZONE",
+                        "short_keepalive",
+                    )
                     .with_env_var("EMQX_LISTENERS__SSL__DEFAULT__BIND", "0.0.0.0:8883")
                     .with_env_var(
                         "EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CACERTFILE",
@@ -636,9 +664,14 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             })
             .await?;
         let port = mapped_port(&container, 1883, "MQTT").await?;
+        let short_keepalive_port = mapped_port(&container, 1884, "MQTT short keep-alive").await?;
         let tls_port = mapped_port(&container, 8883, "MQTT TLS").await?;
         self.endpoints
             .insert(MQTT_ADDR, format!("mqtt://127.0.0.1:{port}"));
+        self.endpoints.insert(
+            MQTT_SHORT_KEEPALIVE_ADDR,
+            format!("mqtt://127.0.0.1:{short_keepalive_port}"),
+        );
         self.endpoints
             .insert(MQTT_TLS_ADDR, format!("mqtts://127.0.0.1:{tls_port}"));
         self.containers.push(RunningContainer::Generic(container));
@@ -719,6 +752,13 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                     .with_env_var("POSTGRES_USER", "postgres")
                     .with_env_var("POSTGRES_PASSWORD", "nervix")
                     .with_env_var("POSTGRES_DB", "postgres")
+                    // SQLx derives a SCRAM-SHA-256 key in as many rounds as the server's verifier
+                    // names and yields to the scheduler after every fifth, so the image's 4096
+                    // rounds poll an establishing connection more than 800 times. On the busy
+                    // scenario runtime each poll waits for a worker's whole run queue, and one
+                    // connection took longer to establish than the 30-second pool wait. One round
+                    // keeps SCRAM authentication and establishes in a few polls.
+                    .with_env_var("POSTGRES_INITDB_ARGS", "--set scram_iterations=1")
                     .with_copy_to("/certs/ca.pem", tls.ca_pem.clone())
                     .with_copy_to("/certs/node.pem", tls.node_pem.clone())
                     .with_copy_to(
@@ -807,6 +847,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                     .with_exposed_port(27017.tcp())
                     .with_entrypoint("bash")
                     .with_wait_for(WaitFor::message_on_either_std("Waiting for connections"))
+                    .with_env_var("GLIBC_TUNABLES", "glibc.pthread.rseq=1")
                     .with_env_var("MONGO_INITDB_ROOT_USERNAME", "root")
                     .with_env_var("MONGO_INITDB_ROOT_PASSWORD", "nervix")
                     .with_copy_to("/certs/ca.pem", tls.ca_pem.clone())
@@ -827,6 +868,72 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         self.endpoints.insert(
             MONGODB_TLS_ADDR,
             format!("mongodb://root:nervix@127.0.0.1:{port}/nervix?authSource=admin&tls=true"),
+        );
+        self.containers.push(RunningContainer::Generic(container));
+        Ok(())
+    }
+
+    /// A MongoDB replica set of one member, which a client reaches directly, without
+    /// authentication or TLS.
+    ///
+    /// The member is the set's only data-bearing node, so a write concern that asks for a second
+    /// one is a write concern the set can never satisfy: the server applies the write and reports
+    /// the write concern error beside it, exactly as it answers a write its lagging members never
+    /// confirm. A standalone server refuses such a write before applying any of it instead.
+    pub async fn start_mongodb_replica_set(&mut self) -> io::Result<()> {
+        if !self.mark_starting("mongodb-replica-set").await? {
+            return Ok(());
+        }
+        let container = self
+            .start_container(
+                "mongodb-replica-set",
+                27017.tcp(),
+                "MongoDB replica set",
+                || {
+                    GenericImage::new("mongo", "8.2")
+                        .with_exposed_port(27017.tcp())
+                        .with_wait_for(WaitFor::message_on_either_std("Waiting for connections"))
+                        .with_env_var("GLIBC_TUNABLES", "glibc.pthread.rseq=1")
+                        .with_cmd(["mongod", "--bind_ip_all", "--replSet", "nervix"])
+                        .with_startup_timeout(STARTUP_TIMEOUT)
+                },
+            )
+            .await?;
+        // A reused container's set is already initiated. Either way, its member must have become
+        // the writable primary within the startup budget before a scenario writes to it.
+        let election = format!(
+            "try {{ void rs.status(); }} catch (error) {{ if (error.codeName !== \
+             'NotYetInitialized') {{ throw error; }} void rs.initiate({{ _id: 'nervix', members: \
+             [{{ _id: 0, host: '127.0.0.1:27017' }}] }}); }} const deadline = Date.now() + {}; \
+             while (!db.hello().isWritablePrimary) {{ if (Date.now() > deadline) {{ throw new \
+             Error('the only member of the replica set did not become its primary'); }} \
+             sleep(100); }}",
+            STARTUP_TIMEOUT.as_millis()
+        );
+        let mut elected = container
+            .exec(
+                ExecCommand::new(["mongosh", "--quiet", "--eval", election.as_str()])
+                    .with_cmd_ready_condition(CmdWaitFor::exit()),
+            )
+            .await
+            .map_err(testcontainers_error("MongoDB replica set primary election"))?;
+        let exit_code = elected
+            .exit_code()
+            .await
+            .map_err(testcontainers_error("MongoDB replica set primary election"))?;
+        if exit_code != Some(0) {
+            let output = elected.stderr_to_vec().await.map_err(testcontainers_error(
+                "MongoDB replica set primary election output",
+            ))?;
+            return Err(io::Error::other(format!(
+                "MongoDB replica set primary election exited with {exit_code:?}: {}",
+                String::from_utf8_lossy(&output)
+            )));
+        }
+        let port = mapped_port(&container, 27017, "MongoDB replica set").await?;
+        self.endpoints.insert(
+            MONGODB_REPLICA_SET_ADDR,
+            format!("mongodb://127.0.0.1:{port}/nervix?directConnection=true"),
         );
         self.containers.push(RunningContainer::Generic(container));
         Ok(())

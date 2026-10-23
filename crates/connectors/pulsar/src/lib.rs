@@ -5,7 +5,7 @@
 //! - **Owns.** Pulsar client and producer configuration, its TLS options, topic
 //!   qualification, the shared-subscription consumers a source reads through, message
 //!   properties as ingest headers, per-message acknowledgement, record and property
-//!   publication, the bounded receipts a NO_ACK producer retains through finish, and the classification of a send or its receipt, including a message the
+//!   publication, the bounded receipts a NO ACK producer retains through finish, and the classification of a send or its receipt, including a message the
 //!   client refuses because it exceeds the maximum message size the broker announced.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and
 //!   `pulsar`.
@@ -43,7 +43,7 @@ use nervix_connector::{
     SinkRecordId, SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
     optional_bool_client_config_value, optional_client_config_value, read_tls_file,
 };
-use nervix_models::{ClientConfigEntry, ConnectorKind, Timestamp, TopicName};
+use nervix_models::{ClientConfigEntry, ConnectorKind, PulsarTopicName, Timestamp};
 use nervix_primitives::{
     task::unconstrained,
     time::{Instant, timeout_at},
@@ -127,7 +127,7 @@ impl From<PulsarError> for PulsarSendFailure {
 /// What one Pulsar sink publishes through: its client entries, topic and publishing mode.
 pub struct PulsarSinkConfig {
     pub config: Vec<ClientConfigEntry>,
-    pub topic: TopicName,
+    pub topic: PulsarTopicName,
     pub mode: BrokerPublishingMode,
 }
 
@@ -214,7 +214,7 @@ where
     }
 
     /// Receipt bookkeeping shares the driver's outbound channel capacity. A full set applies
-    /// backpressure before another hand-over; records already accepted retain their NO_ACK
+    /// backpressure before another hand-over; records already accepted retain their NO ACK
     /// completion point. The driver's operation timeout bounds each outstanding receipt.
     async fn make_room(&mut self) {
         self.collect_ready();
@@ -575,7 +575,7 @@ impl PulsarSink {
 
 #[async_trait]
 impl SinkLifecycle for PulsarSink {
-    /// Producer acceptance completes NO_ACK records, while finish waits for their receipts before
+    /// Producer acceptance completes NO ACK records, while finish waits for their receipts before
     /// dropping the producer. An ACK publish already settled all answers it could observe.
     async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
         match &mut self.publishing {
@@ -1057,7 +1057,7 @@ mod tests {
     async fn sink(broker: &FakeBroker, mode: BrokerPublishingMode) -> PulsarSink {
         let config = PulsarSinkConfig {
             config: vec![entry("addr", &broker.service_url)],
-            topic: TopicName::parse("limited").expect("the test topic is a valid topic name"),
+            topic: PulsarTopicName::parse("limited").expect("the test topic is a valid topic name"),
             mode,
         };
         PulsarSink::new(config, SinkHost::new(SilentHost))
@@ -1173,7 +1173,7 @@ mod tests {
         let broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
         let config = PulsarSinkConfig {
             config: vec![entry("addr", &broker.service_url)],
-            topic: TopicName::parse("limited").assured("the fixture topic is a valid name"),
+            topic: PulsarTopicName::parse("limited").assured("the fixture topic is a valid name"),
             mode: BrokerPublishingMode::Ack(AckConfirmation {
                 max_in_flight: NonZeroUsize::new(1).assured("one is nonzero"),
                 timeout: Duration::MAX,
