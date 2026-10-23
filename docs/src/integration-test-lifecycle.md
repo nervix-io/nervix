@@ -740,6 +740,12 @@ The harness keeps these boundaries explicit.
   result later. The other peer must report connected, and the new relay's scheduled owner must be
   observed before the silent response is released. This is a harness measurement of isolation,
   not a different product deadline.
+  Its completion regression also holds every application-revision reply from the two followers
+  after sampling the reply. Local revision publication and gossip continue, so the same prepared
+  client's mutations must finish while those replies remain held. Reached observations prove both
+  pauses were exercised before explicit release. The shared pause registry retains these controls
+  through request cancellation; scenario cleanup releases and clears them even after an assertion
+  fails. The original health-only scenario remains an independent check.
 - **Cleanup.** Scenario cleanup runs after the scenario's assertions, so it spends the harness
   cleanup budget rather than waiting for a product shutdown deadline. A scenario whose subject is
   shutdown, drain, or deadline expiry stops its nodes itself, inside its body, under the product

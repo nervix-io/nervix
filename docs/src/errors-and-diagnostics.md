@@ -2169,6 +2169,11 @@ terminal task ending; replica synchronization supplies any missed checkpoint ava
 
 ### Panic Classes And Guarded Dependencies
 
+Application-revision probe batches run on tasks owned by their completion barriers. Transport
+failures leave the affected incarnation pending. A probe task's unexpected panic resumes on its
+barrier with the original panic payload. The barrier owns the task's only abort handle, and ending
+the barrier cancels that task without reporting intentional cancellation as a command failure.
+
 Broken internal guarantees take the explicit panic classes `assured` for a construction or platform
 guarantee, `verified` for a condition checked on the current path, and `todo` for a deliberately
 unimplemented path. An actually reachable failure instead becomes a typed error or a valid state
