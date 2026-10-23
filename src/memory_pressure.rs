@@ -33,6 +33,12 @@ use ubyte::ByteUnit;
 
 use crate::runtime::Runtime;
 
+mod settings;
+pub use settings::{
+    MemoryHighWatermark, MemoryLowWatermark, MemoryPressureCheckInterval,
+    MemoryPressureResumeJitter, MemoryPressureSettings,
+};
+
 pub const DEFAULT_MEMORY_PRESSURE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 pub const DEFAULT_MEMORY_PRESSURE_RESUME_JITTER: Duration = Duration::from_secs(1);
 
@@ -67,6 +73,10 @@ impl MemoryPressureConfig {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum MemoryPressureConfigError {
+    #[error("memory high watermark requires memory low watermark")]
+    HighWatermarkWithoutLow,
+    #[error("memory low watermark requires memory high watermark")]
+    LowWatermarkWithoutHigh,
     #[error("memory low watermark ({low}) must be lower than high watermark ({high})")]
     LowWatermarkNotBelowHigh { low: ByteUnit, high: ByteUnit },
     #[error("memory pressure check interval must be greater than zero")]

@@ -30,9 +30,9 @@ use super::{
 };
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm,
-    OptionPresence, OptionValue, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkReferenceKind, SinkValueMapping, SinkValueMappings, TableName,
+    LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SinkValueMapping,
+    SinkValueMappings,
 };
 
 configured_client!(S3: unpooled, config NervixWithPropertyNamespaces, CreateClientS3 => S3ConfigEntry);
@@ -48,10 +48,10 @@ pub type IcebergValueMapping = SinkValueMapping;
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct IcebergTableSink {
-    pub backend: IcebergStorageBackend,
-    /// The object-store client, which configures the connector `backend` names.
+    pub mode: IcebergTablePublishingMode,
+    /// The object-store client, whose connector selects the planned storage backend.
     pub client: ClientName,
-    pub table: TableName,
+    pub table: IcebergTableName,
     pub values: Vec<IcebergValueMapping>,
     pub location: String,
     pub catalog: IcebergCatalog,
@@ -161,12 +161,10 @@ impl SinkEntity for IcebergTableSink {
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        publishing_modes: IcebergTablePublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
             keywords: "TABLE",
-            name: LocatorName::Unquoted {
-                label: "table_name",
-            },
+            name: LocatorName::External(IcebergTableName::DECLARATION),
         }),
         options: &[
             OptionDeclaration {
@@ -202,10 +200,7 @@ impl SinkEntity for IcebergTableSink {
 
 impl SinkBody for IcebergTableSink {
     fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
-            client: &self.client,
-            connector: self.backend.connector(),
-        })
+        SinkReference::StorageClient(&self.client)
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {
@@ -229,8 +224,22 @@ connector_sinks! {
     connector Iceberg = "ICEBERG";
     /// What an Iceberg sink writes.
     pub enum IcebergSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum IcebergEmitterMode;
     /// The entities an Iceberg sink writes.
     pub enum IcebergSinkEntity {
-        Table(IcebergTableSink) = "TABLE";
+        Table(IcebergTableSink, IcebergTablePublishingMode) = "TABLE";
     }
+}
+
+super::publishing::emitter_modes! {
+    pub enum IcebergTablePublishingMode {
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+    }
+}
+
+super::external_name::external_names! {
+    /// The case-preserving external table identifier this connector publishes to.
+    pub struct IcebergTableName => super::external_name::external_identifier,
+        label "iceberg_table", example "Orders";
 }

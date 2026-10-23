@@ -6840,6 +6840,7 @@ dependencies = [
  "ahash",
  "arch-into",
  "arrow-array",
+ "arrow-buffer",
  "arrow-ipc",
  "arrow-schema",
  "arrow-select",
@@ -6868,6 +6869,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "typetag",
@@ -6904,10 +6906,10 @@ dependencies = [
 name = "nervix-connector-mongodb"
 version = "0.1.0-dev"
 dependencies = [
- "ahash",
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "bolero",
  "chrono",
  "error-stack",
  "meticulous",
@@ -6915,6 +6917,7 @@ dependencies = [
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
+ "strum 0.26.3",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -7121,12 +7124,15 @@ version = "0.1.0-dev"
 dependencies = [
  "async-trait",
  "bb8",
+ "combine",
  "error-stack",
  "futures-util",
+ "meticulous",
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "nervix-test-environment",
  "redis",
  "rustls",

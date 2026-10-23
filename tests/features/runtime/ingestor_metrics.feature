@@ -226,7 +226,9 @@ Feature: Ingestor metrics
         CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
-          'addr' = '{{redis_addr}}'
+          'addr' = '{{redis_addr}}',
+          'subscription_buffer_messages' = '1024',
+          'idle_timeout_ms' = '30000'
         };
         CREATE <source_head> INGESTOR ingestor_metrics_source
         FROM <source_clause>
@@ -435,7 +437,9 @@ Feature: Ingestor metrics
         CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
-          'addr' = '{{redis_addr}}'
+          'addr' = '{{redis_addr}}',
+          'subscription_buffer_messages' = '1024',
+          'idle_timeout_ms' = '30000'
         };
         CREATE REDIS PUBSUB INGESTOR remote_owner_metrics_source
         FROM redis_main CHANNEL 'remote_owner_notifications_{{test_id}}' MODE NO ACK

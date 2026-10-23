@@ -5,7 +5,7 @@
 //! - **Owns.** The AMQP connection and channel a client configures, queue declaration,
 //!   the consumer and prefetch window a source reads through, AMQP headers in both
 //!   directions, per-delivery acknowledgement and requeue, publisher confirms, the channel round
-//!   trip that completes a `NO_ACK` write and the client `timeout_ms` that bounds it,
+//!   trip that completes a `NO ACK` write and the client `timeout_ms` that bounds it,
 //!   returned-message classification, and the broker's refusal of a message above its
 //!   `max_message_size`.
 //! - **Depends on.** The connector contract, vocabulary values, the node resolver, `error-stack`,
@@ -67,7 +67,7 @@ use nervix_connector::{
     SinkStartResult,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, QueueName};
+use nervix_models::{ClientConfigEntry, RabbitMqQueueName};
 use nervix_primitives::time::{Instant, sleep, timeout};
 pub use source::{
     RabbitMqDeliveryHeaders, RabbitMqSource, RabbitMqSourceError, RabbitMqSourceMessage,
@@ -82,7 +82,7 @@ const RABBITMQ: &str = "rabbitmq";
 pub struct RabbitMqSinkConfig {
     pub config: Vec<ClientConfigEntry>,
     pub dns: DnsResolver,
-    pub queue: QueueName,
+    pub queue: RabbitMqQueueName,
     pub mode: BrokerPublishingMode,
 }
 
@@ -94,9 +94,9 @@ pub struct RabbitMqSink {
     /// `Sync`, so the methods that await while they borrow the sink borrow it mutably.
     closures: ChannelClosures,
     channel: lapin::Channel,
-    queue: QueueName,
+    queue: RabbitMqQueueName,
     mode: BrokerPublishingMode,
-    /// The client's `timeout_ms`, which bounds the round trip that ends a `NO_ACK` write when the
+    /// The client's `timeout_ms`, which bounds the round trip that ends a `NO ACK` write when the
     /// client sets it.
     round_trip: Option<ConfiguredDeadline>,
 }
@@ -134,7 +134,7 @@ enum ConfirmedAnswer {
     Failed(Report<SinkPublishError>),
 }
 
-/// Why a `NO_ACK` write stopped before the broker answered its round trip.
+/// Why a `NO ACK` write stopped before the broker answered its round trip.
 enum UnconfirmedStop {
     /// The channel is gone, as the failure the sink saw shows. The messages written on it stay
     /// unresolved until the loss is settled.
@@ -249,7 +249,7 @@ impl RabbitMqSink {
             .await
     }
 
-    /// `MODE NO_ACK`: the channel is not in confirm mode, so the broker answers no message on its
+    /// `MODE NO ACK`: the channel is not in confirm mode, so the broker answers no message on its
     /// own. Once the messages are written, the sink asks the channel for one round trip, which the
     /// broker answers only after it has taken every message written before the request, and that
     /// answer delivers them. A write therefore costs one round trip, however many messages it
@@ -319,7 +319,7 @@ impl RabbitMqSink {
         self.round_trip().await
     }
 
-    /// The channel's round trip that ends a `NO_ACK` write, within the client's `timeout_ms` when
+    /// The channel's round trip that ends a `NO ACK` write, within the client's `timeout_ms` when
     /// it sets one.
     async fn round_trip(&mut self) -> Result<(), UnconfirmedStop> {
         let answered = self.channel.basic_qos(0, BasicQosOptions::default());
@@ -343,7 +343,7 @@ impl RabbitMqSink {
         }
     }
 
-    /// Settles the messages a `NO_ACK` write had on a channel it lost.
+    /// Settles the messages a `NO ACK` write had on a channel it lost.
     ///
     /// When the broker refused a message for its size, the first message of `written` whose body
     /// exceeds the limit is that message; the broker took every message before it, which delivers
@@ -762,7 +762,7 @@ impl RabbitMqSink {
 
 #[async_trait]
 impl SinkLifecycle for RabbitMqSink {
-    /// A `NO_ACK` write ends with a round trip the broker answers only after it took every
+    /// A `NO ACK` write ends with a round trip the broker answers only after it took every
     /// message written before it, and a confirmed write awaits each confirm, so the channel holds
     /// nothing once a publish returns.
     async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {

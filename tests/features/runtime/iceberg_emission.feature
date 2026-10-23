@@ -43,11 +43,9 @@ Feature: Iceberg emission
         'uri' = '{{iceberg_rest_dns_addr}}',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
-      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE dns_notifications_{{test_id}}
-      VALUES { 'user_id' = input.user_id }
+      CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'dns_notifications_{{test_id}}'
       LOCATION 's3://nervix-iceberg/tables/dns_notifications_{{test_id}}'
-      CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       START;
@@ -97,8 +95,7 @@ Feature: Iceberg emission
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
 
-      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON GCS gcs_main TABLE gcs_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 'gs://nervix-iceberg/tables/gcs_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO gcs_main TABLE 'gcs_notifications_{{test_id}}' LOCATION 'gs://nervix-iceberg/tables/gcs_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
@@ -106,7 +103,7 @@ Feature: Iceberg emission
       """
     Then the last command output contains
       """
-      TO ICEBERG ON GCS gcs_main TABLE gcs_notifications_{{test_id}}
+      TO gcs_main TABLE 'gcs_notifications_{{test_id}}'
       """
 
     Examples:
@@ -180,22 +177,19 @@ Feature: Iceberg emission
         'uri' = '{{iceberg_rest_addr}}',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
-      CREATE EMITTER iceberg_notifications
+      CREATE ICEBERG TABLE EMITTER iceberg_notifications
       FROM notifications
-      TO ICEBERG ON S3 s3_main TABLE values_error_notifications_{{test_id}}
-      VALUES {
+      TO s3_main TABLE 'values_error_notifications_{{test_id}}'
+      LOCATION 's3://nervix-iceberg/tables/values_error_notifications_{{test_id}}'
+      CATALOG iceberg_catalog
+      COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
         'user_id' = input.user_id / input.denominator,
         'action' = LOWER(input.action),
         'clock_class' = CASE
           WHEN now() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN 'historical'
           ELSE 'physical'
         END
-      }
-      LOCATION 's3://nervix-iceberg/tables/values_error_notifications_{{test_id}}'
-      CATALOG iceberg_catalog
-      COMMIT EACH 100ms MAX SIZE 1MiB
-      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
       SET error_code = error.code,
           error_operation = error.operation,
@@ -263,8 +257,7 @@ Feature: Iceberg emission
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
 
-      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON AZURE_BLOB azure_main TABLE azure_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 'wasb://nervix-iceberg@input.input.input.input.net/tables/azure_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO azure_main TABLE 'azure_notifications_{{test_id}}' LOCATION 'wasb://nervix-iceberg@input.input.input.input.net/tables/azure_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
@@ -272,7 +265,7 @@ Feature: Iceberg emission
       """
     Then the last command output contains
       """
-      TO ICEBERG ON AZURE_BLOB azure_main TABLE azure_notifications_{{test_id}}
+      TO azure_main TABLE 'azure_notifications_{{test_id}}'
       """
 
     Examples:
@@ -342,8 +335,7 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action, 'created_at' = input.created_at } LOCATION 's3://nervix-iceberg/tables/notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'notifications_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action, 'created_at' = input.created_at } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -426,8 +418,7 @@ Feature: Iceberg emission
         'uri' = '{{iceberg_rest_addr}}',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
-      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE batched_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/batched_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'batched_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/batched_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
@@ -504,11 +495,9 @@ Feature: Iceberg emission
         'uri' = '{{iceberg_rest_addr}}',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
-      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE nested_notifications_{{test_id}}
-      VALUES { 'user_id' = input.user_id, 'observed' = input.observed }
+      CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'nested_notifications_{{test_id}}'
       LOCATION 's3://nervix-iceberg/tables/nested_notifications_{{test_id}}'
-      CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'observed' = input.observed } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       START;
@@ -580,8 +569,7 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE DETACHED EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE missing_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/missing_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        CREATE DETACHED ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'missing_notifications_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/missing_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -630,11 +618,9 @@ Feature: Iceberg emission
         'uri' = '{{iceberg_rest_addr}}',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
-      CREATE DETACHED EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE incompatible_notifications_{{test_id}}
-      VALUES { 'user_id' = input.user_id }
+      CREATE DETACHED ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'incompatible_notifications_{{test_id}}'
       LOCATION 's3://nervix-iceberg/tables/incompatible_notifications_{{test_id}}'
-      CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       START;
@@ -648,6 +634,121 @@ Feature: Iceberg emission
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: An Iceberg emitter writes each mapped column into the table column of its name and null into each optional column VALUES leaves out
+    Given MQTT is running
+    And Iceberg dependencies are running
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "by_name_notifications_{{test_id}}" exists at "s3://nervix-iceberg/tables/by_name_notifications_{{test_id}}" with columns
+      """
+      user_id I64
+      action STRING
+      note STRING
+      attempts I32
+      readings <readings_column_type>
+      """
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA notification (user_id I64, action STRING, attempts U16, readings <readings_type>);
+      CREATE CODEC notification_codec FROM JSON TO SCHEMA notification
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE MQTT CLIENT mqtt_ingress CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-cucumber-iceberg-by-name-{{test_id}}'
+      };
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'iceberg_by_name_in_{{test_id}}' MODE NO ACK
+      ON QUIESCE DROP DECODE USING notification_codec
+      TO notifications INHERIT ALL UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE S3 CLIENT s3_main CONFIG {
+        'endpoint' = '{{rustfs_addr}}',
+        'region' = 'us-east-1',
+        'access_key_id' = 'rustfsadmin',
+        'secret_access_key' = 'rustfsadmin',
+        'path_style_access' = true
+      };
+      CREATE ICEBERG_REST CLIENT iceberg_catalog CONFIG {
+        'uri' = '{{iceberg_rest_addr}}',
+        'warehouse' = 's3://nervix-iceberg/warehouse'
+      };
+      CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'by_name_notifications_{{test_id}}'
+      LOCATION 's3://nervix-iceberg/tables/by_name_notifications_{{test_id}}'
+      CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      VALUES { 'readings' = input.readings, 'action' = input.action, 'attempts' = input.attempts, 'user_id' = input.user_id }
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    And MQTT message is published to topic "iceberg_by_name_in_{{test_id}}"
+      """
+      {"user_id":42,"action":"OPEN","attempts":3,"readings":[7,8]}
+      """
+    Then the Iceberg table "by_name_notifications_{{test_id}}" eventually contains a row
+      """
+      {"user_id":42,"action":"OPEN","note":null,"attempts":3,"readings":[7,8]}
+      """
+
+    Examples:
+      | cluster_size | readings_column_type | readings_type |
+      | 1            | LIST<I64>            | ARRAY<I64, 2> |
+      | 3            | LIST<I64>            | ARRAY<I64, 2> |
+
+  Scenario Outline: An Iceberg emitter refuses at open a required table column that VALUES could leave without a value
+    Given Iceberg dependencies are running
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "required_notifications_{{test_id}}" exists at "s3://nervix-iceberg/tables/required_notifications_{{test_id}}" with columns
+      """
+      user_id I64 REQUIRED
+      action STRING
+      """
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA notification (user_id <user_id_type>, action STRING);
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE S3 CLIENT s3_main CONFIG {
+        'endpoint' = '{{rustfs_addr}}',
+        'region' = 'us-east-1',
+        'access_key_id' = 'rustfsadmin',
+        'secret_access_key' = 'rustfsadmin',
+        'path_style_access' = true
+      };
+      CREATE ICEBERG_REST CLIENT iceberg_catalog CONFIG {
+        'uri' = '{{iceberg_rest_addr}}',
+        'warehouse' = 's3://nervix-iceberg/warehouse'
+      };
+      CREATE DETACHED ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'required_notifications_{{test_id}}'
+      LOCATION 's3://nervix-iceberg/tables/required_notifications_{{test_id}}'
+      CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      VALUES { <values> }
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "30s" DESCRIBE EMITTER "iceberg_notifications" on the leader node contains
+      """
+      <refusal>
+      """
+
+    Examples:
+      | cluster_size | user_id_type | values                                             | refusal                                                                                         |
+      | 1            | I64          | 'action' = input.action                            | table column 'user_id' is required, but VALUES does not map it                                  |
+      | 3            | I64          | 'action' = input.action                            | table column 'user_id' is required, but VALUES does not map it                                  |
+      | 1            | I64 OPTIONAL | 'user_id' = input.user_id, 'action' = input.action | table column 'user_id' is required, but the VALUES expression mapped into it can produce a null |
+      | 3            | I64 OPTIONAL | 'user_id' = input.user_id, 'action' = input.action | table column 'user_id' is required, but the VALUES expression mapped into it can produce a null |
 
   Scenario Outline: Iceberg emitters use explicitly provisioned catalog tables
     Given MQTT is running
@@ -722,20 +823,16 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE EMITTER iceberg_notifications_a FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_a_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_a_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        CREATE ICEBERG TABLE EMITTER iceberg_notifications_a FROM notifications TO s3_main TABLE 'namespace_notifications_a_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/namespace_notifications_a_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER iceberg_notifications_b FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_b_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_b_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        CREATE ICEBERG TABLE EMITTER iceberg_notifications_b FROM notifications TO s3_main TABLE 'namespace_notifications_b_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/namespace_notifications_b_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER iceberg_notifications_c FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_c_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_c_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        CREATE ICEBERG TABLE EMITTER iceberg_notifications_c FROM notifications TO s3_main TABLE 'namespace_notifications_c_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/namespace_notifications_c_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER iceberg_notifications_d FROM notifications TO ICEBERG ON S3 s3_main TABLE namespace_notifications_d_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/namespace_notifications_d_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        CREATE ICEBERG TABLE EMITTER iceberg_notifications_d FROM notifications TO s3_main TABLE 'namespace_notifications_d_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/namespace_notifications_d_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -825,8 +922,7 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE temp_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/temp_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 10s MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'temp_notifications_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/temp_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 10s MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -912,8 +1008,7 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE shutdown_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/shutdown_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'shutdown_notifications_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/shutdown_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -991,8 +1086,7 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE DETACHED EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE init_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 'http://nervix-iceberg/tables/init_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        CREATE DETACHED ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'init_notifications_{{test_id}}' LOCATION 'http://nervix-iceberg/tables/init_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -1075,8 +1169,7 @@ Feature: Iceberg emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE ack_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/ack_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'ack_notifications_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/ack_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
@@ -1150,8 +1243,7 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-      CREATE EMITTER iceberg_memory FROM notifications TO ICEBERG ON S3 s3_main TABLE memory_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/memory_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 30s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      CREATE ICEBERG TABLE EMITTER iceberg_memory FROM notifications TO s3_main TABLE 'memory_notifications_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/memory_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 30s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       START;
@@ -1227,10 +1319,9 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_catalog_gate}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-      CREATE EMITTER iceberg_refused FROM notifications
+      CREATE ICEBERG TABLE EMITTER iceberg_refused FROM notifications
         COLLECT FOR 5s
-        TO ICEBERG ON S3 s3_main TABLE refused_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/refused_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 1B MODE ACK RETRY POLICY BACKOFF 10s MAX 10s
-        FLUSH EACH 1h MAX BATCH SIZE 1B
+        TO s3_main TABLE 'refused_notifications_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/refused_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 1B MODE ACK RETRY POLICY BACKOFF 10s MAX 10s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 1h MAX BATCH SIZE 1B
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       START;
@@ -1317,10 +1408,9 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-      CREATE EMITTER iceberg_oversized FROM large_messages
+      CREATE ICEBERG TABLE EMITTER iceberg_oversized FROM large_messages
         COLLECT FOR 1h MAX BATCH SIZE 33MiB
-        TO ICEBERG ON S3 s3_main TABLE oversized_messages_{{test_id}} VALUES { 'value' = input.value, 'message' = input.message } LOCATION 's3://nervix-iceberg/tables/oversized_messages_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 1B MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-        FLUSH EACH 100ms MAX BATCH SIZE 64MiB
+        TO s3_main TABLE 'oversized_messages_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/oversized_messages_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 1B MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { 'value' = input.value, 'message' = input.message } FLUSH EACH 100ms MAX BATCH SIZE 64MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       START;

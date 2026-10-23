@@ -378,7 +378,7 @@ is full, what happens to a payload depends on whether its sender can present it 
 | `ZEROMQ PULL` | Waits | Unread messages stay in the socket's kernel buffers, and then the pushing peers wait. Nothing is dropped. |
 | `SYSLOG LISTENER` | Waits | The listener stays bound. The kernel drops UDP datagrams beyond the socket's receive buffer, and TCP and TLS senders wait once the listener's 64-frame queue is full. |
 | `MQTT TOPIC` | Refused and counted | The client sends its keep-alive only while the loop reads, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from it, and what is published until the source reconnects is lost. |
-| `REDIS PUBSUB` | Refused and counted | The client reads every published message into an unbounded queue of its own, so a held loop would grow the node's memory without limit. |
+| `REDIS PUBSUB` | Refused and counted | The subscription reader holds at most `subscription_buffer_messages` messages. The host keeps polling it so its same-connection idle probes can continue instead of waiting for extension-worker admission. |
 | `WEBSOCKETS CONNECTION` | Refused and counted | The client answers the server's pings only while the loop reads, so a server that pings would close the connection and lose what it sent until the source reconnects. |
 | `KAFKA TOPIC` in `MODE NO ACK` | Refused and counted | A consumer-group member that stops polling for `max.poll.interval.ms` leaves its group, and an instance reading domain offsets would keep its partitions assigned through an ownership handoff. |
 | `PULSAR TOPIC` in `MODE NO ACK` | Refused and counted | A consumer whose receive queue fills cannot complete its close, so a later suspension or stop would wait on it. The refused message stays unacknowledged until the consumer reconnects, when the broker delivers it again. |
@@ -651,6 +651,11 @@ filesystem or consensus worker permits. This does not bound a consumer-group com
 retry lifetime: the caller waits at most 30 seconds and retains that one commit until its exact
 answer arrives before submitting another. Native subscribe, assign and unsubscribe cannot be
 cancelled; their caller's budget limits waiting while an already-running call keeps its worker.
+
+Redis Pub/Sub requires `idle_timeout_ms` in its source client's `CONFIG`. It bounds silence on an
+established subscription, including its same-connection liveness probe; time waiting for room in
+the bounded read-ahead handoff is outside that active read. A failed probe reports the key and its
+bound as a transient status and the host reconnects on its policy.
 
 ## Client Ingestors
 
@@ -978,8 +983,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
 | Buffers | messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
-| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded |
-| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>receive.message.max.bytes 100000000 |
+| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |
+| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
@@ -1022,6 +1027,11 @@ another node, the new owner's consumer joins the group as soon as it starts, but
 partitions, and records flow again, only after that expiry. A graceful stop or an ownership move
 leaves the group first, so its partitions move without that wait. `OFFSET BY DOMAIN` assigns
 partitions through the domain schedule and waits for no group session.
+
+Stopping or dropping a Kafka ingestor returns without waiting for its consumers to be destroyed.
+The node destroys each one on its connector control workers, where a consumer that joined its group
+waits up to five seconds for the coordinator to answer its LeaveGroup request; see
+[Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement).
 
 Under `OFFSET BY CONSUMER GROUP`, `MODE NO ACK` is the consumer's auto-commit: the consumer
 commits the positions it has read on its own schedule, `auto.commit.interval.ms`, without waiting
@@ -1260,29 +1270,51 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | CHANNEL 'orders' (redis_channel) |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
-| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Emit channel names currently use the unquoted emitter grammar. |
+| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | Not offered: The current Pub/Sub declaration delivers payloads without a typed channel metadata namespace. |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | messages the driver reads ahead of the host: unbounded |
-| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>reading the next message: unbounded |
+| Buffers | messages read ahead of intake: set by subscription_buffer_messages; when full, holds back what fills it |
+| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |
 | Driver limits | None declared. |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-ingest).
 <!-- connector-matrix:ingest-redis-pubsub:end -->
 
-Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both modes keep reading and
-keep the subscriber healthy; payloads are either retained locally within the declared bound or
-discarded and counted. A `REDIS CLIENT` declares connection-pool bounds even when only
-ingestors reference it; see [Database Client Connection Pools](database-client-pools.md).
+Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both `ON QUIESCE BUFFER`
+and `ON QUIESCE DROP` keep reading and keep the subscriber healthy. `BUFFER` retains payloads up
+to its byte bound, then applies its declared `DROP OLDEST` or `DROP NEWEST` overflow policy;
+`DROP` discards every payload during the hold. Discards count in
+`nervix_ingestor_quiesce_dropped_total`. A `REDIS CLIENT` declares connection-pool bounds even
+when only ingestors reference it; see [Database Client Connection Pools](database-client-pools.md).
 Each subscription owns a separate connection. It resolves the `addr` hostname through the node's
 asynchronous DNS resolver on initial subscribe and every resume after a disconnect; it does not
 consume a pooled command connection. For `rediss://`, TLS verifies the original hostname and
 uses the configured CA and optional client identity. DNS and connection failures follow the
 source's existing retry cadence; Redis Pub/Sub does not replay messages missed while disconnected.
+
+A Redis ingestor's client must set `subscription_buffer_messages` and `idle_timeout_ms` in its
+`CONFIG`; neither key has an implicit default. The message capacity bounds read-ahead separately
+from `BUFFER MAX SIZE`, which bounds retained payload bytes during quiesce. It is a positive whole
+number that fits the bounded channel.
+For example, choose `'subscription_buffer_messages' = '1024'` and `'idle_timeout_ms' = '30000'`
+for a 1,024-message handoff and a 30-second idle interval. A full message handoff stops TCP reads; quiesced
+intake still applies its declared `BUFFER` overflow policy or counts the messages `DROP` discards.
+Malformed capacity values fail ingestor initialization. This handoff applies TCP backpressure
+when full; it does not discard a message to make room. Redis Pub/Sub still offers no replay or
+delivery acknowledgement, so neither buffer recovers messages missed during a disconnect.
+
+`idle_timeout_ms` is a positive whole number of schedulable milliseconds. The
+subscription sends a same-connection `PING` after half that interval without activity and requires
+activity within the remaining half. Activity means a complete Redis message or probe reply.
+A failed probe is a transient read failure visible in
+`DESCRIBE INGESTOR`, followed by the existing reconnect backoff. A healthy idle connection stays
+subscribed. Time spent waiting for read-ahead room is outside an active idle read. Neither the
+message capacity nor the quiesce byte bound includes kernel buffers or bytes in a partial wire
+frame. Configure both bounds for the expected payload sizes.
 
 ### MQTT
 
@@ -1420,12 +1452,18 @@ Core NATS retains no backlog, so `SUSPEND` is unavailable. A quiesced instance r
 its queue group and keeps receiving its share; that share is buffered or discarded rather than
 shifted to other members.
 
-A lost connection to the server ends the instance's subscription. `DESCRIBE INGESTOR` shows the
-loss, and then each failed reconnect, as its transient error, and the instance connects and
-subscribes again on the host's reconnect cadence: the delay starts at 250 ms, doubles after each
-failed attempt up to 30 s, and `DESCRIBE INGESTOR` shows it as the reconnect backoff. Messages the
-client received before the loss are still delivered. Core NATS retains nothing for a subscription
-that is not connected, so messages published while the instance reconnects never reach it.
+A lost connection to the server ends the instance's subscription, and so does a server that stops
+answering the client's pings, once two of them go unanswered. Messages the client received before
+the loss are still delivered. `DESCRIBE INGESTOR` shows the loss as its transient error,
+`NATS connection lost`, and then each failed attempt to connect and subscribe again, such as
+`failed to connect NATS client`, with the delay before the next attempt as its reconnect backoff.
+The instance connects and subscribes again on the host's reconnect cadence: the delay starts at
+250 ms and doubles after each failure up to 30 s. An instance that cannot connect when the ingestor
+starts does not fail the start; it reports the failure and tries again on the same cadence. Once
+the instance has subscribed again, `DESCRIBE INGESTOR` shows `ready: true`, while the last transient
+error and its backoff stay until the instance takes in its next message, which also returns the
+delay to 250 ms. Core NATS retains nothing for a subscription that is not connected, so messages
+published while the instance reconnects never reach it.
 
 ### ZeroMQ
 
@@ -1657,23 +1695,31 @@ Prometheus samples are flattened into JSON before codec decoding.
 `MAX BODY SIZE <bytes>`, written between `QUERY` and `EVERY`, bounds how many bytes of one query
 response a poll reads; a statement that leaves it out reads at most `16MiB`. The size is a whole
 number greater than zero followed by `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`, and
-`SHOW CREATE` renders it as written. A response whose announced length or whose body exceeds the
-bound fails the poll before any of its samples is delivered: `DESCRIBE INGESTOR` shows the failure
-as the ingestor's transient error, such as `transient error: failed to read from prometheus source:
-Prometheus query response exceeds MAX BODY SIZE 16MiB`, and the next poll queries again.
-`DESCRIBE INGESTOR` prints the bound in effect, whether the statement wrote it or not, as
-`prometheus max body size: 16MiB`.
+`SHOW CREATE` renders it in the unit it was written in. The bound counts the bytes of the
+response's JSON: a response the server compressed is counted as it is decompressed, so the bound
+limits the JSON a poll reads rather than the size of its transfer. A response whose announced
+length or whose body exceeds the bound fails the poll before any of its samples is delivered:
+`DESCRIBE INGESTOR` shows the failure as the ingestor's transient error, such as `transient error:
+failed to read from prometheus source: Prometheus query response exceeds MAX BODY SIZE 16MiB`, and
+the next poll queries again. `DESCRIBE INGESTOR` prints the bound in effect, whether the statement
+wrote it or not, as `prometheus max body size: 16MiB`. `SET FROM` replaces the whole body, so an
+`ALTER PROMETHEUS QUERY INGESTOR` whose new body leaves `MAX BODY SIZE` out reads at most `16MiB`
+again.
 The samples of one response enter the graph in intake batches of at most 1024 samples, and each
 batch is decoded and routed as its own group, so a large vector is never taken in as one batch of
 any size. The remaining samples wait while a batch is routed, and the next query waits until every
-sample of the current one has entered the graph.
+sample of the current one has entered the graph or, while a `BUFFER` quiesce holds the ingestor,
+has been handed to its buffer.
 The first query becomes due after one `EVERY` interval. Nervix supplies each anchored due instant
 as Prometheus's evaluation time; a slow query coalesces missed occurrences and returned samples are
 evaluated with a fresh domain execution snapshot.
 `SUSPEND` skips scrapes and leaves a sampling gap. `BUFFER` keeps querying at the declared cadence
-and delivers retained results in order after resume. A scrape whose `ON INGESTION` unfolding finds
-the node's extension workers full waits for them; see
-[When The Extension Workers Are Full](#when-the-extension-workers-are-full).
+and delivers retained results in order after resume. It retains each intake batch as one payload:
+`MAX SIZE` counts the bytes of its samples' JSON, `ON OVERFLOW` drops whole batches, and
+`nervix_ingestor_quiesce_buffered_records` and `nervix_ingestor_quiesce_dropped_total` count
+batches rather than samples. On resume, each retained batch enters the graph as an ingest group of
+its own, oldest first. A scrape whose `ON INGESTION` unfolding finds the node's extension workers
+full waits for them; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
 
 The ingestor reads through a `PROMETHEUS CLIENT`. Every key of its `CONFIG` is Nervix's own:
 

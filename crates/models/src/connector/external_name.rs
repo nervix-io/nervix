@@ -243,3 +243,25 @@ macro_rules! external_names {
 }
 
 pub(crate) use external_names;
+
+/// The identifier alphabet and 128-byte language bound of external table and collection paths.
+/// Unlike a Nervix identity, the external text keeps its original case.
+pub(crate) fn external_identifier(text: &str) -> Result<(), ExternalNameError> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the Plexus table and collection locator grammar fixes the name at 1–128 \
+                      ASCII bytes, as specified in docs/src/emitters.md"
+        )
+    )]
+    const MAX_IDENTIFIER_BYTES: usize = 128;
+    require_length(text, MAX_IDENTIFIER_BYTES)?;
+    if let Some(ch) = text
+        .chars()
+        .find(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '~' | '.')))
+    {
+        return Err(ExternalNameError::InvalidChar { ch });
+    }
+    Ok(())
+}

@@ -25,9 +25,9 @@ use super::{
 };
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
-    OptionForm, OptionPresence, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkReferenceKind, SinkValueMapping, SinkValueMappings, TableName,
+    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SinkValueMapping,
+    SinkValueMappings,
 };
 
 configured_client!(MySql: pooled, config NervixWithAddressQuery, CreateClientMySql => MySqlConfigEntry);
@@ -39,8 +39,9 @@ pub type MySqlValueMapping = SinkValueMapping;
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct MySqlTableSink {
+    pub mode: MySqlTablePublishingMode,
     pub client: ClientName,
-    pub table: TableName,
+    pub table: MySqlTableName,
     pub values: Vec<MySqlValueMapping>,
     pub conflict_action: MySqlConflictAction,
 }
@@ -77,12 +78,10 @@ impl SinkEntity for MySqlTableSink {
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        publishing_modes: MySqlTablePublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
-            keywords: "INSERT TO TABLE",
-            name: LocatorName::Unquoted {
-                label: "table_name",
-            },
+            keywords: "TABLE",
+            name: LocatorName::External(MySqlTableName::DECLARATION),
         }),
         options: &[OptionDeclaration {
             keywords: "ON CONFLICT",
@@ -127,8 +126,22 @@ connector_sinks! {
     connector MySql = "MYSQL";
     /// What a MySQL sink writes.
     pub enum MySqlSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum MySqlEmitterMode;
     /// The entities a MySQL sink writes.
     pub enum MySqlSinkEntity {
-        Table(MySqlTableSink) = "TABLE";
+        Table(MySqlTableSink, MySqlTablePublishingMode) = "TABLE";
     }
+}
+
+super::publishing::emitter_modes! {
+    pub enum MySqlTablePublishingMode {
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+    }
+}
+
+super::external_name::external_names! {
+    /// The case-preserving external table identifier this connector publishes to.
+    pub struct MySqlTableName => super::external_name::external_identifier,
+        label "mysql_table", example "Orders";
 }

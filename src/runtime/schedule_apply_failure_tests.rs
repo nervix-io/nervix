@@ -19,11 +19,10 @@ use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CodecWireFormat, CommandExecutionReference,
     CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter, CreateGenerator,
     CreateReingestor, CreateRelay, CreateSchema, DomainSchedule, EmitSink, EmitterBody,
-    EmitterPublishingMode, ErrorPolicies, FlushPolicy, MaterializedRelayState, MessageErrorPolicy,
-    ModelKind, ModelName, NodeRef, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, RelayBranching, RetryPolicy, RouteConstruction, ScheduledNode, SchemaField,
-    SchemaName, WasmStateReset, WasmStateResetReason, WasmStateResetScope, ZeroMqPushSink,
-    ZeroMqSink,
+    ErrorPolicies, FlushPolicy, MaterializedRelayState, MessageErrorPolicy, ModelKind, ModelName,
+    NodeRef, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    RelayBranching, RetryPolicy, RouteConstruction, ScheduledNode, SchemaField, SchemaName,
+    WasmStateReset, WasmStateResetReason, WasmStateResetScope, ZeroMqPushSink, ZeroMqSink,
 };
 use nervix_primitives::{
     sync::{mpsc, watch},
@@ -554,17 +553,17 @@ fn emitting_nodes() -> Vec<ScheduledNode> {
                 codec: named("event_codec"),
             },
             sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+                mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
                 client: named("sink"),
             }))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: RouteConstruction::default(),
             materialized_state: Vec::new(),

@@ -27,7 +27,7 @@ use crate::common::{
 
 mod branch_keys;
 mod branch_state;
-mod console;
+pub(crate) mod console;
 mod delivery;
 mod fidelity;
 mod guest_saves;

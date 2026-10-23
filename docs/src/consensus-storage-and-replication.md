@@ -102,6 +102,14 @@ A crash or lost connection after durable application but before delivery of the 
 the client uncertain even though the command took effect; persistent administrative requests use
 their stable execution reference to join or retrieve that result.
 
+Transaction tombstone removal evaluates age and the current applying command records together in
+the state machine. An applying transaction request retains its finished target, and an applying
+ordinary command retains its internal transactions, including planning refresh attempts, by their
+mutation owner. Their commit plans and reports remain durable with the tombstones. The leader uses
+the same eligibility decision to avoid cleanup proposals while every aged tombstone is retained;
+application rechecks it so a proposal cannot race a newly admitted consumer. Once the last consumer
+finishes, the original terminal timestamp determines eligibility, without an additional window.
+
 Transaction application completion persists the actual quiescence history and actual effects in
 the same applied state-machine boundary that changes the step from applying to applied or failed.
 Recovery therefore sees ordered requested, confirmed, failed or uncertain, and released outcomes
@@ -466,13 +474,20 @@ matching environment variables:
 | Argument | Environment | Default | Effect |
 | --- | --- | --- | --- |
 | `--raft-heartbeat-interval` | `NERVIX_RAFT_HEARTBEAT_INTERVAL` | `250ms` | Period for leader liveness probes and basis for their soft deadline. It does not set the append-stream idle bound. |
-| `--raft-election-timeout-min` | `NERVIX_RAFT_ELECTION_TIMEOUT_MIN` | `1500ms` | Lower end of the randomized follower election timeout. Must exceed the heartbeat interval plus the derived suppression window. |
-| `--raft-election-timeout-max` | `NERVIX_RAFT_ELECTION_TIMEOUT_MAX` | `3000ms` | Exclusive upper end of the randomized election timeout. Must exceed the minimum. |
+| `--raft-election-timeout-min` | `NERVIX_RAFT_ELECTION_TIMEOUT_MIN` | `1500ms` | Lower end of the randomized follower election timeout. Must exceed the heartbeat interval; the derived suppression window always fits inside that gap. |
+| `--raft-election-timeout-max` | `NERVIX_RAFT_ELECTION_TIMEOUT_MAX` | `3s` | Exclusive upper end of the randomized election timeout. Must exceed the minimum. |
 | `--raft-snapshot-entry-threshold` | `NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD` | `10000` | Applied entries since the last completed snapshot that request the next build. |
 | `--raft-snapshot-byte-threshold` | `NERVIX_RAFT_SNAPSHOT_BYTE_THRESHOLD` | `64MiB` | Appended entry bytes since the last completed snapshot that request the next build. |
 | `--raft-covered-log-entries-retained` | `NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED` | `1000` | Newest snapshot-covered entries retained for log catch-up. |
 | `--raft-covered-log-bytes-retained` | `NERVIX_RAFT_COVERED_LOG_BYTES_RETAINED` | `64MiB` | Newest snapshot-covered encoded bytes retained; the entry or byte bound reached first decides. |
 | `--raft-retained-log-cap` | `NERVIX_RAFT_RETAINED_LOG_CAP` | `1GiB` | Current-log byte level above which later mutations wait up to 30 seconds for reclamation. |
+
+A node compares its timings in the whole milliseconds consensus runs with, before it opens a store
+or binds a listener. A minimum election timeout that does not exceed the heartbeat interval, or a
+maximum that does not exceed the minimum, refuses the start with a message naming both settings,
+such as `raft-election-timeout-min (200ms) must exceed raft-heartbeat-interval (250ms)`; consensus
+never opens with timings it would reject. [Node Settings](node-settings.md) gives the class of each
+argument: the timings are prerequisites, the snapshot and retention bounds node capabilities.
 
 Replication batch and memory limits are fixed by the current server execution policy; the server
 does not expose flags for them:

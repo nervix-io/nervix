@@ -1,13 +1,13 @@
 ---
 name: nspl
-description: Design, author, explain, review, and troubleshoot Nervix configurations written in the Nervix Stream Processing Language (NSPL). Use when a user wants to configure domains, schemas, codecs, branches, relays, resources, clients, ingestors, processors, emitters, placement policies, lookups, Roto UDFs, subscriptions, lifecycle commands, or complete Nervix streaming graphs. Produce current, valid NSPL and identify required external provisioning.
+description: Design, author, explain, review, and troubleshoot Nervix configurations written in Plexus. Use when a user wants to configure domains, schemas, codecs, branches, relays, resources, clients, ingestors, processors, emitters, placement policies, lookups, Roto UDFs, subscriptions, lifecycle commands, or complete Nervix streaming graphs. Produce current, valid Plexus and identify required external provisioning.
 license: FCL-1.0-ALv2
 ---
 
-# Configure Nervix with NSPL
+# Configure Nervix with Plexus
 
 Turn a user's streaming requirements into an explicit, deployable Nervix graph. Open the public
-[Nervix NSPL documentation index](https://docs.nervix.io/llms.txt), then read the linked Markdown
+[Nervix Plexus documentation index](https://docs.nervix.io/llms.txt), then read the linked Markdown
 needed for the request. Treat that versioned documentation as the authority; never reconstruct
 clause order or connector options from memory.
 
@@ -30,7 +30,7 @@ editors, reference lookup, and transaction behavior.
 
 ## Gather the configuration contract
 
-Establish these inputs before finalizing NSPL. Ask only for missing details that materially change
+Establish these inputs before finalizing Plexus. Ask only for missing details that materially change
 the graph; otherwise use conspicuous placeholders and state the assumptions.
 
 - Domain: paced or unpaced, clock period/skew, start behavior, and default placement policy.
@@ -137,7 +137,7 @@ Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
 explain what an open, committing, or retained transaction requires and changes before or after
 `COMMIT`. These two reads are allowed while a transaction is open, are sent on their own, and neither
-queues content nor shifts operation numbers. Read `NSPL Overview` for its forms and
+queues content nor shifts operation numbers. Read `Plexus Overview` for its forms and
 [Transaction Quiescence And Impact Inspection](https://docs.nervix.io/transaction-quiescence.html)
 for report scopes, execution outcomes, and retained inspection. Treat a successful inspection
 as one complete result: selecting an operation changes presentation focus without narrowing the
@@ -194,7 +194,7 @@ per-route branch selection, while generator route bodies remain set-only.
 `ALTER DOMAIN SET PLACEMENT` is nameless, targets the active domain, and performs a normal schedule
 activation; a newly effective hard colocation requirement can relocate runtime nodes.
 
-## Preserve NSPL semantics
+## Preserve Plexus semantics
 
 - For paced domains, use a positive `PERIOD` no larger than `18446744073709551615ns`; `SKEW` may
   be zero but must fit the same nanosecond duration range. `START AT <timestamp>` is limited to the
@@ -376,7 +376,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `ENCODE USING`. Include every required variable: all modes declare `RETRY POLICY BACKOFF <d> MAX
   <d>`; asynchronous confirming modes also declare `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` and
   `ACK TIMEOUT <d>`. Do not invent a default mode, window, timeout, or retry cadence.
-- When an application receives constructed graph output, use `TO CLIENT SCHEMA <output_schema>
+- When an application receives constructed graph output, use `CREATE CLIENT CONSUMER EMITTER <name> FROM <relays> TO SCHEMA <output_schema>
   MODE ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
   Follow route construction with required `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` and an
   explicit `FLUSH` policy. The output schema is exact, and every sensitive value copied into a
@@ -411,7 +411,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   emitter and WebSocket clients take `connect_timeout_ms` and allow 30 seconds without it, while a
   ZeroMQ PULL ingestor reads none of these keys; a RabbitMQ client's deadline also covers the AMQP
   handshake and opening the entity's channel, and its `timeout_ms` bounds the round trip that ends
-  a `NO_ACK` write. A NATS client's `timeout_ms` bounds a Core NATS write and its flush to the
+  a `NO ACK` write. A NATS client's `timeout_ms` bounds a Core NATS write and its flush to the
   client's socket, which is not a server round trip. A Syslog emitter's client bounds each frame
   write by `timeout_ms`; a TLS Syslog listener's client bounds each accepted handshake by
   `connect_timeout_ms`, 30 seconds without it, and a TCP or TLS listener's client may close idle
@@ -419,10 +419,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   wait it bounds. Read `Ingestors` or
   `Emitters` → `Client Deadlines`, and `Connector Capabilities` for each entity's waits and what
   bounds them.
-- For an HTTP emitter, write `TO HTTP <client> METHOD <string_expression> PATH
+- For an HTTP emitter, write `CREATE HTTP REQUEST EMITTER <name> FROM <relay> TO <client> METHOD <string_expression> PATH
   <string_expression> MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>` followed by exactly
   one of `ENCODE USING <codec>` or `WITHOUT BODY`. Do not add an ACK window, `ACK TIMEOUT`,
-  `NO_ACK` or `BATCH`; see [Emitters](../../../docs/src/emitters.md#http-request-configuration)
+  `NO ACK` or `BATCH`; see [Emitters](../../../docs/src/emitters.md#http-request-configuration)
   for client origin and timeout requirements, request-field types and sensitivity, bodyless
   construction, and ALTER rules. Each record is one request: route `WHERE` filters before any
   request field is evaluated, a failed method, path, header write or body encoding rejects the
@@ -495,12 +495,21 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   only clamps a batch, and the flush tuning guidance in the docs records which sinks benefit from
   larger batches.
 - Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; an ingestor's `NO ACK` and an emitter's
-  `NO_ACK` have no in-flight ACK window and never accept `MAX`.
-- Do not promise that an emitter's `NO_ACK` survives a stop on every sink. A `STOP`, a replacement
+  `NO ACK` have no in-flight ACK window and never accept `MAX`.
+- Do not promise that an emitter's `NO ACK` survives a stop on every sink. A `STOP`, a replacement
   or a node shutdown sends what a Kafka producer still queues, awaits the receipts of what a Pulsar
   producer accepted and waits for an MQTT QoS 0 client to send what it holds, all within its
   deadline, reporting what is outstanding when it passes. Choose an `ACK` mode where a stop must not
   lose emitted records; `Emitters` → `ACK Semantics And Effective Delivery` has the rule.
+- Name the connector and entity in every emitter head, such as `CREATE KAFKA TOPIC EMITTER`,
+  `CREATE HTTP REQUEST EMITTER`, `CREATE OTEL METRICS EMITTER`, or `CREATE ICEBERG TABLE EMITTER`.
+  After `TO`, write its reference, quoted external locator and entity options, then `MODE`, then
+  its codec, `VALUES` mapping or `WITHOUT BODY`. Client consumers use `TO SCHEMA <schema> MODE ACK`.
+  Iceberg resolves its storage backend from its client; put `LOCATION`, `CATALOG` and `COMMIT EACH`
+  before `MODE`. Put OTEL attributes, resource and scope with `VALUES` after `MODE`.
+  Use the stored kind in every emitter ALTER head. `SET TO` requires that entity's complete body,
+  including its payload selection; changing the connector or entity requires drop and create.
+  External table and collection names retain case. Keep client/schema/codec references as identifiers.
 - Name the connector and entity in every ingestor head, such as `CREATE KAFKA TOPIC INGESTOR`,
   `CREATE HTTP ENDPOINT INGESTOR`, or `CREATE SYSLOG LISTENER INGESTOR`, and write the body after
   `FROM` without a connector keyword. Reference a client of the head's connector, and pair
@@ -565,7 +574,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - For syslog, read the dedicated `Common` → `Syslog` documentation entry. Reference the predefined
   singleton wire schema directly with `FROM SYSLOG`, keep the format independent of the UDP/TCP/TLS
   client transport, and use only the documented `SYSLOG LISTENER INGESTOR ... MODE NO ACK` source
-  and `NO_ACK` sink forms.
+  and `NO ACK` sink forms.
 - For a Sentry sink, reference a `SENTRY CLIENT` containing the project DSN and use a codec
   that emits one Sentry event JSON object per record. Do not add header writes to the Sentry route.
 - List topics, queues, streams, tables, buckets, catalogs, namespaces, collections, and other
@@ -578,7 +587,7 @@ When authoring a graph, provide:
 
 1. Assumptions and external prerequisites.
 2. Ordered command phases, separating client-local commands from transactional server statements.
-3. Complete NSPL with consistent names and no unexplained ellipses. Use placeholders only for
+3. Complete Plexus with consistent names and no unexplained ellipses. Use placeholders only for
    genuinely deployment-specific values such as endpoints, credentials, file paths, and external
    entity names.
 4. A short verification sequence using the relevant `SHOW`, `DESCRIBE`, lookup, or subscription

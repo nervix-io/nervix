@@ -6,11 +6,9 @@
 //!   and completes: its publishing modes, how its body is formed, whether it batches and how
 //!   large a batch may grow, its options and its envelope clauses.
 //! - **Depends on.** The connector vocabulary's declarations and the composed statement grammar.
-//! - **Must not know.** Any one connector's grammar beyond the words that open its destination.
+//! - **Must not know.** Connector-specific grammar dispatch or runtime planning.
 //!
-//! The emitter's head does not name its entity yet, so the words that open a destination after
-//! `TO` differ by connector, and [`destination`] writes them. Everything after them comes from the
-//! declaration: the locator, the options, the modes, the body and the batching clause.
+//! Heads, references, locators, options, policies and payload forms all come from the declarations.
 
 #![cfg_attr(
     nervix_lint,
@@ -20,13 +18,9 @@
 use std::collections::BTreeMap;
 
 use nervix_models::{
-    ClickHouseSinkEntity, ClientSinkEntity, ConnectorKind, CreateEmitter, EmitSinkCapabilities,
-    EmitSinkKind, EmitterBatchContractError, EmitterBatchLegality, EmitterBody, EmitterBodyForm,
-    EmitterPublishingModeKind, EnvelopeClauseKind, HttpSinkEntity, IcebergSinkEntity,
-    KafkaSinkEntity, Model, MongoDbSinkEntity, MqttSinkEntity, MySqlSinkEntity, NatsSinkEntity,
-    OptionDeclaration, OptionForm, OptionValue, OtelSinkEntity, PostgresSinkEntity,
-    PulsarSinkEntity, RabbitMqSinkEntity, RedisSinkEntity, SentrySinkEntity, SinkReferenceKind,
-    SqsSinkEntity, SyslogSinkEntity, ZeroMqSinkEntity,
+    CreateEmitter, EmitSinkKind, EmitterBatchContractError, EmitterBatchLegality, EmitterBody,
+    EmitterBodyForm, EmitterPublishingModeKind, EnvelopeClauseKind, Model, OptionDeclaration,
+    OptionForm, OptionValue, SinkReference, SinkReferenceKind,
 };
 use strum::IntoEnumIterator as _;
 
@@ -37,23 +31,6 @@ const BATCH: &str = "BATCH MAX MESSAGES 10 MAX SIZE 64KiB";
 
 /// The mapping a generated direct `VALUES` sink writes.
 const VALUES: &str = "VALUES {'id' = id, 'name' = name}";
-
-/// The locator of an entity's declaration written in full.
-fn locator(declared: &EmitSinkCapabilities) -> String {
-    let Some(locator) = declared.locator else {
-        panic!("the entity declares the locator its destination names");
-    };
-    locator.example()
-}
-
-/// The required option opened by `keywords`, written in its first declared form.
-fn required(declared: &EmitSinkCapabilities, keywords: &str) -> &'static str {
-    let Some(option) = declared.option(keywords) else {
-        panic!("the entity declares {keywords}");
-    };
-    assert!(option.is_required(), "{keywords} is required");
-    first_example(option)
-}
 
 /// The option written in its first declared form.
 fn first_example(option: &OptionDeclaration) -> &'static str {
@@ -68,78 +45,26 @@ fn first_example(option: &OptionDeclaration) -> &'static str {
     }
 }
 
-/// What a generated emitter of `kind` writes after `TO` and before `MODE`, every required option
-/// included.
-fn destination(kind: EmitSinkKind) -> String {
+/// The declared reference, locator and required entity options, before MODE.
+fn reference(kind: EmitSinkKind) -> String {
     let declared = kind.capabilities();
-    let connector = kind.connector().keyword();
-    match kind {
-        EmitSinkKind::Client(ClientSinkEntity::Consumer) => "CLIENT SCHEMA outgoing".to_owned(),
-        EmitSinkKind::Http(HttpSinkEntity::Request) => format!(
-            "{connector} sink_client {} {}",
-            required(&declared, "METHOD"),
-            required(&declared, "PATH")
-        ),
-        EmitSinkKind::Kafka(KafkaSinkEntity::Topic)
-        | EmitSinkKind::Pulsar(PulsarSinkEntity::Topic)
-        | EmitSinkKind::RabbitMq(RabbitMqSinkEntity::Queue)
-        | EmitSinkKind::Mqtt(MqttSinkEntity::Topic)
-        | EmitSinkKind::Nats(NatsSinkEntity::Subject)
-        | EmitSinkKind::Sqs(SqsSinkEntity::Queue) => {
-            format!("{connector} sink_client {}", locator(&declared))
+    let mut words = vec![match declared.reference {
+        SinkReferenceKind::Schema => "SCHEMA outgoing".to_owned(),
+        SinkReferenceKind::Client(_) | SinkReferenceKind::StorageClient(_) => {
+            "destination_client".to_owned()
         }
-        EmitSinkKind::Redis(RedisSinkEntity::PubSub) => {
-            format!("{} sink_client {}", kind.phrase(), locator(&declared))
-        }
-        EmitSinkKind::ZeroMq(ZeroMqSinkEntity::Push)
-        | EmitSinkKind::Sentry(SentrySinkEntity::Event)
-        | EmitSinkKind::Syslog(SyslogSinkEntity::Collector) => {
-            format!("{connector} sink_client")
-        }
-        EmitSinkKind::Otel(OtelSinkEntity::Logs | OtelSinkEntity::Traces) => {
-            format!("{connector} sink_client {} {VALUES}", kind.entity_keyword())
-        }
-        EmitSinkKind::Otel(OtelSinkEntity::Metrics) => format!(
-            "{connector} sink_client {} {VALUES}",
-            required(&declared, "METRIC")
-        ),
-        EmitSinkKind::ClickHouse(ClickHouseSinkEntity::Table)
-        | EmitSinkKind::Postgres(PostgresSinkEntity::Table)
-        | EmitSinkKind::MySql(MySqlSinkEntity::Table)
-        | EmitSinkKind::MongoDb(MongoDbSinkEntity::Collection) => {
-            format!("{connector} sink_client {} {VALUES}", locator(&declared))
-        }
-        EmitSinkKind::Iceberg(IcebergSinkEntity::Table) => {
-            iceberg_destination(&declared, first_store(&declared))
-        }
+    }];
+    if let Some(locator) = declared.locator {
+        words.push(locator.example());
     }
-}
-
-/// The object stores an entity whose body names a storage client declares it may write to.
-fn stores(declared: &EmitSinkCapabilities) -> &'static [ConnectorKind] {
-    let SinkReferenceKind::StorageClient(stores) = declared.reference else {
-        panic!("the entity's body names a storage client");
-    };
-    stores
-}
-
-fn first_store(declared: &EmitSinkCapabilities) -> ConnectorKind {
-    let Some(store) = stores(declared).first() else {
-        panic!("the entity declares at least one object store");
-    };
-    *store
-}
-
-/// What a generated Iceberg emitter writes after `TO`, writing its data files to `store`.
-fn iceberg_destination(declared: &EmitSinkCapabilities, store: ConnectorKind) -> String {
-    format!(
-        "ICEBERG ON {} store {} {VALUES} {} {} {}",
-        store.keyword(),
-        locator(declared),
-        required(declared, "LOCATION"),
-        required(declared, "CATALOG"),
-        required(declared, "COMMIT EACH")
-    )
+    for option in declared
+        .options
+        .iter()
+        .filter(|option| option.is_required())
+    {
+        words.push(first_example(option).to_owned());
+    }
+    words.join(" ")
 }
 
 /// The bodies an emitter of `form` may write after its publishing mode.
@@ -147,7 +72,8 @@ fn bodies(form: EmitterBodyForm) -> Vec<&'static str> {
     match form {
         EmitterBodyForm::Codec => vec!["ENCODE USING events_codec"],
         EmitterBodyForm::CodecOrWithoutBody => vec!["ENCODE USING events_codec", "WITHOUT BODY"],
-        EmitterBodyForm::Values | EmitterBodyForm::Native => vec![""],
+        EmitterBodyForm::Values => vec![VALUES],
+        EmitterBodyForm::Native => vec![""],
     }
 }
 
@@ -212,17 +138,29 @@ impl Generated {
 
     /// The statement up to the publishing mode `MODE` introduces.
     fn through_mode(&self) -> String {
-        let mut destination = destination(self.kind);
-        if let Some(option) = self.option {
+        let mut destination = reference(self.kind);
+        if let Some(option) = self
+            .option
+            .filter(|_| self.kind.capabilities().body != EmitterBodyForm::Values)
+        {
             destination = format!("{destination} {option}");
         }
-        format!("CREATE EMITTER generated FROM events TO {destination} MODE ")
+        format!(
+            "CREATE {} EMITTER generated FROM events TO {destination} MODE ",
+            self.kind.phrase()
+        )
     }
 
     fn text(&self) -> String {
         let mut words = vec![format!("{}{}", self.through_mode(), self.mode)];
         if !self.body.is_empty() {
             words.push(self.body.to_owned());
+        }
+        if let Some(option) = self
+            .option
+            .filter(|_| self.kind.capabilities().body == EmitterBodyForm::Values)
+        {
+            words.push(option.to_owned());
         }
         if let Some(envelope) = self.envelope {
             words.push(envelope.to_owned());
@@ -260,7 +198,8 @@ fn wrote(body: &EmitterBody, written: &str) -> bool {
     match body {
         EmitterBody::Codec { .. } => written.starts_with("ENCODE USING"),
         EmitterBody::WithoutBody => written == "WITHOUT BODY",
-        EmitterBody::Values | EmitterBody::Client => written.is_empty(),
+        EmitterBody::Values => written.starts_with("VALUES"),
+        EmitterBody::Client => written.is_empty(),
     }
 }
 
@@ -284,7 +223,7 @@ fn every_option_example() -> BTreeMap<&'static str, Vec<&'static str>> {
 fn every_destination_writes_the_declared_locator_and_required_options() {
     for kind in EmitSinkKind::all() {
         let declared = kind.capabilities();
-        let destination = destination(kind);
+        let destination = reference(kind);
         if let Some(locator) = declared.locator {
             assert!(
                 destination.contains(&locator.example()),
@@ -319,7 +258,7 @@ fn every_declared_mode_body_and_batching_parses_into_its_kind() {
                     };
                     let emitter = generated.parse();
                     let text = generated.text();
-                    assert_eq!(emitter.publishing_mode.kind(), *mode, "{text}");
+                    assert_eq!(emitter.sink.publishing().kind(), *mode, "{text}");
                     assert!(wrote(&emitter.body, body), "{text}");
                     assert_eq!(emitter.batch.is_some(), batched, "{text}");
                     assert!(emitter.validate_batch().is_ok(), "{text}");
@@ -330,23 +269,14 @@ fn every_declared_mode_body_and_batching_parses_into_its_kind() {
 }
 
 #[test]
-fn every_declared_object_store_parses_into_its_storage_client() {
+fn a_declared_storage_reference_is_preserved_for_planning() {
     for kind in EmitSinkKind::all() {
-        let declared = kind.capabilities();
-        let SinkReferenceKind::StorageClient(stores) = declared.reference else {
-            continue;
-        };
-        for store in stores {
-            let destination = iceberg_destination(&declared, *store);
-            let text = format!(
-                "CREATE EMITTER generated FROM events TO {destination} MODE {} FLUSH IMMEDIATE ON \
-                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
-                EmitterPublishingModeKind::RequestAck.example()
-            );
-            let Some(Model::Emitter(emitter)) = created_model(&text) else {
-                panic!("the grammar refuses an object store {kind} declares: {text}");
+        if let SinkReferenceKind::StorageClient(_) = kind.capabilities().reference {
+            let emitter = Generated::of(kind).parse();
+            let SinkReference::StorageClient(client) = emitter.sink.reference() else {
+                panic!("{kind} must retain a storage client reference");
             };
-            assert_eq!(emitter.sink.client_connector(), Some(*store), "{text}");
+            assert_eq!(client.as_str(), "destination_client");
         }
     }
 }
@@ -543,14 +473,15 @@ fn completion_after_the_destination_offers_exactly_the_optional_options_and_the_
         }
         let mut continuations = Vec::new();
         for option in declared.options {
-            if !option.is_required() {
+            if !option.is_required() && declared.body != EmitterBodyForm::Values {
                 continuations.extend(option.examples());
             }
         }
         continuations.push("MODE");
         let prefix = format!(
-            "CREATE EMITTER generated FROM events TO {} ",
-            destination(kind)
+            "CREATE {} EMITTER generated FROM events TO {} ",
+            kind.phrase(),
+            reference(kind)
         );
         assert_offers_exactly(&prefix, &continuations);
     }

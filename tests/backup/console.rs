@@ -4,9 +4,10 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Saving the archive a console download hands the browser into the scenario's archive
-//!   directory, handing a scenario archive to a file input, reloading the console while it
-//!   downloads, writing and reading the pending backup record in the tab's session storage, and
-//!   checking what the console reports against an archive's own size and digest.
+//!   directory, waiting for that download from before the steps that start it, handing a scenario
+//!   archive to a file input, reloading the console while it downloads, writing and reading the
+//!   pending backup record in the tab's session storage, and checking what the console reports
+//!   against an archive's own size and digest.
 //! - **Depends on.** The scenario's browser page, its archive directory, and the server's fault
 //!   injection for backup downloads.
 //! - **Must not know.** How the console verifies, assembles or streams an archive.
@@ -130,6 +131,28 @@ async fn when_selector_is_pressed_and_download_is_saved(
         .await
         .expect("selector must accept the key press");
     save_console_download(browser_page(world), waiter, &archive).await;
+}
+
+/// A download a scenario waits for from before the action that starts it, and the scenario archive
+/// it is saved as, for a scenario that acts in between.
+pub(crate) struct ExpectedConsoleDownload {
+    waiter: EventWaiter<Download>,
+    archive: PathBuf,
+}
+
+#[given(expr = "the web console's next download is expected as backup archive {string}")]
+async fn given_console_download_is_expected(world: &mut ScenarioWorld, file: String) {
+    let archive = archive_path(world, &file);
+    let waiter = expect_console_download(world).await;
+    world.expected_console_download = Some(ExpectedConsoleDownload { waiter, archive });
+}
+
+#[then("the web console's expected download is saved")]
+async fn then_expected_console_download_is_saved(world: &mut ScenarioWorld) {
+    let Some(expected) = world.expected_console_download.take() else {
+        panic!("no step expected a web console download");
+    };
+    save_console_download(browser_page(world), expected.waiter, &expected.archive).await;
 }
 
 #[when(
