@@ -327,8 +327,12 @@ MQTT fixture publishers keep their event loop alive through the driver's tracked
 publication completion: a socket write for QoS 0 and the broker acknowledgement for QoS 1. The
 existing broker-operation timeout bounds that wait, and cancellation drops the driver. Retained
 scenario inputs still use unique topics. Bursts queue all their messages before waiting for
-completion. The fixture regression pauses a real broker connection for 500 ms and compares every
-complete delivered payload for QoS 0 and QoS 1, as individual messages and bursts of five.
+completion. In a burst, the timeout bounds each publication's queueing and completion rather than
+the whole burst, so a burst fails only once the broker answers none of its publications for that
+long. Under the parallel suite, a burst of 2,000 QoS 1 publications took longer than one timeout
+in total while the broker answered each publication well within it. The fixture regression pauses
+a real broker connection for 500 ms and compares every complete delivered payload for QoS 0 and
+QoS 1, as individual messages and bursts of five.
 
 The reclaimed-command-identity scenario configures a 20-second retry validity for its initial
 admission and exact retry. Its reclamation wait includes the configured validity followed by
