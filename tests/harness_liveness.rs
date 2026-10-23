@@ -19,6 +19,10 @@
 //!   requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
+#[path = "common/broker_observer.rs"]
+mod broker_observer;
+#[path = "common/broker_observer_tests.rs"]
+mod broker_observer_tests;
 #[path = "common/cluster_teardown.rs"]
 mod cluster_teardown;
 #[path = "common/console_connections.rs"]
