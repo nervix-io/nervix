@@ -1,4 +1,4 @@
-Feature: HTTP emitter inspection, errors and metrics
+Feature: HTTP REQUEST emitter inspection, errors and metrics
   DESCRIBE EMITTER reports why an HTTP request is still pending for as long as it stays pending,
   and message errors, runtime events and emitter status name the operation and the status of a
   failure without an evaluated target, a header value or a body. The sent counters count each
@@ -6,7 +6,7 @@ Feature: HTTP emitter inspection, errors and metrics
   count the codec body's record and never the request's method, target or headers.
 
   @http_emitter_inspection @retained_task_handles
-  Scenario Outline: HTTP emitters with and without a body report a pending failure safely and count each delivered record once
+  Scenario Outline: HTTP REQUEST emitters with and without a body report a pending failure safely and count each delivered record once
     Given HTTP receiver "encoded_api" is running
     And HTTP receiver "encoded_api" answers with
       """
@@ -60,8 +60,8 @@ Feature: HTTP emitter inspection, errors and metrics
       CREATE HTTP CLIENT empty_client CONFIG {
         'endpoint' = '{{http_receiver.empty_api}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER encoded FROM outgoing
-        TO HTTP encoded_client
+      CREATE HTTP REQUEST EMITTER encoded FROM outgoing
+        TO encoded_client
           METHOD 'POST'
           PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms
@@ -78,8 +78,8 @@ Feature: HTTP emitter inspection, errors and metrics
               operation_index = error.operation_index,
               error_message = error.message
         ON GENERAL ERROR LOG;
-      CREATE EMITTER empty FROM outgoing
-        TO HTTP empty_client
+      CREATE HTTP REQUEST EMITTER empty FROM outgoing
+        TO empty_client
           METHOD 'POST'
           PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms
@@ -282,8 +282,8 @@ Feature: HTTP emitter inspection, errors and metrics
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH concat('/events/', input.event_id)
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

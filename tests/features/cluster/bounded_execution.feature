@@ -73,7 +73,7 @@ Feature: Bounded execution and transient memory
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE EMITTER transformed_notifications FROM notifications TO KAFKA kafka_main TOPIC transformed_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_out
+      CREATE KAFKA TOPIC EMITTER transformed_notifications FROM notifications TO kafka_main TOPIC 'transformed_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_out
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

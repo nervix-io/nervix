@@ -209,7 +209,7 @@ valid retroactively.
 
 Within a transaction, each consecutive run of model mutations can mix `CREATE`,
 `ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`,
-`ALTER REORDERER`, `ALTER EMITTER`, `ALTER <CONNECTOR> <ENTITY> INGESTOR`, `ALTER REINGESTOR`,
+`ALTER REORDERER`, `ALTER <CONNECTOR> <ENTITY> EMITTER`, `ALTER <CONNECTOR> <ENTITY> INGESTOR`, `ALTER REINGESTOR`,
 `ALTER GENERATOR`, `ALTER PLACEMENT`, and `DROP`. Nervix applies that run as one registry
 mutation: all operations are evaluated in written order against one candidate model map, the
 complete domain graph is revalidated, and one atomic storage batch persists the base-to-final

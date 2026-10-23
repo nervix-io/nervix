@@ -1515,7 +1515,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 }
 
 // The header identifies the current persisted Model shape before archive decoding.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL PHR";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL EPR";
 
 #[cfg(test)]
 #[cfg_attr(
@@ -2116,6 +2116,7 @@ mod tests {
             .plan_mutations(
                 &domain,
                 &[RegistryMutation::AlterEmitter(AlterEmitter {
+                    kind: nervix_models::EmitSinkKind::Kafka(nervix_models::KafkaSinkEntity::Topic),
                     emitter: named("event_sink"),
                     operations: vec![nervix_models::AlterEmitterOperation::SetFlush {
                         flush_policy: FlushPolicy::Immediate,
@@ -2129,6 +2130,7 @@ mod tests {
             .plan_mutations(
                 &domain,
                 &[RegistryMutation::AlterEmitter(AlterEmitter {
+                    kind: nervix_models::EmitSinkKind::Kafka(nervix_models::KafkaSinkEntity::Topic),
                     emitter: named("event_sink"),
                     operations: vec![nervix_models::AlterEmitterOperation::SetClient {
                         client: named("sink_b"),

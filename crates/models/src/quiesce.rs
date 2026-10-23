@@ -1298,7 +1298,6 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         batch: base_batch,
         flush_policy: base_flush_policy,
         error_policies: base_error_policies,
-        publishing_mode: base_publishing_mode,
         mode: base_mode,
         construction: base_construction,
         materialized_state: base_materialized_state,
@@ -1311,7 +1310,6 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         batch: candidate_batch,
         flush_policy: candidate_flush_policy,
         error_policies: candidate_error_policies,
-        publishing_mode: candidate_publishing_mode,
         mode: candidate_mode,
         construction: candidate_construction,
         materialized_state: candidate_materialized_state,
@@ -1343,7 +1341,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     if base_mode != candidate_mode {
         changes.push(ModelChangeAspect::EmitterMode);
     }
-    if base_publishing_mode != candidate_publishing_mode {
+    if base_sink.publishing() != candidate_sink.publishing() {
         changes.push(ModelChangeAspect::EmitterPublishingMode);
     }
     if base_construction != candidate_construction {
@@ -1392,12 +1390,12 @@ mod tests {
     use crate::{
         AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
         CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
-        EmitterBody, EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, FlushPolicy,
-        GeneralErrorPolicy, HttpEndpointSource, HttpSource, IngestSource, IngestTimestampSource,
-        InputCollectPolicy, Literal, MaterializedRelayState, MaterializedStateDependency,
-        MaterializedStatePolicy, MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, NatsSink,
-        NatsSubjectSink, ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        QuiesceLevel, RelayBranching, RetryPolicy, ZeroMqPushSink, ZeroMqSink,
+        EmitterBody, EndpointIngestMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
+        HttpEndpointSource, HttpSource, IngestSource, IngestTimestampSource, InputCollectPolicy,
+        Literal, MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
+        MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, NatsSink, NatsSubjectSink,
+        ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
+        RelayBranching, RetryPolicy, ZeroMqPushSink, ZeroMqSink,
     };
 
     fn named<N>(raw: &str) -> N
@@ -1484,6 +1482,12 @@ mod tests {
                 codec: named("event_codec"),
             },
             sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+                mode: crate::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
                 client: named("sink"),
             }))),
             batch: None,
@@ -1492,12 +1496,6 @@ mod tests {
                 max_batch_size: "1MiB".to_string(),
             },
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: crate::RouteConstruction::default(),
             materialized_state: Vec::new(),
@@ -1852,6 +1850,12 @@ mod tests {
 
         let mut client = base.clone();
         client.sink = Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+            mode: crate::ZeroMqPushPublishingMode::NoAck {
+                retry_policy: crate::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: named("sink_two"),
         })));
         assert_single_aspect(
@@ -1863,6 +1867,12 @@ mod tests {
 
         let mut sink = base.clone();
         sink.sink = Box::new(EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
+            mode: crate::NatsSubjectPublishingMode::NoAck {
+                retry_policy: crate::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: named("sink"),
             subject: named("events"),
         })));
@@ -1931,7 +1941,10 @@ mod tests {
         );
 
         let mut publishing_mode = base.clone();
-        publishing_mode.publishing_mode = EmitterPublishingMode::NoAck {
+        let EmitSink::ZeroMq(ZeroMqSink::Push(destination)) = publishing_mode.sink.as_mut() else {
+            panic!("expected ZeroMQ");
+        };
+        destination.mode = crate::ZeroMqPushPublishingMode::NoAck {
             retry_policy: RetryPolicy {
                 backoff: "500ms".to_string(),
                 max_backoff: "45s".to_string(),

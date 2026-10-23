@@ -22,8 +22,7 @@ use super::{
 };
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    EmitterPublishingModeKind, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkReferenceKind,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
 };
 
 configured_client!(Sentry: unpooled, config Nervix, CreateClientSentry => SentryConfigEntry);
@@ -33,6 +32,7 @@ configured_client!(Sentry: unpooled, config Nervix, CreateClientSentry => Sentry
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct SentryEventSink {
+    pub mode: SentryEventPublishingMode,
     pub client: ClientName,
 }
 
@@ -58,7 +58,7 @@ impl SinkEntity for SentryEventSink {
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: true,
-        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        publishing_modes: SentryEventPublishingMode::KINDS,
         locator: None,
         options: &[],
         envelope: &[],
@@ -84,8 +84,16 @@ connector_sinks! {
     connector Sentry = "SENTRY";
     /// What a Sentry sink writes.
     pub enum SentrySink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum SentryEmitterMode;
     /// The entities a Sentry sink writes.
     pub enum SentrySinkEntity {
-        Event(SentryEventSink) = "EVENT";
+        Event(SentryEventSink, SentryEventPublishingMode) = "EVENT";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum SentryEventPublishingMode {
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
     }
 }

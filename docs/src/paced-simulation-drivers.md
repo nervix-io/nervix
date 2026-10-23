@@ -56,9 +56,9 @@ consumer acknowledged the reading's output. Its batches never mix sensors, becau
 never combines concrete branches:
 
 ```nspl
-CREATE ATTACHED EMITTER observed_readings
+CREATE ATTACHED CLIENT CONSUMER EMITTER observed_readings
   FROM readings
-  TO CLIENT SCHEMA observed_reading
+  TO SCHEMA observed_reading
     MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s
   INHERIT ALL
   BATCH MAX MESSAGES 256 MAX SIZE 256KiB

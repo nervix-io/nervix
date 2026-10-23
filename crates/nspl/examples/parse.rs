@@ -152,9 +152,9 @@ fn main() -> ExitCode {
          <relay> ... ON MESSAGE ERROR LOG [ON GENERAL ERROR LOG;]"
     );
     println!(
-        "  CREATE EMITTER <name> FROM <s> TO KAFKA|PULSAR|RABBITMQ|REDIS|MQTT|NATS|ZEROMQ|SQS ... \
-         MODE <transport-specific publishing mode> ENCODE USING <codec> ... [ ON MESSAGE ERROR \
-         LOG ON GENERAL ERROR LOG;]"
+        "  CREATE <CONNECTOR> <ENTITY> EMITTER <name> FROM <s> TO <reference> [<LOCATOR> \
+         '<external name>'] MODE <entity publishing mode> ENCODE USING <codec> ... [ ON MESSAGE \
+         ERROR LOG ON GENERAL ERROR LOG;]"
     );
     println!("  SHOW CREATE SCHEMA|CODEC|CLIENT|VHOST|ENDPOINT|INGESTOR|RELAY|EMITTER <name> [;]");
     println!("  SHOW CLUSTER STATUS [;]");
