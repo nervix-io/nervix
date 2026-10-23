@@ -953,6 +953,13 @@ is created. The refusal names the connector, the client and the domain, with the
 `PrometheusClientConfigError` beneath it naming the key. Where the key's value breaks its address
 or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
 domain 'shop' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string`.
+A `WEBSOCKETS CLIENT` uses the same validation boundary with
+`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint or positive-duration values,
+TLS keys on `ws`, and unpaired identity files are typed refusals naming their key, client and domain.
+`WebsocketsUpgradeHeadersError` names the connection ingestor and offending field without printing
+its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
+cause if a source cannot produce its validated header collection. Rendered client values are
+validated again by the connector before opening transport.
 An emitter whose sink keeps one value per header name and whose `INVOKE` clause writes one literal
 header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
 emitter, the sink's connector and entity, the header as the sink's
@@ -1157,6 +1164,13 @@ harness requested stop leaves the readiness timeout as the retry cause. Cleanup 
 remaining absolute startup budget; exhaustion with the task still running retains that task and
 reports its pending cleanup. [Integration Test Lifecycle](./integration-test-lifecycle.md#node-startup)
 owns these harness bounds and the distinction from product shutdown deadlines.
+
+The WebSocket declaration fixture treats `Protocol(HandshakeIncomplete)` during an opening
+upgrade as a cancelled attempt. It records that outcome and keeps its payload gate for the next
+completed upgrade. Other handshake errors and established-stream failures preserve their typed
+tungstenite cause beneath the I/O error; a fixture task ending with one still fails the scenario's
+After hook. [Fixture cleanup](./integration-test-lifecycle.md#what-cleanup-releases) owns the
+listener's lifetime.
 
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
@@ -1381,6 +1395,11 @@ guest-requested state reset reports on its own, and an ingest group's failure to
 branch entrypoint, which the group's flush also returns to its caller. A branch whose domain
 routing can no longer be read fails the acknowledgements it was handed with that routing failure
 directly, without a policy or a runtime event.
+A WebSockets ingest metadata builder checks its frame-label capacity before allocation. A row bound
+whose byte estimate exceeds the address space returns `IngestMetadataError::WebsocketsCapacityOverflow`;
+the ingest group retains it below its `open ingest metadata` operation and the source's general-error
+policy reports that chain.
+
 Each failure reports its owner's typed context above the cause it kept:
 
 - `RouteOutputError`, which every node that buffers route output shares, for holding a route's

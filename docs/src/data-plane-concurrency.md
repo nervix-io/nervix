@@ -2038,6 +2038,14 @@ locks. Socket I/O, close-handshake deadlines and reconnect timers remain outside
 observation; public peer observations measure the delays, and a paused-clock host regression checks
 that successful upgrades keep backoff until a delivered batch resets it. Direct connector tests
 exercise suspension and close without claiming those socket waits are tracked locks.
+The declaration-buffer workloads engage the tracked entity gate, admit text and binary frames
+under BUFFER, and replay them after a codec change on one and three nodes. Their scenario and
+stress records name the entity-gate and quiesce-buffer owners. Connection response headers are
+published once and shared by messages and retained buffer entries; this adds no lock or mutable
+map on the frame path. Upgrade-field installation has a focused external-iterator dispatch
+contract; its local conversions remain analyzed. The registered `websocket-retained-metadata` Bolero property checks every
+field and exact snapshot identity through the production retain/replay conversion. Client ping
+timer and socket scheduling remain outside the detector and are exercised by real-peer owner tests.
 
 The native backup-wait workloads reach the client's pending-reply locks during multi-domain
 capture, bounded wait expiry and recovery under the same execution reference. They run on one-

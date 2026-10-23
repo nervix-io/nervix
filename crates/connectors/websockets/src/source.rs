@@ -32,13 +32,16 @@ use error_stack::{Report, ResultExt as _};
 use futures_util::{SinkExt as _, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    BrokerSourceConnector, ClientConfigResult, ConfiguredDeadline, IngestMessageHeaders,
-    IngestMetadataRow, NoIngestHeaders, RustlsClientConfigSource, SourceBatch, SourceBatchRequest,
+    BrokerSourceConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMetadataRow,
+    RetainedIngestHeaders, RustlsClientConfigSource, SourceBatch, SourceBatchRequest,
     SourceConnector, SourceError, SourceMessage, SourceReadCancellation, SourceResult,
-    SourceResume, client_config_value,
+    SourceResume,
 };
 use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
-use nervix_models::ClientConfigEntry;
+use nervix_models::{
+    ClientConfigEntry, WEBSOCKETS_CONTROL_FRAME_BUDGET, WebsocketsClientConfig,
+    WebsocketsUpgradeHeaders,
+};
 use nervix_primitives::{
     net::TcpStream,
     sync::{Arc, mpsc},
@@ -46,17 +49,20 @@ use nervix_primitives::{
 };
 use thiserror::Error;
 use tokio_tungstenite::{
-    Connector, MaybeTlsStream, WebSocketStream, client_async_tls_with_config, tungstenite::Message,
+    Connector, client_async_tls_with_config,
+    tungstenite::{Message, client::IntoClientRequest as _},
 };
-use url::Url;
 
-use crate::{CompiledSignalingProtocol, SignalingDataSink, WebsocketSignalingSession};
+use crate::{
+    CompiledSignalingProtocol, SignalingDataSink, WebsocketDataFrame, WebsocketSignalingSession,
+};
 
 const WEBSOCKETS: &str = "websockets";
-const CLOSE_BUDGET: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Error)]
 enum WebsocketSourceFailure {
+    #[error("WebSocket ping could not be written within {budget:?}")]
+    PingTimeout { budget: Duration },
     #[error("WebSocket peer closed with code {code}: {reason}")]
     PeerClosed { code: u16, reason: String },
     #[error("WebSocket peer closed without a status")]
@@ -73,10 +79,6 @@ enum WebsocketSourceFailure {
 pub enum WebsocketSourcePlanError {
     #[error("invalid WebSockets client configuration")]
     Configuration,
-    #[error("invalid WebSockets endpoint")]
-    Endpoint,
-    #[error("unsupported WebSockets endpoint scheme '{scheme}', expected ws:// or wss://")]
-    Scheme { scheme: String },
 }
 
 #[derive(Clone)]
@@ -85,6 +87,8 @@ pub struct WebsocketSourcePlan {
     dns: DnsResolver,
     entries: Vec<ClientConfigEntry>,
     signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
+    headers: WebsocketsUpgradeHeaders,
+    ping_interval: Option<Duration>,
     /// How long opening one connection may take: name resolution, the address attempts, TLS and
     /// the upgrade handshake.
     connect_timeout: ConfiguredDeadline,
@@ -103,34 +107,25 @@ struct WebsocketEndpoint {
 impl WebsocketSourcePlan {
     pub fn new(
         entries: Vec<ClientConfigEntry>,
+        headers: WebsocketsUpgradeHeaders,
         signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
         dns: DnsResolver,
     ) -> Result<Self, Report<WebsocketSourcePlanError>> {
-        let endpoint = Self::endpoint_from_config(&entries)
+        let config = WebsocketsClientConfig::parse(&entries)
             .change_context(WebsocketSourcePlanError::Configuration)?;
         let connect_timeout = ConfiguredDeadline::connect(&entries)
             .change_context(WebsocketSourcePlanError::Configuration)?;
-        let parsed = Url::parse(&endpoint).map_err(|error| {
-            Report::new(WebsocketSourcePlanError::Endpoint).attach_printable(error)
-        })?;
-        let endpoint_requires_tls = match parsed.scheme() {
-            "ws" => false,
-            "wss" => true,
-            scheme => {
-                return Err(Report::new(WebsocketSourcePlanError::Scheme {
-                    scheme: scheme.to_string(),
-                }));
-            }
-        };
+        let parsed = config.endpoint();
+        let endpoint_requires_tls = parsed.scheme() == "wss";
         let host = parsed
             .host_str()
-            .ok_or_else(|| Report::new(WebsocketSourcePlanError::Endpoint))?;
+            .verified("the client schema requires an endpoint host");
         let port = parsed
             .port_or_known_default()
-            .ok_or_else(|| Report::new(WebsocketSourcePlanError::Endpoint))?;
+            .verified("ws and wss have known default ports, and explicit ports were parsed");
         Ok(Self {
             endpoint: WebsocketEndpoint {
-                raw: endpoint,
+                raw: parsed.to_string(),
                 host: host.to_string(),
                 port,
                 requires_tls: endpoint_requires_tls,
@@ -138,31 +133,30 @@ impl WebsocketSourcePlan {
             dns,
             entries,
             signaling_protocol,
+            headers,
             connect_timeout,
+            ping_interval: config.ping_interval(),
         })
     }
 
     pub fn endpoint(&self) -> &str {
         &self.endpoint.raw
     }
-
-    pub fn endpoint_from_config(config: &[ClientConfigEntry]) -> ClientConfigResult<String> {
-        client_config_value(config, "endpoint", "WebSockets")
-    }
 }
 
 pub struct WebsocketSourceMessage {
-    payload: Vec<u8>,
+    frame: WebsocketDataFrame,
     position: (),
-    headers: NoIngestHeaders,
+    // Messages and quiesce buffers may outlive the connection that supplied its upgrade headers.
+    headers: Arc<RetainedIngestHeaders>,
 }
 
 impl WebsocketSourceMessage {
-    fn new(payload: Vec<u8>) -> Self {
+    fn new(frame: WebsocketDataFrame, headers: Arc<RetainedIngestHeaders>) -> Self {
         Self {
-            payload,
+            frame,
             position: (),
-            headers: NoIngestHeaders,
+            headers,
         }
     }
 }
@@ -171,7 +165,7 @@ impl SourceMessage for WebsocketSourceMessage {
     type Position = ();
 
     fn payload(&self) -> &[u8] {
-        &self.payload
+        self.frame.payload()
     }
 
     fn position(&self) -> &Self::Position {
@@ -179,11 +173,12 @@ impl SourceMessage for WebsocketSourceMessage {
     }
 
     fn headers(&self) -> &dyn IngestMessageHeaders {
-        &self.headers
+        self.headers.as_ref()
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::Headers {
+        IngestMetadataRow::Websockets {
+            frame_type: self.frame.frame_type(),
             headers: &self.headers,
         }
     }
@@ -195,11 +190,57 @@ pub struct WebsocketSource {
     connect_timeout: ConfiguredDeadline,
     tls_connector: Option<Connector>,
     signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
-    relay: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
-    pending: VecDeque<Vec<u8>>,
+    connection: Option<WebsocketConnection>,
+    pending: VecDeque<WebsocketSourceMessage>,
+    headers: WebsocketsUpgradeHeaders,
+    ping_interval: Option<Duration>,
+}
+
+mod connection;
+use connection::{WebsocketConnection, WebsocketRead};
+
+enum WebsocketPingOutcome {
+    Sent,
+    Interrupted,
 }
 
 impl WebsocketSource {
+    async fn send_ping(
+        &mut self,
+        cancellation: &SourceReadCancellation,
+    ) -> SourceResult<WebsocketPingOutcome> {
+        let connection = self
+            .connection
+            .as_mut()
+            .verified("the installed connection requested its ping above");
+        let write = timeout(
+            WEBSOCKETS_CONTROL_FRAME_BUDGET,
+            connection.relay.send(Message::Ping(Vec::new())),
+        );
+        let Some(outcome) = cancellation.unless_cancelled(write).await else {
+            return Ok(WebsocketPingOutcome::Interrupted);
+        };
+        match outcome {
+            Ok(Ok(())) => Ok(WebsocketPingOutcome::Sent),
+            Ok(Err(error)) => {
+                self.connection = None;
+                Err(Report::new(error).change_context(SourceError::Read {
+                    connector: WEBSOCKETS,
+                }))
+            }
+            Err(error) => {
+                self.connection = None;
+                Err(Report::new(error)
+                    .change_context(WebsocketSourceFailure::PingTimeout {
+                        budget: WEBSOCKETS_CONTROL_FRAME_BUDGET,
+                    })
+                    .change_context(SourceError::Read {
+                        connector: WEBSOCKETS,
+                    }))
+            }
+        }
+    }
+
     /// Why a resume opened no connection: when the attempts ran out of the client's
     /// `connect_timeout_ms`, the failure names it beneath the resume's.
     fn unconnected(&self, budget: &OperationBudget, failures: Vec<String>) -> Report<SourceError> {
@@ -224,9 +265,10 @@ impl WebsocketSource {
     async fn close_transport(&mut self) -> error_stack::Result<(), WebsocketSourceFailure> {
         // Detach before the first await: cancelling the handshake drops this exact socket and
         // leaves the source needing a resume, without attaching to another transport.
-        let Some(mut relay) = self.relay.take() else {
+        let Some(mut connection) = self.connection.take() else {
             return Ok(());
         };
+        let relay = &mut connection.relay;
         let closing = async {
             relay
                 .close(None)
@@ -247,11 +289,13 @@ impl WebsocketSource {
                 }
             }
         };
-        timeout(CLOSE_BUDGET, closing).await.map_err(|error| {
-            Report::new(error).change_context(WebsocketSourceFailure::CloseTimeout {
-                budget: CLOSE_BUDGET,
-            })
-        })?
+        timeout(WEBSOCKETS_CONTROL_FRAME_BUDGET, closing)
+            .await
+            .map_err(|error| {
+                Report::new(error).change_context(WebsocketSourceFailure::CloseTimeout {
+                    budget: WEBSOCKETS_CONTROL_FRAME_BUDGET,
+                })
+            })?
     }
 }
 
@@ -276,13 +320,15 @@ impl SourceConnector for WebsocketSource {
             connect_timeout: plan.connect_timeout,
             tls_connector,
             signaling_protocol: plan.signaling_protocol.clone(),
-            relay: None,
+            connection: None,
             pending: VecDeque::new(),
+            headers: plan.headers.clone(),
+            ping_interval: plan.ping_interval,
         })
     }
 
     fn needs_resume(&mut self) -> bool {
-        self.relay.is_none()
+        self.connection.is_none()
     }
 
     async fn suspend(&mut self) -> SourceResult<()> {
@@ -294,10 +340,19 @@ impl SourceConnector for WebsocketSource {
     }
 
     async fn resume(&mut self) -> SourceResult<SourceResume> {
-        if self.relay.is_some() {
+        if self.connection.is_some() {
             return Ok(SourceResume::Ready);
         }
         let budget = OperationBudget::start(self.connect_timeout.bound(), LookupShare::Whole);
+        let mut request = self
+            .endpoint
+            .raw
+            .as_str()
+            .into_client_request()
+            .change_context(SourceError::Resume {
+                connector: WEBSOCKETS,
+            })?;
+        WebsocketConnection::install_request_headers(&mut request, &self.headers);
         let addresses = self
             .dns
             .resolve(&self.endpoint.host, self.endpoint.port, budget.lookup())
@@ -314,7 +369,7 @@ impl SourceConnector for WebsocketSource {
                     .await
                     .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
                 client_async_tls_with_config(
-                    self.endpoint.raw.as_str(),
+                    request.clone(),
                     stream,
                     None,
                     self.tls_connector.clone(),
@@ -334,9 +389,10 @@ impl SourceConnector for WebsocketSource {
                 )),
             }
         }
-        let Some((mut relay, _)) = connected else {
+        let Some((mut relay, response)) = connected else {
             return Err(self.unconnected(&budget, failures));
         };
+        let headers = WebsocketConnection::capture_headers(response.headers());
         if let Some(protocol) = self.signaling_protocol.as_ref() {
             let (payloads_tx, mut payloads_rx) = mpsc::unbounded_channel();
             let sink = QueuedSignalingDataSink { payloads_tx };
@@ -359,11 +415,12 @@ impl SourceConnector for WebsocketSource {
                 }
             }?;
             drop(sink);
-            while let Ok(payload) = payloads_rx.try_recv() {
-                self.pending.push_back(payload);
+            while let Ok(frame) = payloads_rx.try_recv() {
+                self.pending
+                    .push_back(WebsocketSourceMessage::new(frame, headers.clone()));
             }
         }
-        self.relay = Some(relay);
+        self.connection = Some(WebsocketConnection::new(relay, headers, self.ping_interval));
         Ok(SourceResume::Ready)
     }
 
@@ -387,34 +444,60 @@ impl BrokerSourceConnector for WebsocketSource {
         _request: SourceBatchRequest,
         cancellation: &SourceReadCancellation,
     ) -> SourceResult<SourceBatch<Self::Message>> {
-        if let Some(payload) = self.pending.pop_front() {
-            return Ok(SourceBatch::Messages(vec![WebsocketSourceMessage::new(
-                payload,
-            )]));
+        if let Some(message) = self.pending.pop_front() {
+            return Ok(SourceBatch::Messages(vec![message]));
         }
         loop {
             nervix_primitives::task::consume_budget().await;
-            let Some(relay) = self.relay.as_mut() else {
+            let Some(connection) = self.connection.as_mut() else {
                 return Ok(SourceBatch::ResumeRequired);
             };
-            let next = futures_util::StreamExt::next(relay);
-            let Some(message) = cancellation.unless_cancelled(next).await else {
+            let Some(read) = cancellation.unless_cancelled(connection.next()).await else {
                 return Ok(SourceBatch::Interrupted {
                     gathered: Vec::new(),
                 });
             };
-            match message {
-                Some(Ok(Message::Text(text))) => {
+            let read = match read {
+                Ok(read) => read,
+                Err(report) => {
+                    self.connection = None;
+                    return Err(report);
+                }
+            };
+            match read {
+                WebsocketRead::Ping => match self.send_ping(cancellation).await? {
+                    WebsocketPingOutcome::Sent => {}
+                    WebsocketPingOutcome::Interrupted => {
+                        return Ok(SourceBatch::Interrupted {
+                            gathered: Vec::new(),
+                        });
+                    }
+                },
+                WebsocketRead::Frame(Some(Message::Text(text))) => {
+                    let headers = self
+                        .connection
+                        .as_ref()
+                        .verified("the installed connection delivered this frame")
+                        .headers
+                        .clone();
                     return Ok(SourceBatch::Messages(vec![WebsocketSourceMessage::new(
-                        text.to_string().into_bytes(),
+                        WebsocketDataFrame::Text(text),
+                        headers,
                     )]));
                 }
-                Some(Ok(Message::Binary(bytes))) => {
+                WebsocketRead::Frame(Some(Message::Binary(bytes))) => {
+                    let headers = self
+                        .connection
+                        .as_ref()
+                        .verified("the installed connection delivered this frame")
+                        .headers
+                        .clone();
                     return Ok(SourceBatch::Messages(vec![WebsocketSourceMessage::new(
-                        bytes.to_vec(),
+                        WebsocketDataFrame::Binary(bytes),
+                        headers,
                     )]));
                 }
-                Some(Ok(Message::Close(frame))) => {
+                WebsocketRead::Frame(Some(Message::Close(frame))) => {
                     let failure = match frame {
                         Some(frame) => WebsocketSourceFailure::PeerClosed {
                             code: u16::from(frame.code),
@@ -422,13 +505,12 @@ impl BrokerSourceConnector for WebsocketSource {
                         },
                         None => WebsocketSourceFailure::PeerClosedWithoutStatus,
                     };
-                    // Reading a Close queues its response. Flush it before releasing the socket;
-                    // any failure to answer remains attached to the peer's original close reason.
-                    let mut relay = self
-                        .relay
+                    let mut connection = self
+                        .connection
                         .take()
                         .verified("the installed transport yielded the Close above");
-                    let answered = timeout(CLOSE_BUDGET, relay.flush()).await;
+                    let answered =
+                        timeout(WEBSOCKETS_CONTROL_FRAME_BUDGET, connection.relay.flush()).await;
                     let report = Report::new(failure);
                     let report = match answered {
                         Ok(Ok(())) => report,
@@ -439,21 +521,17 @@ impl BrokerSourceConnector for WebsocketSource {
                         connector: WEBSOCKETS,
                     }));
                 }
-                None => {
-                    self.relay = None;
+                WebsocketRead::Frame(None) => {
+                    self.connection = None;
                     return Err(Report::new(WebsocketSourceFailure::Ended).change_context(
                         SourceError::Read {
                             connector: WEBSOCKETS,
                         },
                     ));
                 }
-                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
-                Some(Err(error)) => {
-                    self.relay = None;
-                    return Err(Report::new(error).change_context(SourceError::Read {
-                        connector: WEBSOCKETS,
-                    }));
-                }
+                WebsocketRead::Frame(Some(
+                    Message::Ping(_) | Message::Pong(_) | Message::Frame(_),
+                )) => {}
             }
         }
     }
@@ -468,13 +546,13 @@ impl BrokerSourceConnector for WebsocketSource {
 }
 
 struct QueuedSignalingDataSink {
-    payloads_tx: mpsc::UnboundedSender<Vec<u8>>,
+    payloads_tx: mpsc::UnboundedSender<WebsocketDataFrame>,
 }
 
 impl SignalingDataSink for QueuedSignalingDataSink {
-    fn accept(&self, payload: Vec<u8>) -> impl Future<Output = ()> + Send {
+    fn accept(&self, frame: WebsocketDataFrame) -> impl Future<Output = ()> + Send {
         self.payloads_tx
-            .send(payload)
+            .send(frame)
             .assured("the signaling session retains its payload receiver while the sink is live");
         std::future::ready(())
     }
@@ -493,7 +571,7 @@ mod tests {
     use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
     use tempfile::TempDir;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
+    use tokio_tungstenite::{WebSocketStream, tungstenite::handshake::derive_accept_key};
 
     use super::*;
 
@@ -515,8 +593,13 @@ mod tests {
             key: "connect_timeout_ms".to_string(),
             value: "200".to_string(),
         });
-        let plan = WebsocketSourcePlan::new(entries, None, fixture.resolver)
-            .assured("the endpoint and deadline are valid");
+        let plan = WebsocketSourcePlan::new(
+            entries,
+            WebsocketsUpgradeHeaders::default(),
+            None,
+            fixture.resolver,
+        )
+        .assured("the endpoint and deadline are valid");
         let mut source = WebsocketSource::open(&plan, 0)
             .await
             .assured("the source opens");
@@ -543,9 +626,14 @@ mod tests {
             key: "connect_timeout_ms".to_string(),
             value: "0".to_string(),
         });
-        let error = WebsocketSourcePlan::new(entries, None, fixture.resolver)
-            .err()
-            .assured("a zero deadline cannot plan a connection");
+        let error = WebsocketSourcePlan::new(
+            entries,
+            WebsocketsUpgradeHeaders::default(),
+            None,
+            fixture.resolver,
+        )
+        .err()
+        .assured("a zero deadline cannot plan a connection");
         assert!(matches!(
             error.current_context(),
             WebsocketSourcePlanError::Configuration
@@ -553,23 +641,39 @@ mod tests {
     }
 
     async fn connected_pair() -> (WebsocketSource, WebSocketStream<TcpStream>) {
+        connected_pair_with(Vec::new(), WebsocketsUpgradeHeaders::default()).await
+    }
+
+    pub(super) async fn connected_pair_with(
+        mut config: Vec<ClientConfigEntry>,
+        headers: WebsocketsUpgradeHeaders,
+    ) -> (WebsocketSource, WebSocketStream<TcpStream>) {
         let fixture = DnsFixture::start().await;
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .assured("a loopback TCP port is available");
         let address = listener.local_addr().assured("the listener is bound");
-        let plan = WebsocketSourcePlan::new(
-            endpoint(format!("ws://{address}/socket")),
-            None,
-            fixture.resolver,
-        )
-        .assured("the endpoint is valid");
+        config.extend(endpoint(format!("ws://{address}/socket")));
+        let expected: Vec<_> = headers
+            .iter()
+            .map(|(name, value)| (name.as_str().to_string(), value.as_str().to_string()))
+            .collect();
+        let plan = WebsocketSourcePlan::new(config, headers, None, fixture.resolver)
+            .assured("the endpoint is valid");
         let mut source = WebsocketSource::open(&plan, 0)
             .await
             .assured("the source opens");
         let server = async {
             let (stream, _) = listener.accept().await.assured("the source connects");
-            tokio_tungstenite::accept_async(stream)
+            #[expect(clippy::result_large_err, reason = "tungstenite requires an unboxed HTTP rejection response in its handshake callback")]
+            let verify_upgrade = |request: &tokio_tungstenite::tungstenite::handshake::server::Request, mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                for (name, value) in &expected {
+                    assert_eq!(request.headers().get(name).assured("the request contains every declared application field").as_bytes(), value.as_bytes());
+                }
+                response.headers_mut().insert("x-nervix-upgrade", "fixture".parse().assured("fixture is a valid header value"));
+                Ok(response)
+            };
+            tokio_tungstenite::accept_hdr_async(stream, verify_upgrade)
                 .await
                 .assured("the upgrade succeeds")
         };
@@ -584,7 +688,16 @@ mod tests {
 
         for suspend in [true, false] {
             let (mut source, mut peer) = connected_pair().await;
-            source.pending.push_back(b"retained".to_vec());
+            let headers = source
+                .connection
+                .as_ref()
+                .assured("the pair is connected")
+                .headers
+                .clone();
+            source.pending.push_back(WebsocketSourceMessage::new(
+                WebsocketDataFrame::Binary(b"retained".to_vec()),
+                headers,
+            ));
             let ending = async {
                 if suspend {
                     source.suspend().await
@@ -713,7 +826,16 @@ mod tests {
     async fn a_peer_that_never_answers_close_releases_the_transport_with_a_timeout() {
         for suspend in [true, false] {
             let (mut source, _peer) = connected_pair().await;
-            source.pending.push_back(b"retained".to_vec());
+            let headers = source
+                .connection
+                .as_ref()
+                .assured("the pair is connected")
+                .headers
+                .clone();
+            source.pending.push_back(WebsocketSourceMessage::new(
+                WebsocketDataFrame::Binary(b"retained".to_vec()),
+                headers,
+            ));
             let result = if suspend {
                 timeout(Duration::from_secs(60), source.suspend()).await
             } else {
@@ -732,7 +854,16 @@ mod tests {
     #[nervix_primitives::test]
     async fn a_cancelled_close_releases_the_transport_and_clears_pending_payloads() {
         let (mut source, _peer) = connected_pair().await;
-        source.pending.push_back(b"retained".to_vec());
+        let headers = source
+            .connection
+            .as_ref()
+            .assured("the pair is connected")
+            .headers
+            .clone();
+        source.pending.push_back(WebsocketSourceMessage::new(
+            WebsocketDataFrame::Binary(b"retained".to_vec()),
+            headers,
+        ));
         assert!(
             timeout(Duration::from_millis(1), source.close())
                 .await
@@ -832,8 +963,13 @@ mod tests {
             "127.0.8.2".parse().assured("literal IPv4 address"),
         ]);
         let endpoint_url = format!("ws://websocket.nervix.test:{port}/socket/path?item=42");
-        let plan = WebsocketSourcePlan::new(endpoint(endpoint_url), None, fixture.resolver.clone())
-            .assured("the WebSocket endpoint is valid");
+        let plan = WebsocketSourcePlan::new(
+            endpoint(endpoint_url),
+            WebsocketsUpgradeHeaders::default(),
+            None,
+            fixture.resolver.clone(),
+        )
+        .assured("the WebSocket endpoint is valid");
         let server = nervix_primitives::task::spawn(async move {
             let (mut stream, _) = listener
                 .accept()
@@ -907,6 +1043,7 @@ mod tests {
         let address = listener.local_addr().assured("the listener is bound");
         let plan = WebsocketSourcePlan::new(
             endpoint(format!("ws://{address}/socket")),
+            WebsocketsUpgradeHeaders::default(),
             None,
             fixture.resolver.clone(),
         )
@@ -942,15 +1079,20 @@ mod tests {
             ("ws://websocket.nervix.test/path", 80, false),
             ("wss://websocket.nervix.test/path", 443, true),
         ] {
-            let plan =
-                WebsocketSourcePlan::new(endpoint(url.to_string()), None, fixture.resolver.clone())
-                    .assured("the WebSocket URL is valid");
+            let plan = WebsocketSourcePlan::new(
+                endpoint(url.to_string()),
+                WebsocketsUpgradeHeaders::default(),
+                None,
+                fixture.resolver.clone(),
+            )
+            .assured("the WebSocket URL is valid");
             assert_eq!(plan.endpoint.port, port);
             assert_eq!(plan.endpoint.requires_tls, requires_tls);
             assert_eq!(plan.endpoint.raw, url);
         }
         let error = WebsocketSourcePlan::new(
             endpoint("http://websocket.nervix.test/path".to_string()),
+            WebsocketsUpgradeHeaders::default(),
             None,
             fixture.resolver.clone(),
         )
@@ -958,32 +1100,11 @@ mod tests {
         .assured("HTTP is not a WebSocket endpoint");
         assert!(matches!(
             error.current_context(),
-            WebsocketSourcePlanError::Scheme { .. }
+            WebsocketSourcePlanError::Configuration
         ));
     }
-
-    #[test]
-    fn source_plan_reads_its_endpoint_from_the_client_config() {
-        let config = vec![ClientConfigEntry {
-            key: "endpoint".to_string(),
-            value: "wss://example.com/socket".to_string(),
-        }];
-
-        assert_eq!(
-            WebsocketSourcePlan::endpoint_from_config(&config).expect("endpoint"),
-            "wss://example.com/socket"
-        );
-    }
-
-    #[test]
-    fn source_plan_names_a_missing_endpoint_key() {
-        let error =
-            WebsocketSourcePlan::endpoint_from_config(&[]).expect_err("missing websocket endpoint");
-
-        assert!(
-            error
-                .to_string()
-                .contains("missing WebSockets client config key 'endpoint'")
-        );
-    }
 }
+
+#[cfg(test)]
+#[path = "source/connection_tests.rs"]
+mod connection_tests;

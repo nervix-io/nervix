@@ -66,6 +66,20 @@ pub(in crate::registry) fn validate_ingestor_source(
     identifier: &ModelName,
     ingestor: &CreateIngestor,
 ) -> Result<(), Report<RegistryError>> {
+    if let Some(nervix_models::IngestSource::Websockets(
+        nervix_models::WebsocketsSource::Connection(source),
+    )) = ingestor.input.transport_source()
+        && let Err(report) = nervix_models::WebsocketsUpgradeHeaders::parse(&source.headers)
+    {
+        let issue = report.current_context().clone();
+        return Err(
+            report.change_context(RegistryError::InvalidWebsocketsUpgradeHeaders {
+                domain: domain.clone(),
+                ingestor: identifier.clone(),
+                issue,
+            }),
+        );
+    }
     let invalid = |reason: String| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),

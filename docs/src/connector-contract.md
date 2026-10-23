@@ -646,7 +646,7 @@ clause the grammar accepts, so documentation can show it and generated statement
 | --- | --- |
 | Ingestor | Header reads, the typed metadata scope, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
 | Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg sink writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
-| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. A Prometheus client also declares every key its `CONFIG` may set and the rule each value follows; the registry holds a client to them when it is created, and the source holds its rendered configuration to them again when it opens. |
+| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Prometheus and WebSockets clients also declare every key their `CONFIG` may set and the rule each value follows; the registry holds a client to them when it is created, and the source holds its rendered configuration to them again when it opens. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
 composed head and canonical rendering use the vocabulary's connector kind; a console choice uses
@@ -758,7 +758,7 @@ the `write_header` calls of one record become on the published message.
 | `last_wins`, exact names | `SQS QUEUE` | `PULSAR TOPIC`, `SQS QUEUE` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC` | `KAFKA TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, exact names | `NATS SUBJECT` | `NATS SUBJECT` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
-| `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
+| `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `sorted_by_name`, exact names | `RABBITMQ QUEUE` | `RABBITMQ QUEUE` | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `sorted_by_name`, lowercase names | None | `HTTP REQUEST` | one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 <!-- connector-matrix:headers:end -->
@@ -803,8 +803,9 @@ A client source's plan is not a connector plan: it carries the input schema, its
 producer policy of window, ACK timeout, and retry backoff, and the endpoint contract digest producers
 attach to. It declares no header or metadata scope and supports only `SUSPEND`.
 
-The metadata boundary has distinct header, Kafka, and Syslog scopes. Kafka carries topic,
-partition, offset, and headers; Syslog carries the peer address. The scopes, and the fields of
+The metadata boundary has distinct header, WebSockets, Kafka, and Syslog scopes. WebSockets carries
+the text or binary frame kind and upgrade-response headers; Kafka carries topic, partition, offset,
+and headers; Syslog carries the peer address. The scopes, and the fields of
 each with their exact types, are declared once in the vocabulary, and each source entity names the
 scope its messages expose. Registry validation reads that declaration for the fields an ingestor's
 programs may name, the host builds its metadata columns from the same fields, and a connector's
@@ -822,6 +823,10 @@ completion resolver uses the same vocabulary source capability before the full i
 so it offers those functions only for sources that can read headers. Its emitter `INVOKE`
 completion similarly uses the vocabulary sink capability to offer `write_header` only for sinks that
 can write headers. Runtime validation remains authoritative.
+
+The host checks the WebSockets frame-label byte capacity before opening its Arrow metadata builder.
+An unaddressable row-bound estimate returns a typed metadata error through the group's opening
+operation and its general-error policy.
 
 The source host decodes consecutive payloads into one ingest group's Arrow builders. For a
 schemaful JSON codec, that group also owns mutable payload scratch and simd-json parser buffers;
@@ -1968,11 +1973,23 @@ sequenceDiagram
 - **WebSocket client source.** The WebSocket connector crate supplies the outbound
   `WEBSOCKETS CONNECTION` source through `SourceConnector` and `BrokerSourceConnector`. It has
   no emitter or listening endpoint. Its plan carries resolved client configuration, the node
-  resolver and an optional compiled signaling protocol. `open` prepares local transport and TLS
+  resolver, validated literal upgrade headers and an optional compiled signaling protocol. The
+  vocabulary owns its strict CONFIG schema: endpoint, positive connection/ping durations and TLS
+  file keys restricted to secure endpoints with paired client identity files. Registry creation
+  and source construction after template rendering both validate it. The omitted connection
+  timeout is thirty seconds; omitted ping cadence means only answering peer pings. `open` prepares local transport and TLS
   state without resolving a name or connecting; `resume` resolves and connects, completes any
   signaling handshake, and only then reports readiness. Accepted data from a successful
-  handshake is queued for polling before new socket frames. Text and binary frames become raw
-  payload bytes for the host to decode; protocol control frames remain transport concerns.
+  handshake is queued for polling before new socket frames. Text and binary payload-carrying
+  variants retain their kind through signaling and become bytes for the host to decode. Each
+  connection captures its printable ASCII upgrade response headers once; queued and delivered messages
+  share that immutable snapshot, so suspension, reconnection and quiesce replay preserve the
+  correct headers. The host builds the typed `frame_type` STRING column and supplies header
+  reads from that snapshot. Request headers use the validated vocabulary collection; protocol
+  fields and repeated names cannot override the generated upgrade. Client pings begin after
+  signaling at the configured cadence, with the close handshake's existing one-second budget
+  declared once in the vocabulary and shared by both transport operations, and continue alongside
+  data reads. Protocol control frames remain transport concerns.
   Suspension drops the connection while retaining queued payloads, and close also clears that
   queue. Transport failure requires another resume of the retained source.
   The host composer currently resolves the named signaling protocol and chooses buffered intake,

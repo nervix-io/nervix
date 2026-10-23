@@ -57,6 +57,11 @@ error destination fails at that planning boundary with the owning node or route 
 runtime never repairs a missing decision with a Model lookup or an implicit default. Only a
 committed schedule supplies the placement and state authority used for installed execution.
 
+The WebSockets connection plan carries a validated `WebsocketsUpgradeHeaders` collection beside
+its resolved client and signaling reference. Validation and planning both preserve a typed refusal
+if literal fields violate HTTP bounds or protocol-owned names. Runtime composition passes the
+validated collection directly to the connector; it does not read or reinterpret the source Model.
+
 Process startup has an earlier registry path: `RuntimeChanges` carries each recovered active graph
 inside the registry and application boundary. Before runtime application, it projects that graph
 into an unplaced typed revision; the runtime receives only the revision, never the graph or its
