@@ -1245,6 +1245,12 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                         codec: named("orders_codec"),
                     },
                     sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+                        mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                            retry_policy: RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                        },
                         client: named("zmq_client"),
                     }))),
                     batch: None,
@@ -1254,12 +1260,6 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                     },
                     mode: AckMode::Attached,
                     error_policies: ErrorPolicies::handled_by_log(),
-                    publishing_mode: EmitterPublishingMode::NoAck {
-                        retry_policy: RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
-                        },
-                    },
                     construction: nervix_models::RouteConstruction::default(),
                     materialized_state: Vec::new(),
                 }),

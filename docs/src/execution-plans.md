@@ -76,6 +76,14 @@ both use the same schedule-to-revision planning boundary.
 | Emitters | Typed sink and optional connector client or codec, ordered source relays and predicates, construction, request and ordering expressions, flush, batching, ACK, and error policies | Resolve local mounts and schemas, bind programs, register local or remote consumers, and open the sink |
 | Message errors | Source and optional partial-output schemas, target relay and branch, route flush contract, and ordered `SET` program | Bind once for the installed revision; execute it for failed records using their captured state |
 
+Emitter planning reads the concrete destination's own publishing enum. Broker, MQTT, NATS and
+SQS alternatives lower exhaustively into their connector policies; request-only and unconfirmed-only
+entities need no mode-admission recheck. Shared retry and acknowledgement-duration validation
+borrows the entity-owned policy. The destination's validated external-name type passes through the
+plan into connector configuration without normalization. Iceberg resolves its configured storage
+client into the S3, GCS or Azure Blob backend while constructing this plan; the runtime receives
+that resolved backend and never infers it from the statement or location.
+
 Kafka source installation also binds the node-owned executor into the connector plan. Partition
 inspectors used by scheduling and the host's partition watch use that same node executor. The
 connector interprets the effective native client deadline and admits its synchronous driver calls;

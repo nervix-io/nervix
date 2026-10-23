@@ -81,11 +81,9 @@ Feature: Positive count settings
       """
     And these NSPL commands fail with "BATCH MAX MESSAGES must be between 1 and 65536, found 0"
       """
-      CREATE EMITTER postgres_out FROM notifications
-        TO POSTGRES postgres_main INSERT TO TABLE notifications
-        VALUES { "tenant" = input.tenant }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 0 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER postgres_out FROM notifications
+        TO postgres_main TABLE 'notifications'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "tenant" = input.tenant } BATCH MAX MESSAGES 0 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 

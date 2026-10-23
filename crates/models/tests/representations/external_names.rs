@@ -8,9 +8,10 @@
 
 use nervix_arbitrary::{Arbitrary, Domain, Entropy};
 use nervix_models::{
-    ExternalNameError, KafkaConsumerGroupName, KafkaTopicName, MqttTopicFilter, NatsQueueGroupName,
-    NatsSubjectName, PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName,
-    SqsQueueName,
+    ClickHouseTableName, ExternalNameError, IcebergTableName, KafkaConsumerGroupName,
+    KafkaTopicName, MongoDbCollectionName, MqttTopicFilter, MqttTopicName, MySqlTableName,
+    NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName, PostgresTableName,
+    PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
 };
 
 /// Pieces arbitrary text is assembled from: what the rules admit, the separators and wildcards
@@ -139,6 +140,13 @@ macro_rules! for_every_external_name_type {
         $assertion!(NatsSubjectName, $text);
         $assertion!(NatsQueueGroupName, $text);
         $assertion!(MqttTopicFilter, $text);
+        $assertion!(ClickHouseTableName, $text);
+        $assertion!(PostgresTableName, $text);
+        $assertion!(MySqlTableName, $text);
+        $assertion!(MongoDbCollectionName, $text);
+        $assertion!(IcebergTableName, $text);
+        $assertion!(MqttTopicName, $text);
+        $assertion!(NatsPublishSubjectName, $text);
     };
 }
 
@@ -149,6 +157,22 @@ fn bolero_external_names_round_trip_through_every_representation() {
         .with_max_len(512)
         .for_each(|bytes: &[u8]| {
             let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+            assert_external_name_round_trips!(ClickHouseTableName, arbitrary.emitter_table_name());
+            assert_external_name_round_trips!(PostgresTableName, arbitrary.emitter_table_name());
+            assert_external_name_round_trips!(MySqlTableName, arbitrary.emitter_table_name());
+            assert_external_name_round_trips!(
+                MongoDbCollectionName,
+                arbitrary.emitter_table_name()
+            );
+            assert_external_name_round_trips!(IcebergTableName, arbitrary.emitter_table_name());
+            assert_external_name_round_trips!(
+                MqttTopicName,
+                arbitrary.mqtt_publication_topic_name()
+            );
+            assert_external_name_round_trips!(
+                NatsPublishSubjectName,
+                arbitrary.nats_publication_subject_name()
+            );
             assert_external_name_round_trips!(KafkaTopicName, arbitrary.kafka_topic_name());
             assert_external_name_round_trips!(
                 KafkaConsumerGroupName,

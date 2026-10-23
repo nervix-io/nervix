@@ -44,7 +44,7 @@ use nervix_connector::{
     SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
     client_tls_paths, optional_client_config_value,
 };
-use nervix_models::{ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, TableName};
+use nervix_models::{ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, PostgresTableName};
 use nervix_primitives::time::Instant;
 use nonzero_ext::nonzero;
 use sqlx::{
@@ -102,7 +102,7 @@ pub trait PostgresConnections: Send + Sync + 'static {
 
 /// What one Postgres emitter inserts with, from its typed sink plan.
 pub struct PostgresSinkConfig {
-    pub table: TableName,
+    pub table: PostgresTableName,
     pub conflict_action: PostgresConflictAction,
     /// The emitter's `BATCH` limits, which bound the rows and the measured bytes of every insert.
     pub batch: EmitterBatchPolicy,
@@ -119,7 +119,7 @@ pub enum PostgresConflictAction {
 /// The Postgres sink, which binds each mapped column as one text array of an `unnest` insert.
 pub struct PostgresSink {
     connections: Box<dyn PostgresConnections>,
-    table: TableName,
+    table: PostgresTableName,
     conflict_action: PostgresConflictAction,
     limits: RowRequestLimits,
 }
@@ -1231,7 +1231,7 @@ mod tests {
     fn measures_the_statement_and_the_arrays_the_driver_encodes() {
         let sink = PostgresSink {
             connections: Box::new(NoConnections),
-            table: TableName::parse("limit_a_t0192a1b2c3d4e5f60718293a4b5c6d7e")
+            table: PostgresTableName::parse("limit_a_t0192a1b2c3d4e5f60718293a4b5c6d7e")
                 .expect("the test table name is valid"),
             conflict_action: PostgresConflictAction::None,
             limits: RowRequestLimits::from(EmitterBatchPolicy {
@@ -1356,7 +1356,7 @@ mod tests {
                 let rows = case.rows();
                 let sink = PostgresSink {
                     connections: Box::new(NoConnections),
-                    table: TableName::parse("events").assured("the table name is valid"),
+                    table: PostgresTableName::parse("events").assured("the table name is valid"),
                     conflict_action: PostgresConflictAction::None,
                     limits: RowRequestLimits::from(EmitterBatchPolicy {
                         max_messages: nervix_models::BatchMessageLimit::try_from(8_u32)
@@ -1433,7 +1433,7 @@ mod tests {
     fn sink_without_connections() -> PostgresSink {
         PostgresSink {
             connections: Box::new(NoConnections),
-            table: TableName::parse("events").expect("the test table name is valid"),
+            table: PostgresTableName::parse("events").expect("the test table name is valid"),
             conflict_action: PostgresConflictAction::None,
             limits: RowRequestLimits::from(EmitterBatchPolicy {
                 max_messages: nervix_models::BatchMessageLimit::try_from(1_u32)

@@ -308,11 +308,13 @@ macro_rules! connector_sinks {
         connector $Connector:ident = $connector_keyword:literal;
         $(#[$sink_meta:meta])*
         pub enum $Sink:ident;
+        $(#[$change_meta:meta])*
+        pub enum $ModeChange:ident;
         $(#[$entity_meta:meta])*
         pub enum $Entity:ident {
             $(
                 $(#[$variant_meta:meta])*
-                $Variant:ident($Model:ident) = $keyword:literal;
+                $Variant:ident($Model:ident, $Mode:ident) = $keyword:literal;
             )+
         }
     ) => {
@@ -334,6 +336,62 @@ macro_rules! connector_sinks {
                 $Variant($Model),
             )+
         }
+
+        $(#[$change_meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize,
+                 ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
+        pub enum $ModeChange { $($Variant($Mode),)+ }
+
+        impl $ModeChange {
+            pub const fn entity(&self) -> $Entity {
+                match self { $(Self::$Variant(_) => $Entity::$Variant,)+ }
+            }
+            pub fn publishing(&self) -> $crate::EmitterPublishing<'_> {
+                match self { $(Self::$Variant(mode) => mode.publishing(),)+ }
+            }
+        }
+
+        impl $crate::EmitterPublication for $Sink {
+            fn publishing(&self) -> $crate::EmitterPublishing<'_> {
+                match self { $(Self::$Variant(destination) => $crate::EmitterPublication::publishing(destination),)+ }
+            }
+            fn mode_change(&self) -> $crate::EmitterModeChange {
+                match self { $(Self::$Variant(destination) => $crate::EmitterPublication::mode_change(destination),)+ }
+            }
+            fn replace_mode(&mut self, mode: &$crate::EmitterModeChange)
+                -> ::error_stack::Result<(), $crate::AlterEmitterError> {
+                match self { $(Self::$Variant(destination) => $crate::EmitterPublication::replace_mode(destination, mode),)+ }
+            }
+        }
+
+        $(
+            impl $crate::EmitterEntityModel for $Model {
+                type PublishingMode = $Mode;
+                const KIND: $crate::EmitSinkKind = $crate::EmitSinkKind::$Connector($Entity::$Variant);
+            }
+            impl $crate::EmitterPublication for $Model {
+                fn publishing(&self) -> $crate::EmitterPublishing<'_> { self.mode.publishing() }
+                fn mode_change(&self) -> $crate::EmitterModeChange { self.mode.clone().into() }
+                fn replace_mode(&mut self, requested: &$crate::EmitterModeChange)
+                    -> ::error_stack::Result<(), $crate::AlterEmitterError> {
+                    if let $crate::EmitterModeChange::$Connector($ModeChange::$Variant(mode)) = requested {
+                        self.mode = mode.clone();
+                        Ok(())
+                    } else {
+                        Err(::error_stack::Report::new($crate::AlterEmitterError::DestinationKindMismatch {
+                            stored: <Self as $crate::EmitterEntityModel>::KIND,
+                            requested: requested.kind(),
+                        }))
+                    }
+                }
+            }
+            impl From<$Mode> for $ModeChange {
+                fn from(mode: $Mode) -> Self { Self::$Variant(mode) }
+            }
+            impl From<$Mode> for $crate::EmitterModeChange {
+                fn from(mode: $Mode) -> Self { Self::$Connector($ModeChange::$Variant(mode)) }
+            }
+        )+
 
         impl $Sink {
             /// The entity this sink writes.
@@ -391,7 +449,7 @@ macro_rules! connector_sinks {
         )+
 
         $(#[$entity_meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ::serde::Serialize, ::serde::Deserialize, ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
         pub enum $Entity {
             $(
                 $(#[$variant_meta])*
@@ -636,3 +694,35 @@ pub(crate) use connector_source_kinds;
 pub(crate) use connector_sources;
 pub(crate) use entity_union;
 pub(crate) use ingestor_alteration_union;
+
+/// Declare destination Models, their kinds and policy changes from one connector catalog.
+macro_rules! emitter_destinations {
+    (
+        $(#[$model_meta:meta])* pub enum $Model:ident as $Body:path;
+        $(#[$kind_meta:meta])* pub enum $Kind:ident as $EntityKind:path;
+        pub enum $Change:ident;
+        models { $($Connector:ident($Destination:ident, $Entity:ident, $Mode:ident),)+ }
+    ) => {
+        $crate::connector::entity_union::entity_union! {
+            $(#[$model_meta])* pub enum $Model as $Body;
+            $(#[$kind_meta])*
+            #[derive(::serde::Serialize, ::serde::Deserialize, ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
+            pub enum $Kind as $EntityKind;
+            kinds {}
+            models { $($Connector($Destination, $Entity),)+ }
+        }
+        /// A typed publishing-policy update whose variant names its exact emitter entity.
+        #[derive(Debug, Clone, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize,
+                 ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
+        pub enum $Change { $($Connector($Mode),)+ }
+        impl $Change {
+            pub const fn kind(&self) -> $Kind {
+                match self { $(Self::$Connector(mode) => $Kind::$Connector(mode.entity()),)+ }
+            }
+            pub fn publishing(&self) -> $crate::EmitterPublishing<'_> {
+                match self { $(Self::$Connector(mode) => mode.publishing(),)+ }
+            }
+        }
+    };
+}
+pub(crate) use emitter_destinations;

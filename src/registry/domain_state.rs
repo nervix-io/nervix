@@ -1448,22 +1448,19 @@ impl DomainState {
                                 "expect_kind above resolved this client reference against the \
                                  same model set",
                             );
-                        let expected = emitter.sink.client_connector().verified(
-                            "this sink names a client, so it states the connector that client \
-                             configures",
-                        );
+                        let expected = emitter.sink.capabilities().reference;
                         let found = client_model.connector_kind().verified(
                             "this model was resolved as a client above, and every client model \
                              configures a connector",
                         );
-                        if found != expected {
+                        if !expected.admits_client(found) {
                             return Err(Report::new(RegistryError::InvalidModel {
                                 domain: domain.as_str().to_string(),
                                 identifier: identifier.as_str().to_string(),
                                 reason: format!(
                                     "{} emitter requires a {} client, found {} client '{}'",
                                     emitter.sink.transport_label(),
-                                    expected.keyword(),
+                                    expected,
                                     found.keyword(),
                                     client_name.as_str(),
                                 ),
@@ -1519,7 +1516,7 @@ impl DomainState {
 
                     let output_schema = match emitter.sink.as_ref() {
                         nervix_models::EmitSink::Client(nervix_models::ClientSink::Consumer(
-                            nervix_models::ClientConsumerSink { schema },
+                            nervix_models::ClientConsumerSink { schema, .. },
                         )) => {
                             let schema_node = expect_kind(
                                 domain,
@@ -1537,8 +1534,10 @@ impl DomainState {
                                 return Err(Report::new(RegistryError::InvalidModel {
                                     domain: domain.as_str().to_string(),
                                     identifier: identifier.as_str().to_string(),
-                                    reason: "CLIENT emitter output does not resolve to a schema"
-                                        .to_string(),
+                                    reason: format!(
+                                        "{} emitter output does not resolve to a schema",
+                                        emitter.sink.kind()
+                                    ),
                                 }));
                             };
                             schema

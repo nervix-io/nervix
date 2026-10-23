@@ -20,7 +20,7 @@ use nervix_connector::{
     SinkEventReporter, SinkFinish, SinkFinishError, SinkGeneralErrorHandler, SinkHost,
     SinkLifecycle, SinkRecord, SinkRecordId, SinkStagingDirectory, SinkTransientErrorStatus,
 };
-use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
+use nervix_models::{ClientConfigEntry, KafkaTopicName, Timestamp};
 use nervix_primitives::{
     sync::{
         StdArc,
@@ -181,7 +181,7 @@ fn sink(
     }
     let config = KafkaSinkConfig {
         config,
-        topic: TopicName::parse(TOPIC).expect("the test topic is a valid topic name"),
+        topic: KafkaTopicName::parse(TOPIC).expect("the test topic is a valid topic name"),
         mode,
     };
     KafkaSink::new(config, SinkHost::new(SilentHost))

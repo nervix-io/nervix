@@ -30,8 +30,8 @@ Feature: Kafka emission
         'queue.buffering.max.messages' = '2',
         'linger.ms' = '200'
       };
-      CREATE EMITTER queue_output FROM queue_events
-        TO KAFKA small_queue TOPIC small_queue_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER queue_output FROM queue_events
+        TO small_queue TOPIC 'small_queue_{{test_id}}'
           MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING queue_codec
         INHERIT ALL
@@ -114,9 +114,9 @@ Feature: Kafka emission
         TO events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE EMITTER kafka_events FROM events
-        TO KAFKA kafka_main TOPIC columnar_json_out_{{test_id}}
-          MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING outgoing_codec
+      CREATE KAFKA TOPIC EMITTER kafka_events FROM events
+        TO kafka_main TOPIC 'columnar_json_out_{{test_id}}'
+          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING outgoing_codec
         INHERIT ALL EXCEPT secret
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -215,9 +215,9 @@ Feature: Kafka emission
           'auto.offset.reset' = 'earliest'
         };
 
-      CREATE EMITTER kafka_notifications
+      CREATE KAFKA TOPIC EMITTER kafka_notifications
         FROM notifications
-        TO KAFKA kafka_main TOPIC notifications_headers_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING emitted_notification_codec
+        TO kafka_main TOPIC 'notifications_headers_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING emitted_notification_codec
         INHERIT ALL EXCEPT raw, active
         SET amount = amount + 1,
             normalized = lower(input.raw)
@@ -294,7 +294,7 @@ Feature: Kafka emission
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE EMITTER kafka_notifications FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_notifications FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 2s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -369,8 +369,8 @@ Feature: Kafka emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER kafka_mode_boundary FROM notifications
-        TO KAFKA unavailable_kafka_sink TOPIC unavailable_mode_boundary
+      CREATE ATTACHED KAFKA TOPIC EMITTER kafka_mode_boundary FROM notifications
+        TO unavailable_kafka_sink TOPIC 'unavailable_mode_boundary'
           MODE <publishing_mode>
           ENCODE USING notification_codec
         INHERIT ALL
@@ -388,8 +388,8 @@ Feature: Kafka emission
 
     Examples:
       | cluster_size | publishing_mode                                                       | offset_condition |
-      | 1            | NO_ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |
-      | 3            | NO_ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |
+      | 1            | NO ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |
+      | 3            | NO ACK RETRY POLICY BACKOFF 100ms MAX 200ms                           | at least 1       |
       | 1            | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | below 1          |
       | 3            | ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms | below 1          |
 
@@ -428,9 +428,9 @@ Feature: Kafka emission
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE DETACHED EMITTER kafka_detached_confirming
+      CREATE DETACHED KAFKA TOPIC EMITTER kafka_detached_confirming
       FROM notifications
-      TO KAFKA kafka_main TOPIC detached_confirming_out_{{test_id}}
+      TO kafka_main TOPIC 'detached_confirming_out_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 300ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ENCODE USING notification_codec
       INHERIT ALL
@@ -502,9 +502,9 @@ Feature: Kafka emission
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE DETACHED EMITTER kafka_stale_copy
+      CREATE DETACHED KAFKA TOPIC EMITTER kafka_stale_copy
       FROM notifications
-      TO KAFKA kafka_sink TOPIC stale_copy_out_{{test_id}}
+      TO kafka_sink TOPIC 'stale_copy_out_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 10s MAX 10s
         ENCODE USING notification_codec
       INHERIT ALL
@@ -579,8 +579,8 @@ Feature: Kafka emission
         'bootstrap.servers' = '{{kafka_addr}}',
         'linger.ms' = '120000'
       };
-      CREATE EMITTER held_output FROM held_events
-        TO KAFKA lingering_kafka TOPIC held_out_{{test_id}} MODE NO_ACK
+      CREATE KAFKA TOPIC EMITTER held_output FROM held_events
+        TO lingering_kafka TOPIC 'held_out_{{test_id}}' MODE NO ACK
           RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING held_event_codec
         INHERIT ALL
@@ -664,8 +664,8 @@ Feature: Kafka emission
       CREATE KAFKA CLIENT refusing_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}'
       };
-      CREATE EMITTER unsent_output FROM unsent_events
-        TO KAFKA refusing_kafka TOPIC unsent_out_{{test_id}} MODE NO_ACK
+      CREATE KAFKA TOPIC EMITTER unsent_output FROM unsent_events
+        TO refusing_kafka TOPIC 'unsent_out_{{test_id}}' MODE NO ACK
           RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING unsent_event_codec
         INHERIT ALL
@@ -745,8 +745,8 @@ Feature: Kafka emission
       CREATE KAFKA CLIENT replacement_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}'
       };
-      CREATE EMITTER swap_output FROM swap_events
-        TO KAFKA refusing_kafka TOPIC swap_out_{{test_id}} MODE NO_ACK
+      CREATE KAFKA TOPIC EMITTER swap_output FROM swap_events
+        TO refusing_kafka TOPIC 'swap_out_{{test_id}}' MODE NO ACK
           RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING swap_codec INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -781,7 +781,7 @@ Feature: Kafka emission
     When client "owner" executes these Plexus statements
       """
       BEGIN;
-      ALTER EMITTER swap_output
+      ALTER KAFKA TOPIC EMITTER swap_output
         SET CLIENT replacement_kafka, SET DETACHED;
       """
     Then client "owner" transaction id is saved as placeholder "swap_transaction"

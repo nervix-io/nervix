@@ -124,6 +124,13 @@ For a planned subgraph pause, transaction inspection records the intake-only sco
 from the full subgraph scope, with each scope's actual engagement, drain failure, and release
 outcomes. An already engaged domain pause covers its ingestors throughout these phases.
 
+Emitter publication policy belongs to the concrete destination Model. Impact comparison observes
+that policy separately from the destination definition, so changing only `MODE` retains the
+publishing-policy aspect and entity-pause scope. Comparing destination definitions ignores the
+client and policy while comparing the actual locator and entity options. A complete Plexus
+`SET TO` can change its payload selection and explicitly written construction as part of the same
+atomic alteration; its head and replacement must retain the stored connector/entity kind.
+
 A native client emitter keeps its prepared IPC bytes, source members and application ACK wait as
 emitter work. Force flush releases rows into that same wait; a read or network delivery does not
 finish the drain. A consumer settlement runs beside the session's ordered command lane, so an

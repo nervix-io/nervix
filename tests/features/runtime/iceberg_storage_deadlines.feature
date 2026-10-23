@@ -37,13 +37,10 @@ Feature: Iceberg storage deadlines and retry ownership
         'uri' = '{{iceberg_rest_addr}}',
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
-      CREATE EMITTER iceberg_output FROM notifications
-        TO ICEBERG ON S3 s3_main TABLE storage_timeout_{{test_id}}
-        VALUES { 'user_id' = input.user_id }
+      CREATE ICEBERG TABLE EMITTER iceberg_output FROM notifications
+        TO s3_main TABLE 'storage_timeout_{{test_id}}'
         LOCATION 's3://nervix-iceberg/tables/storage_timeout_{{test_id}}'
-        CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
-        MODE ACK RETRY POLICY BACKOFF 2s MAX 2s
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 2s MAX 2s VALUES { 'user_id' = input.user_id } FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then within "30s" DESCRIBE EMITTER "iceberg_output" on the leader node contains

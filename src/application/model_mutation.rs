@@ -2771,10 +2771,10 @@ mod tests {
             "CREATE DETACHED DEDUPLICATOR passthrough FROM notifications DEDUPLICATE ON \
              input.user_id MAX TIME 10m UNBRANCHED TO forwarded_notifications INHERIT ALL FLUSH \
              EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
-            "CREATE DETACHED EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC \
-             notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING \
-             notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR \
-             LOG ON GENERAL ERROR LOG;",
+            "CREATE DETACHED KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main \
+             TOPIC 'notifications_out' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE \
+             USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
+             ERROR LOG ON GENERAL ERROR LOG;",
         ];
 
         for command in commands {

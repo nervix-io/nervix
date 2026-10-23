@@ -53,6 +53,12 @@ chapter that owns its subsystem:
 The NSPL forms for error routes are in [Message Errors](./processors.md#message-errors) and
 [Error Routes](./quickstart-error-routes.md).
 
+Emitter ALTER validation belongs to the vocabulary: its typed declared-kind and replacement-kind
+failures retain both connector/entity kinds and render their Plexus phrases. The parser constructs
+only each destination's own publishing-policy enum, so no registry or planner failure represents an
+impossible entity/policy pair. Reference validation still rejects a configured client of the wrong
+kind; Iceberg reports its declared object-store alternatives and the actual resolved client kind.
+
 ## The Report Model
 
 ### A Failure Has One Owner
@@ -589,7 +595,7 @@ contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the resolver's
 the deadline that ran out. The sink changes them into a configuration failure for an invalid
 address, CA file or deadline key and an initialization failure otherwise, leading with the failure's
 chain, down to a `connect_timeout_ms` it ran out of, which `DESCRIBE EMITTER` shows. Neither
-attaches credentials from the address. A `NO_ACK` round trip that runs out of the client's
+attaches credentials from the address. A `NO ACK` round trip that runs out of the client's
 `timeout_ms` fails the write as a publish failure with the elapsed deadline as its typed cause and
 its text leading the report.
 
@@ -795,7 +801,7 @@ stays an infrastructure failure of the attempt, which the emitter retries.
 
 The Pulsar sink preserves the driver's `pulsar::Error` beneath `SinkPublishError::Publish` for
 enqueue failures and failed receipts, with its description in a printable attachment. Its shared
-confirmation window owns a missed `ACK TIMEOUT` as `ConfirmationWindowError`. A `NO_ACK` finish
+confirmation window owns a missed `ACK TIMEOUT` as `ConfirmationWindowError`. A `NO ACK` finish
 keeps the first failed receipt beneath `SinkFinishError::Flush`; if its deadline expires with
 receipts still unanswered, `SinkFinishError::Unsent` counts those receipts, retaining an earlier
 driver failure beneath it when present. An unanswered receipt leaves delivery unknown rather
