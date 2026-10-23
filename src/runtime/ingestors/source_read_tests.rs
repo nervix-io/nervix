@@ -461,11 +461,7 @@ pub(super) fn gathering_policy(max_in_flight: usize) -> BrokerSourcePolicy {
         timeout: Duration::from_secs(60),
         retry: SOURCE_RECONNECT_POLICY,
     };
-    BrokerSourcePolicy {
-        acknowledgement,
-        retry: acknowledgement.retry(),
-        position_class: PositionClass::Replayable,
-    }
+    BrokerSourcePolicy::new(acknowledgement, PositionClass::Replayable)
 }
 
 /// A source the tests feed and the host it reads for, before the loop takes them.

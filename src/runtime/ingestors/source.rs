@@ -198,14 +198,6 @@ impl<P> BrokerSourceStart<'_, P> {
             &ingestor.name,
             acknowledgement,
         )?;
-        // An acknowledged mode retries by its declared policy; a source without one reopens on
-        // the host's reconnect cadence.
-        let retry = match acknowledgement {
-            SourceAckPolicy::None => SOURCE_RECONNECT_POLICY,
-            SourceAckPolicy::Sequential { retry, .. } | SourceAckPolicy::Parallel { retry, .. } => {
-                retry
-            }
-        };
         let plan = SourcePlan {
             connector,
             capabilities: ingestor.source_capabilities(instances, acknowledgement.support()),
@@ -220,11 +212,10 @@ impl<P> BrokerSourceStart<'_, P> {
                 .change_context_lazy(|| ingestor.initialize_failure())?;
             opened.push(Box::new(BrokerSourceInstance {
                 source,
-                policy: BrokerSourcePolicy {
-                    acknowledgement: plan.acknowledgement,
-                    retry,
-                    position_class: plan.capabilities.position_class(),
-                },
+                policy: BrokerSourcePolicy::new(
+                    plan.acknowledgement,
+                    plan.capabilities.position_class(),
+                ),
             }));
         }
         Ok(SourceStart {
@@ -256,6 +247,25 @@ pub(super) struct BrokerSourcePolicy {
     /// What its positions mean once the connection that delivered them is gone, which decides
     /// what the host does with a rejection the source could not complete.
     pub(super) position_class: PositionClass,
+}
+
+impl BrokerSourcePolicy {
+    /// How the host drives a broker source whose declared delivery mode is `acknowledgement` and
+    /// whose positions are of `position_class`: an acknowledged mode retries by its declared
+    /// policy, and a source without one reopens on the host's reconnect cadence.
+    pub(super) fn new(acknowledgement: SourceAckPolicy, position_class: PositionClass) -> Self {
+        let retry = match acknowledgement {
+            SourceAckPolicy::None => SOURCE_RECONNECT_POLICY,
+            SourceAckPolicy::Sequential { retry, .. } | SourceAckPolicy::Parallel { retry, .. } => {
+                retry
+            }
+        };
+        Self {
+            acknowledgement,
+            retry,
+            position_class,
+        }
+    }
 }
 
 impl<C> SourceInstance for BrokerSourceInstance<C>

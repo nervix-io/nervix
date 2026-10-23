@@ -868,7 +868,7 @@ entity declares, which states what its positions still mean once their connectio
 | --- | --- | --- |
 | `broker_redelivered` | `MQTT TOPIC`, `RABBITMQ QUEUE`, `SQS QUEUE` | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
 | `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | Nothing is pending. The host keeps no position and reads again after its retry delay. |
-| `replayable` | `KAFKA TOPIC`, `PULSAR TOPIC` | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a consumer-group rebalance has moved away, because only a poll can assign that partition again. |
+| `replayable` | `KAFKA TOPIC`, `PULSAR TOPIC` | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore seeks each rejected partition it is assigned at once, and starts every other one at its earliest rejected record when its consumer group assigns it again, until a commit passes that record. |
 <!-- connector-matrix:position:end -->
 
 The broker host applies the same retry backoff to a failed resume, a failed read and a requested
@@ -1698,17 +1698,34 @@ sequenceDiagram
   that same job. In `MODE NO ACK` the driver commits on its
   own cadence, and suspending or closing the source commits what it delivered since.
   A rejection seeks each rejected partition the consumer is still assigned back to its earliest
-  unacknowledged record. A consumer-group rebalance can move a partition to another group member
-  while its batch is in flight, and Kafka cannot seek a partition the consumer no longer fetches.
-  That partition needs no seek: whichever member is assigned it next, this consumer included,
-  resumes it from the committed offset, which never passes an unacknowledged record.
+  unacknowledged record. Under `OFFSET BY CONSUMER GROUP` the group can revoke that partition
+  before the record is read again: a rebalance moves it while its batch is in flight, the host's
+  suspend and resume after a failed rejection leaves and rejoins the group, and a broker outage
+  that outlasts the group session takes it away. Each revocation loses the seek, and the next
+  assignment resumes the partition from the group's committed offset, or, where the group
+  committed none, from where the client's `auto.offset.reset` starts it, which `latest` places
+  past the rejected record. The source therefore records each rejected partition's earliest
+  rejected record in its consumer's context before it seeks, and the context starts the partition
+  there whenever the group assigns it to this consumer again, until a commit that passes the
+  record forgets it. A retried rejection depends on no poll: it records the floor and seeks what
+  the consumer holds. An eager assignment lists every partition the group gives the consumer, so
+  a floor it omits is forgotten, and the member it went to resumes the partition from the
+  committed offset; a cooperative assignment lists only what it adds and forgets nothing.
   With `OFFSET BY DOMAIN`, the host supplies typed access to replicated next-offset state and a
   committed partition schedule. The leader observes partition topology and commits assignments;
-  executing sources follow that schedule. Offset snapshots can lag a crash, so this mode remains
-  at least once. Commits and start-point resets wait for the assigned state replicas within the
-  native checkpoint bulk operation's thirty-second budget. A missing acknowledgement still fails
-  the commit and follows the host's existing rejection and retry policy.
-  [Kafka ingestion](./ingestors.md#kafka) defines the recovery details.
+  executing sources follow that schedule. The domain offsets record only acknowledged positions and
+  the start of each partition an instance took up without one, so whichever instance the schedule
+  assigns a rejected partition resumes it at or before the rejected record. A partition without a
+  domain offset starts at a concrete offset the instance resolves when it takes the partition up:
+  in a paced domain its first record at or after the domain's current logical time, or its end as
+  it stood before that lookup when it has no such record yet, and in an unpaced domain where the
+  client's `auto.offset.reset` places it, `earliest` at its earliest retained record and `latest`
+  at its end. The instance records that start before it reads, so a reconnect resumes there
+  instead of placing the partition again past records it has not acknowledged. Offset snapshots
+  can lag a crash, so this mode remains at least once. Commits and start-point resets wait for the
+  assigned state replicas within the native checkpoint bulk operation's thirty-second budget. A
+  missing acknowledgement still fails the commit and follows the host's existing rejection and
+  retry policy. [Kafka ingestion](./ingestors.md#kafka) defines the recovery details.
   Replica ACKs reach that installed offset state through a resolved, retired-on-ending route and
   the existing assignment publication. The host's announcer retains its route and follows replica
   assignment changes without reading node-wide state or execution registries. The Kafka commit and

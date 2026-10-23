@@ -22544,6 +22544,55 @@ async fn then_within_duration_describe_ingestor_on_leader_contains(
     }
 }
 
+/// An ingestor that keeps failing waits longer after each failure, so once its reconnect backoff
+/// reaches the threshold it stays at or above it until a read succeeds.
+#[then(
+    expr = "within {string} DESCRIBE INGESTOR {string} on the leader node reports a reconnect \
+            backoff of at least {string}"
+)]
+async fn then_within_duration_describe_ingestor_reports_reconnect_backoff_of_at_least(
+    world: &mut ScenarioWorld,
+    duration: String,
+    ingestor: String,
+    threshold: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let ingestor = expand_placeholders(world, &ingestor);
+    let threshold = parse_duration_text(&threshold).expect("the backoff threshold is a duration");
+    let deadline = Instant::now() + duration;
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output =
+            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE INGESTOR {ingestor};"))
+                .await
+                .expect("describe ingestor command must succeed");
+        world.last_command_output = Some(output.clone());
+        let mut reached = false;
+        for line in output.lines() {
+            let Some(backoff) = line.trim().strip_prefix("reconnect backoff: ") else {
+                continue;
+            };
+            let Ok(backoff) = parse_duration_text(backoff) else {
+                continue;
+            };
+            if backoff >= threshold {
+                reached = true;
+            }
+        }
+        if reached {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE INGESTOR {ingestor} to report a reconnect backoff of \
+             at least {threshold:?}. last output: {output}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(expr = "within {string} DESCRIBE WASM PROCESSOR {string} on the leader node contains")]
 async fn then_within_duration_describe_wasm_processor_on_leader_contains(
     world: &mut ScenarioWorld,
@@ -23604,6 +23653,83 @@ fn when_mock_kafka_broker_accepts_offset_commits_again(world: &mut ScenarioWorld
         .expect("a mock Kafka broker serves the scenario before it accepts offset commits again")
         .accept_offset_commits()
         .expect("the mock Kafka broker accepts offset commits again");
+}
+
+#[given("the mock Kafka broker goes down")]
+#[when("the mock Kafka broker goes down")]
+fn when_mock_kafka_broker_goes_down(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_mut()
+        .expect("a mock Kafka broker serves the scenario before it goes down")
+        .go_down()
+        .expect("the mock Kafka broker goes down");
+}
+
+/// The outage is the event under test, such as one that outlasts a consumer group's session, so
+/// the broker stays down for the stated time, measured from when it went down.
+#[when(expr = "the mock Kafka broker comes back up after an outage of {string}")]
+async fn when_mock_kafka_broker_comes_back_up_after(world: &mut ScenarioWorld, outage: String) {
+    let outage = parse_duration_text(&outage).expect("the outage is a duration");
+    world
+        .kafka_mock_broker
+        .as_mut()
+        .expect("a mock Kafka broker serves the scenario before it comes back up")
+        .come_up_after(outage)
+        .await
+        .expect("the mock Kafka broker comes back up");
+}
+
+#[when("the mock Kafka broker comes back up")]
+async fn when_mock_kafka_broker_comes_back_up(world: &mut ScenarioWorld) {
+    world
+        .kafka_mock_broker
+        .as_mut()
+        .expect("a mock Kafka broker serves the scenario before it comes back up")
+        .come_up_after(Duration::ZERO)
+        .await
+        .expect("the mock Kafka broker comes back up");
+}
+
+/// A consumer that starts where its partition ends reads only what is published once the group
+/// assigned it the partition, so the step publishes until a record reaches the relay subscription.
+#[then(
+    expr = "within {string} repeatedly publishing mock Kafka message to topic {string} yields a \
+            relay subscription payload"
+)]
+async fn then_within_duration_repeatedly_publishing_mock_kafka_message_yields_subscription_payload(
+    world: &mut ScenarioWorld,
+    duration: String,
+    topic: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let topic = expand_placeholders(world, &topic);
+    let payload = expand_placeholders(world, docstring(step));
+    let client_config = world
+        .kafka_mock_broker
+        .as_ref()
+        .expect("a mock Kafka broker serves the topic before a message is published to it")
+        .client_config();
+    let deadline = Instant::now() + duration;
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        world.last_publish_at = Some(Instant::now());
+        publish_kafka_record_through(client_config.clone(), &topic, None, &payload, &[])
+            .await
+            .expect("failed to publish the mock kafka message");
+
+        if try_capture_any_subscription_payload(world, Duration::from_millis(500)).await {
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for a mock Kafka message published to topic '{topic}' to reach the \
+             relay subscription"
+        );
+    }
 }
 
 #[when(expr = "mock Kafka message is published to topic {string}")]

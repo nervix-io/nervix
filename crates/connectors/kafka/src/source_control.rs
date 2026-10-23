@@ -23,9 +23,9 @@ use nervix_primitives::{
     task::JoinHandle,
     time::{Instant, timeout_at},
 };
-use rdkafka::{config::ClientConfig, consumer::StreamConsumer, error::KafkaResult};
+use rdkafka::{config::ClientConfig, error::KafkaResult};
 
-use super::{GroupCommitRequest, KafkaSourceError};
+use super::{GroupCommitRequest, KafkaConsumer, KafkaSourceError};
 
 #[cfg_attr(
     nervix_lint,
@@ -77,12 +77,12 @@ impl KafkaControl {
     )]
     pub(super) async fn run<T, F>(
         &self,
-        consumer: &Arc<StreamConsumer>,
+        consumer: &Arc<KafkaConsumer>,
         operation: F,
     ) -> Result<T, Report<KafkaSourceError>>
     where
         T: Send + 'static,
-        F: FnOnce(&StreamConsumer, &ControlBudget<'_>) -> Result<T, Report<KafkaSourceError>>
+        F: FnOnce(&KafkaConsumer, &ControlBudget<'_>) -> Result<T, Report<KafkaSourceError>>
             + Send
             + 'static,
     {
@@ -130,7 +130,7 @@ impl KafkaControl {
     /// Dropping its JoinHandle does not cancel it or release its worker prematurely.
     pub(super) fn start_commit(
         &self,
-        consumer: &Arc<StreamConsumer>,
+        consumer: &Arc<KafkaConsumer>,
         request: GroupCommitRequest,
     ) -> Result<CommitTask, Report<KafkaSourceError>> {
         let charge = self
