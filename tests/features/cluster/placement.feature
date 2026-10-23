@@ -135,7 +135,7 @@ Feature: Placement policies
       """
     Then the last command output contains
       """
-      members: corridor_middle, corridor_emitter, corridor_source, placement_stage_one, placement_stage_two
+      members: corridor_emitter, corridor_middle, corridor_source, placement_stage_one, placement_stage_two
       """
     And the last command output contains
       """

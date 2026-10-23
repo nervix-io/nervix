@@ -1243,7 +1243,7 @@ fn emitter_entity_supports_headers(connector: &EmitterEntity) -> bool {
     connector.capabilities().writes_headers()
 }
 
-/// Refuses an emitter whose emitter keeps one value per header name and whose `INVOKE` clause writes
+/// Refuses an emitter whose connector keeps one value per header name and whose `INVOKE` clause writes
 /// one literal name twice: on every record the later write would replace the earlier one, so the
 /// earlier write could never reach a message. Names compare as the emitter's header model records
 /// them, and a name an expression computes is left to the emitter at run time.

@@ -1835,7 +1835,7 @@ that reads the broker's client and hands each message to the step over a bounded
 scenario aborts that task when it drops the observer. A core NATS observer has no task of its own:
 the NATS client already reads what the server delivers into the subscription's own buffer on a task
 of its own, and the step takes each message straight from that buffer. A step that is behind takes
-as many buffered messages in one poll of the runner task as the poll's cooperative budget allows.
+as many buffered messages in one poll of the runner task as the poll's cooperative budget allows. The channel receive owns that budget charge; the sequential-message assertion does not add a second charge before each receive. The assertion keeps one deadline for the entire sequence, checks every sequence number and header, and reports the observing client's receipt count if it cannot finish.
 
 Under the suite's concurrency the runner task comes back to a step only after it has polled every
 other woken scenario. While the NATS observer handed each message on through a one-message channel,

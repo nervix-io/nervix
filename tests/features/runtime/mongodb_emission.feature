@@ -482,7 +482,12 @@ Feature: MongoDB emission
       {"user_id":5,"action":"FIFTH"}
       {"user_id":6,"action":"SIXTH"}
       """
-    Then within "20s" DESCRIBE EMITTER "to_mongodb" on the leader node contains
+    # The event remains observable after a fully delivered batch clears its transient status.
+    Then within "20s" the active session observes a server error containing
+      """
+      emitter 'to_mongodb' in domain '{{domain}}':
+      """
+    And the last server error contains
       """
       write concern failed
       """

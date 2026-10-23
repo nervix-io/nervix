@@ -1398,7 +1398,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         }
         let container = self
             .start_container("sentry", 8000.tcp(), "Sentry", || {
-                GenericImage::new("bugemitter/bugemitter", "2.3.1")
+                GenericImage::new("bugsink/bugsink", "2.3.1")
                     .with_exposed_port(8000.tcp())
                     .with_wait_for(WaitFor::http(
                         HttpWaitStrategy::new("/health/ready")
@@ -1419,7 +1419,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         let mut setup = container
             .exec(
                 ExecCommand::new([
-                    "bugemitter-manage",
+                    "bugsink-manage",
                     "shell",
                     "-c",
                     "import json; from projects.models import Project; project, _ = \
@@ -1479,7 +1479,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         );
         let mut query = container
             .exec(
-                ExecCommand::new(["bugemitter-manage", "shell", "-c", script.as_str()])
+                ExecCommand::new(["bugsink-manage", "shell", "-c", script.as_str()])
                     .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
             )
             .await

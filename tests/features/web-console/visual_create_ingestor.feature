@@ -73,7 +73,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
     And selector ".create-name" is filled with "incomplete_source"
     And selector ".create-submit" is clicked
-    Then selector ".create-validation" contains "source type"
+    Then selector ".create-validation" contains "ingestor entity type"
     And selector ".create-name" has value "incomplete_source"
     When selector ".create-ingestor-source [data-source='http-endpoint']" is clicked
     And selector ".create-submit" is clicked

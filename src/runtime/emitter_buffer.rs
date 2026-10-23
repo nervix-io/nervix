@@ -624,7 +624,7 @@ pub(super) struct EmitterBatchBuffer {
     /// The requests an HTTP emitter was handed and has not answered for.
     requests: PreparedPayloads<PreparedHttpRequest>,
     /// The requests a row request emitter prepared and has not answered for. An emitter publishes
-    /// through one emitter, so at most one of the three holds anything.
+    /// through one connector, so at most one of the three holds anything.
     row_requests: PreparedPayloads<RowRequestBody>,
     pending_messages: u64,
     pending_bytes: u64,

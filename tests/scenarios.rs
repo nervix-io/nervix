@@ -31243,8 +31243,9 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
         .broker_observer
         .as_mut()
         .expect("a broker observer must exist before assertion");
+    // Both observer variants receive through a channel that owns cooperative yielding.
+    // Do not charge a ready message twice and halve what one shared runner poll can drain.
     for expected_sequence in 1..=count {
-        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
