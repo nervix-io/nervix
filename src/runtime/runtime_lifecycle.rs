@@ -341,6 +341,17 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn loses_handoff_gate_engagement(
+        &self,
+        coordinator: &ClusterNodeName,
+        participant: &ClusterNodeName,
+    ) -> bool {
+        self.inner
+            .fault_injection
+            .loses_handoff_gate_engagement(coordinator, participant)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) fn take_armed_schedule_publication_fault(&self, domain: &DomainName) -> bool {
         self.inner
             .fault_injection

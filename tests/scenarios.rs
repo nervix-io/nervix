@@ -9027,6 +9027,44 @@ async fn then_broken_handoff_engagement_request_was_delivered(
 }
 
 #[given(
+    expr = "the ownership handoff gate engagement requests node {string} sends to node {string} \
+            are lost"
+)]
+async fn given_handoff_gate_engagements_are_lost(
+    world: &mut ScenarioWorld,
+    coordinator: String,
+    participant: String,
+) {
+    let coordinator = expand_placeholders(world, &coordinator);
+    let participant = expand_placeholders(world, &participant);
+    world.fault_injection.lose_handoff_gate_engagements(
+        crate::common::cluster::node_name(&coordinator),
+        crate::common::cluster::node_name(&participant),
+    );
+}
+
+#[then(
+    expr = "the link from node {string} to node {string} lost no ownership handoff gate \
+            engagement request"
+)]
+async fn then_link_lost_no_handoff_gate_engagement(
+    world: &mut ScenarioWorld,
+    coordinator: String,
+    participant: String,
+) {
+    let coordinator = crate::common::cluster::node_name(&expand_placeholders(world, &coordinator));
+    let participant = crate::common::cluster::node_name(&expand_placeholders(world, &participant));
+    let lost = world
+        .fault_injection
+        .lost_handoff_gate_engagements(&coordinator, &participant);
+    assert_eq!(
+        lost, 0,
+        "node '{coordinator}' asked node '{participant}' to hold an ownership handoff gate {lost} \
+         time(s), and the link lost every request"
+    );
+}
+
+#[given(
     expr = "the leader refuses the next relocation commit in domain {string} as a leader whose \
             lease lapsed"
 )]
