@@ -378,7 +378,7 @@ is full, what happens to a payload depends on whether its sender can present it 
 | `ZEROMQ PULL` | Waits | Unread messages stay in the socket's kernel buffers, and then the pushing peers wait. Nothing is dropped. |
 | `SYSLOG LISTENER` | Waits | The listener stays bound. The kernel drops UDP datagrams beyond the socket's receive buffer, and TCP and TLS senders wait once the listener's 64-frame queue is full. |
 | `MQTT TOPIC` | Refused and counted | The connection keeps sending its keep-alive while the loop is held, but reads only 64 publishes ahead of it and then stops reading, and its keep-alive with it, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from it, and what is published until the source reconnects is lost. |
-| `REDIS PUBSUB` | Refused and counted | The client reads every published message into an unbounded queue of its own, so a held loop would grow the node's memory without limit. |
+| `REDIS PUBSUB` | Refused and counted | The subscription reader holds at most `subscription_buffer_messages` messages. The host keeps polling it so its same-connection idle probes can continue instead of waiting for extension-worker admission. |
 | `WEBSOCKETS CONNECTION` | Refused and counted | The client answers the server's pings only while the loop reads, so a server that pings would close the connection and lose what it sent until the source reconnects. |
 | `KAFKA TOPIC` in `MODE NO ACK` | Refused and counted | A consumer-group member that stops polling for `max.poll.interval.ms` leaves its group, and an instance reading domain offsets would keep its partitions assigned through an ownership handoff. |
 | `PULSAR TOPIC` in `MODE NO ACK` | Refused and counted | A consumer whose receive queue fills cannot complete its close, so a later suspension or stop would wait on it. The refused message stays unacknowledged until the consumer reconnects, when the broker delivers it again. |
@@ -1284,23 +1284,28 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-ingest).
 <!-- connector-matrix:ingest-redis-pubsub:end -->
 
-Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both modes keep reading and
-keep the subscriber healthy; payloads are either retained locally within the declared bound or
-discarded and counted. A `REDIS CLIENT` declares connection-pool bounds even when only
-ingestors reference it; see [Database Client Connection Pools](database-client-pools.md).
+Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both `ON QUIESCE BUFFER`
+and `ON QUIESCE DROP` keep reading and keep the subscriber healthy. `BUFFER` retains payloads up
+to its byte bound, then applies its declared `DROP OLDEST` or `DROP NEWEST` overflow policy;
+`DROP` discards every payload during the hold. Discards count in
+`nervix_ingestor_quiesce_dropped_total`. A `REDIS CLIENT` declares connection-pool bounds even
+when only ingestors reference it; see [Database Client Connection Pools](database-client-pools.md).
 Each subscription owns a separate connection. It resolves the `addr` hostname through the node's
 asynchronous DNS resolver on initial subscribe and every resume after a disconnect; it does not
 consume a pooled command connection. For `rediss://`, TLS verifies the original hostname and
 uses the configured CA and optional client identity. DNS and connection failures follow the
 source's existing retry cadence; Redis Pub/Sub does not replay messages missed while disconnected.
 
-A Redis source client must set `subscription_buffer_messages` and `idle_timeout_ms` in its
-`CONFIG`. The message capacity bounds read-ahead separately from `BUFFER MAX SIZE`, which bounds
-retained payload bytes during quiesce. It is a positive whole number that fits the bounded channel.
+A Redis ingestor's client must set `subscription_buffer_messages` and `idle_timeout_ms` in its
+`CONFIG`; neither key has an implicit default. The message capacity bounds read-ahead separately
+from `BUFFER MAX SIZE`, which bounds retained payload bytes during quiesce. It is a positive whole
+number that fits the bounded channel.
 For example, choose `'subscription_buffer_messages' = '1024'` and `'idle_timeout_ms' = '30000'`
 for a 1,024-message handoff and a 30-second idle interval. A full message handoff stops TCP reads; quiesced
 intake still applies its declared `BUFFER` overflow policy or counts the messages `DROP` discards.
-Malformed capacity values fail source initialization.
+Malformed capacity values fail ingestor initialization. This handoff applies TCP backpressure
+when full; it does not discard a message to make room. Redis Pub/Sub still offers no replay or
+delivery acknowledgement, so neither buffer recovers messages missed during a disconnect.
 
 `idle_timeout_ms` is a positive whole number of schedulable milliseconds. The
 subscription sends a same-connection `PING` after half that interval without activity and requires
