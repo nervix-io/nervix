@@ -1424,8 +1424,9 @@ the missing domain time.
 
 An owner-delivery admission failure, and an owner delivery whose acknowledgement records could not
 be stored, log the domain, relay, branch scope and target together with the report, including
-retained cancellation, rejection and admission causes, before returning the undelivered batch. This keeps admission and connection failures visible even when the batch
-carries no acknowledgement, without logging branch field values.
+retained cancellation, rejection and admission causes, before returning the undelivered batch.
+This keeps admission and connection failures visible even when the batch carries no
+acknowledgement, without logging branch field values.
 
 ## Cross-Node And Public Boundaries
 

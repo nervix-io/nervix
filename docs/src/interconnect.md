@@ -1867,8 +1867,9 @@ errors remain available to the operation owner, which decides whether a request 
 The interconnect does not infer idempotency for arbitrary control-plane or runtime operations.
 Local transport operations return `error_stack` reports. TLS and wire failures retain their typed
 causes beneath `TransportError`; typed requests and stream readers add `RequestError` context while
-retaining the transport report. Deadline, shutdown, quota, cancellation, relay-rejection, relay grant refusal, and
-indeterminate-delivery decisions inspect the current typed context, not formatted report text.
+retaining the transport report. Deadline, shutdown, quota, cancellation, relay-rejection, relay
+grant refusal, and indeterminate-delivery decisions inspect the current typed context, not
+formatted report text.
 Runtime dispatch, relay admission-response and remote acknowledgement logs render every context
 of those local reports. State synchronization, checkpoint announcement and replica catch-up logs
 also retain the underlying request, placement or storage cause when their owner adds context.
@@ -1900,8 +1901,9 @@ exact durable discard, activation, or schedule-based reconciliation resolves tha
 Each node exports interconnect measurements through its local metrics endpoint. The main groups
 cover connection and stream occupancy, pending operations, setup failures and resets, quota
 exhaustion, request latency, relay channels and grants, grant refusals by direction and reason,
-admission wait, unresolved delivery age, and bulk-transfer bytes. Interconnect memory, worker queues, reactor delay, and consensus retention show
-whether pressure originates in transport, execution, or the protocol using it. A connection attempt
+admission wait, unresolved delivery age, and bulk-transfer bytes. Interconnect memory, worker
+queues, reactor delay, and consensus retention show whether pressure originates in transport,
+execution, or the protocol using it. A connection attempt
 that could not resolve its peer's advertised host is counted with reason `resolution`, apart from
 setup, handshake, capacity, and closed failures, so a DNS outage is visible as itself.
 

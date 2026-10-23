@@ -100,8 +100,8 @@ there waits instead of failing. A grant reserves the largest decoded batch and t
 whatever the body's size, so the budget grants about three deliveries at once; a sender whose grant
 is refused for that room, and a sender whose own budget has no room to store the acknowledgements
 of the rows it sends, hold their delivery back and wait as well; see
-[Held Deliveries](./interconnect.md#held-deliveries). The budgets are fixed defaults and do not follow the node's own
-memory.
+[Held Deliveries](./interconnect.md#held-deliveries). The budgets are fixed defaults and do not
+follow the node's own memory.
 The commands budget also holds the 16 MiB working reservation for one normalized consensus state
 write; half is the keyed payload ceiling and half covers database journal encoding and descriptors.
 The credentials budget holds the 19 MiB Argon2id works in for one password, so a node computes one
