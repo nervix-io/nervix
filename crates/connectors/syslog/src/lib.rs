@@ -4,9 +4,9 @@
 //!
 //! - **Owns.** Syslog client configuration, UDP/TCP/TLS listener and sender transports, RFC
 //!   6587 framing, peer metadata, source lifecycle operations, and record publication.
-//! - **Depends on.** The connector contract, typed client configuration entries, Tokio sockets,
+//! - **Depends on.** The connector contract, typed client configuration entries, execution-sensitive sockets,
 //!   `memchr`, and rustls.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -29,6 +29,8 @@ pub use config::{
     SyslogDeadlineScope, SyslogDirection, SyslogFraming, SyslogProtocol,
 };
 pub use sink::{SyslogSink, SyslogSinkConfig};
+#[cfg(feature = "testing")]
+pub use source::SyslogListenerFault;
 #[cfg(feature = "benchmarks")]
 pub use source::{SyslogFrameError, frame_stream};
 pub use source::{SyslogSource, SyslogSourceMessage, SyslogSourcePlan};
