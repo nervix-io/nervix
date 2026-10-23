@@ -15275,6 +15275,74 @@ async fn when_named_client_submits_command_request(
     world.last_client_request = Some(request);
 }
 
+/// Measures a command batch on a client prepared before the fault, with its reply polled
+/// independently of the Cucumber runner. The deadline includes dispatch to the runtime task.
+#[then(expr = "within {string} client {string} completes these Plexus statements")]
+async fn then_named_client_completes_plexus_statements_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    name: String,
+    #[step] step: &Step,
+) {
+    let limit = parse_duration_text(&duration).assured("the scenario duration is valid");
+    let name = expand_placeholders(world, &name);
+    let Some(client) = world.transaction_clients.get(&name) else {
+        panic!("client '{name}' must be connected before the timed probe");
+    };
+    let client = client.clone();
+    let commands = expand_placeholders(world, docstring(step));
+    let statements = nspl_statements(&commands);
+    assert!(!statements.is_empty(), "a timed probe requires statements");
+    world.last_command_error = None;
+    world.last_command_output = None;
+    world.last_client_outcome = None;
+    let started = Instant::now();
+    let deadline = started
+        .checked_add(limit)
+        .assured("the scenario duration fits a monotonic instant");
+    let (outcome, elapsed) =
+        crate::common::runner_observation::observe_off_the_runner(async move {
+            let mut last_outcome = None;
+            for (position, statement) in statements.into_iter().enumerate() {
+                nervix_primitives::task::consume_budget().await;
+                let result =
+                    nervix_primitives::time::timeout_at(deadline, client.execute(statement)).await;
+                let outcome = match result {
+                    Ok(Ok(outcome)) => outcome,
+                    Ok(Err(error)) => {
+                        panic!("client '{name}' failed at Plexus statement {position}: {error:#}")
+                    }
+                    Err(_) => {
+                        panic!(
+                            "client '{name}' did not complete the Plexus statements within \
+                             {limit:?}; pending statement {position}"
+                        )
+                    }
+                };
+                assert!(
+                    outcome.succeeded(),
+                    "client '{name}' Plexus statement {position} must succeed: {}",
+                    outcome.message
+                );
+                append_cucumber_log_line(&format!(
+                    "Plexus control statement: client={name} position={position} elapsed={:?}",
+                    started.elapsed()
+                ));
+                last_outcome = Some(outcome);
+            }
+            let outcome = last_outcome.assured("each statement in the nonempty probe answered");
+            let elapsed = started.elapsed();
+            append_cucumber_log_line(&format!(
+                "Plexus control probe: client={name} elapsed={elapsed:?} limit={limit:?}"
+            ));
+            (outcome, elapsed)
+        })
+        .await;
+    world.last_command_output = Some(crate::common::cluster::flatten_outcome_messages(&outcome));
+    world.last_client_outcome = Some(outcome);
+    world.last_cluster_operation_elapsed = Some(elapsed);
+}
+
 #[when(expr = "client {string} fails to execute these NSPL commands")]
 async fn when_named_client_fails_to_execute_commands(
     world: &mut ScenarioWorld,
