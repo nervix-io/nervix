@@ -630,6 +630,13 @@ failure's whole chain. A deadline key whose value breaks the vocabulary's rule i
 `ClientConfigError::InvalidDeadline`, naming the key above the `ClientDeadlineError` that says why,
 and each connector reports it as a configuration failure.
 
+A Core NATS write that runs out of the client's `timeout_ms` keeps `DeadlineElapsed` beneath
+`SinkPublishError::Publish` and attaches its message, which `DESCRIBE EMITTER` shows; the write's
+records stay unresolved for the emitter's retry. A NATS sink whose client still holds records when
+its finish deadline passes fails its finish with `SinkFinishError::Unsent` and their count, and one
+whose client fails while it flushes them with `SinkFinishError::Flush`, the driver's flush error
+beneath.
+
 A Syslog frame write that runs out of the client's `timeout_ms` keeps `DeadlineElapsed` beneath
 `SinkPublishError::Publish`, and the sink attaches the deadline's message last, so
 `DESCRIBE EMITTER` leads with it; the emitter rebuilds its connection and retries on its policy. A Syslog
@@ -1235,7 +1242,13 @@ carry it. A SQL write that fails for a reason specific to its rows is written ag
 time, and each row the destination still refuses receives an `external` `publish` error with the
 destination's reason. That includes a violated MySQL `CHECK` constraint, which the server reports
 under the generic SQLSTATE `HY000`, and a Postgres cardinality violation, which is how
-`ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. An OTLP receiver's
+`ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. A MongoDB write answers for
+each document even when it fails: a document the server refused for good receives an `external`
+`publish` error with the server's code, a document it applied is delivered, and every other
+document stays unresolved. A write concern the deployment could not satisfy is an infrastructure
+failure the host retries, named with the server's code, such as
+`MongoDB insert_many write concern failed with code 100 (UnsatisfiableWriteConcern)`, and it never
+undoes the documents the server applied, so the retry carries only the rest. An OTLP receiver's
 `partial_success` has no member identities, so it acknowledges the entire request and emits a
 warning instead of inventing per-record rejections. An OTLP/gRPC export the receiver never answered
 — a timeout, a lost connection, an unreadable answer — is an infrastructure failure the host
