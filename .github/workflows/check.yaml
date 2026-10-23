@@ -1495,6 +1495,11 @@ jobs:
       - name: Primitive source and thread owner validation coverage
         run: just coverage-primitive-boundary
 
+      # The completed doctests no longer need their compiled outputs. Keep their evidence while
+      # making room for the separately instrumented benchmark build.
+      - name: Reclaim completed documentation builds
+        run: just clean-ci-docs
+
       # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
       # without treating noisy shared-runner timings as a performance regression signal. The run is
       # instrumented for source coverage, so its timings are not a measurement either.
@@ -1505,6 +1510,11 @@ jobs:
 
       - name: Benchmark smoke tests
         run: just coverage-native-extras bench-smoke
+
+      # The collector has exported its report and recorded completion before this runs. Release
+      # the benchmark's dev-profile build outputs while retaining every coverage record.
+      - name: Reclaim completed benchmark builds
+        run: just clean-ci-benchmarks
 
       # The primitive boundary's native conformance collected separately in every execution mode.
       - name: Runner diagnostics before Primitive boundary conformance

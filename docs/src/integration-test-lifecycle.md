@@ -575,6 +575,14 @@ post step neither saves a manifest nor pushes. The `Start kache remote` step tha
    daemon that has not answered yet gets three polls, two seconds apart. The step prints whether
    the daemon publishes uploads or, under kache's read-only policy, skips them.
 
+The extra-tests job also reclaims completed build phases. Before benchmark smoke it runs
+`just clean-ci-docs` to release the completed doctests' Cargo target directory. After the native
+benchmark collector has exported coverage and recorded completion, `just clean-ci-benchmarks`
+releases that instrumented target's dev-profile build outputs. Both steps run only after their
+preceding checks succeed. Exported reports, completion records, raw profiles,
+compiler evidence and the source tree remain available; a failed phase keeps its build outputs.
+Later phases rebuild any required artifact through the configured cache.
+
 During the build the daemon publishes each entry the build stores: kache records a durable upload
 intent, uploads the entry in the background, and retries an upload that failed for a retryable
 reason every five seconds.
