@@ -347,6 +347,7 @@ struct ScenarioWorld {
     mqtt_fixture_publication: Option<mqtt_fixtures::Publication>,
     postgres_fixture_locks: Option<postgres_fixtures::HeldLocks>,
     postgres_fixture_observations: Option<postgres_fixtures::Observations>,
+    postgres_fixture_connection: Option<postgres_fixtures::ConnectionEstablishment>,
     scenario_admission: Option<ScenarioAdmission>,
     /// Publishes which phase this scenario is in for as long as its world lives, so a reader of
     /// the registry sees the work in flight rather than the last work that finished.
