@@ -1635,6 +1635,15 @@ the fixture kills the process, so cleanup never waits for a graceful stop and a 
 never leaves a server running. What the process does between a signal and its exit is product
 behavior; see [Shutdown And Recovery](./shutdown.md#exit-status).
 
+A whole-cluster restart polls every persisted voter's launch and readiness concurrently, then
+checks convergence through the public status endpoints. Each voter retains its own 120-second
+startup deadline, including its executable read. Serial executable reads would spend an earlier
+voter's deadline preparing later voters before its first readiness probe, while that voter cannot
+recover its quorum alone. The retained 23 October 2026 scenario failure reached that state on all
+three attempts: the first voter completed no readiness probe, and its own executable read took
+37.46, 26.35 and 75.36 seconds. Concurrent restart lets that voter probe while the other voters
+prepare and spawn; it changes neither the deadlines nor the convergence requirement.
+
 **Reading the executable first.** A process does not read its executable when it starts. The kernel
 maps the file, and every page the process first touches is read when the process faults on it: one
 page at a time, in the order its code happens to run. A debug server executable maps about 450 MB,
