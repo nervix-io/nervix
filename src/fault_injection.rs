@@ -26,6 +26,7 @@ use std::{
 use ahash::RandomState;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_execution::Executor;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
     DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
@@ -202,9 +203,12 @@ struct FaultInjectionState {
     /// assuming it.
     lost_remote_acknowledgements:
         DashMap<RemoteAcknowledgementLink, watch::Sender<RemoteAcknowledgementLoss>, RandomState>,
-    /// Nodes whose relay memory a scenario fills just before they charge the acknowledgement
-    /// watches of the next delivery another node sends them, and the memory each fill holds.
+    /// Nodes whose relay memory a scenario fills, at once or just before their relay work reaches
+    /// an armed point, and the memory each fill holds.
     relay_memory_fills: DashMap<ClusterNodeName, RelayMemoryFill, RandomState>,
+    /// The execution budgets each node's relay work charges, registered as the node joins its
+    /// cluster so a scenario can fill its relay memory at once.
+    relay_memory_owners: DashMap<ClusterNodeName, Executor, RandomState>,
     /// The owner pauses one buffered batch before it acquires a dispatch permit and loads routes.
     owner_relay_fanout_pauses: DashMap<String, Arc<TestPause>, RandomState>,
     /// A local schedule swap pauses after removing one attached emitter from its relay.
@@ -462,6 +466,7 @@ impl Default for FaultInjection {
                 remote_relay_dispatch_pauses: DashMap::default(),
                 lost_remote_acknowledgements: DashMap::default(),
                 relay_memory_fills: DashMap::default(),
+                relay_memory_owners: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),
                 emitter_swap_after_detach_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),

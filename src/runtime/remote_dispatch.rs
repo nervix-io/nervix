@@ -226,6 +226,8 @@ pub(super) struct RemoteDispatcher {
     /// The same registry the attaching runtime holds, so an acknowledgement this dispatcher sent
     /// a correlation id for resolves against the entry the runtime is waiting on.
     pub(super) registry: Arc<RemoteDispatchRegistry>,
+    /// The same fault seams the attaching runtime holds.
+    pub(super) fault_injection: ConfiguredFaultInjection,
 }
 
 /// An outbound delivery retains every registration until admission, or resolves its held shares
@@ -327,6 +329,13 @@ impl RemoteDispatcher {
         receiver: &ClusterNodeName,
         acks: Vec<AckSet>,
     ) -> error_stack::Result<PendingRemoteAckDelivery, RemoteDispatchError> {
+        if acks.iter().any(|acks| !acks.is_empty()) {
+            self.fault_injection
+                .fill_relay_memory_before_record_storage_if_armed(
+                    self.local_node_id(),
+                    &self.executor,
+                );
+        }
         let ids = self.registry.register_acks(receiver.clone(), acks)?;
         let registrations = ids
             .into_iter()
@@ -811,11 +820,15 @@ impl Runtime {
         cluster: Arc<cluster::ClusterHandle>,
         interconnect: Transport,
     ) {
+        self.inner
+            .fault_injection
+            .register_relay_memory_owner(interconnect.node_id(), &self.inner.executor);
         let dispatcher = RemoteDispatcher {
             cluster,
             interconnect,
             executor: self.inner.executor.clone(),
             registry: self.inner.remote_dispatch.clone(),
+            fault_injection: self.inner.fault_injection.clone(),
         };
         self.inner
             .remote_dispatcher

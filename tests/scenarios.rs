@@ -12462,6 +12462,62 @@ async fn when_node_releases_filled_relay_memory(world: &mut ScenarioWorld, node_
         .release_relay_memory_fill_on(&crate::common::cluster::node_name(&node_id));
 }
 
+/// Takes all of a node's free relay memory now, except the little the node needs to read and
+/// answer the relay grant requests it receives, so every grant another node asks it for finds no
+/// room for its delivery.
+#[when(expr = "node {string} fills its relay memory, leaving room for no relay grant")]
+async fn when_node_fills_relay_memory_leaving_room_for_no_grant(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .fill_relay_memory_leaving_room_for_no_grant_on(&crate::common::cluster::node_name(
+            &node_id,
+        ));
+}
+
+/// Arms a node to take all of its free relay memory just before it stores the acknowledgement
+/// records of the next delivery it sends another node, so that delivery finds its own relay
+/// budget full exactly when it needs room for them.
+#[when(
+    expr = "node {string} fills its relay memory before it stores the records of its next delivery"
+)]
+async fn when_node_fills_relay_memory_before_record_storage(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .fill_relay_memory_before_next_record_storage_on(crate::common::cluster::node_name(
+            &node_id,
+        ));
+}
+
+/// Keeps the relay memory a node's fill took for `duration` longer and then returns it.
+///
+/// The duration is the length of the shortage the scenario imposes, not a wait for anything to
+/// happen: a shortage that outlasts the sender's five-second dispatch bound is what tells a
+/// delivery held back apart from one its sender gave up on.
+#[when(expr = "node {string} keeps its relay memory filled for {string} before releasing it")]
+async fn when_node_keeps_relay_memory_filled_before_releasing(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    duration: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node = crate::common::cluster::node_name(&node_id);
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    assert!(
+        world.fault_injection.relay_memory_fill_holds_on(&node),
+        "node '{node_id}' holds no filled relay memory to keep"
+    );
+    nervix_primitives::time::sleep(duration).await;
+    world.fault_injection.release_relay_memory_fill_on(&node);
+}
+
 #[given(expr = "relay owner fan-out for domain {string} is paused before dispatch")]
 async fn given_owner_relay_fanout_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
