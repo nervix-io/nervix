@@ -44,7 +44,7 @@ use nervix_connector::{
 use nervix_dns::{
     DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver, HOOK_LOOKUP_BUDGET,
 };
-use nervix_models::{ChannelName, ClientConfigEntry, ClientPoolBounds};
+use nervix_models::{ClientConfigEntry, ClientPoolBounds, RedisChannelName};
 use nervix_primitives::{sync::Arc, time::Instant};
 use redis::{
     AsyncCommands, AsyncConnectionConfig, Client as RedisClient, ClientTlsConfig,
@@ -328,12 +328,12 @@ impl RedisPoolHandle {
 /// What one Redis sink publishes to: the pool it borrows from and the channel it writes.
 pub struct RedisSinkConfig {
     pub pool: RedisPoolHandle,
-    pub channel: ChannelName,
+    pub channel: RedisChannelName,
 }
 
 pub struct RedisSink {
     pool: RedisPoolHandle,
-    channel: ChannelName,
+    channel: RedisChannelName,
 }
 
 impl RedisSink {

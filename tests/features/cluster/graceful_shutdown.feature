@@ -92,8 +92,8 @@ Feature: Graceful shutdown
         TO handoff_records INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER handoff_output FROM handoff_records
-        TO KAFKA handoff_kafka TOPIC shutdown_handoff_out_{{test_id}}
+      CREATE ATTACHED KAFKA TOPIC EMITTER handoff_output FROM handoff_records
+        TO handoff_kafka TOPIC 'shutdown_handoff_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING handoff_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -176,8 +176,8 @@ Feature: Graceful shutdown
         TO flush_records INHERIT ALL UNBRANCHED
           FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER flush_output FROM flush_records
-        TO KAFKA flush_kafka TOPIC shutdown_flush_out_{{test_id}}
+      CREATE ATTACHED KAFKA TOPIC EMITTER flush_output FROM flush_records
+        TO flush_kafka TOPIC 'shutdown_flush_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING flush_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -419,8 +419,8 @@ Feature: Graceful shutdown
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER shutdown_ack_output_sink FROM shutdown_ack_output
-        TO ZEROMQ shutdown_ack_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER shutdown_ack_output_sink FROM shutdown_ack_output
+        TO shutdown_ack_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING shutdown_ack_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE PLACEMENT keep_shutdown_ack_downstream_local
@@ -495,8 +495,8 @@ Feature: Graceful shutdown
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER held_output FROM held_routed
-        TO ZEROMQ held_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER held_output FROM held_routed
+        TO held_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING held_event_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -556,8 +556,8 @@ Feature: Graceful shutdown
         'bootstrap.servers' = '{{kafka_addr}}',
         'linger.ms' = '120000'
       };
-      CREATE EMITTER held_output FROM held_events
-        TO KAFKA lingering_kafka TOPIC held_shutdown_out_{{test_id}} MODE NO_ACK
+      CREATE KAFKA TOPIC EMITTER held_output FROM held_events
+        TO lingering_kafka TOPIC 'held_shutdown_out_{{test_id}}' MODE NO ACK
           RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING held_event_codec
         INHERIT ALL
@@ -647,8 +647,8 @@ Feature: Graceful shutdown
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER shutdown_order_output FROM shutdown_unique_orders
-        TO ZEROMQ shutdown_order_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER shutdown_order_output FROM shutdown_unique_orders
+        TO shutdown_order_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING shutdown_order_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -720,8 +720,8 @@ Feature: Graceful shutdown
         TO confirm_records INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER confirm_output FROM confirm_records
-        TO KAFKA confirm_kafka TOPIC shutdown_confirm_out_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER confirm_output FROM confirm_records
+        TO confirm_kafka TOPIC 'shutdown_confirm_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING confirm_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -772,8 +772,8 @@ Feature: Graceful shutdown
         TO handoff_confirm_records INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER handoff_confirm_output FROM handoff_confirm_records
-        TO KAFKA handoff_confirm_kafka TOPIC shutdown_confirm_handoff_out_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER handoff_confirm_output FROM handoff_confirm_records
+        TO handoff_confirm_kafka TOPIC 'shutdown_confirm_handoff_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING handoff_confirm_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -829,8 +829,8 @@ Feature: Graceful shutdown
         TO refused_stop_records INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER refused_stop_output FROM refused_stop_records
-        TO KAFKA refused_stop_kafka TOPIC refused_stop_out_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER refused_stop_output FROM refused_stop_records
+        TO refused_stop_kafka TOPIC 'refused_stop_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING refused_stop_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -906,8 +906,8 @@ Feature: Graceful shutdown
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER eligible_output FROM eligible_routed
-        TO ZEROMQ eligible_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER eligible_output FROM eligible_routed
+        TO eligible_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING eligible_event_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -982,8 +982,8 @@ Feature: Graceful shutdown
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER everyone_output FROM everyone_routed
-        TO ZEROMQ everyone_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER everyone_output FROM everyone_routed
+        TO everyone_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING everyone_event_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -1250,8 +1250,8 @@ Feature: Graceful shutdown
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER generated_output FROM generated_totals
-        TO ZEROMQ generated_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER generated_output FROM generated_totals
+        TO generated_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING tenant_total_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -1336,8 +1336,8 @@ Feature: Graceful shutdown
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER wait_output FROM waiting_output
-        TO ZEROMQ wait_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER wait_output FROM waiting_output
+        TO wait_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING wait_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -1407,8 +1407,8 @@ Feature: Graceful shutdown
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER stalled_output FROM stalled_events
-        TO ZEROMQ stalled_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      CREATE ZEROMQ PUSH EMITTER stalled_output FROM stalled_events
+        TO stalled_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING stalled_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE

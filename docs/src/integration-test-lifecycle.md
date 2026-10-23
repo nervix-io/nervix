@@ -62,6 +62,12 @@ same oracle runs on one and three nodes. The broker's native round-trip control 
 in the scenario and again during teardown before diagnostics or node drain, including after a
 failed assertion. It does not change a product deadline or use a readiness sleep.
 
+The Kafka consumer-retirement scenario holds the same broker's replies before it drops an ingestor
+whose eight instances joined their group, so destroying each consumer waits for its LeaveGroup
+answer. It waits for a running connector-storage job before sending a record through an HTTP
+ingestor, then releases the replies and waits for the class's pending and running jobs to return to
+zero. The same oracle runs on one and three nodes.
+
 The Pulsar fault forwarder decodes broker frames and advertises its own plain-text service URL
 in topic lookup responses, retaining every other command and payload field. The driver's discovered
 producer and consumer connections therefore stay behind the same pause gate as bootstrap traffic.
@@ -631,10 +637,27 @@ through a fresh client under the original reference. The recovery orchestration 
 runner, so delayed step polling cannot restart the wait bound or leave the second cut held. The
 archive must retain both quiesced cuts and the measured first hold.
 
+The duration window outline establishes its observation boundary through a public subscription:
+it first waits for a probe branch's window to emit, then submits all four interleaved tenant rows
+as one HTTP payload unfolded into a decoded batch. Explicit source timestamps are already due
+when that batch arrives, while `TIMESTAMP NOW` gives the whole batch one fresh ingestion snapshot.
+Each branch receives its two rows together before its next timer check. The outline retains both
+rates, one- and three-node clusters, exact counts and sums, timestamp preservation and its
+ten-second assertion bounds. Independent HTTP requests would allow domain-time completion between
+rows, even when their explicit source timestamps are identical.
+
 The reorderer sorting fixtures submit their ordering set as one JSON array and unfold it with JAQ
 into one input batch. Each route sorts the rows buffered at its own flush; separate HTTP requests
 do not establish a single sorting window. The one-node and three-node examples retain their exact
 ordered payloads, tenant keys, and existing flush and receive deadlines.
+
+Redis burst fixtures observe subscriber readiness and then submit all publications as one driver
+pipeline. Every reply must report a subscriber; a partially accepted burst fails without replay.
+This keeps the bounded-intake scenario's 256 publications inside its held entity gate without
+requiring 256 separately scheduled request/reply round trips. The scenario retains its 30-second
+gate deadline, exact BUFFER and DROP counters, and observation budgets. The scripted harness peer
+withholds every publication reply until it has received the complete burst, checking the same
+pipeline owner used by the public step.
 
 The combined message/duration window outline publishes each message-threshold group as one
 decoded batch, interleaving two branches and checking their exact counts, sums and keys. After
@@ -653,7 +676,7 @@ storage and CPU load, which canonical producers on 21 October 2026 measured at 7
 the same archive, and 24 such scenarios beside each other on a disk-backed host at 25 to 53
 seconds. The former 30-second catch-up bound held only on a lightly loaded runner.
 
-The boundary between them is kept in four places.
+The harness keeps these boundaries explicit.
 
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
   with its execution identity, redirects, and reconnects. This includes the transaction qualification
@@ -707,6 +730,16 @@ The boundary between them is kept in four places.
   scenario releases it. Each barrier is one-shot and uses the shared pause owner's reached and
   released observations. The scenario asserts the original execution reference's outcome and a
   dependent command through the public session protocol; it adds no setup delay or request retry.
+- **Timed control probes.** The silent-peer health scenario connects a named production client
+  before holding the peer's health response. Its nine-second probe then sends the user creation,
+  relay creation and cluster-status statements in order on that client, under one deadline. The
+  bound covers command admission, mutation, visibility and the complete reply, including any recovery
+  the production client requires. Initial connection and authentication precede the fault and the
+  measurement. The probe runs on an owned runtime task, with its absolute deadline captured before
+  dispatch, and records completion there; a delayed Cucumber runner only learns that retained
+  result later. The other peer must report connected, and the new relay's scheduled owner must be
+  observed before the silent response is released. This is a harness measurement of isolation,
+  not a different product deadline.
 - **Cleanup.** Scenario cleanup runs after the scenario's assertions, so it spends the harness
   cleanup budget rather than waiting for a product shutdown deadline. A scenario whose subject is
   shutdown, drain, or deadline expiry stops its nodes itself, inside its body, under the product
@@ -1233,6 +1266,23 @@ A continuous browser assertion begins after its readiness predicate holds. The c
 scenario first waits for the restored clock's `PACED` state, then observes the complete stability
 period and advancing ticks. Leader confirmation and the clock's attach reply are separate events;
 the bounded selector predicate establishes clock readiness before the stability observation starts.
+
+Every console page starts with a connection recorder, a script the harness adds before the page's
+own scripts run. It subclasses the page's `WebSocket` constructor and notes, for each connection the
+console constructs, the console it reached, the call its path names (the session, a backup download
+or a restore stream), and when the page constructed it, saw it open, and let go of it by closing it
+or seeing it close. The record holds each connection's origin and path, never its query, which
+carries the credentials. One counter that only the page's event loop advances orders those moments,
+so a step reads the order the page acted in however late it reads and however loaded the machine
+is. The console lets go of its session connection before it constructs the next one, so `the web
+console never held two session connections at once` tells a reconnect of the console's one session
+from a second session without counting the leader notices, which every reconnect repeats. Other
+steps check which console each session connection reached around the leader redirect, and where
+the backup downloads and restores went. `the web console loses its session connection` closes the
+newest session connection the page holds, as a connection lost under the console closes, and notes
+that moment; `the web console's session reconnected to node ... after it was lost` then checks that
+a session connection the page constructed after that moment opened on that node. It reads the
+record once, after a step that waits for something only the new connection can deliver.
 
 The **active-scenario registry** holds every scenario that has started and not yet ended. A scenario
 registers in its before hook, before it acquires its permits, so a scenario that never gets them is
@@ -2167,7 +2217,7 @@ scenarios in one process, their nodes contended on it and missed startup and req
 that a plain diagnostic build of the same scenarios met.
 [Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
 them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
-owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 102
+owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 108
 lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
 bounded at 40. The six transaction-retention and ten endpoint ACK examples run in separate serial

@@ -21,8 +21,8 @@ use super::{
 };
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    EmitterPublishingModeKind, LocatorDeclaration, LocatorName, SinkBody, SinkClientReference,
-    SinkEntity, SinkReference, SinkReferenceKind, SinkValueMapping, SinkValueMappings, TableName,
+    LocatorDeclaration, LocatorName, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkReferenceKind, SinkValueMapping, SinkValueMappings,
 };
 
 configured_client!(ClickHouse: unpooled, config Nervix, CreateClientClickHouse => ClickHouseConfigEntry);
@@ -34,8 +34,9 @@ pub type ClickHouseValueMapping = SinkValueMapping;
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct ClickHouseTableSink {
+    pub mode: ClickHouseTablePublishingMode,
     pub client: ClientName,
-    pub table: TableName,
+    pub table: ClickHouseTableName,
     pub values: Vec<ClickHouseValueMapping>,
 }
 
@@ -59,12 +60,10 @@ impl SinkEntity for ClickHouseTableSink {
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        publishing_modes: ClickHouseTablePublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
-            keywords: "INSERT TO TABLE",
-            name: LocatorName::Unquoted {
-                label: "table_name",
-            },
+            keywords: "TABLE",
+            name: LocatorName::External(ClickHouseTableName::DECLARATION),
         }),
         options: &[],
         envelope: &[],
@@ -94,8 +93,22 @@ connector_sinks! {
     connector ClickHouse = "CLICKHOUSE";
     /// What a ClickHouse sink writes.
     pub enum ClickHouseSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum ClickHouseEmitterMode;
     /// The entities a ClickHouse sink writes.
     pub enum ClickHouseSinkEntity {
-        Table(ClickHouseTableSink) = "TABLE";
+        Table(ClickHouseTableSink, ClickHouseTablePublishingMode) = "TABLE";
     }
+}
+
+super::publishing::emitter_modes! {
+    pub enum ClickHouseTablePublishingMode {
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+    }
+}
+
+super::external_name::external_names! {
+    /// The case-preserving external table identifier this connector publishes to.
+    pub struct ClickHouseTableName => super::external_name::external_identifier,
+        label "clickhouse_table", example "Orders";
 }

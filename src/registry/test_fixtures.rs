@@ -23,15 +23,15 @@ use nervix_models::{
     CreateEmitter, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
     CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
     CreateWireSchema, DeduplicatorName, DomainName, DomainSchedule, EmitSink, EmitterName,
-    EmitterPublishingMode, EndpointName, ErrorPolicies, Expression, FieldName, FieldReference,
-    FieldScope, FlushPolicy, GeneralErrorPolicy, IngestSource, Inheritance, JsonType, JunctionName,
-    KafkaConfigEntry, KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaSink,
-    KafkaSource, KafkaTopicSink, KafkaTopicSource, MaterializedRelayState, Model, ModelIndex,
+    EndpointName, ErrorPolicies, Expression, FieldName, FieldReference, FieldScope, FlushPolicy,
+    GeneralErrorPolicy, IngestSource, Inheritance, JsonType, JunctionName, KafkaConfigEntry,
+    KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaSink, KafkaSource,
+    KafkaTopicName, KafkaTopicSink, KafkaTopicSource, MaterializedRelayState, Model, ModelIndex,
     ModelKind, ModelName, NodeRef, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs,
     ProcessorOutputs, ReingestorName, RelayBranching, RelayName, ResolvedBranching, RetryPolicy,
     ScheduledNode, ScheduledNodes, SchemaField, SchemaFingerprint, SchemaName,
-    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, TopicName,
-    VhostName, WindowBound, WindowProcessorName, WireSchemaField, WireSchemaName,
+    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, VhostName,
+    WindowBound, WindowProcessorName, WireSchemaField, WireSchemaName,
 };
 use nonzero_ext::nonzero;
 
@@ -812,15 +812,15 @@ pub(in crate::registry) fn emitter(
             codec: CodecName::parse(codec).expect("valid identifier"),
         },
         sink: Box::new(EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
-            client: ClientName::parse(client).expect("valid identifier"),
-            topic: TopicName::parse("topic").expect("valid topic identifier"),
-        }))),
-        publishing_mode: EmitterPublishingMode::NoAck {
-            retry_policy: RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+            mode: nervix_models::KafkaTopicPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
             },
-        },
+            client: ClientName::parse(client).expect("valid identifier"),
+            topic: KafkaTopicName::parse("topic").expect("valid topic identifier"),
+        }))),
         batch: None,
         flush_policy: FlushPolicy::Each {
             interval: "100ms".to_string(),

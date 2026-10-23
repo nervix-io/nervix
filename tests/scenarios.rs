@@ -16,8 +16,9 @@ use std::{
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    Array, BooleanArray, FixedSizeListArray, Int64Array, LargeListArray, LargeStringArray,
-    ListArray, RecordBatch, StringArray, StringViewArray, TimestampMicrosecondArray, UInt64Array,
+    Array, BooleanArray, FixedSizeListArray, Int32Array, Int64Array, LargeListArray,
+    LargeStringArray, ListArray, RecordBatch, StringArray, StringViewArray,
+    TimestampMicrosecondArray, UInt64Array,
 };
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{
@@ -190,6 +191,7 @@ mod pulsar_subscriptions;
 mod restarted_voter;
 mod session_protocol;
 mod standalone_transaction;
+mod web_console_connections;
 mod websocket_lifecycle;
 
 const SCENARIOS_PATH: &str = "tests/features";
@@ -401,6 +403,9 @@ struct ScenarioWorld {
     restore_step_pause: Option<backup::restore::ArmedRestorePause>,
     /// What the last measured CLI backup's memory sampler observed, until a step checks it.
     backup_memory: Option<backup::memory::SampledMemory>,
+    /// The download a scenario expects the web console to hand the browser, waited for from
+    /// before the action that starts it until a step saves it.
+    expected_console_download: Option<backup::console::ExpectedConsoleDownload>,
     /// The outcome of the last command a scenario sent through its own session.
     last_session_command: Option<nervix_client_wire::CommandOutcome>,
     /// Candidates collected by a public session completion paging scenario.
@@ -14108,6 +14113,7 @@ async fn when_these_nspl_commands_are_attempted_on_node(
 }
 
 #[when("these NSPL commands begin executing in the background")]
+#[when("these Plexus statements begin executing in the background")]
 async fn when_these_nspl_commands_begin_executing_in_the_background(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -14675,6 +14681,7 @@ async fn when_background_resource_upload_connection_is_dropped(world: &mut Scena
 }
 
 #[then("the background NSPL execution succeeds")]
+#[then("the background Plexus execution succeeds")]
 async fn then_the_background_nspl_execution_succeeds(world: &mut ScenarioWorld) {
     let task = world
         .background_nspl
@@ -14918,6 +14925,9 @@ async fn open_web_console_page(world: &mut ScenarioWorld, url: &str) -> Result<(
         .await
         .map_err(|error| error.to_string())?;
     page.set_default_timeout(10_000.0).await;
+    web_console_connections::record_console_connections(&page)
+        .await
+        .map_err(|error| error.to_string())?;
     page.goto(url, None)
         .await
         .map_err(|error| error.to_string())?;
@@ -15274,6 +15284,74 @@ async fn when_named_client_submits_command_request(
     }
     world.last_client_outcome = Some(outcome);
     world.last_client_request = Some(request);
+}
+
+/// Measures a command batch on a client prepared before the fault, with its reply polled
+/// independently of the Cucumber runner. The deadline includes dispatch to the runtime task.
+#[then(expr = "within {string} client {string} completes these Plexus statements")]
+async fn then_named_client_completes_plexus_statements_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    name: String,
+    #[step] step: &Step,
+) {
+    let limit = parse_duration_text(&duration).assured("the scenario duration is valid");
+    let name = expand_placeholders(world, &name);
+    let Some(client) = world.transaction_clients.get(&name) else {
+        panic!("client '{name}' must be connected before the timed probe");
+    };
+    let client = client.clone();
+    let commands = expand_placeholders(world, docstring(step));
+    let statements = nspl_statements(&commands);
+    assert!(!statements.is_empty(), "a timed probe requires statements");
+    world.last_command_error = None;
+    world.last_command_output = None;
+    world.last_client_outcome = None;
+    let started = Instant::now();
+    let deadline = started
+        .checked_add(limit)
+        .assured("the scenario duration fits a monotonic instant");
+    let (outcome, elapsed) =
+        crate::common::runner_observation::observe_off_the_runner(async move {
+            let mut last_outcome = None;
+            for (position, statement) in statements.into_iter().enumerate() {
+                nervix_primitives::task::consume_budget().await;
+                let result =
+                    nervix_primitives::time::timeout_at(deadline, client.execute(statement)).await;
+                let outcome = match result {
+                    Ok(Ok(outcome)) => outcome,
+                    Ok(Err(error)) => {
+                        panic!("client '{name}' failed at Plexus statement {position}: {error:#}")
+                    }
+                    Err(_) => {
+                        panic!(
+                            "client '{name}' did not complete the Plexus statements within \
+                             {limit:?}; pending statement {position}"
+                        )
+                    }
+                };
+                assert!(
+                    outcome.succeeded(),
+                    "client '{name}' Plexus statement {position} must succeed: {}",
+                    outcome.message
+                );
+                append_cucumber_log_line(&format!(
+                    "Plexus control statement: client={name} position={position} elapsed={:?}",
+                    started.elapsed()
+                ));
+                last_outcome = Some(outcome);
+            }
+            let outcome = last_outcome.assured("each statement in the nonempty probe answered");
+            let elapsed = started.elapsed();
+            append_cucumber_log_line(&format!(
+                "Plexus control probe: client={name} elapsed={elapsed:?} limit={limit:?}"
+            ));
+            (outcome, elapsed)
+        })
+        .await;
+    world.last_command_output = Some(crate::common::cluster::flatten_outcome_messages(&outcome));
+    world.last_client_outcome = Some(outcome);
+    world.last_cluster_operation_elapsed = Some(elapsed);
 }
 
 #[when(expr = "client {string} fails to execute these NSPL commands")]
@@ -17618,7 +17696,9 @@ impl UnacknowledgedSourceFixture {
             Self::RedisPubSub => {
                 r#"
       CREATE REDIS CLIENT unacknowledged_client POOL SIZE MIN 1 MAX 4 CONFIG {
-        'addr' = '{{redis_addr}}'
+        'addr' = '{{redis_addr}}',
+        'subscription_buffer_messages' = '1024',
+        'idle_timeout_ms' = '30000'
       };"#
             }
             Self::Syslog => {
@@ -24576,6 +24656,24 @@ async fn when_redis_message_is_published(
         .expect("failed to publish redis message");
 }
 
+#[when(expr = "{int} Redis messages are published to channel {string}")]
+async fn when_redis_messages_are_published(
+    world: &mut ScenarioWorld,
+    count: usize,
+    channel: String,
+    #[step] step: &Step,
+) {
+    let channel = expand_placeholders(world, &channel);
+    let payload = expand_placeholders(world, docstring(step));
+    if let Err(error) = world
+        .cluster()
+        .publish_redis_burst(&channel, &payload, count)
+        .await
+    {
+        panic!("failed to publish the Redis burst: {error}");
+    }
+}
+
 #[when(expr = "Kafka message is published to topic {string}")]
 async fn when_kafka_message_is_published(
     world: &mut ScenarioWorld,
@@ -30430,6 +30528,8 @@ impl IcebergTableFixture {
             .collect()
     }
 
+    /// One column line, `<name> <type>` for an optional column or `<name> <type> REQUIRED` for a
+    /// column the table requires.
     fn parse_field(line: &str) -> arrow_schema::Field {
         let normalized = line.trim_end_matches(',');
         let mut parts = normalized.split_whitespace();
@@ -30439,11 +30539,16 @@ impl IcebergTableFixture {
         let column_type = parts
             .next()
             .unwrap_or_else(|| panic!("Iceberg column line is missing a type: {line}"));
+        let nullable = match parts.next() {
+            None => true,
+            Some("REQUIRED") => false,
+            Some(_) => panic!("Iceberg column line must be '<name> <type> [REQUIRED]': {line}"),
+        };
         assert!(
             parts.next().is_none(),
-            "Iceberg column line must be '<name> <type>': {line}"
+            "Iceberg column line must be '<name> <type> [REQUIRED]': {line}"
         );
-        arrow_schema::Field::new(name, Self::parse_data_type(column_type), true)
+        arrow_schema::Field::new(name, Self::parse_data_type(column_type), nullable)
     }
 
     fn parse_data_type(column_type: &str) -> ArrowDataType {
@@ -30458,6 +30563,7 @@ impl IcebergTableFixture {
         }
         match column_type {
             "STRING" => ArrowDataType::Utf8,
+            "I32" => ArrowDataType::Int32,
             "I64" => ArrowDataType::Int64,
             "F64" => ArrowDataType::Float64,
             "BOOLEAN" => ArrowDataType::Boolean,
@@ -30505,6 +30611,9 @@ fn iceberg_array_value(
         return Ok(serde_json::Value::Null);
     }
     match array.data_type() {
+        ArrowDataType::Int32 => Ok(serde_json::Value::from(
+            iceberg_array::<Int32Array>(array, field_name)?.value(row_index),
+        )),
         ArrowDataType::Int64 => Ok(serde_json::Value::from(
             iceberg_array::<Int64Array>(array, field_name)?.value(row_index),
         )),

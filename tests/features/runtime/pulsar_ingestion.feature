@@ -222,8 +222,8 @@ Feature: Pulsar ingestion
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER forwarded_notifications FROM notifications
-        TO PULSAR pulsar_egress TOPIC confirmed_acks_out_{{test_id}}
+      CREATE PULSAR TOPIC EMITTER forwarded_notifications FROM notifications
+        TO pulsar_egress TOPIC 'confirmed_acks_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 120s RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL
@@ -311,8 +311,8 @@ Feature: Pulsar ingestion
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER forwarded_notifications FROM notifications
-        TO PULSAR pulsar_egress TOPIC unsent_redeliveries_out_{{test_id}}
+      CREATE PULSAR TOPIC EMITTER forwarded_notifications FROM notifications
+        TO pulsar_egress TOPIC 'unsent_redeliveries_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 120s RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL

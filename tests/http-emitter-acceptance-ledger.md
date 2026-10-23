@@ -433,7 +433,7 @@ branches and error routes, and node shutdown.
 The lost batch follows the documented contract rather than an HTTP emitter rule. A transport failure
 while reading a remote materialized dependency is a failure, not absence, so the emitter reports it
 and negatively acknowledges the batch: an acknowledged source redelivers it, while the
-unencodable-body scenario's `NO_ACK` endpoint source does not. [Errors And
+unencodable-body scenario's `NO ACK` endpoint source does not. [Errors And
 Diagnostics](../docs/src/errors-and-diagnostics.md#absence-validation-and-planning) owns that
 boundary.
 

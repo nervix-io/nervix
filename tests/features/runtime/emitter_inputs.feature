@@ -56,11 +56,11 @@ Feature: Emitter relay inputs
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-      CREATE EMITTER combined_sink
+      CREATE ZEROMQ PUSH EMITTER combined_sink
         FROM source_a_events WHERE input.source = 'a',
              source_b_events WHERE input.source = 'b'
         COLLECT FOR 20ms MAX BATCH SIZE 1MiB
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec
+        TO sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec
           INHERIT ALL
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG

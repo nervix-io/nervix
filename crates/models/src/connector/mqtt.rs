@@ -32,11 +32,10 @@ use super::{
 use crate::{
     AcknowledgementConfirmation, ChoiceRequirement, ClientName, ConnectorKind, DeclaredDelivery,
     DeclaredQuiesce, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    EmitterPublishingModeKind, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
-    PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind, TopicName,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
+    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, PositionClass,
+    RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
+    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Mqtt: unpooled, config Nervix, CreateClientMqtt => MqttConfigEntry);
@@ -449,8 +448,9 @@ connector_sources! {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct MqttTopicSink {
+    pub mode: MqttTopicPublishingMode,
     pub client: ClientName,
-    pub topic: TopicName,
+    pub topic: MqttTopicName,
 }
 
 impl SinkEntity for MqttTopicSink {
@@ -460,16 +460,10 @@ impl SinkEntity for MqttTopicSink {
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[
-            EmitterPublishingModeKind::MqttQos0,
-            EmitterPublishingModeKind::MqttQos1,
-            EmitterPublishingModeKind::MqttQos2,
-        ],
+        publishing_modes: MqttTopicPublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
             keywords: "TOPIC",
-            name: LocatorName::Unquoted {
-                label: "topic_name",
-            },
+            name: LocatorName::External(MqttTopicName::DECLARATION),
         }),
         options: &[],
         envelope: &[],
@@ -495,8 +489,31 @@ connector_sinks! {
     connector Mqtt = "MQTT";
     /// What an MQTT sink writes.
     pub enum MqttSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum MqttEmitterMode;
     /// The entities an MQTT sink writes.
     pub enum MqttSinkEntity {
-        Topic(MqttTopicSink) = "TOPIC";
+        Topic(MqttTopicSink, MqttTopicPublishingMode) = "TOPIC";
     }
+}
+
+super::publishing::emitter_modes! {
+    pub enum MqttTopicPublishingMode {
+        Qos0 { retry_policy: crate::RetryPolicy } => MqttQos0,
+        Qos1 { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => MqttQos1,
+        Qos2 { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => MqttQos2,
+    }
+}
+
+super::external_name::external_names! {
+    /// An MQTT publication topic, without subscription wildcards.
+    pub struct MqttTopicName => mqtt_publication_topic, label "mqtt_topic", example "devices/Orders";
+}
+
+fn mqtt_publication_topic(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, MQTT_TOPIC_FILTER_MAX)?;
+    if let Some(ch) = text.chars().find(|ch| matches!(ch, '\0' | '+' | '#')) {
+        return Err(ExternalNameError::InvalidChar { ch });
+    }
+    Ok(())
 }

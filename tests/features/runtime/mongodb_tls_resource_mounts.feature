@@ -57,8 +57,7 @@ Feature: MongoDB TLS resource mounts
           'database' = 'nervix',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION tls_notifications_mongodb_out_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+        CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications TO mongodb_client COLLECTION 'tls_notifications_mongodb_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
