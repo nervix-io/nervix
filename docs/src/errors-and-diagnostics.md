@@ -1154,9 +1154,20 @@ class, operation, configured budget, and required bytes, so the node fails start
 actionable diagnostic instead of discovering insufficient storage capacity while applying a
 transaction.
 
-Memory-pressure watermarks are validated where the node reads its options. A low watermark that is
-not below the high one, or a zero check interval, is a `MemoryPressureConfigError` carrying the
-configured values beneath `AppError::InvalidMemoryPressureConfig`, so the node does not start. The
+The node converts its settings once, where it reads its options, and before it opens a store. Each
+owner's definition validates its own value and its relationships with the settings it depends on,
+so defaults and an operator's values cross the same check, and each refusal names the settings by
+their option names with their values. A minimum election timeout that does not exceed the heartbeat
+interval, or a maximum that does not exceed the minimum, is a `RaftTimingError` beneath
+`AppError::InvalidRaftTimings`. A drain timeout above the shutdown timeout is a
+`ShutdownSettingsError` beneath `AppError::InvalidShutdownTimeouts`. A setting that a test names for
+a node but that the server's command line does not read keeps clap's error beneath
+`AppError::ReadSettings`.
+
+Memory-pressure watermarks are validated the same way. A watermark set without its pair, a low
+watermark that is not below the high one, or a zero check interval while the watermarks are set is
+a `MemoryPressureConfigError` carrying the configured values beneath
+`AppError::InvalidMemoryPressureConfig`, so the node does not start. The
 supervisor's constructor validates the same configuration beneath
 `MemoryPressureError::InvalidConfig`, and an allocator sample that jemalloc refuses is
 `MemoryPressureError::ReadJemalloc`, naming the control it read, the epoch, `stats.allocated` or

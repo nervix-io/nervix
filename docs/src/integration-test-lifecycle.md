@@ -1162,7 +1162,7 @@ classifies the failure using both observations, and records the attempt.
 
 | Failure | Classification |
 | --- | --- |
-| The harness could not launch the node: an address it could not parse, the test certificate authority, or the node's database directory | Terminal: the harness's own configuration, which the next launch repeats |
+| The harness could not launch the node: an address it could not parse, the test certificate authority, the node's database directory, or a setting the node refuses | Terminal: the harness's own configuration, which the next launch repeats |
 | Readiness did not arrive before the attempt's deadline, and the requested stop ended cleanly | Transient, selecting all listeners: the resource pressure the budget exists for |
 | The node's task ended with an application error binding its gRPC, HTTP, HTTPS, observability, or web console listen address, or starting the interconnect listener | Transient, selecting that listener family: another process took the port first, and its fresh addresses resolve it |
 | The task ended with any other application error, a panic, a cancellation, or a clean exit before cleanup requested stop | Terminal: the node decided it from its configuration, its stored state, or its own code |
@@ -1209,6 +1209,26 @@ node '<node>' startup attempt <n>/3 [<transient or terminal>] failed <elapsed> i
 The budget bounds what the harness waits for, not what the operating system schedules. A runner that
 stops running the harness's own tasks for longer than an attempt delays the check that ends it, and
 the measured startups above include such a runner.
+
+### Node Settings
+
+Each launch builds the node's identity and its settings the way `nervix-server` builds them from
+its command line: the scenario's cluster configuration becomes the owners' class-typed settings
+groups, through the same validation. A scenario names any other setting for one node with
+`Given <node> starts with <setting> = <value>`, where the setting is the option's long name without
+its leading dashes and the value is written as the command line reads it, for example
+`Given node-2 starts with drain-timeout = 1m`. The harness applies such settings over the
+cluster's own from that node's next launch on, in the order the scenario named them, by rendering
+the node's settings as options, appending the named ones and reading the result with the server's
+own options groups, so a later setting of the same name replaces an earlier one and no setting
+needs a step of its own.
+
+A setting the node refuses fails its launch before the node is spawned, with the refusal's whole
+report, and that failure is terminal. A scenario whose subject is the refusal starts the node with
+`When node "<node>" attempts to start`, which records the outcome instead of failing the step, and
+asserts it with `Then node "<node>" refused to start because "<text>"`. The settings of the current
+launch also decide how long a scenario-driven stop of that node may take, so a scenario that names
+a longer shutdown or drain timeout lengthens that bound with it.
 
 ### Cluster Construction
 
