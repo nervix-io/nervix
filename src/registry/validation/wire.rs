@@ -968,6 +968,12 @@ mod tests {
         };
         emitter.sink = Box::new(EmitSink::Syslog(SyslogSink::Collector(
             SyslogCollectorSink {
+                mode: nervix_models::SyslogCollectorPublishingMode::NoAck {
+                    retry_policy: nervix_models::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
                 client: named("syslog_out"),
             },
         )));

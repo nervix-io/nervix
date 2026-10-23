@@ -174,9 +174,9 @@ Feature: Paced simulation drivers
     Then within "60s" the paced simulation driver prints a line starting with "OUTCOME tick="
     When these NSPL commands are executed on the leader node
       """
-      ALTER EMITTER observed_readings SET TO CLIENT SCHEMA observed_reading
+      ALTER CLIENT CONSUMER EMITTER observed_readings SET TO SCHEMA observed_reading
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;
-      ALTER EMITTER rejection_notices SET TO CLIENT SCHEMA rejected_reading
+      ALTER CLIENT CONSUMER EMITTER rejection_notices SET TO SCHEMA rejected_reading
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;
       """
     Then within "60s" the paced simulation driver prints a line starting with "CONSUMER reopen_required consumer=output-1 emitter=observed_readings reason=contract_changed"
@@ -233,8 +233,8 @@ Feature: Paced simulation drivers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id,
           occurred_at = input.occurred_at, error_code = error.code, error_message = error.message;
-      ALTER EMITTER observed_readings SET FLUSH IMMEDIATE;
-      ALTER EMITTER rejection_notices SET FLUSH IMMEDIATE;
+      ALTER CLIENT CONSUMER EMITTER observed_readings SET FLUSH IMMEDIATE;
+      ALTER CLIENT CONSUMER EMITTER rejection_notices SET FLUSH IMMEDIATE;
       START AT NOW TIME RATE 0.5;
       """
     And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 8 --sensors 1 --credit-batches 1 --processing-time 2s"
@@ -286,7 +286,7 @@ Feature: Paced simulation drivers
     And the leader node is configured with the paced simulation example graph
     When these NSPL commands are executed on the leader node
       """
-      ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;
+      ALTER CLIENT CONSUMER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;
       START AT NOW TIME RATE 0.5;
       """
     And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 1 --sensors 1 --consumer-delay 5s --deadline 2m"
@@ -330,23 +330,23 @@ Feature: Paced simulation drivers
     Examples:
       | driver | cluster_size | change_kind       | endpoint | change                                                                                                                                                                          | error                                                                                               |
       | rust   | 1            | removed           | consumer | DROP EMITTER observed_readings;                                                                                                                                                 | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: endpoint not found   |
-      | rust   | 1            | schema-mismatched | consumer | ALTER EMITTER observed_readings SET TO CLIENT SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;                        | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
-      | rust   | 1            | credit-mismatched | consumer | ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
+      | rust   | 1            | schema-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET TO SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;               | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
+      | rust   | 1            | credit-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
       | rust   | 1            | removed           | producer | DROP INGESTOR simulated_readings;                                                                                                                                               | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: endpoint not found |
       | rust   | 1            | schema-mismatched | producer | ALTER CLIENT PRODUCER INGESTOR simulated_readings SET FROM SCHEMA revised_reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND; | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: schema mismatch    |
       | rust   | 3            | removed           | consumer | DROP EMITTER observed_readings;                                                                                                                                                 | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: endpoint not found   |
-      | rust   | 3            | schema-mismatched | consumer | ALTER EMITTER observed_readings SET TO CLIENT SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;                        | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
-      | rust   | 3            | credit-mismatched | consumer | ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
+      | rust   | 3            | schema-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET TO SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;               | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
+      | rust   | 3            | credit-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
       | rust   | 3            | removed           | producer | DROP INGESTOR simulated_readings;                                                                                                                                               | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: endpoint not found |
       | rust   | 3            | schema-mismatched | producer | ALTER CLIENT PRODUCER INGESTOR simulated_readings SET FROM SCHEMA revised_reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND; | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: schema mismatch    |
       | python | 1            | removed           | consumer | DROP EMITTER observed_readings;                                                                                                                                                 | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: endpoint not found   |
-      | python | 1            | schema-mismatched | consumer | ALTER EMITTER observed_readings SET TO CLIENT SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;                        | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
-      | python | 1            | credit-mismatched | consumer | ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
+      | python | 1            | schema-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET TO SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;               | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
+      | python | 1            | credit-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
       | python | 1            | removed           | producer | DROP INGESTOR simulated_readings;                                                                                                                                               | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: endpoint not found |
       | python | 1            | schema-mismatched | producer | ALTER CLIENT PRODUCER INGESTOR simulated_readings SET FROM SCHEMA revised_reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND; | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: schema mismatch    |
       | python | 3            | removed           | consumer | DROP EMITTER observed_readings;                                                                                                                                                 | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: endpoint not found   |
-      | python | 3            | schema-mismatched | consumer | ALTER EMITTER observed_readings SET TO CLIENT SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;                        | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
-      | python | 3            | credit-mismatched | consumer | ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
+      | python | 3            | schema-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET TO SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;               | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
+      | python | 3            | credit-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
       | python | 3            | removed           | producer | DROP INGESTOR simulated_readings;                                                                                                                                               | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: endpoint not found |
       | python | 3            | schema-mismatched | producer | ALTER CLIENT PRODUCER INGESTOR simulated_readings SET FROM SCHEMA revised_reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND; | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: schema mismatch    |
 

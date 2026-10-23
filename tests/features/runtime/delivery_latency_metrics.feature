@@ -44,7 +44,7 @@ Feature: Delivery latency metrics
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-      CREATE EMITTER publish FROM emitted_readings TO ZEROMQ zeromq_main MODE NO_ACK
+      CREATE ZEROMQ PUSH EMITTER publish FROM emitted_readings TO zeromq_main MODE NO ACK
         RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING reading_wire_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:01:00Z' TIME RATE 1e-300;

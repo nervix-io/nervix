@@ -324,43 +324,31 @@ fn emitter(kind: EmitSinkKind) -> Value {
 /// Synopses use the current destination grammar; all clauses and choices come from declarations.
 fn emitter_template(kind: EmitSinkKind, body: &str) -> String {
     let declared = kind.capabilities();
-    let connector = kind.connector();
     let mut destination = match declared.reference {
-        SinkReferenceKind::Schema => format!("{connector} SCHEMA <schema>"),
-        SinkReferenceKind::StorageClient(stores) => {
-            let names: Vec<_> = stores.iter().map(ToString::to_string).collect();
-            format!("{connector} ON ({}) <store>", names.join(" | "))
-        }
-        SinkReferenceKind::Client(_) => {
-            if connector == ConnectorKind::Redis {
-                format!("{} <client>", kind.phrase())
-            } else {
-                format!("{connector} <client>")
-            }
-        }
+        SinkReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
+        SinkReferenceKind::StorageClient(_) => "<storage_client>".to_owned(),
+        SinkReferenceKind::Client(_) => "<client>".to_owned(),
     };
     if let Some(locator) = declared.locator {
         destination.push_str(&format!(" {}", locator.example()));
     }
-    if connector == ConnectorKind::Otel && kind.entity_keyword() != "METRICS" {
-        destination.push_str(&format!(" {}", kind.entity_keyword()));
-    }
-    let mut options = Vec::new();
+    let mut payload_options = Vec::new();
+    let mut entity_options = Vec::new();
     for option in declared.options {
-        if option.keywords == "METRIC" {
-            destination.push_str(&option_template(&[*option]));
+        if declared.body == EmitterBodyForm::Values && !option.is_required() {
+            payload_options.push(*option);
         } else {
-            options.push(*option);
+            entity_options.push(*option);
         }
     }
-    if declared.body == EmitterBodyForm::Values {
-        destination.push_str(&format!("\n    {body}"));
-    }
-    destination.push_str(&option_template(&options));
-    let body_clause = match declared.body {
-        EmitterBodyForm::Codec | EmitterBodyForm::CodecOrWithoutBody => format!("\n    {body}"),
-        EmitterBodyForm::Values | EmitterBodyForm::Native => String::new(),
+    destination.push_str(&option_template(&entity_options));
+    let mut body_clause = match declared.body {
+        EmitterBodyForm::Codec | EmitterBodyForm::CodecOrWithoutBody | EmitterBodyForm::Values => {
+            format!("\n    {body}")
+        }
+        EmitterBodyForm::Native => String::new(),
     };
+    body_clause.push_str(&option_template(&payload_options));
     let batch = match declared.batch {
         EmitterBatchLegality::Required { .. } => "\n  BATCH MAX MESSAGES <count> MAX SIZE <bytes>",
         EmitterBatchLegality::Optional { .. } => {
@@ -369,9 +357,10 @@ fn emitter_template(kind: EmitSinkKind, body: &str) -> String {
         EmitterBatchLegality::Unavailable { .. } => "",
     };
     format!(
-        "CREATE EMITTER <name>\n  FROM <relay>\n  TO {destination}\n    MODE \
+        "CREATE {} EMITTER <name>\n  FROM <relay>\n  TO {destination}\n    MODE \
          <mode>{body_clause}\n  <construction>{batch}\n  FLUSH IMMEDIATE\n  ON MESSAGE ERROR \
-         LOG\n  ON GENERAL ERROR LOG;"
+         LOG\n  ON GENERAL ERROR LOG;",
+        kind.phrase()
     )
 }
 

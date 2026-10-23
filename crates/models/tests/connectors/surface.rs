@@ -231,27 +231,27 @@ fn sink_surface(kind: EmitSinkKind) -> SinkSurface {
             unlocated(ConnectorKind::Http, &[("METHOD", true), ("PATH", true)])
         }
         EmitSinkKind::Kafka(KafkaSinkEntity::Topic) => {
-            located(ConnectorKind::Kafka, "TOPIC", "topic_name", &[])
+            located(ConnectorKind::Kafka, "TOPIC", "kafka_topic", &[])
         }
         EmitSinkKind::Pulsar(PulsarSinkEntity::Topic) => {
-            located(ConnectorKind::Pulsar, "TOPIC", "topic_name", &[])
+            located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
         }
         EmitSinkKind::Mqtt(MqttSinkEntity::Topic) => {
-            located(ConnectorKind::Mqtt, "TOPIC", "topic_name", &[])
+            located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[])
         }
         EmitSinkKind::RabbitMq(RabbitMqSinkEntity::Queue) => {
-            located(ConnectorKind::RabbitMq, "QUEUE", "queue_name", &[])
+            located(ConnectorKind::RabbitMq, "QUEUE", "rabbitmq_queue", &[])
         }
         EmitSinkKind::Redis(RedisSinkEntity::PubSub) => {
-            located(ConnectorKind::Redis, "CHANNEL", "channel_name", &[])
+            located(ConnectorKind::Redis, "CHANNEL", "redis_channel", &[])
         }
         EmitSinkKind::Nats(NatsSinkEntity::Subject) => {
-            located(ConnectorKind::Nats, "SUBJECT", "subject_name", &[])
+            located(ConnectorKind::Nats, "SUBJECT", "nats_publish_subject", &[])
         }
         EmitSinkKind::Sqs(SqsSinkEntity::Queue) => located(
             ConnectorKind::Sqs,
             "QUEUE",
-            "queue_name",
+            "sqs_queue",
             &[("FIFO GROUP", false)],
         ),
         EmitSinkKind::ZeroMq(ZeroMqSinkEntity::Push) => unlocated(ConnectorKind::ZeroMq, &[]),
@@ -269,28 +269,19 @@ fn sink_surface(kind: EmitSinkKind) -> SinkSurface {
                 ("SCOPE", false),
             ],
         ),
-        EmitSinkKind::ClickHouse(ClickHouseSinkEntity::Table) => located(
-            ConnectorKind::ClickHouse,
-            "INSERT TO TABLE",
-            "table_name",
-            &[],
-        ),
-        EmitSinkKind::Postgres(PostgresSinkEntity::Table) => located(
-            ConnectorKind::Postgres,
-            "INSERT TO TABLE",
-            "table_name",
-            conflict,
-        ),
-        EmitSinkKind::MySql(MySqlSinkEntity::Table) => located(
-            ConnectorKind::MySql,
-            "INSERT TO TABLE",
-            "table_name",
-            conflict,
-        ),
+        EmitSinkKind::ClickHouse(ClickHouseSinkEntity::Table) => {
+            located(ConnectorKind::ClickHouse, "TABLE", "clickhouse_table", &[])
+        }
+        EmitSinkKind::Postgres(PostgresSinkEntity::Table) => {
+            located(ConnectorKind::Postgres, "TABLE", "postgres_table", conflict)
+        }
+        EmitSinkKind::MySql(MySqlSinkEntity::Table) => {
+            located(ConnectorKind::MySql, "TABLE", "mysql_table", conflict)
+        }
         EmitSinkKind::MongoDb(MongoDbSinkEntity::Collection) => located(
             ConnectorKind::MongoDb,
-            "INSERT TO COLLECTION",
-            "collection_name",
+            "COLLECTION",
+            "mongodb_collection",
             conflict,
         ),
         EmitSinkKind::Iceberg(IcebergSinkEntity::Table) => SinkSurface {
@@ -299,7 +290,7 @@ fn sink_surface(kind: EmitSinkKind) -> SinkSurface {
                 ConnectorKind::Gcs,
                 ConnectorKind::AzureBlob,
             ]),
-            locator: Some(("TABLE", "table_name")),
+            locator: Some(("TABLE", "iceberg_table")),
             options: &[("LOCATION", true), ("CATALOG", true), ("COMMIT EACH", true)],
         },
     }
@@ -684,9 +675,9 @@ fn assert_generated_emitter_states_what_its_entity_declares(bytes: &[u8]) {
     let emitter = arbitrary.create_emitter_to(sink_kind);
     let declared = sink_kind.capabilities();
     assert!(
-        declared.accepts_publishing_mode_kind(emitter.publishing_mode.kind()),
+        declared.accepts_publishing_mode_kind(emitter.sink.publishing().kind()),
         "{sink_kind} names an undeclared mode: {:?}",
-        emitter.publishing_mode
+        emitter.sink.publishing()
     );
     let formed = match (declared.body, &emitter.body) {
         (EmitterBodyForm::Codec, EmitterBody::Codec { .. })
@@ -711,12 +702,17 @@ fn assert_generated_emitter_states_what_its_entity_declares(bytes: &[u8]) {
         | (EmitterBatchLegality::Unavailable { .. }, Some(_)) => false,
     };
     assert!(batching, "{sink_kind} batches as {:?}", emitter.batch);
-    match emitter.sink.client_connector() {
-        Some(connector) => assert!(
-            declared.reference.admits_client(connector),
-            "{sink_kind} publishes through a {connector} client"
-        ),
-        None => assert_eq!(declared.reference, SinkReferenceKind::Schema, "{sink_kind}"),
+    match emitter.sink.reference() {
+        nervix_models::SinkReference::Client(reference) => {
+            assert!(declared.reference.admits_client(reference.connector))
+        }
+        nervix_models::SinkReference::StorageClient(_) => assert!(matches!(
+            declared.reference,
+            SinkReferenceKind::StorageClient(_)
+        )),
+        nervix_models::SinkReference::Schema(_) => {
+            assert_eq!(declared.reference, SinkReferenceKind::Schema)
+        }
     }
 }
 

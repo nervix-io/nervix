@@ -64,7 +64,7 @@ use nervix_connector::{
     optional_client_config_value, read_tls_file,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, TopicName};
+use nervix_models::{ClientConfigEntry, MqttTopicName};
 use nervix_primitives::{
     sync::{
         Arc,
@@ -118,7 +118,7 @@ impl MqttPublishingMode {
 /// none, and the node resolver every connection resolves the broker host through.
 pub struct MqttSinkConfig {
     pub config: Vec<ClientConfigEntry>,
-    pub topic: TopicName,
+    pub topic: MqttTopicName,
     pub mode: MqttPublishingMode,
     pub retry_policy: ParsedRetryPolicy,
     pub default_client_id: String,
@@ -127,7 +127,7 @@ pub struct MqttSinkConfig {
 
 pub struct MqttSink {
     client: AsyncClient,
-    topic: TopicName,
+    topic: MqttTopicName,
     mode: MqttPublishingMode,
     framing: MqttPublishFraming,
     broker_limit: Arc<MqttBrokerPacketLimit>,
@@ -168,7 +168,7 @@ struct MqttPublishFraming {
 }
 
 impl MqttPublishFraming {
-    fn new(topic: &TopicName, mode: MqttPublishingMode) -> Self {
+    fn new(topic: &MqttTopicName, mode: MqttPublishingMode) -> Self {
         const TOPIC_LENGTH_PREFIX_BYTES: usize = 2;
         const PROPERTY_LENGTH_BYTES: usize = 1;
         const IN_MEMORY: &str = "a topic name and a few framing bytes fit in usize";
@@ -869,8 +869,8 @@ mod tests {
         }
     }
 
-    fn topic(name: &str) -> TopicName {
-        TopicName::parse(name).expect("the test topic is a valid topic name")
+    fn topic(name: &str) -> MqttTopicName {
+        MqttTopicName::parse(name).expect("the test topic is a valid topic name")
     }
 
     fn confirmed() -> AckConfirmation {

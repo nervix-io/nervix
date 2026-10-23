@@ -2156,7 +2156,7 @@ verdicts stay the scenarios' own, with the product's deadlines and the suite's b
 ## Deterministic Concurrency Verification
 
 The Pulsar sink uses the shared `ConfirmationWindow` and its registered property and Shuttle
-checks for concurrent broker answers, timeout and enqueue failure. Under `NO_ACK`, one sink task
+checks for concurrent broker answers, timeout and enqueue failure. Under `NO ACK`, one sink task
 owns its retained send receipts and the first failed receipt; it collects completed receipts
 while publishing and awaits the rest at finish under the host's deadline. No receipt or outcome
 is persisted or published through a shared map. The driver and its asynchronous channels remain

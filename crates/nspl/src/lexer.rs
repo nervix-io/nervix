@@ -254,6 +254,7 @@ pub enum Identifier {
     Logs,
     Traces,
     Metric,
+    Metrics,
     Attributes,
     Scope,
     Gauge,
@@ -265,6 +266,7 @@ pub enum Identifier {
     Delta,
     Cumulative,
     Collect,
+    Collector,
     Collection,
     Broker,
     Capacity,
@@ -278,6 +280,8 @@ pub enum Identifier {
     Listener,
     Producer,
     Pull,
+    Push,
+    Event,
     Offset,
     Consumer,
     Group,
@@ -298,7 +302,6 @@ pub enum Identifier {
     After,
     Ack,
     No,
-    NoAck,
     Jetstream,
     Parallel,
     Sequential,
@@ -383,7 +386,6 @@ pub enum Identifier {
     Emitter,
     Encode,
     Emit,
-    Insert,
     To,
     Do,
     Update,
@@ -979,13 +981,13 @@ mod tests {
 
     #[test]
     fn known_words_are_case_insensitive() {
-        let tokens = lex("nO_aCk").expect("lex should succeed");
+        let tokens = lex("cOlLeCtOr").expect("lex should succeed");
         assert_eq!(tokens.len(), 1);
         assert_eq!(
             tokens[0].token,
             Token::Word(Word::KnownWord {
-                iden: Identifier::NoAck,
-                raw: "nO_aCk".to_string(),
+                iden: Identifier::Collector,
+                raw: "cOlLeCtOr".to_string(),
             })
         );
     }

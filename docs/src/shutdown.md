@@ -791,7 +791,7 @@ Once the graph drain budget ends, terminal teardown cancels an emitter task wait
 attempt. It does not wait for that client's full attempt timeout or turn the canceled request into
 a record-specific success or rejection.
 
-A `NO_ACK` emitter on Kafka, Pulsar or MQTT QoS 0 reaches its completion point when its client
+A `NO ACK` emitter on Kafka, Pulsar or MQTT QoS 0 reaches its completion point when its client
 takes a record, so the drain can end while the client still holds records it has not sent. Every
 emitter therefore finishes its sink when it stops: the host calls the sink contract's finish hook
 once the emitter will publish nothing more, and records what the hook did. An emitter that the
@@ -801,7 +801,7 @@ the hook the domain drain timeout, cut short by the shutdown deadline. Kafka flu
 producer's local queue within that time, ignoring `linger.ms`; records still awaiting their delivery
 report when it ends are lost, and the emitter logs at `warn` how many, counting records alone and
 not the events waiting in librdkafka's queue, and reports them as its transient error and an error
-event. Pulsar retains the receipts of records accepted under `NO_ACK` and waits for them within
+event. Pulsar retains the receipts of records accepted under `NO ACK` and waits for them within
 that same finish deadline. A driver failure or still-unanswered receipts fail its finish; an
 expired deadline reports their count, without claiming the broker did not receive them. A Core
 NATS client holds records only after a write ran out of the client's `timeout_ms`, which leaves them

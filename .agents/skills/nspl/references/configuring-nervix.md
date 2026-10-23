@@ -1,7 +1,7 @@
-# Configuring Nervix with NSPL
+# Configuring Nervix with Plexus
 
 Use this reference to turn a deployment request into a complete Nervix configuration. Open the
-public NSPL documentation index linked from `SKILL.md` and read its relevant Markdown entries for
+public Plexus documentation index linked from `SKILL.md` and read its relevant Markdown entries for
 exact syntax and connector-specific options. Examples here describe the configuration process,
 not a second grammar.
 
@@ -16,7 +16,7 @@ not a second grammar.
 
 ## Public documentation routes
 
-Always read `NSPL Overview`. Add the indexed topics relevant to the requested graph:
+Always read `Plexus Overview`. Add the indexed topics relevant to the requested graph:
 
 | User need | Documentation index entry |
 | --- | --- |
@@ -34,7 +34,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
 | Constructed Arrow output applications receive and explicitly ACK, retry or reject | `Emitters` → `Client emitters`, `Sessions` → `Emitter Consumers`, and `Client Implementation Manual` → `Emitter Consumers` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
-| Timed generation from materialized state | `NSPL Overview` and `Examples` |
+| Timed generation from materialized state | `Plexus Overview` and `Examples` |
 | Sink transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -48,16 +48,16 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 
 For transaction preview scopes, operation and step impact, actual engagement, and retained
 inspection, read [Transaction Quiescence And Impact Inspection](https://docs.nervix.io/transaction-quiescence.html)
-directly. It is an architecture chapter and is outside the curated NSPL index.
+directly. It is an architecture chapter and is outside the curated Plexus index.
 
 For native application graphs, endpoint ownership, Arrow/credit limits, ACK boundaries, ALTER,
 restoration and replay, read [Client Ingestors And Emitters](https://docs.nervix.io/client-io-architecture.html)
 directly. Follow the same documentation version as the selected index; this architecture chapter
-is outside the curated NSPL index.
+is outside the curated Plexus index.
 
 For the CLI's `subscribe` and `domain-clock` shell streams and their line formats, read
 [Command Line Client](https://docs.nervix.io/client-tools-cli.html) directly. Follow the same
-documentation version as the selected index; this client chapter is outside the curated NSPL index.
+documentation version as the selected index; this client chapter is outside the curated Plexus index.
 
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.
@@ -136,7 +136,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 
 ## Choosing processing nodes
 
-| Desired behavior | NSPL graph element |
+| Desired behavior | Plexus graph element |
 | --- | --- |
 | Decode an external feed and construct initial branches | `<CONNECTOR> <ENTITY> INGESTOR`, such as `KAFKA TOPIC INGESTOR` |
 | Accept typed batches an application publishes and construct initial branches | `CLIENT PRODUCER INGESTOR ... FROM SCHEMA` |
@@ -151,7 +151,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 | Change or remove branch grouping | `REINGESTOR` |
 | Produce timed records from one materialized relay | `GENERATOR` |
 | Publish records outside Nervix | `EMITTER` |
-| Deliver constructed Arrow batches to competing application consumers | `EMITTER ... TO CLIENT SCHEMA` |
+| Deliver constructed Arrow batches to competing application consumers | `CLIENT CONSUMER EMITTER ... TO SCHEMA` |
 | Read a session-local filtered view | `CREATE SUBSCRIPTION` |
 | Follow the active domain's clock from a client session | `ATTACH DOMAIN CLOCK` |
 
@@ -183,8 +183,8 @@ relay. Do not use them to scan across branches.
   order; `ON EMITTING BATCH` may follow `ON EMITTING` and yields exactly one value per batch. Every `ON INGESTION` output is an object that fits the internal schema, and a payload that
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
 - Every codec using the SYSLOG wire schema uses `FROM SYSLOG` and only the exact fixed fields
-  documented in `Common` → `Syslog`; keep the format separate from the `SYSLOG CLIENT`,
-  use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO_ACK` on a syslog emitter, and
+  documented in `Common` → `Syslog`; keep the format separate from the `TYPE SYSLOG` transport,
+  use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter, and
   configure TLS identity and framing for the client direction that consumes it.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
@@ -198,7 +198,7 @@ relay. Do not use them to scan across branches.
 - Every emitter sink declares its transport-supported `MODE` in the documented position and
   supplies the complete retry policy plus the confirmation window and timeout when that mode
   confirms asynchronously. No operational mode variable is inferred.
-- For Pulsar receipt deadlines and the final wait after `NO_ACK` acceptance, read
+- For Pulsar receipt deadlines and the final wait after `NO ACK` acceptance, read
   [Emitters → Pulsar](../../../docs/src/emitters.md#pulsar) and
   [Finishing a sink](../../../docs/src/connector-contract.md#finishing-a-sink).
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
@@ -283,7 +283,7 @@ relay. Do not use them to scan across branches.
   way, naming the column, and retries until the table can take the mapped columns again.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
-  an ingestor's `NO ACK` or an emitter's `NO_ACK`.
+  an ingestor's `NO ACK` or an emitter's `NO ACK`.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
@@ -339,7 +339,7 @@ relay. Do not use them to scan across branches.
   `START` generation and endpoint contract still match; unresolved sent batches remain of unknown
   outcome. A row that fails on a route follows that route's `ON MESSAGE ERROR` policy, so under
   `LOG` its whole batch fails processing as `rejected`.
-- Every client emitter declares `TO CLIENT SCHEMA <output_schema> MODE ACK SEQUENTIAL|ACK
+- Every client emitter declares `CLIENT CONSUMER EMITTER ... TO SCHEMA <output_schema> MODE ACK SEQUENTIAL|ACK
   PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`, a required `BATCH` row and
   byte limit, and an explicit `FLUSH` policy. It constructs exactly that schema as native Arrow;
   a sensitive input needs explicit leakage, and a row whose encoded IPC cannot fit alone follows
@@ -362,7 +362,7 @@ relay. Do not use them to scan across branches.
   between `QUERY` and `EVERY` and `16MiB` when left out. A larger response fails the poll as the
   ingestor's transient error rather than delivering part of it; raise the bound for a query that
   legitimately returns more. Samples enter the graph in batches of at most 1024.
-- Treat Kafka `NO_ACK` emitter success as local librdkafka producer-queue admission. Even in
+- Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces any
   `message.timeout.ms` or `delivery.timeout.ms` in the client's `CONFIG` as the producer's delivery

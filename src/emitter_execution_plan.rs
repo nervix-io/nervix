@@ -190,7 +190,7 @@ impl EmitterExecutionPlan {
         let codec = emitter.body.codec().cloned();
         let output_schema = match emitter.sink.as_ref() {
             nervix_models::EmitSink::Client(nervix_models::ClientSink::Consumer(
-                nervix_models::ClientConsumerSink { schema },
+                nervix_models::ClientConsumerSink { schema, .. },
             )) => activation
                 .schemas
                 .get(schema)
@@ -442,9 +442,8 @@ impl EmitterExecutionPlans {
 )]
 mod tests {
     use nervix_models::{
-        AckMode, ClientName, EmitSink, EmitterBody, EmitterPublishingMode, ErrorPolicies,
-        FlushPolicy, HttpRequestSink, HttpSink, ProcessorInputs, RetryPolicy, SqsQueueSink,
-        SqsSink, ZeroMqPushSink, ZeroMqSink,
+        AckMode, ClientName, EmitSink, EmitterBody, ErrorPolicies, FlushPolicy, HttpRequestSink,
+        HttpSink, ProcessorInputs, RetryPolicy, SqsQueueSink, SqsSink, ZeroMqPushSink, ZeroMqSink,
     };
 
     use super::*;
@@ -470,15 +469,16 @@ mod tests {
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "100ms".to_string(),
-                    max_backoff: "1s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: RouteConstruction::default(),
             materialized_state: Vec::new(),
+        }
+    }
+
+    fn retry_policy() -> RetryPolicy {
+        RetryPolicy {
+            backoff: "100ms".to_string(),
+            max_backoff: "1s".to_string(),
         }
     }
 
@@ -494,6 +494,9 @@ mod tests {
     fn direct_emitter_lowers_only_its_filter_and_codec_emitter_preserves_empty_route() {
         let mut direct = emitter(
             EmitSink::Http(HttpSink::Request(HttpRequestSink {
+                mode: nervix_models::HttpRequestPublishingMode::Ack {
+                    retry_policy: retry_policy(),
+                },
                 client: named::<ClientName>("api"),
                 method: expression("'POST'"),
                 path: expression("'/events'"),
@@ -509,6 +512,9 @@ mod tests {
         assert_eq!(route.inherited_count, 0);
 
         *direct.sink = EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+            mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                retry_policy: retry_policy(),
+            },
             client: named("sink"),
         }));
         direct.body = EmitterBody::Codec {
@@ -526,6 +532,9 @@ mod tests {
     fn http_request_fields_are_lowered_beside_the_route() {
         let http = emitter(
             EmitSink::Http(HttpSink::Request(HttpRequestSink {
+                mode: nervix_models::HttpRequestPublishingMode::Ack {
+                    retry_policy: retry_policy(),
+                },
                 client: named("api"),
                 method: expression("'POST'"),
                 path: expression("'/events'"),
@@ -549,8 +558,11 @@ mod tests {
     fn sqs_ordering_group_is_lowered_or_reads_the_branch() {
         let mut sqs = emitter(
             EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+                mode: nervix_models::SqsQueuePublishingMode::Single {
+                    retry_policy: retry_policy(),
+                },
                 client: named("queue_client"),
-                queue: "events.fifo".to_string(),
+                queue: named("events.fifo"),
                 fifo_group: Some(SqsFifoGroup::Expression(expression("'group'"))),
             })),
             EmitterBody::Codec {

@@ -28,12 +28,12 @@ use super::{
 };
 use crate::{
     AcknowledgementConfirmation, ByteSizeUnit, ClientName, ConnectorKind, DeclaredDelivery,
-    DeclaredQuiesce, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    EmitterPublishingModeKind, Expression, HeaderLayout, HeaderModel, IngestAcknowledgement,
-    IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration, LocatorName, OptionChoice,
-    OptionDeclaration, OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass,
-    RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
-    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    DeclaredQuiesce, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, Expression,
+    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    OptionValue, PayloadSizeLimit, PositionClass, RetryPolicy, SinkBody, SinkClientReference,
+    SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope,
+    SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Sqs: unpooled, config Nervix, CreateClientSqs => SqsConfigEntry);
@@ -206,8 +206,9 @@ const SQS_MESSAGE_SIZE_MAXIMUM: PayloadSizeLimit =
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct SqsQueueSink {
+    pub mode: SqsQueuePublishingMode,
     pub client: ClientName,
-    pub queue: String,
+    pub queue: SqsQueueName,
     pub fifo_group: Option<SqsFifoGroup>,
 }
 
@@ -229,15 +230,10 @@ impl SinkEntity for SqsQueueSink {
             maximum: Some(SQS_MESSAGE_SIZE_MAXIMUM),
         },
         requires_batch_transformation: false,
-        publishing_modes: &[
-            EmitterPublishingModeKind::SqsSingle,
-            EmitterPublishingModeKind::SqsBatch,
-        ],
+        publishing_modes: SqsQueuePublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
             keywords: "QUEUE",
-            name: LocatorName::Unquoted {
-                label: "queue_name",
-            },
+            name: LocatorName::External(SqsQueueName::DECLARATION),
         }),
         options: &[OptionDeclaration {
             keywords: "FIFO GROUP",
@@ -278,8 +274,24 @@ connector_sinks! {
     connector Sqs = "SQS";
     /// What an SQS sink writes.
     pub enum SqsSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum SqsEmitterMode;
     /// The entities an SQS sink writes.
     pub enum SqsSinkEntity {
-        Queue(SqsQueueSink) = "QUEUE";
+        Queue(SqsQueueSink, SqsQueuePublishingMode) = "QUEUE";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum SqsQueuePublishingMode {
+        Single { retry_policy: crate::RetryPolicy } => SqsSingle,
+        Batch { retry_policy: crate::RetryPolicy } => SqsBatch,
+    }
+}
+
+impl SqsQueueName {
+    /// Whether this name identifies a FIFO queue, whose publication states its group.
+    pub fn is_fifo(&self) -> bool {
+        self.as_str().ends_with(SQS_FIFO_SUFFIX)
     }
 }

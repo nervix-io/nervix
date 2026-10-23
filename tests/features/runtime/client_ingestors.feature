@@ -56,8 +56,8 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders_deduped
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders_deduped
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING order_body_codec
@@ -205,16 +205,16 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER diverted FROM order_errors
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER diverted FROM order_errors
+        TO sink_api
           METHOD 'POST' PATH concat('/errors/', input.order_id, '/', input.code)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -314,8 +314,8 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -380,8 +380,8 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -447,8 +447,8 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -550,8 +550,8 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -687,8 +687,8 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -809,8 +809,8 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -885,8 +885,8 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -940,8 +940,8 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -998,8 +998,8 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -1074,8 +1074,8 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -1128,8 +1128,8 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -1256,8 +1256,8 @@ Feature: Client ingestors
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY

@@ -485,8 +485,8 @@ mod tests {
     use std::time::Duration;
 
     use nervix_models::{
-        AckMode, CreateEmitter, CreateRelay, DomainSchedule, EmitSink, EmitterPublishingMode,
-        ErrorPolicies, ProcessorInputs, RelayBranching, RetryPolicy, ZeroMqPushSink, ZeroMqSink,
+        AckMode, CreateEmitter, CreateRelay, DomainSchedule, EmitSink, ErrorPolicies,
+        ProcessorInputs, RelayBranching, RetryPolicy, ZeroMqPushSink, ZeroMqSink,
     };
     use nervix_primitives::{
         sync::{atomic::AtomicBool, mpsc, oneshot, watch},
@@ -507,17 +507,17 @@ mod tests {
                 codec: named("event_codec"),
             },
             sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+                mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
                 client: named("sink"),
             }))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: nervix_models::RouteConstruction::default(),
             materialized_state: Vec::new(),

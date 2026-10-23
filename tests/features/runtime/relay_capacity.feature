@@ -220,7 +220,7 @@ Feature: Relay capacity
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE EMITTER zeromq_capacity_shrink_out FROM notifications TO ZEROMQ zeromq_capacity_shrink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE ZEROMQ PUSH EMITTER zeromq_capacity_shrink_out FROM notifications TO zeromq_capacity_shrink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

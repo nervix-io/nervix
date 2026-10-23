@@ -35,7 +35,7 @@ TO HTTP <client>
 ```
 
 `METHOD` and `PATH` are structured expressions, not client settings. HTTP `MODE ACK` has no ACK
-window or `ACK TIMEOUT`; `NO_ACK`, parallel publication, and the optional emitter `BATCH` clause
+window or `ACK TIMEOUT`; `NO ACK`, parallel publication, and the optional emitter `BATCH` clause
 are unavailable. The emitter still requires a route-local `FLUSH` policy. `COLLECT FOR` may gather
 input records before execution, while `FLUSH` governs when prepared work is released. Neither
 merges several records into one HTTP body. The `HTTP CLIENT`'s polling `method` setting has
@@ -54,9 +54,9 @@ CREATE HTTP CLIENT api CONFIG {
   'timeout_ms' = 5000
 };
 
-CREATE ATTACHED EMITTER deliver_event
+CREATE ATTACHED HTTP REQUEST EMITTER deliver_event
   FROM outgoing
-  TO HTTP api
+  TO api
     METHOD input.request_method
     PATH input.request_path
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -85,9 +85,9 @@ This alternative uses the same relay and client. `WITHOUT BODY` uses the source 
 It allows route `WHERE` and header invocations, but not `INHERIT`, `SET`, or `VALUES`.
 
 ```nspl
-CREATE EMITTER delete_event
+CREATE HTTP REQUEST EMITTER delete_event
   FROM outgoing WHERE input.request_method = 'DELETE'
-  TO HTTP api
+  TO api
     METHOD 'DELETE'
     PATH input.request_path
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -338,7 +338,7 @@ Method, target, headers, and response bytes are not payload bytes or metric-labe
 
 Changing the sink's method, path, client reference, body selection, or retry mode takes an
 `ENTITY_PAUSE`; a `FLUSH`-only change is `DYNAMIC`. Changing source membership or a client
-definition has its existing `DOMAIN_PAUSE` contract. `ALTER EMITTER ... SET TO HTTP` restates the
+definition has its existing `DOMAIN_PAUSE` contract. `ALTER HTTP REQUEST EMITTER ... SET TO` restates the
 complete method, path, mode, and body selection. `SET CLIENT`, `SET MODE`, and `SET ENCODE USING`
 retain their current meanings. `DROP ENCODE` cannot select no body; use `SET TO ... WITHOUT BODY`.
 The whole retained construction and error scope must validate against that selection. For
@@ -350,8 +350,8 @@ For example, this replacement changes the first emitter's method and path withou
 codec construction or header invocations:
 
 ```nspl
-ALTER EMITTER deliver_event
-  SET TO HTTP api
+ALTER HTTP REQUEST EMITTER deliver_event
+  SET TO api
     METHOD 'POST'
     PATH '/v1/events'
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s

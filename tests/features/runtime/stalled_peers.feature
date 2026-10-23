@@ -72,9 +72,9 @@ Feature: Stalled peers
         'subscription_buffer_messages' = '1024',
         'idle_timeout_ms' = '30000'
       };
-      CREATE EMITTER redis_out FROM notifications
-        TO REDIS PUBSUB redis_main CHANNEL stalled_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE REDIS PUBSUB EMITTER redis_out FROM notifications
+        TO redis_main CHANNEL 'stalled_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -150,8 +150,8 @@ Feature: Stalled peers
         'addr' = 'amqps://{{rabbitmq_peer}}/%2f',
         'connect_timeout_ms' = '1000'
       };
-      CREATE EMITTER rabbit_out FROM notifications
-        TO RABBITMQ rabbit_main QUEUE stalled_{{test_id}}
+      CREATE RABBITMQ QUEUE EMITTER rabbit_out FROM notifications
+        TO rabbit_main QUEUE 'stalled_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
@@ -225,8 +225,8 @@ Feature: Stalled peers
         'addr' = 'amqp://{{rabbitmq_peer}}/%2f',
         'connect_timeout_ms' = '1000'
       };
-      CREATE EMITTER rabbit_out FROM notifications
-        TO RABBITMQ rabbit_main QUEUE stalled_{{test_id}}
+      CREATE RABBITMQ QUEUE EMITTER rabbit_out FROM notifications
+        TO rabbit_main QUEUE 'stalled_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
@@ -273,9 +273,9 @@ Feature: Stalled peers
         'addr' = '{{rabbitmq_stallable_addr}}',
         'timeout_ms' = '1000'
       };
-      CREATE EMITTER rabbit_out FROM notifications
-        TO RABBITMQ rabbit_main QUEUE stalled_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE RABBITMQ QUEUE EMITTER rabbit_out FROM notifications
+        TO rabbit_main QUEUE 'stalled_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -337,8 +337,8 @@ Feature: Stalled peers
         'addr' = '{{syslog_peer}}',
         'connect_timeout_ms' = '1000'
       };
-      CREATE EMITTER syslog_forward FROM events
-        TO SYSLOG syslog_forwarder MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      CREATE SYSLOG COLLECTOR EMITTER syslog_forward FROM events
+        TO syslog_forwarder MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING syslog_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -387,8 +387,8 @@ Feature: Stalled peers
         'addr' = '{{syslog_peer}}',
         'timeout_ms' = '1000'
       };
-      CREATE EMITTER syslog_forward FROM events
-        TO SYSLOG syslog_forwarder MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      CREATE SYSLOG COLLECTOR EMITTER syslog_forward FROM events
+        TO syslog_forwarder MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING syslog_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -546,8 +546,8 @@ Feature: Stalled peers
         'dsn' = 'http://public@{{sentry_peer}}/1',
         'timeout_ms' = 1000
       };
-      CREATE EMITTER sentry_errors FROM errors
-        TO SENTRY sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING error_event_codec
+      CREATE SENTRY EVENT EMITTER sentry_errors FROM errors
+        TO sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING error_event_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -595,9 +595,10 @@ Feature: Stalled peers
         'protocol' = '<protocol>',
         'timeout_ms' = 1000
       };
-      CREATE EMITTER stalled_export FROM events
-        TO OTEL otel_main <signal_body>
+      CREATE OTEL <signal> EMITTER stalled_export FROM events
+        TO otel_main <signal_options>
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          <signal_body>
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -614,13 +615,13 @@ Feature: Stalled peers
       """
 
     Examples:
-      | cluster_size | signal  | protocol      | signal_body                                                                                                                                                                                                                                                                               | reported                                                   |
-      | 1            | LOGS    | grpc          | LOGS VALUES { 'time' = now(), 'body' = input.body } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0'                                                                                                                                                         | OTEL gRPC export ended without an answer from the receiver |
-      | 3            | LOGS    | http/protobuf | LOGS VALUES { 'time' = now(), 'body' = input.body } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0'                                                                                                                                                         | OTEL HTTP export request failed                            |
-      | 1            | TRACES  | http/protobuf | TRACES VALUES { 'trace_id' = '00112233445566778899aabbccddeeff', 'span_id' = '0011223344556677', 'name' = input.body, 'kind' = 'INTERNAL', 'start_time' = now(), 'end_time' = now(), 'status_code' = 'OK' } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0' | OTEL HTTP export request failed                            |
-      | 3            | TRACES  | grpc          | TRACES VALUES { 'trace_id' = '00112233445566778899aabbccddeeff', 'span_id' = '0011223344556677', 'name' = input.body, 'kind' = 'INTERNAL', 'start_time' = now(), 'end_time' = now(), 'status_code' = 'OK' } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0' | OTEL gRPC export ended without an answer from the receiver |
-      | 1            | METRICS | grpc          | METRIC 'nervix.test.stalled' UNIT '1' DESCRIPTION 'Stalled export' SUM MONOTONIC DELTA VALUES { 'time' = now(), 'start_time' = now(), 'value' = input.seq } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0'                                                 | OTEL gRPC export ended without an answer from the receiver |
-      | 3            | METRICS | http/protobuf | METRIC 'nervix.test.stalled' UNIT '1' DESCRIPTION 'Stalled export' SUM MONOTONIC DELTA VALUES { 'time' = now(), 'start_time' = now(), 'value' = input.seq } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0'                                                 | OTEL HTTP export request failed                            |
+      | cluster_size | signal  | protocol      | signal_options                                                                         | signal_body                                                                                                                                                                                                                                                                        | reported                                                   |
+      | 1            | LOGS    | grpc          |                                                                                        | VALUES { 'time' = now(), 'body' = input.body } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0'                                                                                                                                                       | OTEL gRPC export ended without an answer from the receiver |
+      | 3            | LOGS    | http/protobuf |                                                                                        | VALUES { 'time' = now(), 'body' = input.body } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0'                                                                                                                                                       | OTEL HTTP export request failed                            |
+      | 1            | TRACES  | http/protobuf |                                                                                        | VALUES { 'trace_id' = '00112233445566778899aabbccddeeff', 'span_id' = '0011223344556677', 'name' = input.body, 'kind' = 'INTERNAL', 'start_time' = now(), 'end_time' = now(), 'status_code' = 'OK' } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0' | OTEL HTTP export request failed                            |
+      | 3            | TRACES  | grpc          |                                                                                        | VALUES { 'trace_id' = '00112233445566778899aabbccddeeff', 'span_id' = '0011223344556677', 'name' = input.body, 'kind' = 'INTERNAL', 'start_time' = now(), 'end_time' = now(), 'status_code' = 'OK' } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0' | OTEL gRPC export ended without an answer from the receiver |
+      | 1            | METRICS | grpc          | METRIC 'nervix.test.stalled' UNIT '1' DESCRIPTION 'Stalled export' SUM MONOTONIC DELTA | VALUES { 'time' = now(), 'start_time' = now(), 'value' = input.seq } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0'                                                                                                                                 | OTEL gRPC export ended without an answer from the receiver |
+      | 3            | METRICS | http/protobuf | METRIC 'nervix.test.stalled' UNIT '1' DESCRIPTION 'Stalled export' SUM MONOTONIC DELTA | VALUES { 'time' = now(), 'start_time' = now(), 'value' = input.seq } RESOURCE { 'service.name' = 'nervix-cucumber' } SCOPE 'stalled' VERSION '1.0'                                                                                                                                 | OTEL HTTP export request failed                            |
 
   Scenario Outline: A ClickHouse emitter whose server never answers is reported within timeout_ms
     Given a <cluster_size> node nervix cluster is started
@@ -648,11 +649,9 @@ Feature: Stalled peers
         'addr' = 'http://{{clickhouse_peer}}',
         'timeout_ms' = 1000
       };
-      CREATE EMITTER to_clickhouse FROM notifications
-        TO CLICKHOUSE clickhouse_main INSERT TO TABLE stalled_{{test_id}}
-        VALUES { "user_id" = input.user_id }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 1 MAX SIZE 1MiB
+      CREATE CLICKHOUSE TABLE EMITTER to_clickhouse FROM notifications
+        TO clickhouse_main TABLE 'stalled_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "user_id" = input.user_id } BATCH MAX MESSAGES 1 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -673,7 +672,7 @@ Feature: Stalled peers
       | 1            |
       | 3            |
 
-  Scenario Outline: An SQS emitter whose service stops answering is reported within timeout_ms
+  Scenario Outline: An SQS QUEUE emitter whose service stops answering is reported within timeout_ms
     Given SQS is running
     And a <cluster_size> node nervix cluster is started
     And a stallable endpoint "sqs_peer" stands in front of "sqs_endpoint"
@@ -702,8 +701,8 @@ Feature: Stalled peers
         'region' = 'us-east-1',
         'timeout_ms' = 1000
       };
-      CREATE EMITTER sqs_out FROM notifications
-        TO SQS sqs_main QUEUE stalled_{{test_id}}
+      CREATE SQS QUEUE EMITTER sqs_out FROM notifications
+        TO sqs_main QUEUE 'stalled_{{test_id}}'
         MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -750,8 +749,8 @@ Feature: Stalled peers
         'addr' = 'tcp://{{zeromq_peer}}',
         'connect_timeout_ms' = '1000'
       };
-      CREATE EMITTER zeromq_out FROM notifications
-        TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      CREATE ZEROMQ PUSH EMITTER zeromq_out FROM notifications
+        TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -799,8 +798,8 @@ Feature: Stalled peers
         'addr' = '{{zeromq_peer}}',
         'timeout_ms' = '1000'
       };
-      CREATE EMITTER zeromq_out FROM notifications
-        TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 2s
+      CREATE ZEROMQ PUSH EMITTER zeromq_out FROM notifications
+        TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 2s
         ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -869,9 +868,9 @@ Feature: Stalled peers
         'addr' = '{{nats_controlled_addr}}',
         'timeout_ms' = '1000'
       };
-      CREATE EMITTER nats_out FROM notifications
-        TO NATS nats_main SUBJECT stalled_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING notification_codec
+      CREATE NATS SUBJECT EMITTER nats_out FROM notifications
+        TO nats_main SUBJECT 'stalled_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
