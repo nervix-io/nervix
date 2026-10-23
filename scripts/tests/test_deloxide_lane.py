@@ -419,23 +419,31 @@ def quietly(function: Callable[[], int]) -> int:
 
 
 class InventoryTests(unittest.TestCase):
-    def test_endpoint_stress_examples_have_a_complete_disjoint_bounded_phase(self) -> None:
+    def test_stressed_lifecycle_phases_are_complete_disjoint_and_bounded(self) -> None:
         inventory = deloxide_lane.load_inventory(REPOSITORY)
         endpoint = inventory.invocations.get("stress-endpoint-acknowledgement")
         self.assertIsNotNone(endpoint, "the ten ACK examples need their own bounded phase")
         assert endpoint is not None
+        retention = inventory.invocations.get("stress-transaction-retention")
+        self.assertIsNotNone(retention, "the six retention examples need their own bounded phase")
+        assert retention is not None
         baseline = inventory.invocations["stress-scenarios"]
         self.assertEqual(inventory.bounds.budget_seconds, 4800)
         self.assertEqual(baseline.bound_seconds, 2700)
         self.assertEqual(endpoint.bound_seconds, 900)
+        self.assertEqual(retention.bound_seconds, 900)
+        self.assertEqual(retention.concurrency, 1)
+        phases = (baseline, endpoint, retention)
         groups = [
             deloxide_lane.discover_scenarios(REPOSITORY, invocation.inputs, invocation.tags)
-            for invocation in (baseline, endpoint)
+            for invocation in phases
         ]
         identities = [{(scenario.feature, scenario.name) for scenario in group} for group in groups]
-        self.assertTrue(identities[0].isdisjoint(identities[1]))
-        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [108, 10])
-        for invocation, group in zip((baseline, endpoint), groups, strict=True):
+        for index, group in enumerate(identities):
+            for other in identities[index + 1:]:
+                self.assertTrue(group.isdisjoint(other))
+        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [108, 10, 6])
+        for invocation, group in zip(phases, groups, strict=True):
             registered = inventory.workloads_of(invocation.id, "deloxide-stress")
             self.assertEqual(deloxide_lane.scenario_problems(invocation, registered, group), [])
 
@@ -466,18 +474,18 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(
             list(inventory.invocations),
             ["probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
-             "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios"],
+             "stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios"],
         )
         for name in ("scenarios", "paced-simulation"):
             self.assertEqual(inventory.invocations[name].selections, {"deloxide", "deloxide-order"})
         for name in ("primitive-conformance", "owner-tests"):
             self.assertEqual(inventory.invocations[name].selections, {"deloxide", "deloxide-order", "deloxide-stress"})
-        for name in ("stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation"):
+        for name in ("stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation"):
             self.assertEqual(inventory.invocations[name].selections, {"deloxide-stress"})
         self.assertEqual(inventory.invocations["stress-restore-scenarios"].selections, {"deloxide-stress-restore"})
         # Stressed scenarios run one at a time: the nodes of several in one process contend on the
         # detector a stress build enters twice per acquisition.
-        for name in ("stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios"):
+        for name in ("stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios"):
             self.assertEqual(inventory.invocations[name].concurrency, 1)
         self.assertEqual(inventory.invocations["stress-paced-simulation"].driver, "nervix-paced-simulation")
         # Every active-only probe, conformance check and owner test runs again under disturbance,
@@ -517,6 +525,13 @@ class InventoryTests(unittest.TestCase):
                 REPOSITORY, endpoint_invocation.inputs, endpoint_invocation.tags
             )
         }
+        retention_invocation = inventory.invocations["stress-transaction-retention"]
+        retention_identities = {
+            (scenario.feature, scenario.name)
+            for scenario in deloxide_lane.discover_scenarios(
+                REPOSITORY, retention_invocation.inputs, retention_invocation.tags
+            )
+        }
         stressed = {
             (workload.feature, workload.scenario): workload
             for workload in inventory.workloads.values()
@@ -542,6 +557,8 @@ class InventoryTests(unittest.TestCase):
                         self.assertEqual(counterpart.invocation, "stress-restore-scenarios")
                     elif identity in endpoint_identities:
                         self.assertEqual(counterpart.invocation, "stress-endpoint-acknowledgement")
+                    elif identity in retention_identities:
+                        self.assertEqual(counterpart.invocation, "stress-transaction-retention")
                     else:
                         self.assertEqual(counterpart.invocation, "stress-scenarios")
                 self.assertEqual(counterpart.examples, workload.examples)
@@ -549,6 +566,7 @@ class InventoryTests(unittest.TestCase):
                 self.assertTrue(counterpart.coverage.startswith("Under scheduling stress: "))
         self.assertEqual(set(stressed), expected)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 108)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-transaction-retention", "deloxide-stress")), 6)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-endpoint-acknowledgement", "deloxide-stress")), 10)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 53)

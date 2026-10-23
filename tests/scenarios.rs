@@ -114,9 +114,10 @@ use crate::common::{
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
-        MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR,
-        MYSQL_ADDR, MYSQL_TLS_ADDR, NATS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR,
-        REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
+        MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_REPLICA_SET_ADDR, MONGODB_TLS_ADDR,
+        MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, NATS_ADDR, PULSAR_ADDR,
+        RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT,
+        SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -464,8 +465,7 @@ struct ScenarioWorld {
     mysql_insert_command_baseline: Option<u64>,
     /// Independent MySQL sessions holding the table locks of this scenario's pool contention.
     mysql_table_locks: BTreeMap<String, mysql_isolation::HeldTableLock>,
-    mongodb_collection: Option<String>,
-    mongodb_tls: bool,
+    mongodb_collection: Option<PreparedMongoDbCollection>,
     domain: String,
     test_id: String,
     /// The address this scenario's nodes bind a ZeroMQ PULL socket to.
@@ -637,7 +637,6 @@ impl fmt::Debug for ScenarioWorld {
                 &self.mysql_insert_command_baseline,
             )
             .field("mongodb_collection", &self.mongodb_collection)
-            .field("mongodb_tls", &self.mongodb_tls)
             .field("syslog_udp_observer", &self.syslog_udp_observer.is_some())
             .field("syslog_split_sender", &self.syslog_split_sender.is_some())
             .field("syslog_silent_client", &self.syslog_silent_client.is_some())
@@ -1385,6 +1384,17 @@ async fn given_mongodb_is_running(world: &mut ScenarioWorld) {
         .start_mongodb(&world.test_id)
         .await
         .expect("MongoDB test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("MongoDB replica set is running")]
+async fn given_mongodb_replica_set_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_mongodb_replica_set(&world.test_id)
+        .await
+        .expect("MongoDB replica set test container should start");
     refresh_dependency_configuration(world);
 }
 
@@ -6377,29 +6387,58 @@ fn mysql_root_pool(dependencies: &DependencyEndpoints) -> Result<MySqlPool, Stri
     Ok(MySqlPool::new(opts))
 }
 
-async fn mongodb_client(
-    dependencies: &DependencyEndpoints,
-    tls: bool,
-) -> Result<MongoDbClient, String> {
-    let addr = if tls {
-        dependencies.get(MONGODB_TLS_ADDR)
-    } else {
-        dependencies.get(MONGODB_ADDR)
+/// The MongoDB server a scenario's collection lives on.
+#[derive(Debug, Clone, Copy)]
+enum MongoDbServer {
+    /// The authenticated standalone server, reached without TLS.
+    Standalone,
+    /// The authenticated standalone server, reached over TLS.
+    StandaloneTls,
+    /// The single-member replica set, whose one member is its primary.
+    ReplicaSet,
+}
+
+/// The collection a scenario prepared and the server it lives on, which every MongoDB assertion
+/// of the scenario reads.
+#[derive(Debug, Clone)]
+struct PreparedMongoDbCollection {
+    name: String,
+    server: MongoDbServer,
+}
+
+impl MongoDbServer {
+    /// A client of this server, as the scenario's own setup and assertions reach it.
+    async fn client(self, dependencies: &DependencyEndpoints) -> Result<MongoDbClient, String> {
+        let addr = match self {
+            Self::Standalone => dependencies.get(MONGODB_ADDR),
+            Self::StandaloneTls => dependencies.get(MONGODB_TLS_ADDR),
+            Self::ReplicaSet => dependencies.get(MONGODB_REPLICA_SET_ADDR),
+        }
+        .map_err(|error| error.to_string())?;
+        let mut options = MongoDbClientOptions::parse(addr)
+            .await
+            .map_err(|source| source.to_string())?;
+        if let Self::StandaloneTls = self {
+            let ca_file = dependencies
+                .tls_ca_path()
+                .map_err(|error| error.to_string())?
+                .to_path_buf();
+            options.tls = Some(MongoDbTls::Enabled(
+                MongoDbTlsOptions::builder().ca_file_path(ca_file).build(),
+            ));
+        }
+        MongoDbClient::with_options(options).map_err(|source| source.to_string())
     }
-    .map_err(|error| error.to_string())?;
-    let mut options = MongoDbClientOptions::parse(addr)
-        .await
-        .map_err(|source| source.to_string())?;
-    if tls {
-        let ca_file = dependencies
-            .tls_ca_path()
-            .map_err(|error| error.to_string())?
-            .to_path_buf();
-        options.tls = Some(MongoDbTls::Enabled(
-            MongoDbTlsOptions::builder().ca_file_path(ca_file).build(),
-        ));
+}
+
+impl PreparedMongoDbCollection {
+    /// A client of the server this collection lives on.
+    async fn client(&self, dependencies: &DependencyEndpoints) -> MongoDbClient {
+        self.server
+            .client(dependencies)
+            .await
+            .expect("failed to connect to MongoDB")
     }
-    MongoDbClient::with_options(options).map_err(|source| source.to_string())
 }
 
 async fn append_cluster_statuses(world: &ScenarioWorld, prefix: &str) {
@@ -16345,6 +16384,38 @@ async fn then_only_transaction_id_is_saved_as_placeholder(
     world.placeholders.insert(placeholder, ids[0].to_string());
 }
 
+#[then(
+    expr = "the transaction targeted by execution reference {string} is saved as placeholder \
+            {string}"
+)]
+async fn then_execution_transaction_is_saved(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    placeholder: String,
+) {
+    let reference = command_execution_reference(world, &execution_reference);
+    let reference = nervix_models::CommandExecutionReference::parse(reference)
+        .assured("scenario command references are valid UUIDv7 values");
+    let leader = current_leader_node(world).await;
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
+    let execution = observer
+        .current_command_execution(&reference)
+        .await
+        .verified("the preceding finalization pause holds an admitted execution");
+    let transaction_id = match execution.effect() {
+        Some(nervix_consensus::CommandExecutionEffect::Transaction { transaction_id, .. }) => {
+            transaction_id.clone()
+        }
+        Some(nervix_consensus::CommandExecutionEffect::TransactionRequest(request)) => {
+            request.target.id().to_string()
+        }
+        _ => panic!("execution '{reference}' must target a transaction"),
+    };
+    world.placeholders.insert(placeholder, transaction_id);
+}
+
 #[then(expr = "transaction {string} eventually has state {string}")]
 async fn then_transaction_eventually_has_state(
     world: &mut ScenarioWorld,
@@ -24276,7 +24347,7 @@ async fn prepare_mysql_table_schema(
 
 #[given(expr = "MongoDB collection {string} exists")]
 async fn given_mongodb_collection_exists(world: &mut ScenarioWorld, collection: String) {
-    prepare_mongodb_collection(world, collection, false).await;
+    prepare_mongodb_collection(world, collection, MongoDbServer::Standalone).await;
 }
 
 #[given(expr = "MongoDB collection {string} with unique user id exists")]
@@ -24284,7 +24355,23 @@ async fn given_mongodb_collection_with_unique_user_id_exists(
     world: &mut ScenarioWorld,
     collection: String,
 ) {
-    prepare_mongodb_collection_schema(world, collection, false, true).await;
+    prepare_mongodb_collection_schema(world, collection, MongoDbServer::Standalone, true).await;
+}
+
+#[given(expr = "MongoDB replica set collection {string} exists")]
+async fn given_mongodb_replica_set_collection_exists(
+    world: &mut ScenarioWorld,
+    collection: String,
+) {
+    prepare_mongodb_collection(world, collection, MongoDbServer::ReplicaSet).await;
+}
+
+#[given(expr = "MongoDB replica set collection {string} with unique user id exists")]
+async fn given_mongodb_replica_set_collection_with_unique_user_id_exists(
+    world: &mut ScenarioWorld,
+    collection: String,
+) {
+    prepare_mongodb_collection_schema(world, collection, MongoDbServer::ReplicaSet, true).await;
 }
 
 #[given(expr = "MongoDB collection {string} rejecting poison actions exists")]
@@ -24292,19 +24379,12 @@ async fn given_mongodb_collection_rejecting_poison_actions_exists(
     world: &mut ScenarioWorld,
     collection: String,
 ) {
-    prepare_mongodb_collection(world, collection, false).await;
-    let collection = world
-        .mongodb_collection
-        .as_ref()
-        .expect("MongoDB collection should be recorded after preparation")
-        .clone();
-    let client = mongodb_client(world.dependencies.endpoints(), false)
-        .await
-        .expect("failed to connect to MongoDB");
+    let prepared = prepare_mongodb_collection(world, collection, MongoDbServer::Standalone).await;
+    let client = prepared.client(world.dependencies.endpoints()).await;
     client
         .database("nervix")
         .run_command(mongodb_doc! {
-            "collMod": &collection,
+            "collMod": &prepared.name,
             "validator": {
                 "mongodb_action": { "$ne": "poison" },
             },
@@ -24320,10 +24400,8 @@ async fn given_mongodb_collection_recording_insert_command_sizes_exists(
     world: &mut ScenarioWorld,
     collection: String,
 ) {
-    prepare_mongodb_collection(world, collection, false).await;
-    let client = mongodb_client(world.dependencies.endpoints(), false)
-        .await
-        .expect("failed to connect to MongoDB");
+    let prepared = prepare_mongodb_collection(world, collection, MongoDbServer::Standalone).await;
+    let client = prepared.client(world.dependencies.endpoints()).await;
     client
         .database("nervix")
         .run_command(mongodb_doc! {
@@ -24337,39 +24415,44 @@ async fn given_mongodb_collection_recording_insert_command_sizes_exists(
 
 #[given(expr = "MongoDB TLS collection {string} exists")]
 async fn given_mongodb_tls_collection_exists(world: &mut ScenarioWorld, collection: String) {
-    prepare_mongodb_collection(world, collection, true).await;
+    prepare_mongodb_collection(world, collection, MongoDbServer::StandaloneTls).await;
 }
 
-async fn prepare_mongodb_collection(world: &mut ScenarioWorld, collection: String, tls: bool) {
-    prepare_mongodb_collection_schema(world, collection, tls, false).await;
+async fn prepare_mongodb_collection(
+    world: &mut ScenarioWorld,
+    collection: String,
+    server: MongoDbServer,
+) -> PreparedMongoDbCollection {
+    prepare_mongodb_collection_schema(world, collection, server, false).await
 }
 
 async fn prepare_mongodb_collection_schema(
     world: &mut ScenarioWorld,
     collection: String,
-    tls: bool,
+    server: MongoDbServer,
     unique_user_id: bool,
-) {
-    let collection = expand_placeholders(world, &collection);
-    let client = mongodb_client(world.dependencies.endpoints(), tls)
-        .await
-        .expect("failed to connect to MongoDB");
+) -> PreparedMongoDbCollection {
+    let prepared = PreparedMongoDbCollection {
+        name: expand_placeholders(world, &collection),
+        server,
+    };
+    let client = prepared.client(world.dependencies.endpoints()).await;
     client
         .database("nervix")
-        .collection::<MongoDbDocument>(&collection)
+        .collection::<MongoDbDocument>(&prepared.name)
         .drop()
         .await
         .expect("failed to drop MongoDB collection");
     client
         .database("nervix")
-        .create_collection(&collection)
+        .create_collection(&prepared.name)
         .await
         .expect("failed to create MongoDB collection");
     if unique_user_id {
         client
             .database("nervix")
             .run_command(mongodb_doc! {
-                "createIndexes": &collection,
+                "createIndexes": &prepared.name,
                 "indexes": [{
                     "key": { "mongodb_user_id": 1 },
                     "name": "mongodb_user_id_unique",
@@ -24379,8 +24462,8 @@ async fn prepare_mongodb_collection_schema(
             .await
             .expect("failed to create MongoDB unique user id index");
     }
-    world.mongodb_collection = Some(collection);
-    world.mongodb_tls = tls;
+    world.mongodb_collection = Some(prepared.clone());
+    prepared
 }
 
 #[when(expr = "MQTT message is published to topic {string}")]
@@ -29607,17 +29690,14 @@ async fn then_mongodb_collection_eventually_contains_document(
     #[step] step: &Step,
 ) {
     let expected = expand_placeholders(world, docstring(step));
-    let collection = world
+    let prepared = world
         .mongodb_collection
-        .as_ref()
-        .expect("a MongoDB collection must be prepared before assertion")
-        .clone();
-    let client = mongodb_client(world.dependencies.endpoints(), world.mongodb_tls)
-        .await
-        .expect("failed to connect to MongoDB");
+        .clone()
+        .expect("a MongoDB collection must be prepared before assertion");
+    let client = prepared.client(world.dependencies.endpoints()).await;
     let collection = client
         .database("nervix")
-        .collection::<MongoDbDocument>(&collection);
+        .collection::<MongoDbDocument>(&prepared.name);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let cursor = collection
@@ -29679,17 +29759,14 @@ async fn then_mongodb_collection_eventually_holds_exactly_these_documents(
             .push(serde_json::to_string(&document).expect("a JSON object serializes back to JSON"));
     }
     expected.sort();
-    let collection = world
+    let prepared = world
         .mongodb_collection
-        .as_ref()
-        .expect("a MongoDB collection must be prepared before assertion")
-        .clone();
-    let client = mongodb_client(world.dependencies.endpoints(), world.mongodb_tls)
-        .await
-        .expect("failed to connect to MongoDB");
+        .clone()
+        .expect("a MongoDB collection must be prepared before assertion");
+    let client = prepared.client(world.dependencies.endpoints()).await;
     let collection = client
         .database("nervix")
-        .collection::<MongoDbDocument>(&collection);
+        .collection::<MongoDbDocument>(&prepared.name);
     let read_documents = || async {
         let documents = collection
             .find(mongodb_doc! {})
@@ -29743,17 +29820,14 @@ async fn then_mongodb_collection_eventually_contains_exactly_documents(
     world: &mut ScenarioWorld,
     expected_documents: u64,
 ) {
-    let collection = world
+    let prepared = world
         .mongodb_collection
-        .as_ref()
-        .expect("a MongoDB collection must be prepared before assertion")
-        .clone();
-    let client = mongodb_client(world.dependencies.endpoints(), world.mongodb_tls)
-        .await
-        .expect("failed to connect to MongoDB");
+        .clone()
+        .expect("a MongoDB collection must be prepared before assertion");
+    let client = prepared.client(world.dependencies.endpoints()).await;
     let collection = client
         .database("nervix")
-        .collection::<MongoDbDocument>(&collection);
+        .collection::<MongoDbDocument>(&prepared.name);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let observed_documents = collection
@@ -29782,14 +29856,12 @@ async fn then_mongodb_collection_eventually_contains_documents_across_bounded_in
     expected_inserts: usize,
     maximum_documents_per_insert: usize,
 ) {
-    let collection_name = world
+    let prepared = world
         .mongodb_collection
-        .as_ref()
-        .expect("a MongoDB collection must be prepared before assertion")
-        .clone();
-    let client = mongodb_client(world.dependencies.endpoints(), world.mongodb_tls)
-        .await
-        .expect("failed to connect to MongoDB");
+        .clone()
+        .expect("a MongoDB collection must be prepared before assertion");
+    let client = prepared.client(world.dependencies.endpoints()).await;
+    let collection_name = prepared.name;
     let database = client.database("nervix");
     let collection = database.collection::<MongoDbDocument>(&collection_name);
     let profile = database.collection::<MongoDbDocument>("system.profile");

@@ -1442,12 +1442,18 @@ Core NATS retains no backlog, so `SUSPEND` is unavailable. A quiesced instance r
 its queue group and keeps receiving its share; that share is buffered or discarded rather than
 shifted to other members.
 
-A lost connection to the server ends the instance's subscription. `DESCRIBE INGESTOR` shows the
-loss, and then each failed reconnect, as its transient error, and the instance connects and
-subscribes again on the host's reconnect cadence: the delay starts at 250 ms, doubles after each
-failed attempt up to 30 s, and `DESCRIBE INGESTOR` shows it as the reconnect backoff. Messages the
-client received before the loss are still delivered. Core NATS retains nothing for a subscription
-that is not connected, so messages published while the instance reconnects never reach it.
+A lost connection to the server ends the instance's subscription, and so does a server that stops
+answering the client's pings, once two of them go unanswered. Messages the client received before
+the loss are still delivered. `DESCRIBE INGESTOR` shows the loss as its transient error,
+`NATS connection lost`, and then each failed attempt to connect and subscribe again, such as
+`failed to connect NATS client`, with the delay before the next attempt as its reconnect backoff.
+The instance connects and subscribes again on the host's reconnect cadence: the delay starts at
+250 ms and doubles after each failure up to 30 s. An instance that cannot connect when the ingestor
+starts does not fail the start; it reports the failure and tries again on the same cadence. Once
+the instance has subscribed again, `DESCRIBE INGESTOR` shows `ready: true`, while the last transient
+error and its backoff stay until the instance takes in its next message, which also returns the
+delay to 250 ms. Core NATS retains nothing for a subscription that is not connected, so messages
+published while the instance reconnects never reach it.
 
 ### ZeroMQ
 
@@ -1679,23 +1685,31 @@ Prometheus samples are flattened into JSON before codec decoding.
 `MAX BODY SIZE <bytes>`, written between `QUERY` and `EVERY`, bounds how many bytes of one query
 response a poll reads; a statement that leaves it out reads at most `16MiB`. The size is a whole
 number greater than zero followed by `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`, and
-`SHOW CREATE` renders it as written. A response whose announced length or whose body exceeds the
-bound fails the poll before any of its samples is delivered: `DESCRIBE INGESTOR` shows the failure
-as the ingestor's transient error, such as `transient error: failed to read from prometheus source:
-Prometheus query response exceeds MAX BODY SIZE 16MiB`, and the next poll queries again.
-`DESCRIBE INGESTOR` prints the bound in effect, whether the statement wrote it or not, as
-`prometheus max body size: 16MiB`.
+`SHOW CREATE` renders it in the unit it was written in. The bound counts the bytes of the
+response's JSON: a response the server compressed is counted as it is decompressed, so the bound
+limits the JSON a poll reads rather than the size of its transfer. A response whose announced
+length or whose body exceeds the bound fails the poll before any of its samples is delivered:
+`DESCRIBE INGESTOR` shows the failure as the ingestor's transient error, such as `transient error:
+failed to read from prometheus source: Prometheus query response exceeds MAX BODY SIZE 16MiB`, and
+the next poll queries again. `DESCRIBE INGESTOR` prints the bound in effect, whether the statement
+wrote it or not, as `prometheus max body size: 16MiB`. `SET FROM` replaces the whole body, so an
+`ALTER PROMETHEUS QUERY INGESTOR` whose new body leaves `MAX BODY SIZE` out reads at most `16MiB`
+again.
 The samples of one response enter the graph in intake batches of at most 1024 samples, and each
 batch is decoded and routed as its own group, so a large vector is never taken in as one batch of
 any size. The remaining samples wait while a batch is routed, and the next query waits until every
-sample of the current one has entered the graph.
+sample of the current one has entered the graph or, while a `BUFFER` quiesce holds the ingestor,
+has been handed to its buffer.
 The first query becomes due after one `EVERY` interval. Nervix supplies each anchored due instant
 as Prometheus's evaluation time; a slow query coalesces missed occurrences and returned samples are
 evaluated with a fresh domain execution snapshot.
 `SUSPEND` skips scrapes and leaves a sampling gap. `BUFFER` keeps querying at the declared cadence
-and delivers retained results in order after resume. A scrape whose `ON INGESTION` unfolding finds
-the node's extension workers full waits for them; see
-[When The Extension Workers Are Full](#when-the-extension-workers-are-full).
+and delivers retained results in order after resume. It retains each intake batch as one payload:
+`MAX SIZE` counts the bytes of its samples' JSON, `ON OVERFLOW` drops whole batches, and
+`nervix_ingestor_quiesce_buffered_records` and `nervix_ingestor_quiesce_dropped_total` count
+batches rather than samples. On resume, each retained batch enters the graph as an ingest group of
+its own, oldest first. A scrape whose `ON INGESTION` unfolding finds the node's extension workers
+full waits for them; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
 
 The ingestor reads through a `PROMETHEUS CLIENT`. Every key of its `CONFIG` is Nervix's own:
 
