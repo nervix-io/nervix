@@ -190,3 +190,60 @@ impl Default for MemoryPressureSettings {
             .assured("without watermarks the memory-pressure defaults have nothing to pair")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ubyte::ByteUnit;
+
+    use super::{MemoryPressureConfigError, MemoryPressureSettings};
+
+    #[test]
+    fn without_watermarks_the_node_runs_no_supervisor() {
+        assert_eq!(MemoryPressureSettings::default().config(), None);
+    }
+
+    #[test]
+    fn paired_ordered_watermarks_configure_the_supervisor() {
+        let settings = MemoryPressureSettings::resolve(
+            Some(ByteUnit::Mebibyte(2)),
+            Some(ByteUnit::Mebibyte(1)),
+            None,
+            None,
+        )
+        .expect("a low watermark below its high watermark pairs with it");
+        let config = settings
+            .config()
+            .expect("paired watermarks configure the supervisor");
+        assert_eq!(config.high_watermark, ByteUnit::Mebibyte(2));
+        assert_eq!(config.low_watermark, ByteUnit::Mebibyte(1));
+    }
+
+    #[test]
+    fn a_watermark_without_its_pair_or_out_of_order_is_refused() {
+        let cases = [
+            (
+                Some(ByteUnit::Mebibyte(2)),
+                None,
+                MemoryPressureConfigError::HighWatermarkWithoutLow,
+            ),
+            (
+                None,
+                Some(ByteUnit::Mebibyte(1)),
+                MemoryPressureConfigError::LowWatermarkWithoutHigh,
+            ),
+            (
+                Some(ByteUnit::Mebibyte(1)),
+                Some(ByteUnit::Mebibyte(1)),
+                MemoryPressureConfigError::LowWatermarkNotBelowHigh {
+                    low: ByteUnit::Mebibyte(1),
+                    high: ByteUnit::Mebibyte(1),
+                },
+            ),
+        ];
+        for (high, low, expected) in cases {
+            let refused = MemoryPressureSettings::resolve(high, low, None, None)
+                .expect_err("the watermarks do not pair");
+            assert_eq!(refused.current_context(), &expected);
+        }
+    }
+}

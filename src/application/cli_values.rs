@@ -144,12 +144,6 @@ impl std::str::FromStr for HumanDuration {
     }
 }
 
-impl From<Duration> for HumanDuration {
-    fn from(duration: Duration) -> Self {
-        Self(duration)
-    }
-}
-
 /// A byte quantity as the node's options write it: one whole number of the largest binary unit
 /// that holds it exactly, such as `64MiB` or `1GiB`, or of bytes when no unit does.
 ///
@@ -188,12 +182,6 @@ impl std::str::FromStr for HumanBytes {
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         parse_human_bytes(input).map(Self)
-    }
-}
-
-impl From<ubyte::ByteUnit> for HumanBytes {
-    fn from(bytes: ubyte::ByteUnit) -> Self {
-        Self(bytes)
     }
 }
 
