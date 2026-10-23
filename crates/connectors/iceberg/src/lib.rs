@@ -31,13 +31,13 @@
 )]
 
 mod storage;
+mod table_projection;
 
 use std::{fs::File, path::PathBuf, time::Duration};
 
 use ::iceberg::{
     Catalog, CatalogBuilder, Error as IcebergError, ErrorKind as IcebergErrorKind, NamespaceIdent,
     Result as IcebergResult, TableIdent,
-    arrow::FieldMatchMode,
     io::{
         ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID,
         ADLS_CLIENT_SECRET, ADLS_CONNECTION_STRING, ADLS_SAS_TOKEN, ADLS_TENANT_ID, CLIENT_REGION,
@@ -46,7 +46,7 @@ use ::iceberg::{
         S3_ALLOW_ANONYMOUS, S3_DISABLE_CONFIG_LOAD, S3_DISABLE_EC2_METADATA, S3_ENDPOINT,
         S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY, S3_SESSION_TOKEN,
     },
-    spec::{DataFile, DataFileFormat, Snapshot, TableProperties, Type},
+    spec::{DataFile, DataFileFormat, Snapshot, TableProperties},
     table::Table,
     transaction::{ApplyTransactionAction, Transaction},
     writer::{
@@ -87,6 +87,7 @@ use nervix_models::{ClientConfigEntry, IcebergStorageBackend, TableName, Timesta
 use nervix_primitives::{sync::StdArc, time::Instant};
 use parquet::file::properties::WriterProperties;
 use storage::DnsStorageFactory;
+use table_projection::{IcebergColumnError, IcebergTableProjection};
 use tempfile::TempDir;
 use tracing::{debug, trace};
 use url::Url;
@@ -127,7 +128,8 @@ pub struct IcebergSinkConfig {
     pub namespace: String,
     pub table: TableName,
     pub location: String,
-    /// The mapped columns every staged batch carries, as the host projects them.
+    /// The mapped columns every staged batch carries, in `VALUES` order, each nullable exactly
+    /// when its expression can produce a null.
     pub mapped_schema: StdArc<arrow_schema::Schema>,
     pub commit: IcebergCommitPolicy,
     /// How generated staging and data files name the writer that produced them.
@@ -145,6 +147,8 @@ pub struct IcebergSink {
     commit_state: IcebergCommitState,
     /// The exact Arrow schema every staged file is written and read back with, which is the host's
     /// mapped schema with datetime columns narrowed to the microsecond resolution Iceberg stores.
+    /// Each column keeps its expression's nullability, which a commit checks against the columns
+    /// the table requires.
     staged_schema: StdArc<arrow_schema::Schema>,
     commit_policy: IcebergCommitPolicy,
     staging_dir: TempDir,
@@ -533,7 +537,7 @@ impl IcebergSink {
     }
 
     /// The Arrow schema staged files carry, which narrows every UTC datetime column to the
-    /// microsecond resolution an Iceberg `timestamptz` stores.
+    /// microsecond resolution an Iceberg `timestamptz` stores and keeps each column's nullability.
     fn staged_arrow_schema(
         mapped_schema: &arrow_schema::Schema,
     ) -> SinkStartResult<StdArc<arrow_schema::Schema>> {
@@ -549,7 +553,7 @@ impl IcebergSink {
             fields.push(arrow_schema::Field::new(
                 field.name(),
                 Self::staged_arrow_data_type(field.data_type()),
-                true,
+                field.is_nullable(),
             ));
         }
         Ok(StdArc::new(arrow_schema::Schema::new(fields)))
@@ -606,70 +610,6 @@ impl IcebergSink {
                 *ordered,
             ),
             _ => data_type.clone(),
-        }
-    }
-
-    /// Match the staged columns to the table by name. The generated field IDs describe the
-    /// staged file, not the table, so nested types are compared without those IDs.
-    fn validate_table_schema(
-        staged: &arrow_schema::Schema,
-        table: &::iceberg::spec::Schema,
-    ) -> SinkStartResult<()> {
-        let mapped = ::iceberg::arrow::arrow_schema_to_schema_auto_assign_ids(staged)
-            .change_context(SinkStartError::InvalidConfiguration { sink: ICEBERG })
-            .attach_printable("mapped Iceberg schema cannot be written")?;
-        for column in mapped.as_struct().fields() {
-            let Some(target) = table.as_struct().field_by_name(&column.name) else {
-                return Err(
-                    Report::new(SinkStartError::InvalidConfiguration { sink: ICEBERG })
-                        .attach_printable(format!(
-                            "mapped column '{}' does not exist in the Iceberg table",
-                            column.name
-                        )),
-                );
-            };
-            if !Self::iceberg_types_match(&column.field_type, &target.field_type) {
-                return Err(
-                    Report::new(SinkStartError::InvalidConfiguration { sink: ICEBERG })
-                        .attach_printable(format!(
-                            "mapped column '{}' has Iceberg type {}, but the table requires {}",
-                            column.name, column.field_type, target.field_type
-                        )),
-                );
-            }
-        }
-        Ok(())
-    }
-
-    fn iceberg_types_match(mapped: &Type, table: &Type) -> bool {
-        match (mapped, table) {
-            (Type::Primitive(mapped), Type::Primitive(table)) => mapped == table,
-            (Type::List(mapped), Type::List(table)) => Self::iceberg_types_match(
-                &mapped.element_field.field_type,
-                &table.element_field.field_type,
-            ),
-            (Type::Struct(mapped), Type::Struct(table)) => {
-                if mapped.fields().len() != table.fields().len() {
-                    return false;
-                }
-                for field in mapped.fields() {
-                    let Some(target) = table.field_by_name(&field.name) else {
-                        return false;
-                    };
-                    if !Self::iceberg_types_match(&field.field_type, &target.field_type) {
-                        return false;
-                    }
-                }
-                true
-            }
-            (Type::Map(mapped), Type::Map(table)) => {
-                Self::iceberg_types_match(&mapped.key_field.field_type, &table.key_field.field_type)
-                    && Self::iceberg_types_match(
-                        &mapped.value_field.field_type,
-                        &table.value_field.field_type,
-                    )
-            }
-            _ => false,
         }
     }
 
@@ -1167,7 +1107,10 @@ impl IcebergSink {
                 group.charge,
             )
             .await?;
-            let data_files = self.client.write_data_files(batches).await?;
+            let data_files = self
+                .client
+                .write_data_files(&self.staged_schema, batches)
+                .await?;
             // The rows the charge covered are in data files now.
             drop(charge);
             preparation.record_written(group.files, data_files);
@@ -1304,9 +1247,13 @@ impl IcebergSinkClient {
         self.install_table(table)
     }
 
-    /// Writes `batches` into new Parquet data files of the table, without committing them.
+    /// Writes `batches`, which carry the columns of `staged`, into new Parquet data files of the
+    /// table, without committing them. Each batch is laid out as the table's current columns first,
+    /// each mapped column in the column of its name, so a table changed since the sink opened is
+    /// written as it is now or refused, naming the column it cannot take.
     async fn write_data_files(
         &mut self,
+        staged: &arrow_schema::SchemaRef,
         batches: Vec<RecordBatch>,
     ) -> SinkPublishResult<Vec<DataFile>> {
         let commit_failure = |error: &dyn std::fmt::Display| {
@@ -1314,6 +1261,9 @@ impl IcebergSinkClient {
                 .attach_printable(format!("failed to commit Iceberg staged batches: {error}"))
         };
         self.refresh_table().await?;
+        let projection =
+            IcebergTableProjection::plan(staged, self.table.metadata().current_schema())
+                .map_err(IcebergColumnError::commit_failure)?;
         let location_generator = DefaultLocationGenerator::new(self.table.metadata())
             .map_err(|error| commit_failure(&error))?;
         self.data_file_sequence = self
@@ -1325,10 +1275,9 @@ impl IcebergSinkClient {
             None,
             DataFileFormat::Parquet,
         );
-        let parquet_writer = ParquetWriterBuilder::new_with_match_mode(
+        let parquet_writer = ParquetWriterBuilder::new(
             WriterProperties::builder().build(),
             self.table.metadata().current_schema().clone(),
-            FieldMatchMode::Name,
         );
         let rolling_writer = RollingFileWriterBuilder::new_with_default_file_size(
             parquet_writer,
@@ -1342,8 +1291,11 @@ impl IcebergSinkClient {
             .map_err(|error| commit_failure(&error))?;
         for batch in batches {
             nervix_primitives::task::consume_budget().await;
+            let projected = projection
+                .project(&batch)
+                .map_err(IcebergColumnError::commit_failure)?;
             writer
-                .write(batch)
+                .write(projected)
                 .await
                 .map_err(|error| commit_failure(&error))?;
         }
@@ -2534,3 +2486,10 @@ mod tests {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod commit_tests;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod column_tests;

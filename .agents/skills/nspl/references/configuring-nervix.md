@@ -273,11 +273,13 @@ relay. Do not use them to scan across branches.
   transient error while the emitter retries.
 - Provision Iceberg table columns with names and types matching the emitter's `VALUES`. A
   `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
-  microsecond and needs a `timestamptz` column, not `timestamptz_ns`. Opening the emitter refuses
-  a mapped column the table lacks or types differently, before staging records, but a commit
-  writes the mapped columns by position in the table's column order: map every table column, in
-  that order, and map only values that are never null into required columns. A table changed
-  after open can still fail a later commit.
+  microsecond and needs a `timestamptz` column, not `timestamptz_ns`. A commit writes each mapped
+  column into the table column of its name, in any `VALUES` order, and a null into each optional
+  column `VALUES` leaves out. Opening the emitter refuses, before staging records, a mapped column
+  the table lacks or types differently, a required table column `VALUES` leaves out, and a required
+  column mapped from an expression that can produce a null, such as an `OPTIONAL` field; wrap it in
+  `coalesce(...)` with a never-null argument. A commit refuses a table changed after open in the same
+  way, naming the column, and retries until the table can take the mapped columns again.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
   an ingestor's `NO ACK` or an emitter's `NO_ACK`.
