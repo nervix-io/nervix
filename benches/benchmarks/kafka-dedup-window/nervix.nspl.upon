@@ -70,10 +70,10 @@ CREATE WINDOW PROCESSOR benchmark_window_{{ lane }}
     SET record_count = COUNT(input.key){% if parameters.sketch_enabled %},
         distinct_estimate = APPROX_COUNT_DISTINCT(input.key, {{ parameters.sketch_precision }}){% endif %}
     ON MESSAGE ERROR LOG;
-CREATE EMITTER kafka_out_{{ lane }}
+CREATE KAFKA TOPIC EMITTER kafka_out_{{ lane }}
   FROM benchmark_summaries_{{ lane }}
-  TO KAFKA kafka_output TOPIC {{ output_topic }}
-    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  TO kafka_output TOPIC '{{ output_topic }}'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING benchmark_summary_codec
   INHERIT ALL
   FLUSH EACH {{ parameters.emitter_flush_each }} MAX BATCH SIZE {{ parameters.emitter_max_batch_size }}

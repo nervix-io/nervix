@@ -30,11 +30,11 @@ use super::{
 };
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    LocatorDeclaration, LocatorName, OptionDeclaration, PositionClass, QueueName, RetryPolicy,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, HeaderLayout, HeaderModel,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
+    LocatorName, OptionDeclaration, PositionClass, RetryPolicy, SinkBody, SinkClientReference,
+    SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope,
+    SourceReference, SourceReferenceKind,
 };
 
 configured_client!(RabbitMq: unpooled, config NervixWithAddressQuery, CreateClientRabbitMq => RabbitMqConfigEntry);
@@ -214,8 +214,9 @@ connector_sources! {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct RabbitMqQueueSink {
+    pub mode: RabbitMqQueuePublishingMode,
     pub client: ClientName,
-    pub queue: QueueName,
+    pub queue: RabbitMqQueueName,
 }
 
 impl SinkEntity for RabbitMqQueueSink {
@@ -226,15 +227,10 @@ impl SinkEntity for RabbitMqQueueSink {
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[
-            EmitterPublishingModeKind::NoAck,
-            EmitterPublishingModeKind::BrokerAck,
-        ],
+        publishing_modes: RabbitMqQueuePublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
             keywords: "QUEUE",
-            name: LocatorName::Unquoted {
-                label: "queue_name",
-            },
+            name: LocatorName::External(RabbitMqQueueName::DECLARATION),
         }),
         options: &[],
         envelope: &[],
@@ -260,8 +256,17 @@ connector_sinks! {
     connector RabbitMq = "RABBITMQ";
     /// What a RabbitMQ sink writes.
     pub enum RabbitMqSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum RabbitMqEmitterMode;
     /// The entities a RabbitMQ sink writes.
     pub enum RabbitMqSinkEntity {
-        Queue(RabbitMqQueueSink) = "QUEUE";
+        Queue(RabbitMqQueueSink, RabbitMqQueuePublishingMode) = "QUEUE";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum RabbitMqQueuePublishingMode {
+        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
     }
 }

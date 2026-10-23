@@ -38,7 +38,7 @@ The recovery promise stops at a durable boundary:
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens and ACK maps | Drain tries to resolve them before its deadline | Volatile; they may be lost |
 
 The crash-window rows in the real-process scenario intentionally have no exactly-once assertion.
-Its HTTP source is `NO_ACK`, so admitted data that had not crossed the Postgres boundary may be
+Its HTTP source is `NO ACK`, so admitted data that had not crossed the Postgres boundary may be
 lost. A Postgres commit whose acknowledgement was interrupted has only the Postgres connector's
 documented retry semantics. Exact counts are asserted only for keys whose deduplicator snapshots
 were known durable before the kill.
@@ -52,7 +52,7 @@ were known durable before the kill.
 | 3. Delayed ACK, queued work, long cadence, extreme pacing and held upload | `cluster/graceful_shutdown.feature` covers a delayed remote ACK, hour-long processor/emitter cadence, generator buffering, `REQUIRED WAIT`, timeout redelivery and stuck command work. `cluster/shutdown_deadline.feature` holds authenticated uploads at each accepted-stream progress point and runs the same deadline in unpaced, extremely slow and extremely fast domains. |
 | 4. Interrupted ownership handoff | Four tagged scenarios in `cluster/relocate.feature` pause after durable preparation or before its response. They restart the destination, lose the response, cancel the coordinator and replace the leader, then prove cleanup by a later exact relocation to the intended owner. |
 | 5. Snapshot interruption and recovered runtime state | `cluster/raft_replication.feature` reopens after an interrupted snapshot install. `runtime/deduplicator_replication.feature` restores branch-local suppression after one- and three-node restarts. The real-process crash scenario restores two branch checkpoints from the same database. The direct consensus and runtime recovery tests below cover each storage boundary and schedule rebuild. |
-| 6. Unique identities, two branches and external delivery contracts | The real-process scenario sends monotonically unique load IDs through `alpha` and `beta` branch keys from an HTTP `NO_ACK` source to an acknowledging Postgres emitter. The last-schedulable-node scenario uses an externally acknowledged Kafka source, two interleaved branches and a committed consumer-group offset. |
+| 6. Unique identities, two branches and external delivery contracts | The real-process scenario sends monotonically unique load IDs through `alpha` and `beta` branch keys from an HTTP `NO ACK` source to an acknowledging Postgres emitter. The last-schedulable-node scenario uses an externally acknowledged Kafka source, two interleaved branches and a committed consumer-group offset. |
 | 7. Isolated former-owner restart fence from Shutdown 11 | `cluster/runtime_startup_admission.feature` restarts the former owner with consensus blocked, proves that its public listener and interconnect can be live while stale persisted ownership cannot route a record, then restores consensus and proves routing through the current owner. |
 | 8. Reproducible validation | The tag command above selects the complete public matrix. The direct commands and observed results are recorded below. No scenario waits without a timeout; fault-injection pauses are reached and released through explicit barriers, and teardown releases every armed pause or load task. |
 

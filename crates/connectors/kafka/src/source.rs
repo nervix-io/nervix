@@ -3,8 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Kafka consumer configuration, polling, headers and metadata, partition assignment,
-//!   offset acknowledgement, partition inspection, and the opaque services through which a source
-//!   reads and advances host-owned domain offsets.
+//!   offset acknowledgement, partition inspection, consumer retirement, and the opaque services
+//!   through which a source reads and advances host-owned domain offsets.
 //! - **Depends on.** The connector contract, Kafka vocabulary values, the bounded executor,
 //!   the primitive boundary, `error-stack` and `rust-rdkafka`.
 //! - **Must not know.** Runtime offset-state types, domain execution maps, relays, branches,
@@ -26,6 +26,8 @@
 mod control;
 #[path = "source_rejection.rs"]
 mod rejection;
+#[path = "source_retirement.rs"]
+mod retirement;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -58,7 +60,8 @@ use rdkafka::{
     message::{Headers, Message as KafkaMessage},
     topic_partition_list::{Offset, TopicPartitionList},
 };
-use rejection::{KafkaConsumer, KafkaConsumerContext};
+use rejection::KafkaConsumer;
+use retirement::KafkaConsumerHandle;
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -255,6 +258,11 @@ pub enum KafkaSourceError {
     ControlTimeout { timeout: Duration },
     #[error("the {connector} control call was cancelled", connector = ConnectorKind::Kafka)]
     ControlCancelled,
+    #[error(
+        "the {connector} consumer cannot reserve the job that will destroy it",
+        connector = ConnectorKind::Kafka
+    )]
+    RetirementAdmission,
     #[error("failed to initialize Kafka consumer")]
     Initialize,
     #[error("failed to subscribe to Kafka topic '{topic}'")]
@@ -523,9 +531,9 @@ impl SourceMessage for KafkaSourceMessage {
 
 pub struct KafkaSource {
     control: KafkaControl,
-    /// Shared with the blocking-pool job of a commit in flight, which keeps the consumer open
-    /// until librdkafka answers it.
-    consumer: Arc<KafkaConsumer>,
+    /// Shared with the driver jobs the source admits. A commit in flight keeps the consumer open
+    /// until librdkafka answers it, and whichever holder lets it go last retires it.
+    consumer: KafkaConsumerHandle,
     topic: nervix_models::KafkaTopicName,
     offset_mode: KafkaSourceOffsetMode,
     /// Where a partition with no domain offset starts when no paced domain time places it.
@@ -566,13 +574,11 @@ impl SourceConnector for KafkaSource {
             .change_context(SourceError::Open { connector: KAFKA })?;
         let offset_reset =
             KafkaOffsetReset::of(&config).change_context(SourceError::Open { connector: KAFKA })?;
-        let consumer = config
-            .create_with_context(KafkaConsumerContext::default())
-            .map_err(|source| Report::new(source).change_context(KafkaSourceError::Initialize))
+        let consumer = KafkaConsumerHandle::create(&config, plan.executor.clone())
             .change_context(SourceError::Open { connector: KAFKA })?;
         Ok(Self {
             control,
-            consumer: Arc::new(consumer),
+            consumer,
             topic: plan.topic.clone(),
             offset_mode: plan.offset_mode.clone(),
             offset_reset,
@@ -1174,7 +1180,7 @@ impl GroupCommits {
     async fn commit(
         &mut self,
         control: &KafkaControl,
-        consumer: &Arc<KafkaConsumer>,
+        consumer: &KafkaConsumerHandle,
         group_id: &str,
         request: GroupCommitRequest,
     ) -> Result<(), Report<KafkaSourceError>> {
@@ -1220,7 +1226,7 @@ impl GroupCommits {
     async fn leave_group(
         &mut self,
         control: &KafkaControl,
-        consumer: &Arc<KafkaConsumer>,
+        consumer: &KafkaConsumerHandle,
         group_id: &str,
         commit: KafkaGroupCommit,
     ) -> Result<(), Report<KafkaSourceError>> {
@@ -1485,7 +1491,7 @@ fn assign_offsets_for_instance(
 
 pub struct TopicPartitionInspector {
     control: KafkaControl,
-    consumer: Arc<KafkaConsumer>,
+    consumer: KafkaConsumerHandle,
 }
 
 impl TopicPartitionInspector {
@@ -1501,14 +1507,9 @@ impl TopicPartitionInspector {
         client_config.set("group.id", group_id);
         client_config.set("enable.partition.eof", "false");
         client_config.set("enable.auto.commit", "false");
-        let control = KafkaControl::new(&client_config, executor)?;
-        let consumer = client_config
-            .create_with_context(KafkaConsumerContext::default())
-            .map_err(|source| Report::new(source).change_context(KafkaSourceError::Initialize))?;
-        Ok(Self {
-            control,
-            consumer: Arc::new(consumer),
-        })
+        let control = KafkaControl::new(&client_config, executor.clone())?;
+        let consumer = KafkaConsumerHandle::create(&client_config, executor)?;
+        Ok(Self { control, consumer })
     }
 
     pub async fn partitions(&self, topic: &str) -> Result<Vec<i32>, Report<KafkaSourceError>> {
@@ -1763,3 +1764,11 @@ mod control_tests;
 )]
 #[path = "source_rejection_tests.rs"]
 mod rejection_tests;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "source_retirement_tests.rs"]
+mod retirement_tests;

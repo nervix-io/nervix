@@ -53,6 +53,12 @@ chapter that owns its subsystem:
 The NSPL forms for error routes are in [Message Errors](./processors.md#message-errors) and
 [Error Routes](./quickstart-error-routes.md).
 
+Emitter ALTER validation belongs to the vocabulary: its typed declared-kind and replacement-kind
+failures retain both connector/entity kinds and render their Plexus phrases. The parser constructs
+only each destination's own publishing-policy enum, so no registry or planner failure represents an
+impossible entity/policy pair. Reference validation still rejects a configured client of the wrong
+kind; Iceberg reports its declared object-store alternatives and the actual resolved client kind.
+
 ## The Report Model
 
 ### A Failure Has One Owner
@@ -589,7 +595,7 @@ contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the resolver's
 the deadline that ran out. The sink changes them into a configuration failure for an invalid
 address, CA file or deadline key and an initialization failure otherwise, leading with the failure's
 chain, down to a `connect_timeout_ms` it ran out of, which `DESCRIBE EMITTER` shows. Neither
-attaches credentials from the address. A `NO_ACK` round trip that runs out of the client's
+attaches credentials from the address. A `NO ACK` round trip that runs out of the client's
 `timeout_ms` fails the write as a publish failure with the elapsed deadline as its typed cause and
 its text leading the report.
 
@@ -753,6 +759,13 @@ to: a rejected partition's floor that cannot be set on the assignment, and an as
 revocation librdkafka refuses, are logged at `warn` with the driver's error, and the partition then
 starts where the group's committed offset or the client's reset policy places it.
 
+A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
+and a refused charge keeps `AdmissionError` beneath `KafkaSourceError::RetirementAdmission`. It
+fails the source's open or the partition inspector's start, as transiently as a refused control
+call; see [Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement). A
+retirement has no caller to fail, so its supervisor reports a destruction job that panicked at
+`debug`.
+
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
 cause of its connection error, and the connector finds it there by type and keeps it as the context
@@ -790,7 +803,7 @@ stays an infrastructure failure of the attempt, which the emitter retries.
 
 The Pulsar sink preserves the driver's `pulsar::Error` beneath `SinkPublishError::Publish` for
 enqueue failures and failed receipts, with its description in a printable attachment. Its shared
-confirmation window owns a missed `ACK TIMEOUT` as `ConfirmationWindowError`. A `NO_ACK` finish
+confirmation window owns a missed `ACK TIMEOUT` as `ConfirmationWindowError`. A `NO ACK` finish
 keeps the first failed receipt beneath `SinkFinishError::Flush`; if its deadline expires with
 receipts still unanswered, `SinkFinishError::Unsent` counts those receipts, retaining an earlier
 driver failure beneath it when present. An unanswered receipt leaves delivery unknown rather
@@ -1061,11 +1074,20 @@ predicate, its relay. The decision fails before a new emitter plan or remote con
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
 opening an external sink may fail independently and follows the emitter's retry policy.
 
-The Iceberg sink checks its mapped schema against the loaded table while opening. A mapped column
-absent from the table or with an incompatible type returns `SinkStartError::InvalidConfiguration`
-before staging records. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg
-conversion error beneath that context. The check compares names and nested types after narrowing
-UTC datetimes to microseconds; table changes after open can still fail a later catalog commit.
+The Iceberg sink plans how its commits write the mapped columns into the table, matching them to
+the table's columns by name, once while opening and again against the table's current schema before
+each commit writes data files. A plan the table cannot take is an `IcebergColumnError` naming the
+column: a mapped column absent from the table (`Missing`) or of an incompatible Iceberg type
+(`TypeMismatch`, which carries both types), a required table column `VALUES` leaves out
+(`UnmappedRequired`), and a required column mapped from an expression that can produce a null
+(`NullableIntoRequired`), or whose nested values the table requires and the expression can leave
+null (`NullableNestedIntoRequired`). While opening, the error stays beneath
+`SinkStartError::InvalidConfiguration`, before staging records; before a commit, beneath
+`SinkPublishError::Commit`, so the commit keeps its staged rows and their acknowledgements. Either
+way the report attaches the error's own description, which the emitter shows as its transient error
+while it retries. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg conversion
+error beneath `IcebergColumnError::MappedSchema`. The plan compares names and nested types after
+narrowing UTC datetimes to microseconds.
 
 An Iceberg commit charges the bulk memory class for the staged files it reads back with
 `Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The

@@ -45,8 +45,8 @@ Feature: SQS name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER sqs_out FROM notifications
-        TO SQS sqs_main QUEUE dns_out_{{test_id}} MODE <mode> RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE SQS QUEUE EMITTER sqs_out FROM notifications
+        TO sqs_main QUEUE 'dns_out_{{test_id}}' MODE <mode> RETRY POLICY BACKOFF 200ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -101,8 +101,8 @@ Feature: SQS name resolution
         'tls_ca_file' = '{{dev_tls}}/ca.pem',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_out FROM notifications
-        TO SQS sqs_main QUEUE dns_out_{{test_id}} MODE SINGLE RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE SQS QUEUE EMITTER sqs_out FROM notifications
+        TO sqs_main QUEUE 'dns_out_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 200ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -159,8 +159,8 @@ Feature: SQS name resolution
         'endpoint' = '{{sqs_forwarded_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_out FROM notifications
-        TO SQS sqs_main QUEUE dns_out_{{test_id}} MODE SINGLE RETRY POLICY BACKOFF 100ms MAX 1s
+      CREATE SQS QUEUE EMITTER sqs_out FROM notifications
+        TO sqs_main QUEUE 'dns_out_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE

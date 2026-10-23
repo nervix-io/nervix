@@ -83,77 +83,77 @@ Feature: Emitter batch containers
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE EMITTER record_json FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER record_json FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING json_codec
         INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_json_wire FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_json_wire FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING json_wire_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_cbor_wire FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_cbor_wire FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING cbor_wire_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_avro_wire FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_avro_wire FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING avro_wire_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_json FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_json FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING json_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_yaml FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_yaml FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING yaml_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_toml FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_toml FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING toml_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_cbor FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_cbor FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING cbor_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_xml FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_xml FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING xml_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_proto FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_proto FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING proto_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_proto_envelope FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_proto_envelope FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING proto_envelope_codec
         INHERIT ALL
@@ -230,29 +230,29 @@ Feature: Emitter batch containers
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE EMITTER identity_batches FROM events
-        TO KAFKA kafka_main TOPIC transformed_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER identity_batches FROM events
+        TO kafka_main TOPIC 'transformed_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING identity_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER mapped_batches FROM events
-        TO KAFKA kafka_main TOPIC transformed_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER mapped_batches FROM events
+        TO kafka_main TOPIC 'transformed_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING map_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER enveloped_batches FROM events
-        TO KAFKA kafka_main TOPIC transformed_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER enveloped_batches FROM events
+        TO kafka_main TOPIC 'transformed_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING envelope_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER expanded_batches FROM events
-        TO KAFKA kafka_main TOPIC transformed_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER expanded_batches FROM events
+        TO kafka_main TOPIC 'transformed_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING expansion_codec
         INHERIT ALL
@@ -337,15 +337,15 @@ Feature: Emitter batch containers
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE EMITTER json_batches FROM events
-        TO KAFKA kafka_main TOPIC json_batches_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER json_batches FROM events
+        TO kafka_main TOPIC 'json_batches_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING json_batch_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER proto_batches FROM events
-        TO KAFKA kafka_main TOPIC proto_batches_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER proto_batches FROM events
+        TO kafka_main TOPIC 'proto_batches_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING proto_batch_codec
         INHERIT ALL
@@ -437,8 +437,8 @@ Feature: Emitter batch containers
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE EMITTER subdivided FROM events
-        TO KAFKA kafka_main TOPIC subdivided_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER subdivided FROM events
+        TO kafka_main TOPIC 'subdivided_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING padded_pairs_codec
         INHERIT ALL
@@ -516,8 +516,8 @@ Feature: Emitter batch containers
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE EMITTER failing_batches FROM events
-        TO KAFKA kafka_main TOPIC failed_batches_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER failing_batches FROM events
+        TO kafka_main TOPIC 'failed_batches_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING failing_codec
         INHERIT ALL
@@ -591,8 +591,8 @@ Feature: Emitter batch containers
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE EMITTER syslog_frames FROM syslog_events
-        TO KAFKA kafka_main TOPIC syslog_frames_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER syslog_frames FROM syslog_events
+        TO kafka_main TOPIC 'syslog_frames_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING syslog_codec
         INHERIT ALL

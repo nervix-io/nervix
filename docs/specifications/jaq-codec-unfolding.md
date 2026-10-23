@@ -167,7 +167,7 @@ Acknowledgement stays at payload granularity, because the payload is what the ex
 
 A rejected payload is handled exactly as any payload that fails to decode in that source and delivery
 mode. The failure is reported as a runtime error event to attached sessions and logged. It is not a
-route message error, and no error record is produced for it. `NO_ACK` modes continue with the next
+route message error, and no error record is produced for it. `NO ACK` modes continue with the next
 payload, and acknowledged modes apply their retry and redelivery behavior. An HTTP endpoint still
 answers `202`, which means that the body was accepted, not that it decoded or how many messages it
 produced. A source that hands several payloads over as one unit, such as one Prometheus evaluation,

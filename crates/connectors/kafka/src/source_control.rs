@@ -19,13 +19,13 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Cancellation, ExecutionError, Executor, MemoryClass, StorageClass};
 use nervix_primitives::{
-    sync::{Arc, Semaphore, StdArc},
+    sync::{Semaphore, StdArc},
     task::JoinHandle,
     time::{Instant, timeout_at},
 };
 use rdkafka::{config::ClientConfig, error::KafkaResult};
 
-use super::{GroupCommitRequest, KafkaConsumer, KafkaSourceError};
+use super::{GroupCommitRequest, KafkaConsumer, KafkaSourceError, retirement::KafkaConsumerHandle};
 
 #[cfg_attr(
     nervix_lint,
@@ -77,7 +77,7 @@ impl KafkaControl {
     )]
     pub(super) async fn run<T, F>(
         &self,
-        consumer: &Arc<KafkaConsumer>,
+        consumer: &KafkaConsumerHandle,
         operation: F,
     ) -> Result<T, Report<KafkaSourceError>>
     where
@@ -130,7 +130,7 @@ impl KafkaControl {
     /// Dropping its JoinHandle does not cancel it or release its worker prematurely.
     pub(super) fn start_commit(
         &self,
-        consumer: &Arc<KafkaConsumer>,
+        consumer: &KafkaConsumerHandle,
         request: GroupCommitRequest,
     ) -> Result<CommitTask, Report<KafkaSourceError>> {
         let charge = self

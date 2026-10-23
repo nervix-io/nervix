@@ -22,13 +22,13 @@ mirror = "Polling and emitting send requests while an endpoint accepts requests.
 
 [entity."KAFKA TOPIC"]
 envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
-mirror = "Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Emit locators currently use the emitter grammar’s unquoted name, while ingest validates a quoted broker topic."
+mirror = "Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Both directions use the same quoted, case-preserving Kafka topic names."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."PULSAR TOPIC"]
 envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
 metadata = "The current topic declaration exposes properties as headers but no separate typed broker metadata namespace."
-mirror = "Consumption owns a subscription and broker positions; publication uses a producer receipt. Emit locators currently use the emitter grammar’s unquoted topic, while ingest validates a quoted Pulsar name."
+mirror = "Consumption owns a subscription and broker positions; publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."MQTT TOPIC"]
@@ -42,21 +42,21 @@ properties = "This entity declares no typed PROPERTIES block; any encoded record
 [entity."NATS SUBJECT"]
 envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
 metadata = "The current subject declaration exposes message headers but no typed subject or JetStream metadata namespace."
-mirror = "Subject consumption can join a queue group; publication chooses Core flush or JetStream acknowledgement. Emit subject names currently use the unquoted emitter grammar, and ingest validates quoted subscription subjects."
+mirror = "Subject consumption can join a queue group; publication chooses Core flush or JetStream acknowledgement. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."RABBITMQ QUEUE"]
 envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
 metadata = "The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace."
-mirror = "A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Queue names currently use the unquoted emitter grammar and quoted ingest validator respectively."
+mirror = "A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."REDIS PUBSUB"]
-emit_headers = "Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Emit channel names currently use the unquoted emitter grammar."
+emit_headers = "Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names."
 envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
-ingest_headers = "Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Emit channel names currently use the unquoted emitter grammar."
+ingest_headers = "Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names."
 metadata = "The current Pub/Sub declaration delivers payloads without a typed channel metadata namespace."
-mirror = "Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Emit channel names currently use the unquoted emitter grammar."
+mirror = "Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."PROMETHEUS QUERY"]
@@ -74,7 +74,7 @@ mirror = "The PULL listener receives payload frames and the PUSH socket sends th
 [entity."SQS QUEUE"]
 envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
 metadata = "The current queue declaration exposes message attributes through headers but no separate typed receipt metadata namespace."
-mirror = "Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Emit queue names currently use the unquoted emitter grammar."
+mirror = "Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."WEBSOCKETS CONNECTION"]

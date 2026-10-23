@@ -48,8 +48,7 @@ Feature: MongoDB emission
           'addr' = '{{mongodb_addr}}',
           'database' = 'nervix'
         };
-        CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_out_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+        CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications TO mongodb_client COLLECTION 'notifications_mongodb_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -128,7 +127,7 @@ Feature: MongoDB emission
           'addr' = '{{mongodb_addr}}',
           'database' = 'nervix'
         };
-        CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_conflict_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } ON CONFLICT ("mongodb_user_id") <conflict_action> MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications TO mongodb_client COLLECTION 'notifications_mongodb_conflict_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } ON CONFLICT ("mongodb_user_id") <conflict_action>
         BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -209,16 +208,14 @@ Feature: MongoDB emission
         'addr' = '{{mongodb_addr}}',
         'database' = 'nervix'
       };
-      CREATE EMITTER to_mongodb
+      CREATE MONGODB COLLECTION EMITTER to_mongodb
       FROM notifications
-      TO MONGODB mongodb_client INSERT TO COLLECTION poison_mongodb_{{test_id}}
-      VALUES {
+      TO mongodb_client COLLECTION 'poison_mongodb_{{test_id}}'
+      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
         "mongodb_user_id" = input.user_id,
         "mongodb_now" = NOW() AS STRING,
         "mongodb_action" = LOWER(input.action)
-      }
-      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-      BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+      } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
       SET error_code = error.code,
@@ -290,12 +287,10 @@ Feature: MongoDB emission
         'addr' = '{{mongodb_addr}}',
         'database' = 'nervix'
       };
-      CREATE EMITTER to_mongodb
+      CREATE MONGODB COLLECTION EMITTER to_mongodb
       FROM notifications
-      TO MONGODB mongodb_client INSERT TO COLLECTION batch_mongodb_{{test_id}}
-      VALUES { "mongodb_user_id" = input.user_id }
-      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-      BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      TO mongodb_client COLLECTION 'batch_mongodb_{{test_id}}'
+      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { "mongodb_user_id" = input.user_id } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
@@ -362,16 +357,14 @@ Feature: MongoDB emission
         'addr' = '{{mongodb_addr}}',
         'database' = 'nervix'
       };
-      CREATE EMITTER to_mongodb
+      CREATE MONGODB COLLECTION EMITTER to_mongodb
       FROM notifications
-      TO MONGODB mongodb_client INSERT TO COLLECTION range_mongodb_{{test_id}}
-      VALUES {
+      TO mongodb_client COLLECTION 'range_mongodb_{{test_id}}'
+      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
         "mongodb_user_id" = input.user_id,
         "mongodb_action" = LOWER(input.action)
       }
-      <conflict_clause>
-      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-      BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+      <conflict_clause> BATCH MAX MESSAGES 10 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
       SET error_code = error.code,
@@ -465,15 +458,15 @@ Feature: MongoDB emission
         'addr' = '{{mongodb_replica_set_addr}}&w=2',
         'database' = 'nervix'
       };
-      CREATE EMITTER to_mongodb
+      CREATE MONGODB COLLECTION EMITTER to_mongodb
       FROM notifications
-      TO MONGODB mongodb_client INSERT TO COLLECTION write_concern_mongodb_{{test_id}}
+      TO mongodb_client COLLECTION 'write_concern_mongodb_{{test_id}}'
+      MODE ACK RETRY POLICY BACKOFF 1s MAX 2s
       VALUES {
         "mongodb_user_id" = input.user_id,
         "mongodb_action" = LOWER(input.action)
       }
       <conflict_clause>
-      MODE ACK RETRY POLICY BACKOFF 1s MAX 2s
       BATCH MAX MESSAGES 2 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
