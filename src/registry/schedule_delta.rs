@@ -264,11 +264,11 @@ mod tests {
         AckMode, BranchKeyFingerprint, BranchSelection, ClusterNodeName, CommandExecutionReference,
         CreateEmitter, CreateIngestor, CreateJunction, CreatePlacement, CreateRelay, CreateVhost,
         CreateWasmProcessor, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink,
-        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy,
-        GeneralErrorPolicy, HttpEndpointSource, HttpSource, IngestSource, Literal, Model,
-        ModelKind, NodeRef, OutputBranch, PlacementPolicy, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, QuiesceLevel, RelayBranching, ResolvedBranching, RetryPolicy,
-        RouteConstruction, ScheduledNode, SchemaFingerprint, VhostTlsResource, WasmProcessorLimits,
+        EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy, GeneralErrorPolicy,
+        HttpEndpointSource, HttpSource, IngestSource, Literal, Model, ModelKind, NodeRef,
+        OutputBranch, PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        QuiesceLevel, RelayBranching, ResolvedBranching, RetryPolicy, RouteConstruction,
+        ScheduledNode, SchemaFingerprint, VhostTlsResource, WasmProcessorLimits,
         WasmStateResetScope, ZeroMqPushSink, ZeroMqSink,
     };
     use nonzero_ext::nonzero;
@@ -628,6 +628,12 @@ mod tests {
                 codec: named("event_codec"),
             },
             sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+                mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
                 client: named("sink_a"),
             }))),
             batch: None,
@@ -636,12 +642,6 @@ mod tests {
                 max_batch_size: "1MiB".to_string(),
             },
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: RouteConstruction::default(),
             materialized_state: Vec::new(),
@@ -676,6 +676,12 @@ mod tests {
 
         let mut swapped_emitter = emitter;
         swapped_emitter.sink = Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+            mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                retry_policy: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: named("sink_b"),
         })));
         let mut swapped = existing.clone();

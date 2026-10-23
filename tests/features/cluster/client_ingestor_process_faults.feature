@@ -2,7 +2,7 @@
 Feature: Client producers across real node process faults
   Every scenario runs three real nervix-server processes. The producer's session is served by one
   node, the client ingestor it publishes to executes on a second, and the ingestor's relay and its
-  acknowledging HTTP emitter run on the leader, so a fault in either of the first two leaves the
+  acknowledging HTTP REQUEST emitter run on the leader, so a fault in either of the first two leaves the
   sink and the cluster's quorum running.
 
   Scenario: Killing an ingestor owner leaves admitted batches uncertain and restores the producer
@@ -24,8 +24,8 @@ Feature: Client producers across real node process faults
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -122,8 +122,8 @@ Feature: Client producers across real node process faults
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -220,8 +220,8 @@ Feature: Client producers across real node process faults
       CREATE HTTP CLIENT sink_api CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY

@@ -340,16 +340,27 @@ impl OpenWindowFixture {
 
 impl RunningProcessor {
     async fn checkpoint(&self) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
-        timeout(WAIT, ScheduledNodeTask::checkpoint_via(&self.commands))
-            .await
-            .expect("the processor answers its checkpoint")
+        timeout(
+            WAIT,
+            ScheduledNodeTask::checkpoint_via(
+                &self.commands,
+                ProcessorCheckpointPurpose::OwnershipHandoff,
+            ),
+        )
+        .await
+        .expect("the processor answers its checkpoint")
     }
 
     /// The lifecycle the processor checkpoints once its restore has installed its branches.
     async fn restored_lifecycle(&self) -> PersistedRuntimeStateEntry {
         timeout(WAIT, async {
             loop {
-                match ScheduledNodeTask::checkpoint_via(&self.commands).await {
+                match ScheduledNodeTask::checkpoint_via(
+                    &self.commands,
+                    ProcessorCheckpointPurpose::OwnershipHandoff,
+                )
+                .await
+                {
                     Ok(lifecycle) => return lifecycle,
                     Err(error) => {
                         assert!(

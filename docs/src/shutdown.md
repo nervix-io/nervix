@@ -707,6 +707,11 @@ both follow.
 
 ### Sources
 
+A Redis Pub/Sub source stops its dedicated reader and joins it before close or suspend returns.
+Its bounded read-ahead queue is volatile, unadmitted input and is discarded when that subscription
+ends. Redis Pub/Sub provides no acknowledgement or replay for those messages; an idle probe does
+not change that delivery contract.
+
 An MQTT execution stop or ownership move retains its persistent broker sessions for resume.
 Removing or changing the declared input retires its external state separately, after its exact
 source tasks stop; a stopped domain still holds the typed plan needed for cleanup. See
@@ -789,7 +794,7 @@ Once the graph drain budget ends, terminal teardown cancels an emitter task wait
 attempt. It does not wait for that client's full attempt timeout or turn the canceled request into
 a record-specific success or rejection.
 
-A `NO_ACK` emitter on Kafka, Pulsar or MQTT QoS 0 reaches its completion point when its client
+A `NO ACK` emitter on Kafka, Pulsar or MQTT QoS 0 reaches its completion point when its client
 takes a record, so the drain can end while the client still holds records it has not sent. Every
 emitter therefore finishes its sink when it stops: the host calls the sink contract's finish hook
 once the emitter will publish nothing more, and records what the hook did. An emitter that the
@@ -799,12 +804,15 @@ the hook the domain drain timeout, cut short by the shutdown deadline. Kafka flu
 producer's local queue within that time, ignoring `linger.ms`; records still awaiting their delivery
 report when it ends are lost, and the emitter logs at `warn` how many, counting records alone and
 not the events waiting in librdkafka's queue, and reports them as its transient error and an error
-event. Pulsar retains the receipts of records accepted under `NO_ACK` and waits for them within
+event. Pulsar retains the receipts of records accepted under `NO ACK` and waits for them within
 that same finish deadline. A driver failure or still-unanswered receipts fail its finish; an
 expired deadline reports their count, without claiming the broker did not receive them. A Core
 NATS client holds records only after a write ran out of the client's `timeout_ms`, which leaves them
-unresolved and with the client; its finish flushes them within that same finish deadline, and a
-deadline that ends first reports how many the client still held. MQTT QoS 0 waits within that same
+unresolved and with the client; its finish flushes them within that same finish deadline. A
+deadline that ends first reports how many the client still held, and a client that fails while it
+flushes fails the finish with the driver's cause. A connection the client loses while it holds them
+discards those the client had taken for it but not yet written, and a finish whose flush completes
+after the client connected again still reports them flushed. MQTT QoS 0 waits within that same
 finish deadline for its client's event loop to write and flush the publishes the client still holds;
 a failed flush or publishes still unflushed when it ends fail its finish, which reports the failure
 or their count. Every other sink
@@ -952,6 +960,15 @@ remains. Connections that peers opened to the node close at once, together with 
 serving their streams, so a peer's request the node has not answered fails instead of completing.
 A forced ending skips this entirely, so peers observe the connections ending exactly as they do
 when a process crashes.
+
+Runtime teardown stops a Kafka ingestor's instances like any other source's, and each stopped
+instance hands its consumer to its retirement on the connector storage workers; see
+[Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement). Teardown does not
+wait for those retirements. The process's runtime does, as it stops once the application has
+returned: a retirement already running finishes, within the five seconds a joined consumer's
+coordinator has to answer its LeaveGroup request, and a consumer still waiting for a worker is
+destroyed by the runtime's stop, once the runtime runs no async work. The shutdown deadline bounds
+both, and a forced ending skips them as it skips every other destructor.
 
 The node's own OTLP trace exporter is a process service. After the application returns, its tracing
 guard closes resolver installation and asks the SDK to flush before the process drops its Tokio

@@ -389,18 +389,18 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             body: nervix_models::EmitterBody::Values,
             sink: Box::new(EmitSink::Syslog(SyslogSink::Collector(
                 SyslogCollectorSink {
+                    mode: nervix_models::SyslogCollectorPublishingMode::NoAck {
+                        retry_policy: nervix_models::RetryPolicy {
+                            backoff: "1s".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
                     client: named("syslog_forwarder"),
                 },
             ))),
             batch: None,
             flush_policy: nervix_models::FlushPolicy::Immediate,
             error_policies: nervix_models::ErrorPolicies::handled_by_log(),
-            publishing_mode: nervix_models::EmitterPublishingMode::NoAck {
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "1s".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: nervix_models::RouteConstruction::default(),
             materialized_state: Vec::new(),

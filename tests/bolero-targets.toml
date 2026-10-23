@@ -162,7 +162,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_nspl/corpus"
-domain_version = 12
+domain_version = 13
 features = []
 id = "nspl-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -177,7 +177,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 13
+domain_version = 14
 features = []
 id = "nspl-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -372,7 +372,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_nspl/corpus"
-domain_version = 10
+domain_version = 11
 features = []
 id = "nspl-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -402,7 +402,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 10
+domain_version = 11
 features = []
 id = "nspl-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -417,7 +417,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 10
+domain_version = 11
 features = []
 id = "nspl-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -432,7 +432,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 9
+domain_version = 10
 features = []
 id = "nspl-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -447,7 +447,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/names__bolero_names_round_trip_through_every_representation/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "models-names"
 invariant = "Every name type keeps valid text through parsing, display, conversions, JSON, the archive and model-name widening."
@@ -462,7 +462,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/names__bolero_name_text_is_validated_or_rejected/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "models-name-validation"
 invariant = "Name parsing matches the name rule on arbitrary text, and the JSON and archive decoders accept only canonical name text."
@@ -477,7 +477,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/external_names__bolero_external_names_round_trip_through_every_representation/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "models-external-names"
 invariant = "Every external name type keeps its exact text, case and punctuation through parsing, display, conversions, JSON and the archive."
@@ -492,7 +492,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/external_names__bolero_external_name_text_is_validated_or_rejected/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "models-external-name-validation"
 invariant = "On arbitrary text every external name type's parser, conversion, JSON decoder and archive decoder accept exactly the same text and keep it as written."
@@ -507,7 +507,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/connectors/__fuzz__/surface__bolero_generated_entities_state_only_what_their_entity_declares/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "models-connector-declarations"
 invariant = "A generated ingestor and emitter of every entity state only what their entity declares: a declared delivery or publishing mode whose required option choices they make, a quiesce mode their entity honors, a body of the declared form, batching the declared legality admits and a client of a declared connector."
@@ -717,7 +717,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus"
-domain_version = 9
+domain_version = 10
 features = []
 id = "models-archived-models"
 invariant = "Every generated Model family and statement form keeps every field through its archive, and a stored Model widens to requested versions and pins back to itself."
@@ -1062,7 +1062,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/__fuzz__/registry__storage__tests__bolero_registry_archived_models_round_trip/corpus"
-domain_version = 7
+domain_version = 8
 features = []
 id = "registry-archived-models"
 invariant = "The registry's current tagged Model archive restores the complete generated vocabulary Model, including full-width counts and pinned resource bindings."
@@ -1991,7 +1991,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/storage/__fuzz__/registry__storage__properties__bolero_registry_stored_models_list_back_from_memory_and_tables/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "registry-stored-models"
 invariant = "Committed Models named across the whole name rule list back complete and in key order, and read back by their own keys, from a reopened registry serving them from its journal or from the on-disk table a flush moved them into."
@@ -2006,7 +2006,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/storage/__fuzz__/registry__storage__properties__bolero_corrupt_registry_records_fail_typed_or_list_canonically/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "registry-stored-models-corruption"
 invariant = "Damaged registry records free every decoding allocation, and damaged records and keys either fail the listing with the registry's typed storage failure or list Models whose own keys are exactly the stored keys."
@@ -2920,6 +2920,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/iceberg/src/table_projection/__fuzz__/table_projection__tests__bolero_staged_columns_land_in_the_table_columns_of_their_names/corpus"
+domain_version = 1
+features = []
+id = "iceberg-table-projection"
+invariant = "Over generated table schemas, required columns, nullable mappings, column orders and subsets, a projection is refused exactly when a required column is left out or mapped from an expression that can produce a null, naming the first such column; otherwise every staged value lands unchanged in the table column of its name, in the table's Arrow form, and every column VALUES leaves out is null."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-connector-iceberg"
+random_iterations = 256
+source = "crates/connectors/iceberg/src/table_projection/tests.rs"
+test = "table_projection::tests::bolero_staged_columns_land_in_the_table_columns_of_their_names"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/mqtt/src/__fuzz__/tests__bolero_measured_packets_are_the_bytes_the_client_writes/corpus"
 domain_version = 1
 features = []
@@ -2946,6 +2961,21 @@ package = "nervix-connector-postgres"
 random_iterations = 256
 source = "crates/connectors/postgres/src/lib.rs"
 test = "tests::bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/mongodb/src/__fuzz__/tests__bolero_failed_write_answers_partition_the_write/corpus"
+domain_version = 1
+features = []
+id = "mongodb-write-answers"
+invariant = "Every row of a failed unordered MongoDB insert_many or bulk_write, under any mix of applied results of each kind, refusals for good and for retry, repeated refusals, answers naming documents beyond the write and a write concern failure, is delivered when the server applied it and refused it nowhere, rejected with its code when one refusal for good names it, and otherwise left unresolved; the write fails exactly when a row is unresolved, an answer names a document beyond the write, or the write concern failed, and the failure names the request and the write concern's code."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-connector-mongodb"
+random_iterations = 256
+source = "crates/connectors/mongodb/src/lib.rs"
+test = "tests::bolero_failed_write_answers_partition_the_write"
 test_target = "lib"
 
 [[target]]

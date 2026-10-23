@@ -50,8 +50,8 @@ Feature: Process shutdown deadline
         'protocol' = 'tcp',
         'addr' = '{{syslog_emit_addr}}'
       };
-      CREATE EMITTER held_output FROM held_events
-        TO SYSLOG unreachable_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      CREATE SYSLOG COLLECTOR EMITTER held_output FROM held_events
+        TO unreachable_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING held_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE

@@ -92,8 +92,8 @@ use nervix_models::{
 mod fixture_vocabulary {
     pub(super) use nervix_models::{
         ClusterSchedule, CreateClientHttp, CreateClientPrometheus, CreateClientRabbitMq,
-        CreateEmitter, CreateIngestor, CreateReingestor, CreateRelay, DomainSchedule,
-        EmitterPublishingMode, IngestSource, Model, OutputBranch, ScheduledNode, ScheduledNodes,
+        CreateEmitter, CreateIngestor, CreateReingestor, CreateRelay, DomainSchedule, IngestSource,
+        Model, OutputBranch, ScheduledNode, ScheduledNodes,
     };
 }
 #[cfg(test)]
@@ -529,8 +529,9 @@ use planning::{
 use processor_branch_restore::PendingProcessorBranchRestore;
 use processor_branch_task::{
     PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, PreparedProcessorBranch, ProcessorBranchHandoff,
-    ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError, ProcessorNodeCommand,
-    ProcessorSnapshotRequest, SpawnedSnapshotTask,
+    ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,
+    ProcessorCheckpointPurpose, ProcessorNodeCommand, ProcessorSnapshotRequest,
+    SpawnedSnapshotTask,
 };
 pub(in crate::runtime) use processor_branch_task::{
     ProcessorRuntimeContext, spawn_processor_node_runtime,

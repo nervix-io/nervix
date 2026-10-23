@@ -19,26 +19,25 @@ use nervix_models::{
     AckWindow, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterIngestorError,
     BatchMessageLimit, BatchUnavailability, ClickHouseSink, ClickHouseSinkEntity,
     ClickHouseTableSink, ClickHouseValueMapping, ClientConsumerSink, ClientIngestMode, ClientName,
-    ClientSinkEntity, ClientSourceEntity, CollectionName, ConnectorKind, EmitSink, EmitSinkKind,
-    EmitterBatchLegality, EmitterBatchPolicy, EmitterBodyForm, EmitterPublishingMode,
-    EndpointIngestMode, EndpointType, Expression, HeaderLayout, HeaderModel, HttpEndpointSource,
-    HttpSinkEntity, HttpSource, HttpSourceEntity, IcebergCatalog, IcebergSink, IcebergSinkEntity,
-    IcebergStorageBackend, IcebergTableSink, IngestAcknowledgement, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestSource, IngestSourceKind, KafkaIngestMode, KafkaOffsetMode,
-    KafkaSinkEntity, KafkaSourceEntity, KafkaTopicSink, KafkaTopicSource, Literal, Model,
-    ModelKind, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MongoDbSinkEntity,
-    MqttIngestMode, MqttQos, MqttSession, MqttSinkEntity, MqttSourceEntity, MqttTopicSource,
-    MySqlConflictAction, MySqlSink, MySqlSinkEntity, MySqlTableSink, NatsSinkEntity,
-    NatsSourceEntity, OtelLogsSink, OtelMappings, OtelMetric, OtelMetricKind, OtelMetricsSink,
-    OtelSink, OtelSinkEntity, OtelTracesSink, ParseAsType, PostgresConflictAction, PostgresSink,
-    PostgresSinkEntity, PostgresTableSink, PrometheusSourceEntity, PulsarSinkEntity,
-    PulsarSourceEntity, PulsarTopicSink, RabbitMqSinkEntity, RabbitMqSourceEntity,
-    RedisPubSubIngestMode, RedisPubSubSink, RedisPubSubSource, RedisSink, RedisSinkEntity,
-    RedisSource, RedisSourceEntity, RetryPolicy, SchemaName, SentryEventSink, SentrySink,
-    SentrySinkEntity, SinkClientReference, SinkReference, SinkValueMapping, SourceMetadataScope,
-    SourceReferenceKind, SqsSinkEntity, SqsSourceEntity, SyslogSinkEntity, SyslogSourceEntity,
-    TableName, WebsocketsEndpointSource, WebsocketsSourceEntity, ZeroMqSinkEntity,
-    ZeroMqSourceEntity,
+    ClientSinkEntity, ClientSourceEntity, ConnectorKind, EmitSink, EmitSinkKind,
+    EmitterBatchLegality, EmitterBatchPolicy, EmitterBodyForm, EndpointIngestMode, EndpointType,
+    Expression, HeaderLayout, HeaderModel, HttpEndpointSource, HttpSinkEntity, HttpSource,
+    HttpSourceEntity, IcebergCatalog, IcebergSink, IcebergSinkEntity, IcebergTableSink,
+    IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
+    IngestSourceKind, KafkaIngestMode, KafkaOffsetMode, KafkaSinkEntity, KafkaSourceEntity,
+    KafkaTopicSink, KafkaTopicSource, Literal, Model, ModelKind, MongoDbCollectionSink,
+    MongoDbConflictAction, MongoDbSink, MongoDbSinkEntity, MqttIngestMode, MqttQos, MqttSession,
+    MqttSinkEntity, MqttSourceEntity, MqttTopicSource, MySqlConflictAction, MySqlSink,
+    MySqlSinkEntity, MySqlTableSink, NatsSinkEntity, NatsSourceEntity, OtelLogsSink, OtelMappings,
+    OtelMetric, OtelMetricKind, OtelMetricsSink, OtelSink, OtelSinkEntity, OtelTracesSink,
+    ParseAsType, PostgresConflictAction, PostgresSink, PostgresSinkEntity, PostgresTableSink,
+    PrometheusSourceEntity, PulsarSinkEntity, PulsarSourceEntity, PulsarTopicSink,
+    RabbitMqSinkEntity, RabbitMqSourceEntity, RedisPubSubIngestMode, RedisPubSubSink,
+    RedisPubSubSource, RedisSink, RedisSinkEntity, RedisSource, RedisSourceEntity, RetryPolicy,
+    SchemaName, SentryEventSink, SentrySink, SentrySinkEntity, SinkClientReference, SinkReference,
+    SinkValueMapping, SourceMetadataScope, SourceReferenceKind, SqsSinkEntity, SqsSourceEntity,
+    SyslogSinkEntity, SyslogSourceEntity, WebsocketsEndpointSource, WebsocketsSourceEntity,
+    ZeroMqSinkEntity, ZeroMqSourceEntity,
 };
 use rstest::rstest;
 use strum::IntoEnumIterator as _;
@@ -77,76 +76,11 @@ fn retry_policy() -> RetryPolicy {
     }
 }
 
-/// One publishing mode of every kind the vocabulary defines, by its variant name.
-fn publishing_modes() -> Vec<(&'static str, EmitterPublishingMode)> {
-    let confirmed = || (AckWindow::Sequential, "5s".to_owned(), retry_policy());
-    let (window, ack_timeout, retry) = confirmed();
-    let client_ack = EmitterPublishingMode::ClientAck {
-        window,
-        ack_timeout,
-        retry_policy: retry,
-    };
-    let (window, ack_timeout, retry) = confirmed();
-    let broker_ack = EmitterPublishingMode::BrokerAck {
-        window,
-        ack_timeout,
-        retry_policy: retry,
-    };
-    let (window, ack_timeout, retry) = confirmed();
-    let mqtt_qos_1 = EmitterPublishingMode::MqttQos1 {
-        window,
-        ack_timeout,
-        retry_policy: retry,
-    };
-    let (window, ack_timeout, retry) = confirmed();
-    let mqtt_qos_2 = EmitterPublishingMode::MqttQos2 {
-        window,
-        ack_timeout,
-        retry_policy: retry,
-    };
-    let (window, ack_timeout, retry) = confirmed();
-    let jet_stream = EmitterPublishingMode::NatsJetStream {
-        window,
-        ack_timeout,
-        retry_policy: retry,
-    };
-    vec![
-        ("ClientAck", client_ack),
-        (
-            "NoAck",
-            EmitterPublishingMode::NoAck {
-                retry_policy: retry_policy(),
-            },
-        ),
-        ("BrokerAck", broker_ack),
-        (
-            "MqttQos0",
-            EmitterPublishingMode::MqttQos0 {
-                retry_policy: retry_policy(),
-            },
-        ),
-        ("MqttQos1", mqtt_qos_1),
-        ("MqttQos2", mqtt_qos_2),
-        ("NatsJetStream", jet_stream),
-        (
-            "SqsSingle",
-            EmitterPublishingMode::SqsSingle {
-                retry_policy: retry_policy(),
-            },
-        ),
-        (
-            "SqsBatch",
-            EmitterPublishingMode::SqsBatch {
-                retry_policy: retry_policy(),
-            },
-        ),
-        (
-            "RequestAck",
-            EmitterPublishingMode::RequestAck {
-                retry_policy: retry_policy(),
-            },
-        ),
-    ]
+/// Every policy kind observed by the shared capability catalog.
+fn publishing_modes() -> Vec<(String, nervix_models::EmitterPublishingModeKind)> {
+    nervix_models::EmitterPublishingModeKind::iter()
+        .map(|kind| (format!("{kind:?}"), kind))
+        .collect()
 }
 
 /// Fails when two pairs share a phrase, which would make one of them unaddressable.
@@ -722,13 +656,8 @@ fn every_sink_pair_declares_its_headers_codec_batching_and_publishing_modes() {
         );
         for (name, mode) in publishing_modes() {
             assert_eq!(
-                kind.accepts_publishing_mode(&mode),
-                expected.modes.contains(&name),
-                "{kind:?} {name}"
-            );
-            assert_eq!(
-                declared.publishing_modes.contains(&mode.kind()),
-                expected.modes.contains(&name),
+                declared.publishing_modes.contains(&mode),
+                expected.modes.contains(&name.as_str()),
                 "{kind:?} {name}"
             );
         }
@@ -756,7 +685,7 @@ fn a_sink_states_what_its_pair_declares() {
             let declared = kind.capabilities();
             assert_eq!(sink.kind(), kind);
             assert_eq!(sink.connector(), kind.connector());
-            assert_eq!(sink.transport_label(), kind.connector().keyword());
+            assert_eq!(sink.transport_label(), kind.phrase());
             assert_eq!(sink.capabilities(), declared);
             assert_eq!(sink.requires_codec(), declared.body.requires_codec());
             assert_eq!(sink.batch_legality(), declared.batch);
@@ -764,21 +693,25 @@ fn a_sink_states_what_its_pair_declares() {
                 sink.requires_batch_transformation(),
                 declared.requires_batch_transformation
             );
-            for (name, mode) in publishing_modes() {
-                assert_eq!(
-                    sink.accepts_publishing_mode(&mode),
-                    kind.accepts_publishing_mode(&mode),
-                    "{kind:?} {name}"
-                );
-            }
+            assert!(
+                declared
+                    .publishing_modes
+                    .contains(&sink.publishing().kind())
+            );
             match sink.reference() {
                 SinkReference::Client(SinkClientReference { client, connector }) => {
                     assert_eq!(sink.client(), Some(client));
-                    assert_eq!(sink.client_connector(), Some(connector));
+                    assert!(declared.reference.admits_client(connector));
+                }
+                SinkReference::StorageClient(client) => {
+                    assert_eq!(sink.client(), Some(client));
+                    assert!(matches!(
+                        declared.reference,
+                        nervix_models::SinkReferenceKind::StorageClient(_)
+                    ));
                 }
                 SinkReference::Schema(_) => {
                     assert_eq!(sink.client(), None);
-                    assert_eq!(sink.client_connector(), None);
                     assert_eq!(kind, EmitSinkKind::Client(ClientSinkEntity::Consumer));
                 }
             }
@@ -839,9 +772,14 @@ fn every_client_model_names_the_connector_it_configures_and_no_other_model_does(
     );
 }
 
-fn iceberg_sink(backend: IcebergStorageBackend) -> IcebergTableSink {
+fn iceberg_sink() -> IcebergTableSink {
     IcebergTableSink {
-        backend,
+        mode: nervix_models::IcebergTablePublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("lake"),
         table: named("events"),
         values: vec![mapping("value")],
@@ -854,18 +792,14 @@ fn iceberg_sink(backend: IcebergStorageBackend) -> IcebergTableSink {
     }
 }
 
-#[rstest]
-#[case::s3(IcebergStorageBackend::S3, ConnectorKind::S3)]
-#[case::gcs(IcebergStorageBackend::Gcs, ConnectorKind::Gcs)]
-#[case::azure_blob(IcebergStorageBackend::AzureBlob, ConnectorKind::AzureBlob)]
-fn an_iceberg_sink_writes_through_the_object_store_its_backend_names(
-    #[case] backend: IcebergStorageBackend,
-    #[case] connector: ConnectorKind,
-) {
-    let sink = EmitSink::from(iceberg_sink(backend));
-    assert_eq!(backend.connector(), connector);
-    assert_eq!(sink.client_connector(), Some(connector));
-    assert_eq!(sink.client(), Some(&named::<ClientName>("lake")));
+#[test]
+fn an_iceberg_destination_retains_its_storage_client_for_resolution() {
+    let sink = EmitSink::from(iceberg_sink());
+    let SinkReference::StorageClient(client) = sink.reference() else {
+        panic!("storage reference");
+    };
+    assert_eq!(client, &named::<ClientName>("lake"));
+    assert_eq!(sink.client(), Some(client));
     let catalog: ClientName = named("catalog");
     assert_eq!(
         sink.catalog_client(),
@@ -911,14 +845,32 @@ fn an_otel_sink_names_its_signal_by_its_entity() {
         kind: OtelMetricKind::Gauge,
     };
     let logs = OtelSink::from(OtelLogsSink {
+        mode: nervix_models::OtelLogsPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("collector"),
         mappings: otel_mappings(),
     });
     let traces = OtelSink::from(OtelTracesSink {
+        mode: nervix_models::OtelTracesPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("collector"),
         mappings: otel_mappings(),
     });
     let metrics = OtelSink::from(OtelMetricsSink {
+        mode: nervix_models::OtelMetricsPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("collector"),
         metric: metric.clone(),
         mappings: otel_mappings(),
@@ -942,7 +894,6 @@ fn an_otel_sink_names_its_signal_by_its_entity() {
 #[test]
 fn direct_value_mappings_cover_all_external_value_sections() {
     let client: ClientName = named("sink");
-    let table: TableName = named("events");
     let mapping = |column: &str| ClickHouseValueMapping {
         column: column.to_owned(),
         expression: Expression::Literal(Literal::String(column.to_owned())),
@@ -950,6 +901,12 @@ fn direct_value_mappings_cover_all_external_value_sections() {
     let single_value = || vec![mapping("value")];
     let sinks = [
         EmitSink::from(OtelLogsSink {
+            mode: nervix_models::OtelLogsPublishingMode::Ack {
+                retry_policy: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: client.clone(),
             mappings: OtelMappings {
                 values: single_value(),
@@ -959,32 +916,61 @@ fn direct_value_mappings_cover_all_external_value_sections() {
             },
         }),
         EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
+            mode: nervix_models::ClickHouseTablePublishingMode::Ack {
+                retry_policy: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: client.clone(),
-            table: table.clone(),
+            table: named("events"),
             values: single_value(),
         })),
         EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
+            mode: nervix_models::PostgresTablePublishingMode::Ack {
+                retry_policy: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: client.clone(),
-            table: table.clone(),
+            table: named("events"),
             values: single_value(),
             conflict_action: PostgresConflictAction::None,
         })),
         EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
+            mode: nervix_models::MySqlTablePublishingMode::Ack {
+                retry_policy: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: client.clone(),
-            table: table.clone(),
+            table: named("events"),
             values: single_value(),
             conflict_action: MySqlConflictAction::None,
         })),
         EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
+            mode: nervix_models::MongoDbCollectionPublishingMode::Ack {
+                retry_policy: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: client.clone(),
-            collection: named::<CollectionName>("events"),
+            collection: named::<nervix_models::MongoDbCollectionName>("events"),
             values: single_value(),
             conflict_action: MongoDbConflictAction::None,
         })),
         EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
-            backend: IcebergStorageBackend::S3,
+            mode: nervix_models::IcebergTablePublishingMode::Ack {
+                retry_policy: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: client.clone(),
-            table,
+            table: named("events"),
             values: single_value(),
             location: "s3://bucket/events".to_owned(),
             catalog: IcebergCatalog::Rest {
@@ -1008,7 +994,12 @@ fn direct_value_mappings_cover_all_external_value_sections() {
         assert_eq!(columns, expected, "{sink:?}");
     }
 
-    let sink_without_values = EmitSink::Sentry(SentrySink::Event(SentryEventSink { client }));
+    let sink_without_values = EmitSink::Sentry(SentrySink::Event(SentryEventSink {
+        client,
+        mode: nervix_models::SentryEventPublishingMode::Ack {
+            retry_policy: retry_policy(),
+        },
+    }));
     assert_eq!(sink_without_values.direct_value_mappings().count(), 0);
 }
 
@@ -1016,6 +1007,12 @@ fn direct_value_mappings_cover_all_external_value_sections() {
 fn two_sinks_are_one_definition_when_only_their_client_differs() {
     let kafka = |client: &str, topic: &str| {
         EmitSink::from(KafkaTopicSink {
+            mode: nervix_models::KafkaTopicPublishingMode::NoAck {
+                retry_policy: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: named(client),
             topic: named(topic),
         })
@@ -1025,6 +1022,12 @@ fn two_sinks_are_one_definition_when_only_their_client_differs() {
     assert!(!kafka("first", "orders").same_definition(&kafka("first", "payments")));
 
     let pulsar = EmitSink::from(PulsarTopicSink {
+        mode: nervix_models::PulsarTopicPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("first"),
         topic: named("orders"),
     });
@@ -1032,6 +1035,14 @@ fn two_sinks_are_one_definition_when_only_their_client_differs() {
 
     let consumer = |schema: &str| {
         EmitSink::from(ClientConsumerSink {
+            mode: nervix_models::ClientConsumerPublishingMode::Ack {
+                window: nervix_models::AckWindow::Sequential,
+                ack_timeout: "30s".to_string(),
+                retry_policy: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             schema: named::<SchemaName>(schema),
         })
     };
@@ -1041,7 +1052,7 @@ fn two_sinks_are_one_definition_when_only_their_client_differs() {
     assert!(!kafka("first", "orders").same_definition(&consumer("orders")));
 
     let iceberg = |client: &str, catalog: &str| {
-        let mut sink = iceberg_sink(IcebergStorageBackend::S3);
+        let mut sink = iceberg_sink();
         sink.client = named(client);
         sink.catalog = IcebergCatalog::Rest {
             client: named(catalog),
@@ -1079,6 +1090,7 @@ fn naming_another_client_keeps_a_sink_of_every_pair_the_same_definition() {
                 | EmitterBatchLegality::Unavailable { .. } => None,
             };
             let alter = AlterEmitter {
+                kind,
                 emitter: original.name.clone(),
                 operations: vec![AlterEmitterOperation::SetClient {
                     client: other.clone(),
@@ -1223,6 +1235,12 @@ fn an_entity_model_converts_into_every_enum_that_holds_it() {
     );
 
     let sink = RedisPubSubSink {
+        mode: nervix_models::RedisPubSubPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("cache"),
         channel: named("orders"),
     };

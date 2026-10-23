@@ -107,20 +107,21 @@ Feature: Interconnect health coordination
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" eventually reports leader "node-1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus statements
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA health_event ( id I64 );
       CREATE RELAY baseline_health_events SCHEMA health_event UNBRANCHED;
       START;
       """
+    And client "health_probe" is connected to node "node-1"
     And health requests from node "node-1" to node "node-2" pause before responding
     And health requests from node "node-1" to node "node-3" pause before responding
     Then the health response pause from node "node-1" to node "node-2" is reached
     And within "30s" the health response pause from node "node-1" to node "node-3" is reached
     When the health response pause from node "node-1" to node "node-3" is released
     Then node "node-1" eventually reports interconnect to "node-3" as "connected"
-    And within "9s" these NSPL commands complete on node "node-1"
+    And within "9s" client "health_probe" completes these Plexus statements
       """
       CREATE USER health_probe_admin WITH PASSWORD 'created-password';
       CREATE RELAY independent_health_events SCHEMA health_event UNBRANCHED;

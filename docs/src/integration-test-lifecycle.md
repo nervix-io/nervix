@@ -62,6 +62,12 @@ same oracle runs on one and three nodes. The broker's native round-trip control 
 in the scenario and again during teardown before diagnostics or node drain, including after a
 failed assertion. It does not change a product deadline or use a readiness sleep.
 
+The Kafka consumer-retirement scenario holds the same broker's replies before it drops an ingestor
+whose eight instances joined their group, so destroying each consumer waits for its LeaveGroup
+answer. It waits for a running connector-storage job before sending a record through an HTTP
+ingestor, then releases the replies and waits for the class's pending and running jobs to return to
+zero. The same oracle runs on one and three nodes.
+
 The Pulsar fault forwarder decodes broker frames and advertises its own plain-text service URL
 in topic lookup responses, retaining every other command and payload field. The driver's discovered
 producer and consumer connections therefore stay behind the same pause gate as bootstrap traffic.
@@ -149,9 +155,15 @@ scenarios out by default: their steps assert a detector an ordinary build does n
 The stressed endpoint ACK lifecycle examples use `@deloxide_stress_endpoint_ack` in their own
 bounded diagnostic invocation. They run serially as the other stressed lifecycle examples do,
 with a 900-second process bound and the existing 360-second teardown reserve. The baseline
-lifecycle invocation keeps its 1,800-second bound; all phases share the unchanged 4,800-second
-selection workload budget. Inventory discovery checks both groups completely, and the ordinary
+lifecycle invocation has a 2,700-second bound; all phases share the 4,800-second
+selection workload budget. Inventory discovery checks every group completely, and the ordinary
 suite continues to admit these examples beside its other scenarios.
+
+The six transaction-retention examples use `@deloxide_stress_transaction_retention` in the
+`stress-transaction-retention` invocation, before the baseline lifecycle process. It uses the
+same 900-second process bound and 360-second teardown reserve. Inventory discovery checks that
+the baseline, endpoint ACK and retention groups are complete and disjoint. The separate serial
+phase accounts for every retention example within the selection's workload budget.
 
 The [diagnostic lane](#diagnostic-lane) also selects the ordinary `@restore_installation`,
 `@client_ingestor_alter_drain`, `@memory_pressure_pause`, `@client_io_03_consumer_restore`,
@@ -225,6 +237,22 @@ drops one it already forwarded, so a repeated payment yields its summary exactly
 rows keep `MODE NO ACK`: a window acknowledges a row only when it steps past it, so an acknowledged
 post of one row would wait for the rows after it.
 
+The fixture of guest saves above the bulk budget feeds its WASM processor from a Kafka ingestor in
+`MODE ACK SEQUENTIAL`, and every input ends with a 40 MiB guest checkpoint that the processor's
+replica confirms before the ingestor reads the next input. Every wait that follows published input
+covers at least one such checkpoint, and a wait for a sent-message total up to two in sequence. The
+product gives each checkpoint ninety seconds to reach its replica, so these waits are bounded at 300
+seconds. On a loaded runner, two checkpoints that each stayed within their budget outlasted the
+former 120-second bound of a sent-message total. A sent total counts the inputs the ingestor sent,
+not the ones the guest has saved, so before its first cut the fixture waits until both branches have
+committed the save of their third input, every replica has confirmed it and no checkpoint has
+failed. No cut then drains an input still on its way, whose checkpoint could fail under load and
+redeliver the input between the cuts the fixture compares. It then holds the next guest checkpoint
+before its save across the source domain's three cuts. A cut that asked a guest to save again would
+stall on that checkpoint, so the fixture shows that every cut archives the saves the branches
+committed. A checkpoint that misses its ninety seconds still ends the attempt, because the
+redelivered input would no longer match the exact sent totals and archives the fixture compares.
+
 The large materialized restore fixture prepares its rows through an acknowledged client producer.
 One round has a 120-second budget and one in-flight batch, including explicit replays of reported
 processing failures. Each replay replaces the same materialized keys with the same complete values,
@@ -264,20 +292,33 @@ reach the scenario directly.
 
 The Postgres image starts a temporary Unix-socket server to initialize its database, then starts
 the final TCP/TLS server. The fixture waits for both readiness messages before publishing either
-endpoint. Its plaintext and certificate-verified TLS observation clients belong to that same
-suite environment. Each transport shares one SQLx pool with a maximum of two connections for short
-setup and observation queries across all scenarios. A deliberate table-lock controller detaches
-its physical SQLx connection before waiting for release, returning the observation permit. Its
-scenario release handle owns that connection's lifetime, so concurrent lock holders cannot consume
-the permits their own observation queries need. The environment closes both observation pools before
-stopping their container, including when scenarios still retain client handles. The existing suite
-teardown budget bounds that cleanup.
+endpoint. Initialization stores the password's SCRAM-SHA-256 verifier with one key-derivation
+round instead of the image's 4096. A SQLx client derives its key in as many rounds as the verifier
+names and yields to the scheduler after every fifth, so 4096 rounds hand an establishing connection
+back to the scheduler more than 800 times. On the suite's busy runtime each of those returns waits
+for a worker's whole run queue. Establishing one connection that way took longer than the 30-second
+pool wait, while queries on connections already established were unaffected. With one round, every
+connection the suite establishes, the product's included, still authenticates with SCRAM-SHA-256
+and completes in a few polls.
+
+The fixture's plaintext and certificate-verified TLS observation clients belong to that same suite
+environment. Each transport shares one SQLx pool of two connections for short setup and observation
+queries across all scenarios. The pool establishes both connections when the environment opens it
+and keeps them until it closes, with no idle or lifetime retirement, so an observer waits only for
+another observer's query and never for a connection to be established. A deliberate table-lock
+controller connects on its own with the same transport's options, instead of taking one of the
+pool's connections. Its scenario release handle owns that connection's lifetime, so a held lock
+takes neither an observation permit nor an established observation connection. The environment
+closes both observation pools before stopping their container, including when scenarios still
+retain client handles. The existing suite teardown budget bounds that cleanup.
 
 The Postgres fixture scenarios exercise 48 concurrent observers retaining three client handles
 each over plaintext and TLS, and compare every returned text, byte sequence and observer number.
 Every query also checks its actual transport through Postgres's connection statistics. Two further
 examples hold locks through the existing fixture controller while another observer queries, once
-over each transport.
+over each transport, and require the observer's connection to have been established before both
+lock holders connected. Two more establish a connection with each transport's observation options
+and require it to complete within 32 polls of its future.
 The database batch scenarios retain their one- and three-node row, field, write-size, conflict,
 rejection and ambiguous-write assertions. Fixture concurrency adds no scenario admission limit.
 
@@ -423,8 +464,10 @@ qualification evidence.
 The `checks`, `tests`, and `scenarios` jobs use Go 1.26 and check out the source before installing
 their pinned Go formatters. This makes the installer and the later cache publication and report
 scripts available when a tool setup step fails. The installer retains every attempt in a
-`go-tool-bootstrap-<job>` artifact and retries only a checksum database transport error within its
-eight-minute budget. The publication and report steps check for their scripts before calling them,
+`go-tool-bootstrap-<job>` artifact and retries transport errors reading Go's public module proxy or
+checksum database within its eight-minute budget. Checksum verification remains mandatory; compiler,
+version and verification failures end installation immediately. The publication and report steps
+check for their scripts before calling them,
 so a failed checkout does not add a second failure that obscures the original one. The jobs'
 existing deadlines and test budgets are unchanged.
 
@@ -594,10 +637,27 @@ through a fresh client under the original reference. The recovery orchestration 
 runner, so delayed step polling cannot restart the wait bound or leave the second cut held. The
 archive must retain both quiesced cuts and the measured first hold.
 
+The duration window outline establishes its observation boundary through a public subscription:
+it first waits for a probe branch's window to emit, then submits all four interleaved tenant rows
+as one HTTP payload unfolded into a decoded batch. Explicit source timestamps are already due
+when that batch arrives, while `TIMESTAMP NOW` gives the whole batch one fresh ingestion snapshot.
+Each branch receives its two rows together before its next timer check. The outline retains both
+rates, one- and three-node clusters, exact counts and sums, timestamp preservation and its
+ten-second assertion bounds. Independent HTTP requests would allow domain-time completion between
+rows, even when their explicit source timestamps are identical.
+
 The reorderer sorting fixtures submit their ordering set as one JSON array and unfold it with JAQ
 into one input batch. Each route sorts the rows buffered at its own flush; separate HTTP requests
 do not establish a single sorting window. The one-node and three-node examples retain their exact
 ordered payloads, tenant keys, and existing flush and receive deadlines.
+
+Redis burst fixtures observe subscriber readiness and then submit all publications as one driver
+pipeline. Every reply must report a subscriber; a partially accepted burst fails without replay.
+This keeps the bounded-intake scenario's 256 publications inside its held entity gate without
+requiring 256 separately scheduled request/reply round trips. The scenario retains its 30-second
+gate deadline, exact BUFFER and DROP counters, and observation budgets. The scripted harness peer
+withholds every publication reply until it has received the complete burst, checking the same
+pipeline owner used by the public step.
 
 The combined message/duration window outline publishes each message-threshold group as one
 decoded batch, interleaving two branches and checking their exact counts, sums and keys. After
@@ -616,7 +676,7 @@ storage and CPU load, which canonical producers on 21 October 2026 measured at 7
 the same archive, and 24 such scenarios beside each other on a disk-backed host at 25 to 53
 seconds. The former 30-second catch-up bound held only on a lightly loaded runner.
 
-The boundary between them is kept in four places.
+The harness keeps these boundaries explicit.
 
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
   with its execution identity, redirects, and reconnects. This includes the transaction qualification
@@ -670,6 +730,16 @@ The boundary between them is kept in four places.
   scenario releases it. Each barrier is one-shot and uses the shared pause owner's reached and
   released observations. The scenario asserts the original execution reference's outcome and a
   dependent command through the public session protocol; it adds no setup delay or request retry.
+- **Timed control probes.** The silent-peer health scenario connects a named production client
+  before holding the peer's health response. Its nine-second probe then sends the user creation,
+  relay creation and cluster-status statements in order on that client, under one deadline. The
+  bound covers command admission, mutation, visibility and the complete reply, including any recovery
+  the production client requires. Initial connection and authentication precede the fault and the
+  measurement. The probe runs on an owned runtime task, with its absolute deadline captured before
+  dispatch, and records completion there; a delayed Cucumber runner only learns that retained
+  result later. The other peer must report connected, and the new relay's scheduled owner must be
+  observed before the silent response is released. This is a harness measurement of isolation,
+  not a different product deadline.
 - **Cleanup.** Scenario cleanup runs after the scenario's assertions, so it spends the harness
   cleanup budget rather than waiting for a product shutdown deadline. A scenario whose subject is
   shutdown, drain, or deadline expiry stops its nodes itself, inside its body, under the product
@@ -931,6 +1001,15 @@ observations establish retirement on both owners. Fresh-clock sampling has direc
 unit coverage; this public scenario proves initial-state retirement, branch isolation and exact fresh
 pairings without assuming the phase of an owner's next scan. Logical TTLs, domain clock rates,
 physical scan cadence and correlation policy retain their own contracts.
+
+The materialized-state expiration and recreation outline gives its fixture a 30-second branch TTL,
+allows 30 seconds to observe each complete row and 60 seconds to observe retirement, and posts both
+recreated branches concurrently. A short fixture lifetime can end while the shared scenario runner
+is delayed between an HTTP response and a state query; extending only the query's wait cannot make
+an expired row visible again. The outline still requires the initial row, an empty publication after
+expiration, and the exact recreated keys and payloads on one- and three-node clusters. These bounds
+belong to the fixture and its observations; product retention and deadline policies keep their own
+contracts.
 
 Collection and route-flush timing assertions measure observed row arrival from the HTTP publication
 instant. Concurrent branch posts retain one publication origin, and every expected row must match
@@ -1207,6 +1286,23 @@ A continuous browser assertion begins after its readiness predicate holds. The c
 scenario first waits for the restored clock's `PACED` state, then observes the complete stability
 period and advancing ticks. Leader confirmation and the clock's attach reply are separate events;
 the bounded selector predicate establishes clock readiness before the stability observation starts.
+
+Every console page starts with a connection recorder, a script the harness adds before the page's
+own scripts run. It subclasses the page's `WebSocket` constructor and notes, for each connection the
+console constructs, the console it reached, the call its path names (the session, a backup download
+or a restore stream), and when the page constructed it, saw it open, and let go of it by closing it
+or seeing it close. The record holds each connection's origin and path, never its query, which
+carries the credentials. One counter that only the page's event loop advances orders those moments,
+so a step reads the order the page acted in however late it reads and however loaded the machine
+is. The console lets go of its session connection before it constructs the next one, so `the web
+console never held two session connections at once` tells a reconnect of the console's one session
+from a second session without counting the leader notices, which every reconnect repeats. Other
+steps check which console each session connection reached around the leader redirect, and where
+the backup downloads and restores went. `the web console loses its session connection` closes the
+newest session connection the page holds, as a connection lost under the console closes, and notes
+that moment; `the web console's session reconnected to node ... after it was lost` then checks that
+a session connection the page constructed after that moment opened on that node. It reads the
+record once, after a step that waits for something only the new connection can deliver.
 
 The **active-scenario registry** holds every scenario that has started and not yet ended. A scenario
 registers in its before hook, before it acquires its permits, so a scenario that never gets them is
@@ -1580,6 +1676,20 @@ first time a scenario needs one and shared by every scenario of the run. The run
 it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse` sets, keeps them
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
+
+MongoDB write-concern scenarios use a separate single-member replica set, reached through a direct
+connection after its primary election completes within the dependency startup budget. A client
+requesting two data-bearing members receives the server's unsatisfied write-concern answer beside
+the documents it applied. This fault belongs to that client's write concern, so other scenarios
+sharing the server keep running. Each scenario provisions its own collection and retains its
+server kind with that collection for later assertions; standalone and TLS collections keep their
+own server kinds.
+
+Both MongoDB test servers set `GLIBC_TUNABLES=glibc.pthread.rseq=1`, enabling glibc's restartable
+sequence registration. This avoids the MongoDB/TCMalloc crash on affected Linux kernels when the
+image's default disables that registration; the [image maintainers document the setting and kernel
+issue](https://github.com/docker-library/mongo/discussions/748). The fixed container environment is
+shared by ordinary and diagnostic runs and participates in the fixture's configuration hash.
 
 A scenario that needs a Kafka broker to refuse what the shared broker accepts for every other
 scenario starts a broker of its own: librdkafka's in-process mock cluster of one broker, which the
@@ -2127,11 +2237,12 @@ scenarios in one process, their nodes contended on it and missed startup and req
 that a plain diagnostic build of the same scenarios met.
 [Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
 them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
-owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 98
-lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, the ten endpoint ACK
-examples in their own 15-minute invocation, and the
+owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 108
+lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
-bounded at 40. `deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
+bounded at 40. The six transaction-retention and ten endpoint ACK examples run in separate serial
+invocations, each bounded at 15 minutes, within the same selection workload budget.
+`deloxide-stress-restore` runs the build's probes and the `stress-restore-scenarios`
 invocation of 53 capture, restore and checkpoint-transfer runs tagged `@deloxide_stress_restore`,
 bounded at 70 minutes. Each selection has the inventory's 80-minute budget and its own CI runner.
 

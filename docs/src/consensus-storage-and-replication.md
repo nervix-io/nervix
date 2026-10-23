@@ -102,6 +102,14 @@ A crash or lost connection after durable application but before delivery of the 
 the client uncertain even though the command took effect; persistent administrative requests use
 their stable execution reference to join or retrieve that result.
 
+Transaction tombstone removal evaluates age and the current applying command records together in
+the state machine. An applying transaction request retains its finished target, and an applying
+ordinary command retains its internal transactions, including planning refresh attempts, by their
+mutation owner. Their commit plans and reports remain durable with the tombstones. The leader uses
+the same eligibility decision to avoid cleanup proposals while every aged tombstone is retained;
+application rechecks it so a proposal cannot race a newly admitted consumer. Once the last consumer
+finishes, the original terminal timestamp determines eligibility, without an additional window.
+
 Transaction application completion persists the actual quiescence history and actual effects in
 the same applied state-machine boundary that changes the step from applying to applied or failed.
 Recovery therefore sees ordered requested, confirmed, failed or uncertain, and released outcomes
