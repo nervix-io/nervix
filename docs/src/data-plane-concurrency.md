@@ -607,6 +607,32 @@ its existing wait for a place. Native broker waits, the destruction's included, 
 and Deloxide's lock detector; the ordinary connector and retirement regressions and the
 one-/three-node stalled-broker and retirement scenarios own that evidence.
 
+### Kafka source rejection floors
+
+A Kafka source under `OFFSET BY CONSUMER GROUP` records the earliest rejected record of every
+partition it rejects in its consumer's context, before it seeks the partitions the consumer is
+still assigned. The context's rebalance handling starts each partition the group assigns at its
+floor, so a revocation that loses the seek, from a rebalance, the host leaving and rejoining the
+group, or a lapsed group session, never resumes the partition past the rejected record. A commit
+that passes the record forgets the floor, and an eager assignment that omits a partition forgets
+its floor, since another member now resumes it from the committed offset. The floors sit behind one
+thread-blocking lock per consumer: the source takes it once per rejection and, while a floor is
+outstanding, once per acknowledged batch, and the rebalance handling takes it once per assignment.
+librdkafka serves a rebalance only while the source polls for its next batch, and the host never
+polls while it rejects or acknowledges, so the lock is never contended. No guard is held across an
+await or a driver call that waits on the broker: under it, the rebalance handling only sets the
+start offsets of the assignment list in memory. The registered
+`source::rejection::shuttle_tests::shuttle_a_rejected_record_is_read_again_whenever_its_group_takes_the_partition_away`
+and
+`source::rejection::shuttle_tests::shuttle_a_commit_past_the_rejected_record_lets_the_group_resume_from_the_committed_offset`
+checks let a coordinator task decide a revocation and an assignment at any point of a rejection,
+serve them in the source's polls as librdkafka does, and hold that the first record read again
+from the partition is the rejected one, and that once a commit passes it the record after the
+committed one is read next. Native consumer-group traffic is outside Shuttle. Deloxide's detector
+tracks the floors' lock, which the lane's refused-commit shutdown workloads reach at assignment, at
+the rejection of the refused batch and at the commit that reads it again; the mock-cluster
+regressions and the one- and three-node broker restart scenario own the driver evidence.
+
 ### Kafka producer retention
 
 A Kafka sink counts the records its producer holds itself, because librdkafka's own out-queue
@@ -1336,6 +1362,10 @@ it:
   lock scoped to that entity, one newest announcement per branch, and taken all at once by the
   entity's one replica task, never across an await; see [Replica catch-up](#replica-catch-up)
 - an ACK root locks only its single terminal sender transition
+- a Kafka consumer-group source's rejected-partition floors sit behind one lock per consumer, taken
+  once per rejection, once per acknowledged batch while a floor is outstanding, and once per
+  rebalance, never across an await or a driver call that waits on the broker; see
+  [Kafka source rejection floors](#kafka-source-rejection-floors)
 
 These sites are accepted for the contract and bound named above. A lock that merely makes shared
 state convenient, protects immutable configuration, or repeats registry discovery on every batch

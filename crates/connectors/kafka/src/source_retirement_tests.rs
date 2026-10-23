@@ -19,11 +19,11 @@ use nervix_connector::SourceConnector as _;
 use nervix_execution::{AdmissionError, Executor, MemoryClass};
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::sync::oneshot;
-use rdkafka::{consumer::StreamConsumer, mocking::MockCluster, producer::DefaultProducerContext};
+use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext};
 
 use super::{
-    GroupCommitRequest, KafkaGroupCommit, KafkaOffsetPosition, KafkaSource, KafkaSourceError,
-    KafkaSourcePlan, TopicPartitionInspector,
+    GroupCommitRequest, KafkaConsumer, KafkaGroupCommit, KafkaOffsetPosition, KafkaSource,
+    KafkaSourceError, KafkaSourcePlan, TopicPartitionInspector,
     commit_tests::{GROUP, HELD_ROUND_TRIP, cluster, plan, publish, read_positions},
 };
 use crate::retirement_tests::{
@@ -331,7 +331,7 @@ async fn a_consumer_holds_the_charge_of_its_retirement_from_its_creation() {
     let source = KafkaSource::open(&plan_on(&broker, &executor), 0)
         .await
         .assured("the source opens once the budget has room");
-    let charge = u64::try_from(std::mem::size_of::<StreamConsumer>())
+    let charge = u64::try_from(std::mem::size_of::<KafkaConsumer>())
         .assured("a consumer handle's size fits in u64");
     assert_eq!(executor.snapshot().commands_memory.reserved_bytes, charge);
     let before = executor.snapshot().connector_storage;

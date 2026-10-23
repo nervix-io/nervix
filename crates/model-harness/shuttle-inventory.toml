@@ -69,6 +69,8 @@ name = "nervix-connector"
 checks = [
   "delivery::shuttle_tests::shuttle_a_publish_that_reads_a_report_finds_its_record_no_longer_retained",
   "delivery::shuttle_tests::shuttle_the_count_holds_every_record_until_its_report_is_served",
+  "source::rejection::shuttle_tests::shuttle_a_commit_past_the_rejected_record_lets_the_group_resume_from_the_committed_offset",
+  "source::rejection::shuttle_tests::shuttle_a_rejected_record_is_read_again_whenever_its_group_takes_the_partition_away",
 ]
 name = "nervix-connector-kafka"
 

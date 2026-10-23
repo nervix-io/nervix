@@ -23,9 +23,9 @@ use nervix_primitives::{
     task::JoinHandle,
     time::{Instant, timeout_at},
 };
-use rdkafka::{config::ClientConfig, consumer::StreamConsumer, error::KafkaResult};
+use rdkafka::{config::ClientConfig, error::KafkaResult};
 
-use super::{GroupCommitRequest, KafkaSourceError, retirement::KafkaConsumerHandle};
+use super::{GroupCommitRequest, KafkaConsumer, KafkaSourceError, retirement::KafkaConsumerHandle};
 
 #[cfg_attr(
     nervix_lint,
@@ -82,7 +82,7 @@ impl KafkaControl {
     ) -> Result<T, Report<KafkaSourceError>>
     where
         T: Send + 'static,
-        F: FnOnce(&StreamConsumer, &ControlBudget<'_>) -> Result<T, Report<KafkaSourceError>>
+        F: FnOnce(&KafkaConsumer, &ControlBudget<'_>) -> Result<T, Report<KafkaSourceError>>
             + Send
             + 'static,
     {

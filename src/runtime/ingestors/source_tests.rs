@@ -360,11 +360,7 @@ impl PacedSourceHostServices for FakeHost {
 }
 
 fn replayable(acknowledgement: SourceAckPolicy) -> BrokerSourcePolicy {
-    BrokerSourcePolicy {
-        acknowledgement,
-        retry: acknowledgement.retry(),
-        position_class: PositionClass::Replayable,
-    }
+    BrokerSourcePolicy::new(acknowledgement, PositionClass::Replayable)
 }
 
 fn three_messages() -> VecDeque<FakeMessage> {

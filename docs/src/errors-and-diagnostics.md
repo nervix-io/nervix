@@ -757,6 +757,16 @@ acknowledgement, rather than failures to decode a record. A control call that ex
 watermark, timestamp and seek failures preserve the driver's typed cause beneath the operation
 that failed.
 
+A domain-offset Kafka source that must start a partition without a domain offset while its client's
+`auto.offset.reset` is `error` fails its resume with `KafkaSourceError::ResetRefused`, which names
+the topic and partition, beneath `SourceError::Resume`; the host shows it as the ingestor's
+transient status and resumes again on its cadence. A timestamp lookup whose answer carries a
+partition error keeps that `KafkaError` beneath `KafkaSourceError::ResolveTimestampOffsets`. A
+consumer-group rebalance runs in the consumer's context, which has no caller to return a failure
+to: a rejected partition's floor that cannot be set on the assignment, and an assignment or
+revocation librdkafka refuses, are logged at `warn` with the driver's error, and the partition then
+starts where the group's committed offset or the client's reset policy places it.
+
 A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
 and a refused charge keeps `AdmissionError` beneath `KafkaSourceError::RetirementAdmission`. It
 fails the source's open or the partition inspector's start, as transiently as a refused control

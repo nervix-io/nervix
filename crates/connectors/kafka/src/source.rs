@@ -24,6 +24,8 @@
 
 #[path = "source_control.rs"]
 mod control;
+#[path = "source_rejection.rs"]
+mod rejection;
 #[path = "source_retirement.rs"]
 mod retirement;
 
@@ -36,7 +38,7 @@ use std::{
 use async_trait::async_trait;
 use control::{CommitTask, ControlBudget, KafkaControl};
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceAckPolicy, SourceBatch,
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceReadCancellation,
@@ -53,11 +55,12 @@ use nervix_primitives::{
 use nervix_recovery::{Discarded as _, Reported as _};
 use rdkafka::{
     config::ClientConfig,
-    consumer::{CommitMode, Consumer, StreamConsumer},
+    consumer::{CommitMode, Consumer},
     error::{KafkaError, KafkaResult, RDKafkaErrorCode},
     message::{Headers, Message as KafkaMessage},
     topic_partition_list::{Offset, TopicPartitionList},
 };
+use rejection::KafkaConsumer;
 use retirement::KafkaConsumerHandle;
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -303,6 +306,107 @@ pub enum KafkaSourceError {
     OffsetOverflow { topic: String, partition: i32 },
     #[error("Kafka batch timeout exceeds the monotonic clock range")]
     BatchDeadline,
+    #[error(
+        "Kafka topic '{topic}' partition {partition} has no domain offset, and the client's \
+         auto.offset.reset refuses to start a partition without one"
+    )]
+    ResetRefused { topic: String, partition: i32 },
+}
+
+/// Where the client's `auto.offset.reset` starts a partition that has no offset to resume from,
+/// under each of the names librdkafka accepts for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString)]
+enum KafkaOffsetReset {
+    /// The partition's earliest retained record.
+    #[strum(
+        serialize = "smallest",
+        serialize = "earliest",
+        serialize = "beginning"
+    )]
+    Earliest,
+    /// The partition's end, so only the records produced after it was taken up are read.
+    #[strum(serialize = "largest", serialize = "latest", serialize = "end")]
+    Latest,
+    /// No start: the partition cannot be read until it has an offset.
+    #[strum(serialize = "error")]
+    Refuse,
+}
+
+impl KafkaOffsetReset {
+    /// The policy `config` declares, or librdkafka's own default when it declares none.
+    ///
+    /// `auto.offset.reset` is a topic property, which librdkafka's client configuration reports
+    /// only once the client sets one. A client that declares no policy gets the property's
+    /// default, `largest`.
+    fn of(config: &ClientConfig) -> Result<Self, Report<KafkaSourceError>> {
+        if config.get("auto.offset.reset").is_none() {
+            return Ok(Self::Latest);
+        }
+        let native = config
+            .create_native_config()
+            .change_context(KafkaSourceError::Initialize)?;
+        let value = native
+            .get("auto.offset.reset")
+            .change_context(KafkaSourceError::Initialize)?;
+        let policy = value.parse::<Self>().assured(
+            "librdkafka accepts a declared policy under any of its seven names, in any case, and \
+             reports it under the first name of its value, which this policy parses",
+        );
+        Ok(policy)
+    }
+
+    /// The next offset of each of `partitions` of `topic` this policy starts it at.
+    fn starts(
+        self,
+        consumer: &KafkaConsumer,
+        topic: &str,
+        partitions: &BTreeSet<i32>,
+        budget: &ControlBudget<'_>,
+    ) -> Result<BTreeMap<i32, i64>, Report<KafkaSourceError>> {
+        let mut starts = BTreeMap::new();
+        for partition in partitions {
+            budget.remaining()?;
+            let watermarks = PartitionWatermarks::fetch(consumer, topic, *partition, budget)?;
+            let start = match self {
+                Self::Earliest => watermarks.low,
+                Self::Latest => watermarks.high,
+                Self::Refuse => {
+                    return Err(Report::new(KafkaSourceError::ResetRefused {
+                        topic: topic.to_string(),
+                        partition: *partition,
+                    }));
+                }
+            };
+            starts.insert(*partition, start);
+        }
+        Ok(starts)
+    }
+}
+
+/// The offset of a partition's earliest retained record and the offset the next record produced to
+/// it will take.
+struct PartitionWatermarks {
+    low: i64,
+    high: i64,
+}
+
+impl PartitionWatermarks {
+    fn fetch(
+        consumer: &KafkaConsumer,
+        topic: &str,
+        partition: i32,
+        budget: &ControlBudget<'_>,
+    ) -> Result<Self, Report<KafkaSourceError>> {
+        let (low, high) = consumer
+            .fetch_watermarks(topic, partition, budget.remaining()?)
+            .map_err(|source| {
+                Report::new(source).change_context(KafkaSourceError::FetchWatermarks {
+                    topic: topic.to_string(),
+                    partition,
+                })
+            })?;
+        Ok(Self { low, high })
+    }
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -324,7 +428,7 @@ impl KafkaConsumerAssignment {
 
     fn apply(
         &mut self,
-        consumer: &StreamConsumer,
+        consumer: &KafkaConsumer,
         topic: &str,
         assignment: &TopicPartitionList,
     ) -> Result<(), Report<KafkaSourceError>> {
@@ -345,7 +449,7 @@ impl KafkaConsumerAssignment {
 
     fn clear(
         &mut self,
-        consumer: &StreamConsumer,
+        consumer: &KafkaConsumer,
         topic: &str,
     ) -> Result<(), Report<KafkaSourceError>> {
         if *self == Self::Cleared {
@@ -432,7 +536,12 @@ pub struct KafkaSource {
     consumer: KafkaConsumerHandle,
     topic: nervix_models::KafkaTopicName,
     offset_mode: KafkaSourceOffsetMode,
+    /// Where a partition with no domain offset starts when no paced domain time places it.
+    offset_reset: KafkaOffsetReset,
     commits: GroupCommits,
+    /// Whether a rejection's floor may still be outstanding in the consumer's context, so an
+    /// acknowledged commit confirms it.
+    rejections_outstanding: bool,
     instance_index: u64,
     assignment: KafkaConsumerAssignment,
     observed_generation: Option<u64>,
@@ -463,6 +572,8 @@ impl SourceConnector for KafkaSource {
         );
         let control = KafkaControl::new(&config, plan.executor.clone())
             .change_context(SourceError::Open { connector: KAFKA })?;
+        let offset_reset =
+            KafkaOffsetReset::of(&config).change_context(SourceError::Open { connector: KAFKA })?;
         let consumer = KafkaConsumerHandle::create(&config, plan.executor.clone())
             .change_context(SourceError::Open { connector: KAFKA })?;
         Ok(Self {
@@ -470,7 +581,9 @@ impl SourceConnector for KafkaSource {
             consumer,
             topic: plan.topic.clone(),
             offset_mode: plan.offset_mode.clone(),
+            offset_reset,
             commits: GroupCommits::new(COMMIT_ANSWER_DEADLINE),
+            rejections_outstanding: false,
             instance_index,
             assignment: KafkaConsumerAssignment::default(),
             observed_generation: None,
@@ -654,7 +767,14 @@ impl BrokerSourceConnector for KafkaSource {
                 self.commits
                     .commit(&self.control, &self.consumer, group_id, request)
                     .await
-                    .change_context(SourceError::Acknowledge { connector: KAFKA })
+                    .change_context(SourceError::Acknowledge { connector: KAFKA })?;
+                // A commit past a rejected record confirms the record was delivered again, so the
+                // group may resume its partition from the committed offset from now on.
+                if self.rejections_outstanding {
+                    self.rejections_outstanding =
+                        self.consumer.context().confirm_commit(&positions);
+                }
+                Ok(())
             }
             KafkaSourceOffsetMode::Domain { offsets, .. } => {
                 for position in positions {
@@ -672,6 +792,16 @@ impl BrokerSourceConnector for KafkaSource {
     async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         let starts = earliest_message_offsets(positions)
             .change_context(SourceError::Reject { connector: KAFKA })?;
+        // A consumer group can revoke a partition before its rewound records are read again, and
+        // then resumes it from a committed offset past them, or from where the client's reset
+        // policy starts a partition the group committed nothing for. The floor starts the
+        // partition at its earliest rejected record whenever the group assigns it to this
+        // consumer, until a commit passes that record. Domain offsets need none: they record only
+        // acknowledged positions, which never pass a rejected record.
+        if let KafkaSourceOffsetMode::ConsumerGroup { .. } = &self.offset_mode {
+            self.consumer.context().record_rejection(&starts);
+            self.rejections_outstanding = true;
+        }
         let topic = self.topic.as_str().to_owned();
         self.control
             .run(&self.consumer, move |consumer, budget| {
@@ -689,8 +819,8 @@ impl BrokerSourceConnector for KafkaSource {
                             topic = position.topic.as_str(),
                             partition = position.partition,
                             offset = position.offset,
-                            "rejected Kafka partition is no longer assigned; its next holder \
-                             resumes it from the committed offset"
+                            "rejected Kafka partition is not assigned to this consumer, so it is \
+                             not sought now"
                         );
                         continue;
                     }
@@ -746,64 +876,235 @@ impl KafkaSource {
         let generation = initialization.generation;
         let topic = self.topic.as_str().to_owned();
         let instance_index = self.instance_index;
+        let offset_reset = self.offset_reset;
         let mut assignment = std::mem::take(&mut self.assignment);
         struct InitializedOffsets {
             ready: bool,
             assignment: KafkaConsumerAssignment,
-            reset: Option<Vec<KafkaOffsetPosition>>,
+            record: DomainOffsetRecord,
         }
         let initialized = self
             .control
             .run(&self.consumer, move |consumer, budget| {
-                let is_new_start = matches!(initialization.start, KafkaDomainOffsetStart::At(_));
-                let offsets = match initialization.start {
-                    KafkaDomainOffsetStart::Resume {
-                        positions,
-                        missing_partition_timestamp,
-                    } => resume_offsets(
-                        consumer,
-                        &topic,
-                        &partitions,
-                        positions,
-                        missing_partition_timestamp,
-                        budget,
-                    )?,
-                    KafkaDomainOffsetStart::At(timestamp) => offsets_for_partitions_by_timestamp(
-                        consumer, &topic, partitions, timestamp, budget,
-                    )?,
+                let ready = initialization.schedule.is_some() && !partitions.is_empty();
+                let scheduled = ScheduledPartitions {
+                    topic: &topic,
+                    partitions: &partitions,
+                    assigned: scheduled_partitions(
+                        initialization.schedule.as_ref(),
+                        instance_index,
+                    ),
                 };
-                let ready = assign_offsets_for_instance(
+                let start = DomainStart::resolve(
                     consumer,
-                    &topic,
-                    &offsets,
-                    initialization.schedule.as_ref(),
-                    instance_index,
+                    &scheduled,
+                    initialization.start,
+                    offset_reset,
+                    budget,
+                )?;
+                assign_offsets_for_instance(
+                    consumer,
+                    &scheduled,
+                    start.offsets(),
                     &mut assignment,
                     budget,
                 )?;
-                let reset = if is_new_start {
-                    Some(concrete_next_offsets_from_assignment(
-                        consumer, &topic, &offsets, budget,
-                    )?)
-                } else {
-                    None
-                };
                 Ok(InitializedOffsets {
                     ready,
                     assignment,
-                    reset,
+                    record: start.into_record(&topic),
                 })
             })
             .await
             .change_context(SourceError::Resume { connector: KAFKA })?;
         self.assignment = initialized.assignment;
-        if let Some(positions) = initialized.reset {
-            host.reset(positions)
-                .await
-                .change_context(SourceError::Resume { connector: KAFKA })?;
-        }
+        initialized
+            .record
+            .store(host)
+            .await
+            .change_context(SourceError::Resume { connector: KAFKA })?;
         self.observed_generation = Some(generation);
         Ok(initialized.ready)
+    }
+}
+
+/// The partitions of a source topic, and which of them the domain's schedule assigns one instance.
+struct ScheduledPartitions<'a> {
+    topic: &'a str,
+    partitions: &'a [i32],
+    assigned: BTreeSet<i32>,
+}
+
+/// Where a partition that has no domain offset starts.
+enum UnrecordedPartitionStart {
+    /// At its first record at or after a paced domain's current logical time.
+    At(Timestamp),
+    /// Where the client's `auto.offset.reset` starts a partition without an offset.
+    Reset(KafkaOffsetReset),
+}
+
+impl UnrecordedPartitionStart {
+    /// The next offset each of `partitions` of `topic` starts at.
+    fn starts(
+        &self,
+        consumer: &KafkaConsumer,
+        topic: &str,
+        partitions: &BTreeSet<i32>,
+        budget: &ControlBudget<'_>,
+    ) -> Result<BTreeMap<i32, i64>, Report<KafkaSourceError>> {
+        if partitions.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        match self {
+            Self::At(timestamp) => offsets_at(consumer, topic, partitions, *timestamp, budget),
+            Self::Reset(policy) => policy.starts(consumer, topic, partitions, budget),
+        }
+    }
+}
+
+/// Where the partitions a domain-offset instance reads start after it resumed.
+enum DomainStart {
+    /// The instance's partitions resume from their domain offsets; those in `unrecorded` had none
+    /// and start where the domain's time or the client's reset policy places them.
+    Resumed {
+        offsets: BTreeMap<i32, i64>,
+        unrecorded: BTreeSet<i32>,
+    },
+    /// A new start point places every partition of the topic, replacing the domain offsets.
+    Reset { offsets: BTreeMap<i32, i64> },
+}
+
+impl DomainStart {
+    fn resolve(
+        consumer: &KafkaConsumer,
+        scheduled: &ScheduledPartitions<'_>,
+        start: KafkaDomainOffsetStart,
+        offset_reset: KafkaOffsetReset,
+        budget: &ControlBudget<'_>,
+    ) -> Result<Self, Report<KafkaSourceError>> {
+        match start {
+            KafkaDomainOffsetStart::Resume {
+                positions,
+                missing_partition_timestamp,
+            } => {
+                let unrecorded_start = match missing_partition_timestamp {
+                    Some(timestamp) => UnrecordedPartitionStart::At(timestamp),
+                    None => UnrecordedPartitionStart::Reset(offset_reset),
+                };
+                Self::resume(consumer, scheduled, positions, &unrecorded_start, budget)
+            }
+            KafkaDomainOffsetStart::At(timestamp) => {
+                let partitions = scheduled.partitions.iter().copied().collect();
+                let offsets =
+                    offsets_at(consumer, scheduled.topic, &partitions, timestamp, budget)?;
+                Ok(Self::Reset { offsets })
+            }
+        }
+    }
+
+    /// Resumes each partition the schedule assigns the instance from its domain offset, clamped to
+    /// what the partition still retains, and starts each one that has none where
+    /// `unrecorded_start` places it.
+    fn resume(
+        consumer: &KafkaConsumer,
+        scheduled: &ScheduledPartitions<'_>,
+        positions: Vec<KafkaOffsetPosition>,
+        unrecorded_start: &UnrecordedPartitionStart,
+        budget: &ControlBudget<'_>,
+    ) -> Result<Self, Report<KafkaSourceError>> {
+        let mut recorded = BTreeMap::new();
+        for position in positions {
+            if position.topic == scheduled.topic {
+                recorded.insert(position.partition, position.offset);
+            }
+        }
+        let mut offsets = BTreeMap::new();
+        let mut unrecorded = BTreeSet::new();
+        for partition in scheduled.partitions {
+            budget.remaining()?;
+            if !scheduled.assigned.contains(partition) {
+                continue;
+            }
+            let Some(next_offset) = recorded.get(partition) else {
+                unrecorded.insert(*partition);
+                continue;
+            };
+            let watermarks =
+                PartitionWatermarks::fetch(consumer, scheduled.topic, *partition, budget)?;
+            offsets.insert(
+                *partition,
+                (*next_offset).clamp(watermarks.low, watermarks.high),
+            );
+        }
+        let starts = unrecorded_start.starts(consumer, scheduled.topic, &unrecorded, budget)?;
+        offsets.extend(starts);
+        Ok(Self::Resumed {
+            offsets,
+            unrecorded,
+        })
+    }
+
+    fn offsets(&self) -> &BTreeMap<i32, i64> {
+        match self {
+            Self::Resumed { offsets, .. } | Self::Reset { offsets } => offsets,
+        }
+    }
+
+    /// What the instance records in its domain offsets once it took its partitions up.
+    fn into_record(self, topic: &str) -> DomainOffsetRecord {
+        match self {
+            Self::Resumed {
+                offsets,
+                unrecorded,
+            } => {
+                let mut starts = Vec::with_capacity(unrecorded.len());
+                for (partition, offset) in offsets {
+                    if unrecorded.contains(&partition) {
+                        starts.push(KafkaOffsetPosition {
+                            topic: topic.to_string(),
+                            partition,
+                            offset,
+                        });
+                    }
+                }
+                DomainOffsetRecord::Starts(starts)
+            }
+            Self::Reset { offsets } => {
+                let mut positions = Vec::with_capacity(offsets.len());
+                for (partition, offset) in offsets {
+                    positions.push(KafkaOffsetPosition {
+                        topic: topic.to_string(),
+                        partition,
+                        offset,
+                    });
+                }
+                DomainOffsetRecord::Reset(positions)
+            }
+        }
+    }
+}
+
+/// What a domain-offset instance records in its domain offsets once it took its partitions up.
+enum DomainOffsetRecord {
+    /// The start of each partition it took up without a domain offset, so a later resume restarts
+    /// the partition there instead of placing it again, past what it has not acknowledged.
+    Starts(Vec<KafkaOffsetPosition>),
+    /// Every partition's start at a new start point, replacing what the domain offsets recorded.
+    Reset(Vec<KafkaOffsetPosition>),
+}
+
+impl DomainOffsetRecord {
+    async fn store(self, host: &KafkaDomainOffsetHost) -> KafkaDomainOffsetResult<()> {
+        match self {
+            Self::Starts(positions) => {
+                for position in positions {
+                    nervix_primitives::task::consume_budget().await;
+                    host.commit(position).await?;
+                }
+                Ok(())
+            }
+            Self::Reset(positions) => host.reset(positions).await,
+        }
     }
 }
 
@@ -839,7 +1140,7 @@ impl GroupCommitRequest {
     /// Commits through `consumer` and returns the coordinator's answer.
     ///
     /// librdkafka's synchronous commit parks the calling thread until the coordinator answers.
-    fn commit(self, consumer: &StreamConsumer) -> KafkaResult<()> {
+    fn commit(self, consumer: &KafkaConsumer) -> KafkaResult<()> {
         match self {
             Self::Acknowledged(offsets) => consumer.commit(&offsets, CommitMode::Sync),
             Self::Delivered => {
@@ -1058,7 +1359,7 @@ pub fn earliest_message_offsets(
 }
 
 fn topic_partitions(
-    consumer: &StreamConsumer,
+    consumer: &KafkaConsumer,
     topic: &str,
     budget: &ControlBudget<'_>,
 ) -> Result<Vec<i32>, Report<KafkaSourceError>> {
@@ -1081,33 +1382,29 @@ fn topic_partitions(
         .collect())
 }
 
-#[cfg_attr(
-    nervix_lint,
-    nervix::dispatch(
-        reason = "the Kafka driver owns timestamp lookup and its caller-supplied partition \
-                  iterator"
-    )
-)]
-fn offsets_for_partitions_by_timestamp<I>(
-    consumer: &StreamConsumer,
+/// The next offset of each of `partitions` of `topic` at `timestamp`: its first record at or after
+/// the timestamp, or, when it has none yet, its end as it stood before the lookup, so a record
+/// produced after the lookup is read rather than skipped.
+fn offsets_at(
+    consumer: &KafkaConsumer,
     topic: &str,
-    partitions: I,
+    partitions: &BTreeSet<i32>,
     timestamp: Timestamp,
     budget: &ControlBudget<'_>,
-) -> Result<BTreeMap<i32, Offset>, Report<KafkaSourceError>>
-where
-    I: IntoIterator<Item = i32>,
-{
-    let mut query = TopicPartitionList::new();
+) -> Result<BTreeMap<i32, i64>, Report<KafkaSourceError>> {
     let timestamp_ms = timestamp.unix_nanos().div_euclid(1_000_000);
+    let mut ends = BTreeMap::new();
+    let mut query = TopicPartitionList::new();
     for partition in partitions {
         budget.remaining()?;
+        let watermarks = PartitionWatermarks::fetch(consumer, topic, *partition, budget)?;
+        ends.insert(*partition, watermarks.high);
         query
-            .add_partition_offset(topic, partition, Offset::Offset(timestamp_ms))
+            .add_partition_offset(topic, *partition, Offset::Offset(timestamp_ms))
             .map_err(|source| {
                 Report::new(source).change_context(KafkaSourceError::BuildTimestampQuery {
                     topic: topic.to_string(),
-                    partition,
+                    partition: *partition,
                 })
             })?;
     }
@@ -1121,163 +1418,75 @@ where
     let mut offsets = BTreeMap::new();
     for element in resolved.elements() {
         budget.remaining()?;
-        let offset = match element.offset() {
-            Offset::Invalid => Offset::End,
-            other => other,
-        };
-        offsets.insert(element.partition(), offset);
-    }
-    Ok(offsets)
-}
-
-fn normalized_resume_offset(
-    consumer: &StreamConsumer,
-    topic: &str,
-    partition: i32,
-    next_offset: i64,
-    budget: &ControlBudget<'_>,
-) -> Result<Offset, Report<KafkaSourceError>> {
-    let (low, high) = consumer
-        .fetch_watermarks(topic, partition, budget.remaining()?)
-        .map_err(|source| {
-            Report::new(source).change_context(KafkaSourceError::FetchWatermarks {
+        let partition = element.partition();
+        element.error().map_err(|source| {
+            Report::new(source).change_context(KafkaSourceError::ResolveTimestampOffsets {
                 topic: topic.to_string(),
-                partition,
             })
         })?;
-    Ok(Offset::Offset(next_offset.clamp(low, high)))
-}
-
-fn resume_offsets(
-    consumer: &StreamConsumer,
-    topic: &str,
-    partitions: &[i32],
-    positions: Vec<KafkaOffsetPosition>,
-    missing_partition_timestamp: Option<Timestamp>,
-    budget: &ControlBudget<'_>,
-) -> Result<BTreeMap<i32, Offset>, Report<KafkaSourceError>> {
-    let mut recorded = BTreeMap::new();
-    for position in positions {
-        if position.topic == topic {
-            recorded.insert(position.partition, position.offset);
-        }
-    }
-    let mut offsets = BTreeMap::new();
-    let mut missing = Vec::new();
-    for partition in partitions {
-        budget.remaining()?;
-        if let Some(next_offset) = recorded.get(partition) {
-            offsets.insert(
-                *partition,
-                normalized_resume_offset(consumer, topic, *partition, *next_offset, budget)?,
-            );
-        } else {
-            missing.push(*partition);
-        }
-    }
-    if let Some(timestamp) = missing_partition_timestamp {
-        offsets.extend(offsets_for_partitions_by_timestamp(
-            consumer, topic, missing, timestamp, budget,
-        )?);
-    } else {
-        for partition in missing {
-            budget.remaining()?;
-            offsets.insert(partition, Offset::Beginning);
-        }
+        // The lookup answers only for the partitions it was asked about.
+        let Some(end) = ends.get(&partition) else {
+            return Err(Report::new(KafkaSourceError::ResolveTimestampOffsets {
+                topic: topic.to_string(),
+            }));
+        };
+        let offset = match element.offset() {
+            Offset::Offset(offset) => offset,
+            // No record of the partition is at or after the timestamp yet.
+            Offset::End | Offset::Invalid => *end,
+            Offset::Beginning | Offset::Stored | Offset::OffsetTail(_) => {
+                return Err(Report::new(KafkaSourceError::UnsupportedDomainOffset {
+                    topic: topic.to_string(),
+                    partition,
+                }));
+            }
+        };
+        offsets.insert(partition, offset);
     }
     Ok(offsets)
 }
 
-fn assign_offsets_for_instance(
-    consumer: &StreamConsumer,
-    topic: &str,
-    offsets: &BTreeMap<i32, Offset>,
+/// The partitions the domain's schedule assigns instance `instance_index`, none without a schedule.
+fn scheduled_partitions(
     schedule: Option<&KafkaPartitionSchedule>,
     instance_index: u64,
+) -> BTreeSet<i32> {
+    let Some(schedule) = schedule else {
+        return BTreeSet::new();
+    };
+    let Ok(instance_index) = usize::try_from(instance_index) else {
+        return BTreeSet::new();
+    };
+    let Some(assignments) = schedule.instance_assignments.get(instance_index) else {
+        return BTreeSet::new();
+    };
+    assignments.iter().copied().collect()
+}
+
+/// Assigns the consumer each partition `scheduled` gives the instance, at its offset in `offsets`.
+fn assign_offsets_for_instance(
+    consumer: &KafkaConsumer,
+    scheduled: &ScheduledPartitions<'_>,
+    offsets: &BTreeMap<i32, i64>,
     consumer_assignment: &mut KafkaConsumerAssignment,
     budget: &ControlBudget<'_>,
-) -> Result<bool, Report<KafkaSourceError>> {
-    let has_topic_partitions = schedule.is_some() && !offsets.is_empty();
-    let assigned_partitions = if let Some(schedule) = schedule
-        && let Ok(instance_index) = usize::try_from(instance_index)
-        && let Some(assignments) = schedule.instance_assignments.get(instance_index)
-    {
-        assignments.iter().copied().collect::<BTreeSet<_>>()
-    } else {
-        BTreeSet::new()
-    };
+) -> Result<(), Report<KafkaSourceError>> {
     let mut assignment = TopicPartitionList::new();
     for (partition, offset) in offsets {
         budget.remaining()?;
-        if assigned_partitions.contains(partition) {
+        if scheduled.assigned.contains(partition) {
             assignment
-                .add_partition_offset(topic, *partition, *offset)
+                .add_partition_offset(scheduled.topic, *partition, Offset::Offset(*offset))
                 .map_err(|source| {
                     Report::new(source).change_context(KafkaSourceError::BuildAssignment {
-                        topic: topic.to_string(),
+                        topic: scheduled.topic.to_string(),
                         partition: *partition,
                     })
                 })?;
         }
     }
     budget.remaining()?;
-    consumer_assignment.apply(consumer, topic, &assignment)?;
-    Ok(has_topic_partitions)
-}
-
-fn concrete_next_offsets_from_assignment(
-    consumer: &StreamConsumer,
-    topic: &str,
-    offsets: &BTreeMap<i32, Offset>,
-    budget: &ControlBudget<'_>,
-) -> Result<Vec<KafkaOffsetPosition>, Report<KafkaSourceError>> {
-    let mut concrete = Vec::with_capacity(offsets.len());
-    for (partition, offset) in offsets {
-        budget.remaining()?;
-        let next_offset = match offset {
-            Offset::Offset(value) => *value,
-            Offset::Beginning => {
-                let mapping_input = consumer
-                    .fetch_watermarks(topic, *partition, budget.remaining()?)
-                    .map(|(low, _)| low);
-                match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(source) => Err(Report::new(source).change_context(
-                        KafkaSourceError::FetchWatermarks {
-                            topic: topic.to_string(),
-                            partition: *partition,
-                        },
-                    )),
-                }
-            }?,
-            Offset::End | Offset::Invalid => {
-                let mapping_input = consumer
-                    .fetch_watermarks(topic, *partition, budget.remaining()?)
-                    .map(|(_, high)| high);
-                match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(source) => Err(Report::new(source).change_context(
-                        KafkaSourceError::FetchWatermarks {
-                            topic: topic.to_string(),
-                            partition: *partition,
-                        },
-                    )),
-                }
-            }?,
-            Offset::Stored | Offset::OffsetTail(_) => {
-                return Err(Report::new(KafkaSourceError::UnsupportedDomainOffset {
-                    topic: topic.to_string(),
-                    partition: *partition,
-                }));
-            }
-        };
-        concrete.push(KafkaOffsetPosition {
-            topic: topic.to_string(),
-            partition: *partition,
-            offset: next_offset,
-        });
-    }
-    Ok(concrete)
+    consumer_assignment.apply(consumer, scheduled.topic, &assignment)
 }
 
 pub struct TopicPartitionInspector {
@@ -1320,8 +1529,6 @@ impl TopicPartitionInspector {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use meticulous::ResultExt as _;
-
     use super::*;
 
     fn assignment_at(offset: i64) -> TopicPartitionList {
@@ -1549,6 +1756,14 @@ mod read_tests;
 )]
 #[path = "source_control_tests.rs"]
 mod control_tests;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "source_rejection_tests.rs"]
+mod rejection_tests;
 
 #[cfg(test)]
 #[cfg_attr(
