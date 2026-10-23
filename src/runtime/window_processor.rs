@@ -2557,6 +2557,58 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn identical_event_times_share_one_window_until_domain_completion() {
+        let mut window = TestWindow::new(
+            "SET total = SUM(input.value), samples = COUNT(input.value)",
+            &[field("value", ParseAsType::I64)],
+            &[
+                field("total", ParseAsType::I64),
+                field("samples", ParseAsType::I64),
+            ],
+        );
+        let refused = window
+            .admit(vec![int64([Some(100), Some(200)])], &[0, 0])
+            .await;
+        assert!(refused.is_empty(), "{refused:?}");
+
+        let width = Duration::from_millis(30);
+        assert_eq!(
+            window_next_deadline(&window.state, Some(width)),
+            Some(at(30_000_000))
+        );
+        assert!(!window_width_met(
+            &window.state,
+            None,
+            Some(width),
+            at(29_999_999)
+        ));
+        assert!(window_width_met(
+            &window.state,
+            None,
+            Some(width),
+            at(30_000_000)
+        ));
+
+        let emitted_at = at(90_000_000);
+        assert!(window_width_met(
+            &window.state,
+            None,
+            Some(width),
+            emitted_at
+        ));
+        let record = window.emitted().await;
+        assert_eq!(batch_value(&record, "total"), Some(RuntimeValue::I64(300)));
+        assert_eq!(batch_value(&record, "samples"), Some(RuntimeValue::I64(2)));
+        let metadata = window_output_metadata(&window.state, emitted_at)
+            .assured("the test admitted two rows with supported timestamps");
+        assert_eq!(metadata.ingested_at_low_watermark(), at(0));
+        assert_eq!(metadata.ingested_at_high_watermark(), emitted_at);
+
+        advance_window(&mut window.state, None, Some(width), emitted_at);
+        assert!(window.state.entries.is_empty());
+    }
+
+    #[nervix_primitives::test]
     async fn combined_window_completes_at_either_width_boundary() {
         let mut window = TestWindow::new(
             "SET total = SUM(input.value), samples = COUNT(input.value)",
