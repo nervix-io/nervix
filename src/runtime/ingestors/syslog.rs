@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** Composing the Syslog connector plan, bound to this node's listener address, with
 //!   host-owned intake.
-//! - **Depends on.** The connector ingestor contract, the Syslog connector, and pre-resolved runtime
-//!   execution handles.
+//! - **Depends on.** The connector ingestor contract, the Syslog connector, pre-resolved runtime
+//!   execution handles, and a test-only listener fault channel supplied by the harness.
 //! - **Must not know.** Syslog socket drivers, framing, TLS configuration, Plexus parsing, registry
 //!   validation, or placement computation.
 
@@ -44,6 +44,9 @@ impl SyslogListenerIngestorStartPlan {
             runtime.syslog_ingestor_bind_addr(configured)
         })
         .change_context_lazy(|| ingestor.initialize_failure())?;
+        #[cfg(feature = "testing")]
+        let connector =
+            connector.with_listener_faults(runtime.inner.fault_injection.syslog_listener_faults());
         BrokerIngestorStart {
             connector,
             instances: NonZeroU64::MIN,

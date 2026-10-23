@@ -1073,11 +1073,11 @@ that is everything the source can confirm. A batch never asks for more acknowled
 client's request queue holds, so no request waits for room. The acknowledgement never waits on a
 task that stopped polling. While the task holds a publish for room in a full read-ahead, only the
 host's next read, which follows the acknowledgement, could let it write, so the acknowledgement
-fails with `MqttSourceError::ReadAheadFull`. When the connection ended first, it fails with the
-lost connection beneath `MqttSourceError::Acknowledge`. A connection whose broker stopped reading
+fails with `MqttTopicIngestorError::ReadAheadFull`. When the connection ended first, it fails with the
+lost connection beneath `MqttTopicIngestorError::Acknowledge`. A connection whose broker stopped reading
 it holds the writes, and the client's flush has no deadline of its own, so the acknowledgement
 waits at most one keep-alive interval, 60 seconds unless the broker's `CONNACK` announced its own,
-and then fails with `MqttSourceError::AcknowledgementDeadline`; a broker that announces a
+and then fails with `MqttTopicIngestorError::AcknowledgementDeadline`; a broker that announces a
 keep-alive of zero leaves it unbounded, as it leaves a silent connection. Every such failure drops
 the connection and the acknowledgements it never wrote: the host shows the failure as the ingestor's transient status and
 rejects the positions, a rejection fails once its publishes' connection is gone, and the broker
@@ -1086,7 +1086,7 @@ delivers again every publish the lost connection did not acknowledge once the so
 
 A failed poll ends the connection. The task has handed over every publish it read, so the source
 reads the read-ahead empty, and its next read then reports the lost connection: beneath
-`MqttSourceError::Receive`, or as `MqttSourceError::PacketTooLarge` for a packet above the
+`MqttTopicIngestorError::Receive`, or as `MqttTopicIngestorError::PacketTooLarge` for a packet above the
 advertised Maximum Packet Size. Suspension, close and every failure drop the connection, which
 aborts its task and closes the broker connection.
 
@@ -1876,6 +1876,20 @@ sequenceDiagram
   octet count, at most eleven bytes with its space, is read whole again when a read splits it. A
   frame split anywhere across reads yields the same payload and the same typed framing failure as
   one read holding the whole stream. [Syslog ingestion](./syslog.md#tcp) defines the framing rules.
+  Once a connection decodes a frame, it completes the bounded intake-queue send even if SUSPEND
+  engages while that send waits for a place; suspension stops its next read. An accept failure
+  retires only the listening socket. The source retains established connection tasks, their
+  in-progress frames and its intake queue, reports the typed read failure through the host, and
+  rebinds the socket on resume. A later bind failure keeps those tasks and queued frames while the
+  host retries. Closing the source ends the retained connection tasks and queue together.
+  Plans, sources and stream listeners retain a configured accept capability. Ordinary builds keep
+  zero-sized fault markers; the testing module owns the harness channel and selected bound address.
+  The harness retains one named request carrying the bound address and its acknowledgement in a
+  watch channel until the selected listener claims it
+  and acknowledges it once. Cancelling an accept does not consume that request, and arming another
+  fault before acknowledgement is a harness error. The one- and three-node Cucumber checks hold a connection open
+  across that failure, observe the fault, and send through both the retained connection and a
+  freshly accepted connection after rebind.
 - **Syslog decoding, SQS bodies and OTEL identifiers.** The SYSLOG codec checks header fields and
   scans `STRUCTURED-DATA` through byte classes of `nervix-simd-kernels`: the first byte outside
   printable US-ASCII ends a header check, and two forward scans find the byte that ends each

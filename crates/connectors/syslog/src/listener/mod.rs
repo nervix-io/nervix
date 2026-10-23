@@ -6,7 +6,8 @@
 //!   deadlines of the connections they accept, dropping an oversized datagram, and ingestor
 //!   lifecycle operations.
 //! - **Depends on.** The connector ingestor contract and its client deadlines, connector-owned
-//!   Syslog configuration, Tokio sockets and timers, `memchr`, and rustls.
+//!   Syslog configuration, execution-sensitive sockets, timers and channels, `memchr`, rustls,
+//!   and a test-only accept fault channel supplied by the host.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
@@ -46,6 +47,46 @@ use tracing::debug;
 
 use crate::config::{SyslogClientConfig, SyslogConfigError, SyslogDirection, SyslogProtocol};
 
+#[cfg(feature = "testing")]
+mod listener_faults;
+#[cfg(feature = "testing")]
+pub use listener_faults::SyslogListenerFault;
+#[cfg(feature = "testing")]
+use listener_faults::{ConfiguredListenerFaults, ConfiguredStreamAccept};
+
+/// The listener fault capability has a stable slot in plans and sources. Ordinary builds keep
+/// only this zero-sized marker; testing builds own the injector in the testing module.
+#[cfg(not(feature = "testing"))]
+#[derive(Clone, Default)]
+struct ConfiguredListenerFaults {
+    _marker: (),
+}
+
+#[cfg(not(feature = "testing"))]
+impl ConfiguredListenerFaults {
+    fn stream_accept(&self, _bind_addr: &str) -> ConfiguredStreamAccept {
+        ConfiguredStreamAccept { _marker: () }
+    }
+}
+
+#[cfg(not(feature = "testing"))]
+struct ConfiguredStreamAccept {
+    _marker: (),
+}
+
+#[cfg(not(feature = "testing"))]
+impl ConfiguredStreamAccept {
+    async fn accept(
+        &mut self,
+        listener: &TcpListener,
+    ) -> error_stack::Result<(TcpStream, SocketAddr), SyslogListenerError> {
+        listener
+            .accept()
+            .await
+            .map_err(|source| Report::new(SyslogListenerError::StreamAccept { source }))
+    }
+}
+
 const SYSLOG: &str = "syslog";
 const STREAM_INTAKE_QUEUE_CAPACITY: usize = 64;
 const MAX_OCTET_COUNT_DIGITS: usize = 10;
@@ -57,6 +98,7 @@ const STREAM_READ_CHUNK: usize = 8_192;
 pub struct SyslogListenerIngestorPlan {
     config: SyslogClientConfig,
     bind_addr: String,
+    listener_faults: ConfiguredListenerFaults,
     connections: ConnectionDeadlines,
 }
 
@@ -71,8 +113,18 @@ impl SyslogListenerIngestorPlan {
         Ok(Self {
             config,
             bind_addr,
+            listener_faults: ConfiguredListenerFaults::default(),
             connections,
         })
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn with_listener_faults(
+        mut self,
+        faults: watch::Sender<Option<SyslogListenerFault>>,
+    ) -> Self {
+        self.listener_faults = ConfiguredListenerFaults::new(faults);
+        self
     }
 }
 
@@ -162,11 +214,14 @@ struct SyslogUdpListener {
 }
 
 struct SyslogStreamListener {
-    listener: TcpListener,
+    /// An accept failure retires only this socket; established connection tasks and queued
+    /// frames remain owned by the same source until resume rebinds it.
+    listener: Option<TcpListener>,
     frame_tx: mpsc::Sender<ReceivedSyslogFrame>,
     frame_rx: mpsc::Receiver<ReceivedSyslogFrame>,
     connections: JoinSet<error_stack::Result<(), SyslogConnectionError>>,
     paused: watch::Sender<bool>,
+    accept: ConfiguredStreamAccept,
 }
 
 pub struct SyslogListenerIngestor {
@@ -175,6 +230,7 @@ pub struct SyslogListenerIngestor {
     connections: ConnectionDeadlines,
     tls_acceptor: Option<TlsAcceptor>,
     listener: Option<SyslogListener>,
+    listener_faults: ConfiguredListenerFaults,
 }
 
 #[derive(Debug, Error)]
@@ -268,11 +324,16 @@ impl IngestorConnector for SyslogListenerIngestor {
             connections: plan.connections,
             tls_acceptor,
             listener: None,
+            listener_faults: plan.listener_faults.clone(),
         })
     }
 
     fn needs_resume(&mut self) -> bool {
-        self.listener.is_none()
+        match self.listener.as_ref() {
+            None => true,
+            Some(SyslogListener::Stream(listener)) => listener.listener.is_none(),
+            Some(SyslogListener::Udp(_)) => false,
+        }
     }
 
     async fn suspend(&mut self) -> IngestorResult<()> {
@@ -285,6 +346,17 @@ impl IngestorConnector for SyslogListenerIngestor {
     async fn resume(&mut self) -> IngestorResult<IngestorResume> {
         if let Some(listener) = self.listener.as_mut() {
             if let SyslogListener::Stream(listener) = listener {
+                if listener.listener.is_none() {
+                    let socket = TcpListener::bind(&self.bind_addr).await.map_err(|source| {
+                        Report::new(SyslogListenerError::Bind {
+                            transport: "stream",
+                            addr: self.bind_addr.clone(),
+                            source,
+                        })
+                        .change_context(IngestorError::Resume { connector: SYSLOG })
+                    })?;
+                    listener.listener = Some(socket);
+                }
                 listener.paused.send_replace(false);
             }
             return Ok(IngestorResume::Ready);
@@ -319,6 +391,9 @@ impl BrokerIngestorConnector for SyslogListenerIngestor {
                 cancellation.unless_cancelled(receive).await
             }
             Some(SyslogListener::Stream(listener)) => {
+                if listener.listener.is_none() {
+                    return Ok(IngestorBatch::ResumeRequired);
+                }
                 let receive = listener.receive(
                     self.config.max_message_size,
                     self.tls_acceptor.clone(),
@@ -338,10 +413,7 @@ impl BrokerIngestorConnector for SyslogListenerIngestor {
             Ok(SyslogReceived::OversizedDatagram) => Ok(IngestorBatch::Oversized {
                 payloads: NonZeroUsize::MIN,
             }),
-            Err(error) => {
-                self.drop_listener();
-                Err(error.change_context(IngestorError::Read { connector: SYSLOG }))
-            }
+            Err(error) => Err(self.on_listener_error(error)),
         }
     }
 
@@ -355,6 +427,20 @@ impl BrokerIngestorConnector for SyslogListenerIngestor {
 }
 
 impl SyslogListenerIngestor {
+    fn on_listener_error(&mut self, error: Report<SyslogListenerError>) -> Report<IngestorError> {
+        if matches!(
+            error.current_context(),
+            SyslogListenerError::StreamAccept { .. }
+        ) {
+            if let Some(SyslogListener::Stream(listener)) = self.listener.as_mut() {
+                listener.listener = None;
+            }
+        } else {
+            self.drop_listener();
+        }
+        error.change_context(IngestorError::Read { connector: SYSLOG })
+    }
+
     async fn bind_listener(&self) -> error_stack::Result<SyslogListener, SyslogListenerError> {
         match self.config.protocol {
             SyslogProtocol::Udp => {
@@ -381,11 +467,12 @@ impl SyslogListenerIngestor {
                 let (frame_tx, frame_rx) = mpsc::channel(STREAM_INTAKE_QUEUE_CAPACITY);
                 let (paused, _) = watch::channel(false);
                 Ok(SyslogListener::Stream(SyslogStreamListener {
-                    listener,
+                    listener: Some(listener),
                     frame_tx,
                     frame_rx,
                     connections: JoinSet::new(),
                     paused,
+                    accept: self.listener_faults.stream_accept(&self.bind_addr),
                 }))
             }
         }
@@ -436,11 +523,14 @@ impl SyslogStreamListener {
     ) -> error_stack::Result<SyslogReceived, SyslogListenerError> {
         loop {
             nervix_primitives::task::consume_budget().await;
+            let accept = self.accept.accept(
+                self.listener
+                    .as_ref()
+                    .assured("receive is called only with a bound listener"),
+            );
             nervix_primitives::select! {
-                accepted = self.listener.accept() => {
-                    let (stream, peer_addr) = accepted.map_err(|source| {
-                        Report::new(SyslogListenerError::StreamAccept { source })
-                    })?;
+                accepted = accept => {
+                    let (stream, peer_addr) = accepted?;
                     if let Err(error) = stream.set_nodelay(true) {
                         debug!(
                             peer_addr = %peer_addr,
@@ -550,17 +640,17 @@ async fn read_stream_connection(
             .next_frame()
             .change_context(SyslogConnectionError::Frame)?
         {
-            nervix_primitives::select! {
-                sent = tx.send(ReceivedSyslogFrame { payload: frame, peer_addr }) => {
-                    if sent.is_err() {
-                        return Ok(());
-                    }
-                }
-                changed = paused.changed() => {
-                    if changed.is_err() {
-                        return Ok(());
-                    }
-                }
+            // Once decoded, this frame belongs to the intake handoff. A pause may stop the
+            // following read, but must not cancel a send already waiting on the bounded queue.
+            if tx
+                .send(ReceivedSyslogFrame {
+                    payload: frame,
+                    peer_addr,
+                })
+                .await
+                .is_err()
+            {
+                return Ok(());
             }
             continue;
         }

@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** Syslog client configuration, UDP/TCP/TLS listener and sender transports, RFC
 //!   6587 framing, peer metadata, ingestor lifecycle operations, and record publication.
-//! - **Depends on.** The connector contract, typed client configuration entries, Tokio sockets,
-//!   `memchr`, and rustls.
+//! - **Depends on.** The connector contract, typed client configuration entries,
+//!   execution-sensitive sockets, `memchr`, and rustls.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
@@ -29,6 +29,8 @@ pub use config::{
     DEFAULT_MAX_MESSAGE_SIZE, MAX_UDP_PAYLOAD_SIZE, SyslogClientConfig, SyslogConfigError,
     SyslogDeadlineScope, SyslogDirection, SyslogFraming, SyslogProtocol,
 };
+#[cfg(feature = "testing")]
+pub use listener::SyslogListenerFault;
 #[cfg(feature = "benchmarks")]
 pub use listener::{SyslogFrameError, frame_stream};
 pub use listener::{

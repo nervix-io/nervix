@@ -822,6 +822,12 @@ first, an active connector retry next, and a task error without a retry after th
 retry remains visible to drains. Operator inspection reads both owners' errors and the selected
 retry from one immutable publication. Retained observations are immutable.
 
+A Syslog stream source separately represents its listener's existence and the listening socket's
+presence. An absent socket after accept failure requires rebind, while the same listener still
+owns established connection tasks and queued frames; source close ends that retained state.
+The testing capability shares one named listener-fault request between the connector and host:
+the selected bound address and its acknowledgement belong to that same armed request.
+
 Domain-clock publication carries lifecycle pause, generation and start
 point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;
 a present assignment contains its state identity, optional primary, executors and replicas
