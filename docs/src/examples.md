@@ -2,15 +2,15 @@
 
 Runnable end-to-end graphs live under `examples/`:
 
-- `examples/iot/iot.nspl` implements MQTT smart-factory telemetry with branch-local quality gates,
+- `examples/iot/iot.plexus` implements MQTT smart-factory telemetry with branch-local quality gates,
   repartitioning, ordering, and alert emission.
-- `examples/nats-factory-windows/nats_factory_windows.nspl` demonstrates NATS ingestion and
+- `examples/nats-factory-windows/nats_factory_windows.plexus` demonstrates NATS ingestion and
   route-local window aggregate construction.
-- `examples/datalake/datalake.nspl` combines MQTT CBOR, NATS Protobuf, Kafka JSON, correlation,
+- `examples/datalake/datalake.plexus` combines MQTT CBOR, NATS Protobuf, Kafka JSON, correlation,
   materialized lookup state, Rust WASM enrichment, Kafka/Redis output, and Iceberg tables.
-- `examples/wasm-processors/wasm-dual.nspl` wires Rust and Go guests into set-only multi-route WASM
+- `examples/wasm-processors/wasm-dual.plexus` wires Rust and Go guests into set-only multi-route WASM
   processors.
-- `examples/paced-simulation/paced_simulation.nspl` is the graph of two runnable applications, a
+- `examples/paced-simulation/paced_simulation.plexus` is the graph of two runnable applications, a
   Rust driver and a Python driver over the shared C binding, that pace a sensor simulation by the
   domain clock through client ingestors and attached client emitters. [Paced Simulation
   Drivers](paced-simulation-drivers.md) describes the graph and how to run both programs.
@@ -20,7 +20,7 @@ used by the datalake graph. Nervix never creates those external entities during 
 
 ## Kafka ingestion with route-local branch construction
 
-```nspl
+```plexus
 CREATE SCHEMA user_id_branch (
   user_id U32
 );
@@ -72,7 +72,7 @@ after output finalization and route filtering.
 
 ## Transforming projection
 
-```nspl
+```plexus
 CREATE DEDUPLICATOR project_notifications
   FROM notifications WHERE input.active
   DEDUPLICATE ON input.tenant, input.event_id
@@ -99,7 +99,7 @@ original record, while `output.amount` is the finalized route value.
 Inferencers keep explicit tensor declarations and name the resource version they load. Their routes
 are set-only and do not inherit the source row:
 
-```nspl
+```plexus
 CREATE INFERENCER score_message
   FROM input_features
   USING RESOURCE inference VERSION 1
@@ -123,7 +123,7 @@ output, the branch, and declared materialized state, but not `input` or `message
 
 ## Window construction
 
-```nspl
+```plexus
 CREATE WINDOW PROCESSOR device_summary
   FROM device_measurements
   FILTER WHERE input.value >= 0.0
@@ -145,7 +145,7 @@ though aggregate calls may participate in larger scalar expressions.
 
 ## Generate from materialized state
 
-```nspl
+```plexus
 CREATE GENERATOR synth_notifications
   USING MATERIALIZED STATE notification_templates
   EACH 100ms
@@ -163,7 +163,7 @@ independent task, and every route sees the same immutable state snapshot for a t
 
 ## Codec emission with staged headers
 
-```nspl
+```plexus
 CREATE EMITTER kafka_notifications
   FROM notifications
   TO KAFKA kafka_main TOPIC notifications_out

@@ -232,14 +232,14 @@ macro_rules! connector_sources {
                 }
             }
 
-            /// The canonical NSPL of each operation, in order.
-            pub(crate) fn operations_to_nspl(
+            /// The canonical Plexus of each operation, in order.
+            pub(crate) fn operations_to_plexus(
                 &self,
-            ) -> ::error_stack::Result<Vec<String>, $crate::CanonicalNsplError> {
+            ) -> ::error_stack::Result<Vec<String>, $crate::CanonicalPlexusError> {
                 match self {
                     $(
                         Self::$Variant(operations) => {
-                            $crate::canonical::alter_transport_ingestor_operations_to_nspl(
+                            $crate::canonical::alter_transport_ingestor_operations_to_plexus(
                                 operations,
                             )
                         }
@@ -566,7 +566,7 @@ macro_rules! entity_union {
 ///
 /// A line names a connector with the alteration enum its module declared, whose variants name the
 /// connector's entities. The union states the pair the statement's head names, applies the
-/// operations to an ingestor that reads it, and writes them back as canonical NSPL.
+/// operations to an ingestor that reads it, and writes them back as canonical Plexus.
 macro_rules! ingestor_alteration_union {
     (
         $(#[$union_meta:meta])*
@@ -611,12 +611,12 @@ macro_rules! ingestor_alteration_union {
                 }
             }
 
-            /// The canonical NSPL of each operation, in order.
-            pub(crate) fn operations_to_nspl(
+            /// The canonical Plexus of each operation, in order.
+            pub(crate) fn operations_to_plexus(
                 &self,
-            ) -> ::error_stack::Result<Vec<String>, $crate::CanonicalNsplError> {
+            ) -> ::error_stack::Result<Vec<String>, $crate::CanonicalPlexusError> {
                 match self {
-                    $(Self::$Connector(alteration) => alteration.operations_to_nspl(),)+
+                    $(Self::$Connector(alteration) => alteration.operations_to_plexus(),)+
                 }
             }
         }

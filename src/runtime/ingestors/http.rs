@@ -5,7 +5,7 @@
 //! - **Owns.** Composing the HTTP connector plan with the domain cadence the host polls it on.
 //! - **Depends on.** The connector source contract, typed HTTP plans and pre-resolved runtime
 //!   handles.
-//! - **Must not know.** HTTP request or response details, NSPL parsing, registry validation, or
+//! - **Must not know.** HTTP request or response details, Plexus parsing, registry validation, or
 //!   placement computation.
 
 #![cfg_attr(

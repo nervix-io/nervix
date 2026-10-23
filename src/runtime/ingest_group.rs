@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Group decoding, timestamped row metadata, route execution and in-memory ACKs.
 //! - **Depends on.** Installed domain capabilities, compiled codecs and branch-local routes.
-//! - **Must not know.** NSPL parsing, consensus decisions or source transport lifecycle.
+//! - **Must not know.** Plexus parsing, consensus decisions or source transport lifecycle.
 
 #![cfg_attr(
     nervix_lint,
@@ -24,11 +24,11 @@ use super::*;
 /// executes and becomes one Arrow batch per (relay, branch key). A group closes once it holds this
 /// many or more: every message of one payload joins the same group, so a payload that unfolds past
 /// the remaining room carries the group beyond the bound instead of being split. This is
-/// intentionally independent of an NSPL route's flush policy.
+/// intentionally independent of a Plexus route's flush policy.
 pub(in crate::runtime) const INGEST_GROUP_MAX_ROWS: usize = 1024;
 
 /// Chosen operational bound for how long a partial source group waits when the source
-/// goes quiet. This is intentionally independent of an NSPL route's flush policy.
+/// goes quiet. This is intentionally independent of a Plexus route's flush policy.
 pub(in crate::runtime) const INGEST_GROUP_IDLE_FLUSH: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone, Copy, strum::Display)]

@@ -11,17 +11,17 @@ Feature: Replica catch-up of branch-keyed state
     And runtime state checkpoint announcements are lost
     And a 3 node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "wasm_catch_up_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_catch_up_filter;
       UPLOAD RESOURCE wasm_catch_up_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -96,7 +96,7 @@ Feature: Replica catch-up of branch-keyed state
     And runtime state checkpoint announcements are lost
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA transaction ( tenant STRING, transaction_id STRING, amount I64 );
@@ -133,7 +133,7 @@ Feature: Replica catch-up of branch-keyed state
       """
     Then the last command output owner is saved as placeholder "failed_owner"
     And the first replica in the last command output is saved as placeholder "promoted_replica"
-    When these NSPL commands are executed on node "{{promoted_replica}}"
+    When these Plexus commands are executed on node "{{promoted_replica}}"
       """
       CREATE SUBSCRIPTION before_failover TO deduped;
       """
@@ -166,7 +166,7 @@ Feature: Replica catch-up of branch-keyed state
     And node "{{failed_owner}}" is stopped
     Then node "{{promoted_replica}}" eventually observes a stable leader
     And within "60s" node "{{promoted_replica}}" eventually reports scheduled "deduplicator" "dedup_txns" owner equals placeholder "promoted_replica"
-    When these NSPL commands are executed on node "{{promoted_replica}}"
+    When these Plexus commands are executed on node "{{promoted_replica}}"
       """
       CREATE SUBSCRIPTION after_failover TO deduped;
       """

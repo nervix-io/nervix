@@ -6,7 +6,7 @@
 //!   dispatch, and response disposition.
 //! - **Depends on.** The request intakes endpoint sources bind, Arrow decoding and actual-UTC
 //!   observation.
-//! - **Must not know.** When a route is bound or unbound, which the endpoint source owns; NSPL
+//! - **Must not know.** When a route is bound or unbound, which the endpoint source owns; Plexus
 //!   parsing, placement policy or consensus storage.
 
 #![cfg_attr(

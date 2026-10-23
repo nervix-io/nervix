@@ -648,7 +648,7 @@ fn assert_generated_entities_state_what_they_declare(bytes: &[u8]) {
 /// Checks that a generated ingestor names a declared mode whose requirements it meets, and a
 /// quiesce mode its entity honors.
 fn assert_generated_ingestor_states_what_its_entity_declares(bytes: &[u8]) {
-    let mut arbitrary = Arbitrary::new(bytes, Domain::Nspl);
+    let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
     let sources = IngestSourceKind::all().collect::<Vec<_>>();
     let count = NonZeroUsize::new(sources.len()).assured("the vocabulary declares sources");
     let source_kind = sources[arbitrary.entropy().index(count)];
@@ -677,7 +677,7 @@ fn assert_generated_ingestor_states_what_its_entity_declares(bytes: &[u8]) {
 /// declared form and batching its declared legality admits, and publishes through a client of a
 /// declared connector.
 fn assert_generated_emitter_states_what_its_entity_declares(bytes: &[u8]) {
-    let mut arbitrary = Arbitrary::new(bytes, Domain::Nspl);
+    let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
     let sinks = EmitSinkKind::all().collect::<Vec<_>>();
     let count = NonZeroUsize::new(sinks.len()).assured("the vocabulary declares sinks");
     let sink_kind = sinks[arbitrary.entropy().index(count)];

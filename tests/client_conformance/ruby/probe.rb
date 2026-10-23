@@ -995,7 +995,7 @@ module Probe
     handle
   end
 
-  # A field's type in NSPL's spelling, with nested fixed-size lists as dimensions.
+  # A field's type in Plexus's spelling, with nested fixed-size lists as dimensions.
   def self.type_text(levels)
     kind = levels.first.first
     return "VEC<#{type_text(levels.drop(1))}>" if kind == 'LIST'

@@ -3,12 +3,12 @@ Feature: RabbitMQ ingestion
     Given RabbitMQ is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And RabbitMQ queue "notifications_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -63,13 +63,13 @@ Feature: RabbitMQ ingestion
     Given RabbitMQ is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And RabbitMQ queue "notifications_reconnect_{{test_id}}" exists
     When ingestor "rabbit_notifications" enters fault mode
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -129,13 +129,13 @@ Feature: RabbitMQ ingestion
     And MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And RabbitMQ queue "notifications_redelivery_{{test_id}}" exists
     And MQTT topic "notifications_redelivery_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -211,13 +211,13 @@ Feature: RabbitMQ ingestion
     And a stallable RabbitMQ endpoint is configured
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And RabbitMQ queue "notifications_lost_reject_{{test_id}}" exists
     And MQTT topic "notifications_lost_reject_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -311,13 +311,13 @@ Feature: RabbitMQ ingestion
     And a stallable RabbitMQ endpoint is configured
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And RabbitMQ queue "notifications_lost_ack_{{test_id}}" exists
     And MQTT topic "notifications_lost_ack_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -406,12 +406,12 @@ Feature: RabbitMQ ingestion
     Given RabbitMQ is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And RabbitMQ queue "poison_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -465,7 +465,7 @@ Feature: RabbitMQ ingestion
       nervix_ingestor_decode_rejections_total: 1
       """
     # A delivery the ingestor still held would return to the queue once its consumer leaves.
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       STOP;
       """

@@ -4,7 +4,7 @@
 //! to the replica task that keeps the state current.
 //! May depend on: the replicated states this node holds, checkpoint replication, the committed
 //! schedule and the interconnect dispatcher.
-//! Must not know: what a checkpoint holds, how a replica installs it, NSPL parsing, or
+//! Must not know: what a checkpoint holds, how a replica installs it, Plexus parsing, or
 //! control-plane transactions.
 
 #![cfg_attr(

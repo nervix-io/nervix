@@ -9861,7 +9861,7 @@ mod tests {
             "SET bytes = octet_length(input.text), capture = regexp_extract(input.text, \
              input.pattern, input.group)",
         )
-        .verified("the string calls have valid NSPL syntax");
+        .verified("the string calls have valid Plexus syntax");
         let schema = schema(vec![
             Field::new("text", DataType::Utf8, true),
             Field::new("pattern", DataType::Utf8, true),
@@ -9940,7 +9940,7 @@ mod tests {
              input.pattern), any_match = contains_any(input.text, vec(input.needle, 'missing')), \
              normalized = normalize_nfc(input.decomposed)",
         )
-        .verified("the string calls have valid NSPL syntax");
+        .verified("the string calls have valid Plexus syntax");
         let fields = vec![
             Field::new("text", DataType::Utf8, true),
             Field::new("delimiter", DataType::Utf8, true),

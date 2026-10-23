@@ -6,7 +6,7 @@
 //!   host-owned intake.
 //! - **Depends on.** The connector source contract, the RabbitMQ connector, the node resolver,
 //!   and pre-resolved runtime execution handles.
-//! - **Must not know.** The AMQP driver, channel lifecycle, NSPL parsing, registry validation, or
+//! - **Must not know.** The AMQP driver, channel lifecycle, Plexus parsing, registry validation, or
 //!   placement computation.
 
 #![cfg_attr(

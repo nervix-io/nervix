@@ -16,7 +16,7 @@ usage() {
 [[ "$#" -eq 1 ]] || { usage; exit 2; }
 bytes="$1"
 # The counter needs eight bytes, and the save and a host buffer as large as the save must fit the
-# 96 MiB MAX MEMORY of fixtures/restore-state.nspl.
+# 96 MiB MAX MEMORY of fixtures/restore-state.plexus.
 [[ "${bytes}" =~ ^[0-9]+$ ]] && ((bytes >= 8 && bytes <= 47 * 1024 * 1024 && bytes % 8 == 0)) \
     || { printf 'the padded save size must be a multiple of 8 from 8 bytes through 47 MiB\n' >&2; exit 2; }
 page=65536

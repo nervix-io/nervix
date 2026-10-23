@@ -14,7 +14,7 @@
     nervix_lint,
     nervix::layer(
         edge,
-        reason = "archive intake edge parses external NSPL before decision-layer planning"
+        reason = "archive intake edge parses external Plexus before decision-layer planning"
     )
 )]
 
@@ -45,7 +45,7 @@ use nervix_models::{
     ResourceUpload, ResourceUploadState, ResourceUploads, ResourceUploadsError, Restore,
     RestoreArchive, RestoreStep, Statement, Timestamp, TransactionImpactReport, UserName,
 };
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statement_sources};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statement_sources};
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
 
@@ -242,7 +242,7 @@ impl VerifiedArchive {
         self.artifact.clone()
     }
 
-    /// The NSPL of the archived domain `domain`, as the archive holds it.
+    /// The Plexus of the archived domain `domain`, as the archive holds it.
     pub(in crate::application) fn models_text(&self, domain: &DomainName) -> &str {
         match self.data.contents.models.get(domain) {
             Some(text) => text.as_str(),

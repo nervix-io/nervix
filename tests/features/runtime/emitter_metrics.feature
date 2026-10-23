@@ -3,12 +3,12 @@ Feature: Emitter metrics
   Scenario Outline: DESCRIBE EMITTER and Prometheus report emitter traffic metrics
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -58,7 +58,7 @@ Feature: Emitter metrics
       """
       "user_id":
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE EMITTER emitter_metrics_node;
       """

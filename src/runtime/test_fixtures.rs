@@ -158,11 +158,11 @@ pub(super) async fn execute_filter_map_for_test(
 }
 
 pub(super) fn expression(raw: &str) -> nervix_models::Expression {
-    nervix_nspl::parse_expression(raw).expect("valid semantic expression")
+    nervix_plexus::parse_expression(raw).expect("valid semantic expression")
 }
 
 pub(super) fn construction(raw: &str) -> nervix_models::RouteConstruction {
-    nervix_nspl::parse_route_construction(raw).expect("valid route construction")
+    nervix_plexus::parse_route_construction(raw).expect("valid route construction")
 }
 
 pub(super) fn window_outputs(relay: &str, set: &str) -> ProcessorOutputs {

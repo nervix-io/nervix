@@ -337,7 +337,7 @@ mod tests {
     }
 
     fn parsed_model(source: &str) -> Model {
-        let statement = nervix_nspl::server_statement::parse_server_statement(source)
+        let statement = nervix_plexus::server_statement::parse_server_statement(source)
             .expect("test model should parse");
         let Statement::Create(create) = statement else {
             panic!("test source should create a model");
@@ -354,7 +354,7 @@ mod tests {
     fn with_dlq(mut model: Model) -> Model {
         let policy = MessageErrorPolicy::Dlq {
             relay: named("errors"),
-            assignments: nervix_nspl::parse_route_construction(
+            assignments: nervix_plexus::parse_route_construction(
                 "SET value = error.code, operation = error.operation",
             )
             .expect("error assignments should parse")

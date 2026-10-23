@@ -17,7 +17,7 @@ use nervix_models::{
     CodecName, CreateIngestor, FieldName, GeneralErrorPolicy, IngestTimestampSource, IngestorInput,
     IngestorName, ModelKind, NodeRef, ProcessorOutputs, TransportIngestorInput,
 };
-use nervix_nspl::parse_expression;
+use nervix_plexus::parse_expression;
 use thiserror::Error;
 
 use super::{

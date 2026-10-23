@@ -1,13 +1,13 @@
-//! How canonical NSPL writes the name of a field, a UDF or a function inside an expression.
+//! How canonical Plexus writes the name of a field, a UDF or a function inside an expression.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** The spelling canonical NSPL gives such a name at each position an expression or a
+//! - **Owns.** The spelling canonical Plexus gives such a name at each position an expression or a
 //!   route construction writes one, and the words it writes only between backticks there.
 //! - **Depends on.** Nothing but the name's text.
 //! - **Must not know.** The parser that reads the spelling back.
 //!
 //! A name is written bare, as it is, wherever it reads back as that name, and between backticks
-//! everywhere else. The name rule admits text a plain NSPL word cannot hold, such as `-`, `~`, `.` or
+//! everywhere else. The name rule admits text a plain Plexus word cannot hold, such as `-`, `~`, `.` or
 //! a leading digit, and an expression reserves the words of its own operators, literals and forms
 //! wherever a keyword could stand. Every other word, a statement keyword such as `to`, `on` or `by`
 //! included, is an ordinary name inside an expression.
@@ -36,7 +36,7 @@ pub enum NamePosition {
 }
 
 impl NamePosition {
-    /// The canonical NSPL spelling of `name` at this position: the name as it is where it reads back
+    /// The canonical Plexus spelling of `name` at this position: the name as it is where it reads back
     /// as that name, and the name between backticks otherwise.
     pub fn spell(self, name: &str) -> Cow<'_, str> {
         if self.reads_bare(name) {

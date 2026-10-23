@@ -8,7 +8,7 @@
 //!   acknowledged.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   Tokio, the node resolver, and the AWS SQS SDK.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,

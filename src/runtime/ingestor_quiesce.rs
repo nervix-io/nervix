@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** In-memory quiescence causes, bounded retained payloads and intake decisions.
 //! - **Depends on.** Typed ingestor policy, observed input timestamps and runtime task handles.
-//! - **Must not know.** NSPL parsing, consensus decisions or persisted payload state.
+//! - **Must not know.** Plexus parsing, consensus decisions or persisted payload state.
 
 #![cfg_attr(
     nervix_lint,

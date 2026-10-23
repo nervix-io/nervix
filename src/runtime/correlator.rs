@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Correlator program compilation, paired-input evaluation and output construction.
 //! - **Depends on.** Validated correlator plans, Arrow batches and bound domain execution time.
-//! - **Must not know.** NSPL parsing, placement decisions or connector transports.
+//! - **Must not know.** Plexus parsing, placement decisions or connector transports.
 
 #![cfg_attr(
     nervix_lint,

@@ -6,7 +6,7 @@
 //!   overrides, listener-address overrides, and test scheduling.
 //! - **Depends on.** Vocabulary identities, Tokio notification primitives, and the decision
 //!   layer's test scheduler mode.
-//! - **Must not know.** Product configuration, NSPL syntax, connector implementations, or runtime
+//! - **Must not know.** Product configuration, Plexus syntax, connector implementations, or runtime
 //!   ownership beyond the typed values needed to select a seam.
 
 #![cfg_attr(

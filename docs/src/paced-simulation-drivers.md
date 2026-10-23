@@ -1,5 +1,7 @@
 # Paced Simulation Drivers
 
+*Plexus, the Nervix graph definition language.*
+
 `examples/paced-simulation` holds two runnable applications that drive a paced simulation through
 a Nervix graph. Each one follows the domain clock, submits sensor readings stamped with the tick
 centers that clock reaches through a [client ingestor](ingestors.md#client-ingestors), and applies
@@ -21,7 +23,7 @@ the endpoint ownership, ACK, credit, ALTER and recovery contracts these programs
 
 ## The Graph
 
-`examples/paced-simulation/paced_simulation.nspl` creates the paced domain `paced_simulation`
+`examples/paced-simulation/paced_simulation.plexus` creates the paced domain `paced_simulation`
 with a 100 ms tick period and an equal admission skew, and this graph in it:
 
 | Entity | Role |
@@ -37,7 +39,7 @@ Each ingestor route keeps the reading, adds the domain time it was admitted at, 
 concrete branch per sensor. A reading the ingestor cannot admit becomes a rejection notice instead
 of an error in a log:
 
-```nspl
+```plexus
 CREATE CLIENT PRODUCER INGESTOR simulated_readings
   FROM SCHEMA reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND
   TIMESTAMP AT occurred_at
@@ -55,7 +57,7 @@ The output emitter is attached, so a reading's batch completes for its producer 
 consumer acknowledged the reading's output. Its batches never mix sensors, because a client batch
 never combines concrete branches:
 
-```nspl
+```plexus
 CREATE ATTACHED EMITTER observed_readings
   FROM readings
   TO CLIENT SCHEMA observed_reading
@@ -79,12 +81,12 @@ selection, then start the clock at the pace the simulation should run at:
 ```bash
 nervix-cli --command "CREATE PACED DOMAIN paced_simulation WITH PERIOD 100ms SKEW 100ms;"
 nervix-cli --domain paced_simulation --command \
-  "$(sed -n '/^BEGIN;/,$p' examples/paced-simulation/paced_simulation.nspl)"
+  "$(sed -n '/^BEGIN;/,$p' examples/paced-simulation/paced_simulation.plexus)"
 nervix-cli --domain paced_simulation --command "START AT NOW TIME RATE 4.0;"
 ```
 
 Check the printed command dispositions: ordinary `--command` currently prints a refusal without
-a nonzero exit status. `USE` must run on its own when entered as an NSPL command.
+a nonzero exit status. `USE` must run on its own when entered as a Plexus command.
 
 ## Running The Drivers
 
@@ -134,7 +136,7 @@ come from `NERVIX_USERNAME` and `NERVIX_PASSWORD` instead.
 | `--follow-generations` | off | After `STOP` and `START`, continue in the new generation |
 | `--deadline` | `10m` | How long to wait for outstanding outcomes once submitting stops |
 
-Durations are written like NSPL durations, such as `250ms`, `1s` or `5m`, and byte sizes as a
+Durations are written like Plexus durations, such as `250ms`, `1s` or `5m`, and byte sizes as a
 count of bytes, `KiB`, `MiB` or `GiB`.
 
 ## Choosing The Pace

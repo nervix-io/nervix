@@ -1,10 +1,12 @@
 #  Sessions
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix supports session-local commands over its session protocol.
 
 These commands are not persisted in the registry:
 
-```nspl
+```plexus
 CREATE SUBSCRIPTION acme_notifications TO notifications WHERE tenant = 'acme';
 CREATE SUBSCRIPTION sampled_telemetry TO telemetry DROPPING BATCH SAMPLE RATE 0.1 WHERE input.tenant = 'acme';
 DELETE SUBSCRIPTION acme_notifications;
@@ -20,7 +22,7 @@ Following a domain clock is not a subscription; see
 The [Client Ingestors And Emitters](./client-io-architecture.md) architecture chapter connects
 these transient handles to their persisted graph endpoints, ACK boundaries and restoration.
 
-This page describes sessions as a user of NSPL sees them. [Client Session
+This page describes sessions as a user of Plexus sees them. [Client Session
 Protocol](./client-session-protocol.md) explains the protocol that carries them, and the [Client
 Implementation Manual](./client-implementation-manual.md) states what a client implementation must
 do.
@@ -279,7 +281,7 @@ defines the frames, and [Emitters](./emitters.md#client-emitters) defines their 
 
 ## Suggestions
 
-The session's `SuggestRequest` carries the full NSPL input, a UTF-8 byte cursor on a character
+The session's `SuggestRequest` carries the full Plexus input, a UTF-8 byte cursor on a character
 boundary, the selected domain, a page size from 1 through 100, and an optional continuation.
 The server asks the composed client/server grammar for expectations at that cursor, then resolves
 semantic references from one read of the selected domain's committed configuration with the
@@ -360,7 +362,7 @@ before it reads a frame, like every session method, and a call without valid cre
 `UNAUTHENTICATED`.
 
 The first frame is the restore's start. It names the request identity of the reply, the restore's
-execution reference, the `RESTORE` statement as canonical NSPL, and the archive's exact size and
+execution reference, the `RESTORE` statement as canonical Plexus, and the archive's exact size and
 BLAKE3 digest. Every later frame carries the next non-empty bytes of the archive, at most 256 KiB
 each from the Rust client and the console; the leader accepts any non-empty chunk that fits one
 frame. The execution reference, the statement, and the archive's size and digest together are the
@@ -400,7 +402,7 @@ connection that closes before that chunk ends the call as a failed gRPC call doe
 ## Structured Choices
 
 `ChoiceLookupRequest` resolves values for structured client controls without constructing partial
-NSPL. It carries a semantic target, typed dependent selections, search text, a page size from 1
+Plexus. It carries a semantic target, typed dependent selections, search text, a page size from 1
 through 100, and an optional page cursor. Targets resolve domain pace, placement policy, and a
 domain's internal schemas, each wire-schema format, branches, relays, codecs, VHOSTs, signaling
 protocols, relay fields, codec output fields, resource catalogs, and completed resource versions.
@@ -452,7 +454,7 @@ replace the choices for a newer edit or connection.
 
 ## Transaction Binding
 
-An NSPL transaction is replicated control-plane state, but its binding to a live session is
+A Plexus transaction is replicated control-plane state, but its binding to a live session is
 leader-local soft state. A session may bind one transaction, and a transaction may be bound to at
 most one session. The session protocol can attach by transaction id; the authenticated user must
 match the transaction owner. A later attach takes over the binding and the displaced session gets
@@ -479,5 +481,5 @@ client.
 Finished transaction outcomes remain available during tombstone retention. Attach during that
 window reports `COMMITTED`, `FAILED`, `REVERTED`, or `EXPIRED` with the structured final status and
 the transaction's aggregate outcome. After retention, attach reports an unknown transaction id. See
-[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions) and [Transactions Over
+[Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions) and [Transactions Over
 The Protocol](./client-session-protocol.md#transactions-over-the-protocol).

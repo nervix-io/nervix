@@ -3,7 +3,7 @@ Feature: Domain clock attachment
   @retained_task_handles
   Scenario Outline: A session attaches to a domain clock once and follows every generation
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
@@ -14,7 +14,7 @@ Feature: Domain clock attachment
     And within "10s" the clock session receives 3 increasing ticks for generation 1 with period "100ms" and time rate "2"
     When the clock session attaches to the clock of domain "{{domain}}"
     Then the clock session is refused because it already follows the clock of domain "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
@@ -24,7 +24,7 @@ Feature: Domain clock attachment
     And within "10s" the clock session receives a tick for generation 2 after its state frame
     When the clock session detaches from the clock of domain "{{domain}}"
     Then the clock session is detached from the clock of domain "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
@@ -41,7 +41,7 @@ Feature: Domain clock attachment
 
   Scenario Outline: A client paces simulated events by the domain clock it is attached to
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       CREATE SCHEMA event ( sequence I64, occurred_at DATETIME );
@@ -60,7 +60,7 @@ Feature: Domain clock attachment
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
       """
     And client "driver" is connected to node "node-1"
-    When client "driver" executes these NSPL commands
+    When client "driver" executes these Plexus commands
       """
       ATTACH DOMAIN CLOCK;
       """

@@ -34,7 +34,7 @@ use nervix_models::{
     DomainStartPoint, DomainState, DomainStatus, Restore, RestoreArchive, Statement, Timestamp,
     TransactionPosition, TransactionStatus, UserName,
 };
-use nervix_nspl::client_statement::ClientStatement;
+use nervix_plexus::client_statement::ClientStatement;
 use nervix_primitives::{
     collections::DashMap,
     sync::{Mutex as AsyncMutex, OwnedMutexGuard, StdArc, StdWeak},
@@ -257,7 +257,7 @@ impl PersistentCommandRequest {
             let SessionCommandOperation::Execute(pending) = operation else {
                 continue;
             };
-            let nervix_nspl::client_statement::ClientStatement::Server(statement) =
+            let nervix_plexus::client_statement::ClientStatement::Server(statement) =
                 &pending.statement
             else {
                 continue;
@@ -1286,7 +1286,7 @@ mod tests {
             request_reference: CommandExecutionReference::parse("backup.request")
                 .assured("the test reference is valid"),
             expected_transaction_position: None,
-            source: backup.to_canonical_nspl(),
+            source: backup.to_canonical_plexus(),
             statement: ClientStatement::Server(Statement::Backup(backup)),
             domain: Some(selected_domain.clone()),
         });

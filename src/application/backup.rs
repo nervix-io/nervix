@@ -8,7 +8,7 @@
 //!   execution reference, and reporting the resulting cut and archive summary.
 //! - **Depends on.** Consensus for the capture and the command execution record, the registry's
 //!   creation order, the resource store for version archives, the runtime's staging area, the
-//!   archive format, and the language layer to parse the rendered NSPL back.
+//!   archive format, and the language layer to parse the rendered Plexus back.
 //! - **Must not know.** How a download travels to a client, or how a client stores the archive.
 //!
 //! A normal backup leases one domain at a time and pauses a running one for its state cut. It
@@ -53,8 +53,8 @@ use nervix_interconnect::InterconnectStreamRequest as _;
 use nervix_models::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupDomainSummary,
     BackupQuiesceCounters, BackupResources, BackupScope, ClusterNodeName, CoordinationIdentity,
-    DomainName, DomainSchedule, DomainStatus, IngestorName, ModelKind, NSPL_LANGUAGE_VERSION,
-    NodeRef, ResourceId, ResourceName, Timestamp,
+    DomainName, DomainSchedule, DomainStatus, IngestorName, ModelKind, NodeRef,
+    PLEXUS_LANGUAGE_VERSION, ResourceId, ResourceName, Timestamp,
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
@@ -114,9 +114,11 @@ pub(in crate::application) enum BackupError {
     DomainNotFound { domain: DomainName },
     #[error("the committed models of domain '{domain}' do not form a valid graph")]
     InvalidModels { domain: DomainName },
-    #[error("the committed models of domain '{domain}' could not be rendered as NSPL")]
+    #[error("the committed models of domain '{domain}' could not be rendered as Plexus")]
     Rendering { domain: DomainName },
-    #[error("the NSPL rendered for domain '{domain}' does not parse back to its committed models")]
+    #[error(
+        "the Plexus rendered for domain '{domain}' does not parse back to its committed models"
+    )]
     Verification { domain: DomainName },
     #[error("the clock mapping of domain '{domain}' cannot be projected to the capture time")]
     ClockProjection { domain: DomainName },
@@ -383,7 +385,7 @@ impl SessionServiceImpl {
         }
         let manifest = BackupManifest {
             producer_version: env!("CARGO_PKG_VERSION").to_string(),
-            language_version: NSPL_LANGUAGE_VERSION.to_string(),
+            language_version: PLEXUS_LANGUAGE_VERSION.to_string(),
             cluster_id: self.inner.cluster.cluster_id().await,
             captured_at,
             scope: planned_scope.scope.clone(),

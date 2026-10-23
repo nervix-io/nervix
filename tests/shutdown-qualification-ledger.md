@@ -117,5 +117,5 @@ Recorded on 15 September 2026 from the task worktree. Cucumber retries were disa
 | `cargo test -p nervix-consensus an_interrupted_installation_finishes_on_the_next_start -- --nocapture` | Pass: the one regression exercised and passed all six operation/boundary reopen cases. |
 | `cargo test --features testing --lib forced_recovery_completion_survives_runtime_restart_and_schedule_rebuild -- --nocapture` | Pass: recovered owner and domain rebuild. |
 | `cargo test --features testing --lib forced_recovery_replay_preserves_source_offsets_and_branch_processor_state -- --nocapture` | Pass: Kafka and both branch checkpoint classifications. |
-| `just validate` | Pass: formatting, all-target all-feature Clippy with warnings denied, protocol lint, web console build, skill publication dry run, documented NSPL parsing and clock-boundary checks. |
+| `just validate` | Pass: formatting, all-target all-feature Clippy with warnings denied, protocol lint, web console build, skill publication dry run, documented Plexus parsing and clock-boundary checks. |
 | `just ratchet` | Pass: every tracked architecture-debt count remained at or below its baseline. |

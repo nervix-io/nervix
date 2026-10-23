@@ -7,7 +7,7 @@
 //! - **Depends on.** Validated branch templates, relay boundaries, processors, execution
 //!   admission, domain force-flush generations, node quiesce accounting, and runtime state
 //!   persistence.
-//! - **Must not know.** NSPL text, control-plane transactions, consensus, or connector protocols.
+//! - **Must not know.** Plexus text, control-plane transactions, consensus, or connector protocols.
 
 #![cfg_attr(
     nervix_lint,

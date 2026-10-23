@@ -2,7 +2,7 @@ Feature: Logical ingestion time and admission
   @logical_ingestion_time
   Scenario Outline: One decoded batch admits each timestamp against the reached clock window
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1h SKEW 100ms;
       CREATE SCHEMA event ( sequence I64, occurred_at DATETIME );
@@ -25,7 +25,7 @@ Feature: Logical ingestion time and admission
       """
     And domain clock for domain "{{domain}}" starts with its complete retained admission history for period "1h"
     And domain clock progress for domain "{{domain}}" is paused before delivery
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
@@ -64,7 +64,7 @@ Feature: Logical ingestion time and admission
   @logical_ingestion_time
   Scenario Outline: Admission uses inclusive logical skew and excludes unreached future centers
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       CREATE SCHEMA event ( sequence I64, occurred_at DATETIME );
@@ -82,7 +82,7 @@ Feature: Logical ingestion time and admission
       CREATE SUBSCRIPTION observations TO events;
       """
     And domain clock progress for domain "{{domain}}" is paused before delivery
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1e-300;
       """
@@ -179,7 +179,7 @@ Feature: Logical ingestion time and admission
   @logical_ingestion_time
   Scenario Outline: Admission retains exactly 256 reached logical tick windows with inclusive SKEW
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1h SKEW 1h;
       CREATE SCHEMA request ( sequence I64, occurred_at DATETIME );
@@ -198,7 +198,7 @@ Feature: Logical ingestion time and admission
       """
     And domain clock for domain "{{domain}}" starts with its complete retained admission history for period "1h"
     And domain clock progress for domain "{{domain}}" is paused before delivery
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
@@ -215,7 +215,7 @@ Feature: Logical ingestion time and admission
   Scenario Outline: Buffered TIMESTAMP NOW is selected when quiesced intake is delivered
     Given a <cluster_size> node nervix cluster is started
     And the entity gate for domain "{{domain}}" pauses after engagement
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 1s;
       CREATE SCHEMA request ( sequence I64, occurred_at DATETIME );
@@ -251,7 +251,7 @@ Feature: Logical ingestion time and admission
       CREATE SUBSCRIPTION clock_observations TO observations;
       START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
       """
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       ALTER HTTP ENDPOINT INGESTOR source SET DECODE USING delivery_codec;
       """
@@ -264,7 +264,7 @@ Feature: Logical ingestion time and admission
     Then within "5s" node "node-1" eventually reports describe ingestor "source" as "nervix_ingestor_quiesce_buffered_records: 1"
     And within "5s" the clock at host "quiesced-clock-{{test_id}}.example.com" advances by "4s" and is saved as "release_time"
     When the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     When http payload is posted to host "quiesced-clock-{{test_id}}.example.com" path "/events"
       """
       {"sequence":2,"occurred_at":"1999-01-01T00:00:00Z"}

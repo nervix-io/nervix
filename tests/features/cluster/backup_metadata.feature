@@ -10,13 +10,13 @@ Feature: Large native restore metadata
     And the active domain is "{{domain}}"
     And node "node-1" has a state-counting WASM fixture with <save_mib> MiB saves in resource directory "wasm_processor"
     And Kafka topic "backup_wasm_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE SCHEMA result ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -71,12 +71,12 @@ Feature: Large native restore metadata
     When the CLI restores "domain {{domain}} --as {{domain}}_durable_failure" from "native.nvxb" on node "{{leader}}" reporting JSON with memory measurements
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
     Given the active domain is "{{source_domain}}_durable_failure"
-    When these NSPL commands fail with "restore state installation is incomplete"
+    When these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
     When the cluster is restarted
-    And these NSPL commands fail with "restore state installation is incomplete"
+    And these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
@@ -88,7 +88,7 @@ Feature: Large native restore metadata
     Then the CLI restore succeeded, restoring domain "{{domain}}_copy" with 1 resource versions and 11 models
     And the CLI restore execution reference is saved as placeholder "native_restore_reference"
     Given the active domain is "{{domain}}_copy"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -105,7 +105,7 @@ Feature: Large native restore metadata
     And the restore stream's complete report matches placeholder "native_restore_report"
     And stopped restored nodes preserve every native metadata value from backup archive "native.nvxb"
     When the cluster is restarted
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -125,12 +125,12 @@ Feature: Large native restore metadata
       """
       ready: true
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status preserves restored work placements from placeholder "native_restore_placements"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
@@ -145,7 +145,7 @@ Feature: Large native restore metadata
     Then within "120s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <restored_inputs>
     And within "120s" DESCRIBE DOMAIN section "processed" metric "messages_total" "sent" relay "filtered_metrics" across physical nodes totals <branches>
     And within "120s" the restore subscription receives one isolated even row for each of <branches> tenants
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -165,13 +165,13 @@ Feature: Large native restore metadata
     And the active domain is "{{domain}}"
     And node "node-1" has a state-counting WASM fixture with 1 MiB saves in resource directory "wasm_processor"
     And Kafka topic "backup_native_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE SCHEMA result ( tenant STRING OPTIONAL, note STRING OPTIONAL );

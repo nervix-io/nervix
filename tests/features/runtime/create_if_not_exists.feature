@@ -8,7 +8,7 @@ Feature: CREATE IF NOT EXISTS
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Chicago\"}\n{\"zip\":\"10001\",\"city\":\"New York\"}\n"
       }
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       <setup_commands>
       <create_command>

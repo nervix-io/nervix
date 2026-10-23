@@ -5,7 +5,7 @@
 //!   accumulators, due-window emission, stepping, and eviction.
 //! - **Depends on.** Validated window plans, Arrow batches, the window accumulators, and bound
 //!   domain time.
-//! - **Must not know.** NSPL parsing, placement decisions or connector transports.
+//! - **Must not know.** Plexus parsing, placement decisions or connector transports.
 
 #![cfg_attr(
     nervix_lint,
@@ -77,11 +77,11 @@ pub(super) enum WindowProcessorError {
         expected: ArrowDataType,
         found: ArrowDataType,
     },
-    #[error("{} requires finite floating-point arguments", .function.nspl_name())]
+    #[error("{} requires finite floating-point arguments", .function.plexus_name())]
     NonFiniteArgument { function: WindowAggregateFunction },
     #[error("SUM of the window does not fit {data_type:?}")]
     SumOverflow { data_type: ArrowDataType },
-    #[error("{} of the window is not finite", .function.nspl_name())]
+    #[error("{} of the window is not finite", .function.plexus_name())]
     StatisticNotFinite { function: WindowAggregateFunction },
     #[error("window aggregate did not initialize required output field '{field}'")]
     UninitializedOutputField { field: String },
@@ -1084,7 +1084,7 @@ impl VmFunctionInjector for WindowAggregateResults {
             return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "window aggregate {} of structure {} was not evaluated for this emission",
-                    invocation.function.nspl_name(),
+                    invocation.function.plexus_name(),
                     invocation.demand_id
                 ),
             }));
@@ -1093,7 +1093,7 @@ impl VmFunctionInjector for WindowAggregateResults {
             return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "window aggregate {} evaluated {} rows for output rows selected as {rows:?}",
-                    invocation.function.nspl_name(),
+                    invocation.function.plexus_name(),
                     result.len()
                 ),
             }));

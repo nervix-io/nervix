@@ -13,7 +13,7 @@ use super::*;
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "nervix-server")]
-#[command(about = "NSPL gRPC server")]
+#[command(about = "Plexus gRPC server")]
 pub struct Args {
     #[arg(long, env = "NERVIX_ADDR", default_value = "127.0.0.1:47391")]
     pub addr: String,

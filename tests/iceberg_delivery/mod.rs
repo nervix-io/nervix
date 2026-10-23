@@ -25,7 +25,7 @@ use super::{
     DescribedEmitterRetry, ICEBERG_REST_ADDR, IcebergCatalogGate, ScenarioWorld,
     common::iceberg_catalog_gate::HeldCommitArrival, current_leader_node, docstring,
     expand_placeholders, iceberg_row_matches_expected, iceberg_table_rows, parse_duration_text,
-    run_nspl_commands_on_node, rustfs_iceberg_table, staged_iceberg_arrow_ipc_batches,
+    run_plexus_commands_on_node, rustfs_iceberg_table, staged_iceberg_arrow_ipc_batches,
 };
 
 /// The snapshot summary property that counts every row the table holds at that snapshot.
@@ -320,7 +320,7 @@ async fn then_describe_emitter_reports_a_whole_class_wait(
         nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let output =
-            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+            run_plexus_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
                 .await
                 .unwrap_or_else(|error| panic!("DESCRIBE EMITTER {emitter} failed: {error:?}"));
         world.last_command_output = Some(output.clone());

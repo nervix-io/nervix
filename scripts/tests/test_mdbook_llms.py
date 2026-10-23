@@ -19,7 +19,7 @@ from scripts.upload_book_to_r2 import (
 
 
 class RenderLlmsTests(unittest.TestCase):
-    def test_renders_only_configured_public_nspl_chapters(self) -> None:
+    def test_renders_only_configured_public_plexus_chapters(self) -> None:
         context = {
             "book": {
                 "sections": [
@@ -37,8 +37,8 @@ class RenderLlmsTests(unittest.TestCase):
                                 },
                                 {
                                     "Chapter": {
-                                        "name": "NSPL Overview",
-                                        "path": "nspl-overview.md",
+                                        "name": "Plexus Overview",
+                                        "path": "plexus-overview.md",
                                         "sub_items": [],
                                     }
                                 },
@@ -65,10 +65,10 @@ class RenderLlmsTests(unittest.TestCase):
             "config": {
                 "output": {
                     "llms": {
-                        "title": "Nervix NSPL Documentation",
-                        "description": "Public NSPL configuration reference for Nervix.",
+                        "title": "Nervix Plexus Documentation",
+                        "description": "Public Plexus configuration reference for Nervix.",
                         "version": "v1.2.3",
-                        "include": ["nspl-overview.md", "relay.md"],
+                        "include": ["plexus-overview.md", "relay.md"],
                     }
                 }
             },
@@ -78,11 +78,11 @@ class RenderLlmsTests(unittest.TestCase):
 
         self.assertEqual(
             rendered,
-            "# Nervix NSPL Documentation (v1.2.3)\n\n"
-            "> Public NSPL configuration reference for Nervix.\n\n"
+            "# Nervix Plexus Documentation (v1.2.3)\n\n"
+            "> Public Plexus configuration reference for Nervix.\n\n"
             "Every link below belongs to this immutable documentation version.\n\n"
-            "## Public NSPL Reference\n\n"
-            "- [NSPL Overview](markdown/nspl-overview.md)\n"
+            "## Public Plexus Reference\n\n"
+            "- [Plexus Overview](markdown/plexus-overview.md)\n"
             "- [Streams And State](markdown/relay.md)\n",
         )
         self.assertNotIn("How To Run", rendered)
@@ -103,20 +103,20 @@ class RenderLlmsTests(unittest.TestCase):
                 "items": [
                     {
                         "Chapter": {
-                            "name": "NSPL Overview",
-                            "path": "nspl-overview.md",
+                            "name": "Plexus Overview",
+                            "path": "plexus-overview.md",
                             "sub_items": [],
                         }
                     }
                 ]
             },
             "config": {
-                "output": {"llms": {"include": ["nspl-overview.md"]}}
+                "output": {"llms": {"include": ["plexus-overview.md"]}}
             },
         }
 
         self.assertIn(
-            "[NSPL Overview](markdown/nspl-overview.md)", render_llms(context)
+            "[Plexus Overview](markdown/plexus-overview.md)", render_llms(context)
         )
 
     def test_book_upload_configures_boto3_for_r2(self) -> None:
@@ -162,7 +162,7 @@ class RenderLlmsTests(unittest.TestCase):
 
     def test_markdown_upload_uses_registered_media_type(self) -> None:
         self.assertEqual(
-            content_type_for(Path("markdown/nspl-overview.md")),
+            content_type_for(Path("markdown/plexus-overview.md")),
             "text/markdown; charset=utf-8",
         )
 

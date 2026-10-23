@@ -100,7 +100,7 @@ pub(crate) enum EntrypointPlanError {
         ingestor: IngestorName,
         endpoint: nervix_models::EndpointName,
     },
-    #[error("ingestor '{ingestor}' has an endpoint contract canonical NSPL cannot render")]
+    #[error("ingestor '{ingestor}' has an endpoint contract canonical Plexus cannot render")]
     UnrenderableClientContract { ingestor: IngestorName },
     #[error("{kind:?} '{node}' declares no input relay")]
     MissingInput { kind: ModelKind, node: ModelName },

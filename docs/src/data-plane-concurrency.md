@@ -1,5 +1,7 @@
 # Data-Plane Concurrency
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix keeps the paths that carry records, batches, remote relay frames, and acknowledgements free
 from shared coordination that is unrelated to the record being processed. This is the
 contentionless data-plane rule. It applies after a runtime task has started and its graph, routing,
@@ -2206,7 +2208,7 @@ both random and PCT schedules, and the failing schedule replays.
 Shuttle explores sequentially consistent schedules. It cannot prove that a chosen `Relaxed`,
 `Acquire`, or `Release` ordering is sufficient on weak-memory hardware; a claim that depends on one
 is a Loom model, described under [Memory-ordering models](#memory-ordering-models). Cucumber
-remains the public behavior test: when a scheduling defect affects an NSPL operation, runtime
+remains the public behavior test: when a scheduling defect affects a Plexus operation, runtime
 output, or process outcome, its Shuttle regression is paired with a scenario through that
 interface. A scenario cannot exhaust the interleavings of an in-process protocol, and neither a
 Shuttle check nor a Loom model can verify the whole cluster, socket, disk, or browser path.

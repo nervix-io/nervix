@@ -1,5 +1,7 @@
 # Developing Nervix
 
+*Plexus, the Nervix graph definition language.*
+
 This section is for working on Nervix itself. Everything here assumes a clone of the Nervix
 repository and uses its `just` recipes; none of it is required to use Nervix.
 
@@ -107,9 +109,9 @@ Fresh clusters require an initial password for the `default` user. Set
 `NERVIX_INIT_DEFAULT_USER_PASSWORD` or pass `--init-default-user-password <password>` on the first
 startup. The leader stores the `default` user's Argon2 password hash in the strongly consistent
 control plane only when that user does not already exist. After the default user has been created,
-remove the environment variable or flag from normal startup. Later users can be created through NSPL:
+remove the environment variable or flag from normal startup. Later users can be created through Plexus:
 
-```nspl
+```plexus
 CREATE USER my_username WITH PASSWORD 'my_secure_password';
 ```
 
@@ -297,9 +299,9 @@ runs a focused check of all targets through the same recipe. The compiler driver
 separate `typed-ratchet/driver` directory. All builds retain the configured kache wrapper. Cargo's
 compiler job limit applies separately within each invocation.
 
-`just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
-the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that
-are intentionally not complete NSPL scripts; the fence remains identified as NSPL in the rendered
+`just validate-plexus-docs` scans `docs/src` and parses every exact `plexus` code fence directly with
+the parser crate. Use `plexus,ignore` only for loose grammar synopses and statement fragments that
+are intentionally not complete Plexus scripts; the fence remains identified as Plexus in the rendered
 documentation.
 
 For test runs:

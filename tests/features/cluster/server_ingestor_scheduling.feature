@@ -2,7 +2,7 @@ Feature: Server ingestor scheduling
   Scenario: HTTP endpoint ingestors accept traffic on every live node
     Given Kafka is running
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -10,7 +10,7 @@ Feature: Server ingestor scheduling
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -67,7 +67,7 @@ Feature: Server ingestor scheduling
   Scenario: Websocket endpoint ingestors accept traffic on every live node
     Given Kafka is running
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -75,7 +75,7 @@ Feature: Server ingestor scheduling
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -132,7 +132,7 @@ Feature: Server ingestor scheduling
   Scenario: HTTP endpoint ingestors follow node stop and rejoin
     Given Kafka is running
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -140,7 +140,7 @@ Feature: Server ingestor scheduling
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -201,7 +201,7 @@ Feature: Server ingestor scheduling
   Scenario: Websocket endpoint ingestors follow node stop and rejoin
     Given Kafka is running
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -209,7 +209,7 @@ Feature: Server ingestor scheduling
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64

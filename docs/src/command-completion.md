@@ -1,6 +1,8 @@
 # Command Completion
 
-Nervix treats a successful NSPL administrative response as a completion boundary. When a command
+*Plexus, the Nervix graph definition language.*
+
+Nervix treats a successful Plexus administrative response as a completion boundary. When a command
 returns `OK`, its declared effect is durable, applied, and usable through every current live node
 that participates in that effect. A caller can issue the dependent command immediately through
 another session or node. Runtime data flow, subscription delivery, connector acknowledgements, and
@@ -395,6 +397,6 @@ outcomes. An expired reference produces an explicit result and never causes auto
 under a new identity.
 
 The public behavior is specified in
-[NSPL command completion](https://github.com/nervix-io/nervix/blob/main/docs/specifications/nspl-command-completion.md).
+[Plexus command completion](https://github.com/nervix-io/nervix/blob/main/docs/specifications/plexus-command-completion.md).
 The corresponding public scenario inventory is maintained in the repository's command-completion
 acceptance ledger.

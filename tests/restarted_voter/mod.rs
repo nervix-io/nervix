@@ -11,7 +11,7 @@ use std::time::Duration;
 use cucumber::{then, when};
 use nervix_primitives::time::timeout;
 
-use crate::{ScenarioWorld, common::cluster::node_name, run_nspl_commands_on_node};
+use crate::{ScenarioWorld, common::cluster::node_name, run_plexus_commands_on_node};
 
 #[when(expr = "the cluster restarts with voter {string}'s first heartbeat relayed to node-1")]
 async fn restart_with_relayed_voter(world: &mut ScenarioWorld, voter: String) {
@@ -35,7 +35,7 @@ async fn observe_first_heartbeat(world: &mut ScenarioWorld) {
         observation.is_ok(),
         "the leader did not evaluate the relayed heartbeat during startup grace"
     );
-    let status = run_nspl_commands_on_node(world, "node-1", "SHOW CLUSTER STATUS;").await;
+    let status = run_plexus_commands_on_node(world, "node-1", "SHOW CLUSTER STATUS;").await;
     let status = match status {
         Ok(status) => status,
         Err(error) => panic!("public cluster status failed at the observation barrier: {error}"),

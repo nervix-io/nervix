@@ -1,7 +1,9 @@
 # Client Session Protocol
 
+*Plexus, the Nervix graph definition language.*
+
 The client session protocol is the public boundary between a client and a Nervix node. It carries
-NSPL commands and their outcomes, transaction attachment and inspection, completion and choice
+Plexus commands and their outcomes, transaction attachment and inspection, completion and choice
 lookups, domain selection and the observations that follow it, Row subscriptions, domain clock
 attachments, producers that submit batches to client ingestors, resource uploads, backup downloads, and restore streams. The CLI, the web console, the Rust client, every host of the
 shared Rust binding, and independent implementations in other languages all speak it.
@@ -27,7 +29,7 @@ This chapter explains why the protocol behaves as it does. The [Client Implement
 Manual](./client-implementation-manual.md) states, as rules, what a client implementation must do.
 Each links to the other instead of repeating it. [Command Completion](./command-completion.md) owns
 the completion boundary and the retention of execution identities, [Control
-Plane](./control-plane.md#replicated-nspl-transactions) owns the transaction lifecycle, [Transaction
+Plane](./control-plane.md#replicated-plexus-transactions) owns the transaction lifecycle, [Transaction
 Quiescence And Impact Inspection](./transaction-quiescence.md) owns the impact report, [Resource
 Versions And Bindings](./resource-versions.md) owns the version lifecycle behind an upload, [Backup
 And Restore](./backup-and-restore.md) owns what a backup archive holds, [Domain
@@ -775,7 +777,7 @@ and the preview it is checked against.
 ## Transactions Over The Protocol
 
 A transaction is replicated control-plane state; its binding to a session is not. [Control
-Plane](./control-plane.md#replicated-nspl-transactions) owns the lifecycle, the eligible statements,
+Plane](./control-plane.md#replicated-plexus-transactions) owns the lifecycle, the eligible statements,
 and the limits, and [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) owns
 planning, previews, and reports. This section describes how a transaction travels over the protocol.
 
@@ -1018,7 +1020,7 @@ stateDiagram-v2
 
 A subscription is a read-only view of one relay, owned by the session that opened it. Its rows
 travel from the relay owner to the subscriber's node as Arrow batches, and from there to the client
-as typed Row frames. [Sessions](./sessions.md#subscription-lifecycle) owns the NSPL form and what a
+as typed Row frames. [Sessions](./sessions.md#subscription-lifecycle) owns the Plexus form and what a
 user sees; this section explains the protocol and data path behind it.
 
 ### Opening A Subscription
@@ -1068,7 +1070,7 @@ schema for. Batches the relay published during the opening are not delivered.
 The subscriber's node encodes Row frames directly from the Arrow batch it received. It validates the
 batch against the announced definition once, then writes each selected cell from its typed column
 into the FlatBuffers builder; no JSON object, map of fields, or intermediate row is built. Every
-NSPL type has exactly one cell type, `DATETIME` travels as signed nanoseconds, floats keep their
+Plexus type has exactly one cell type, `DATETIME` travels as signed nanoseconds, floats keep their
 exact bits, and `BYTES` travels as raw octets. A sensitive field is written as `RedactedCell` in
 every row, whether or not it held a value, so the frame reveals neither the value nor its nullness.
 A null in a nullable field is `NullCell`; a list element is never null or redacted.
@@ -1491,7 +1493,7 @@ refuses an open that cannot hold the emitter's maximum IPC batch. At most 32 con
 belong to one session. The request identity of the open is its `ConsumerId`. The protocol and its
 FlatBuffers shape are identical over native gRPC and the console WebSocket. An opened reply also
 carries the domain `START` generation and the emitter endpoint contract fingerprint. The fingerprint
-is BLAKE3 of canonical emitter NSPL with flush cadence normalized to immediate, a `0xff` separator,
+is BLAKE3 of canonical emitter Plexus with flush cadence normalized to immediate, a `0xff` separator,
 and the ordered output fields serialized as JSON. A flush-only change therefore keeps the live
 endpoint contract while changes to construction, publishing or ACK behavior do not.
 
@@ -1684,7 +1686,7 @@ owns what a restore recreates and the order of its steps.
 The client streams one `RestoreStart`, then the archive in order as non-empty `RestoreChunk`
 frames, and half-closes the stream. The Rust client and the console send chunks of at most
 256 KiB; the leader accepts any non-empty chunk that fits one frame. The start carries the request identity of the
-reply, the restore's execution reference, the statement as canonical NSPL, and the archive's exact
+reply, the restore's execution reference, the statement as canonical Plexus, and the archive's exact
 size and BLAKE3 digest. The reference is a persistent command's execution reference, and the
 request it is bound to is the statement together with the archive's size and digest: a restore is
 admitted once under it, repeating the same statement and archive under it joins that restore, and

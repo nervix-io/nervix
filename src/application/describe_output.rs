@@ -25,7 +25,7 @@ use nervix_interconnect::{
     LookupDescribeEnvelope, TransportPositionEnvelope,
 };
 use nervix_models::{
-    BranchSelection, CanonicalNsplError, ClickHouseSink, ClickHouseTableSink, ClientConsumerSink,
+    BranchSelection, CanonicalPlexusError, ClickHouseSink, ClickHouseTableSink, ClientConsumerSink,
     ClientSink, ClusterNodeName, CreateCorrelator, CreateDeduplicator, CreateEmitter,
     CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor, CreateReorderer,
     CreateWindowProcessor, EmitSink, EmitterBody, FieldPath, HeaderModel, HttpRequestSink,
@@ -40,7 +40,7 @@ use nervix_models::{
     RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
     ResourceUsage, ResourceVersionEntries, ScheduledNode, SentryEventSink, SentrySink,
     SqsQueueSink, SqsSink, SyslogCollectorSink, SyslogSink, WasmStateInspection, ZeroMqPushSink,
-    ZeroMqSink, expression_to_nspl, ingest_quiesce_to_nspl, ingestor_input_body_to_nspl,
+    ZeroMqSink, expression_to_plexus, ingest_quiesce_to_plexus, ingestor_input_body_to_plexus,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use sorted_vec::SortedSet;
@@ -290,7 +290,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
         format!(
             "from: {} {}",
             ingestor.input.source_phrase(),
-            ingestor_input_body_to_nspl(&ingestor.input)
+            ingestor_input_body_to_plexus(&ingestor.input)
         ),
         format!(
             "streams: {}",
@@ -308,7 +308,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
         }
         IngestorInput::Client(client) => {
             lines.push(format!("schema: {}", client.schema.as_str()));
-            lines.push(format!("mode: {}", client.mode.to_canonical_nspl()));
+            lines.push(format!("mode: {}", client.mode.to_canonical_plexus()));
         }
     }
     lines.extend([
@@ -336,7 +336,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
         format!("ready: {}", if summary.ready { "true" } else { "false" }),
         format!(
             "quiesce: {}",
-            ingest_quiesce_to_nspl(ingestor.input.quiesce())
+            ingest_quiesce_to_plexus(ingestor.input.quiesce())
         ),
         format!(
             "quiesce state: {}",
@@ -729,7 +729,7 @@ fn format_expression_list(expressions: &[nervix_models::Expression]) -> String {
     expressions
         .iter()
         .map(|expression| {
-            expression_to_nspl(expression).unwrap_or_else(|error| format!("<invalid: {error}>"))
+            expression_to_plexus(expression).unwrap_or_else(|error| format!("<invalid: {error}>"))
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -857,7 +857,7 @@ pub(in crate::application) fn format_correlator_describe_output(
         format!("match: {}", correlator.match_policy.as_ref()),
         format!(
             "correlate where: {}",
-            expression_to_nspl(&correlator.correlate_where)
+            expression_to_plexus(&correlator.correlate_where)
                 .unwrap_or_else(|error| format!("<invalid: {error}>"))
         ),
         format!("max time: {}", correlator.max_time),
@@ -931,7 +931,7 @@ pub(in crate::application) fn format_emitter_describe_output(
     emitter: &CreateEmitter,
     scheduled_node: Option<&ScheduledNode>,
     status: Option<&DataflowNodeStatusEnvelope>,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     let name = name.into();
     let mut lines = vec![
         format!("emitter: {}", name.as_str()),
@@ -993,10 +993,10 @@ pub(in crate::application) fn format_emitter_describe_output(
             Some(batch) => format!("batch: {batch}"),
             None => "batch: none".to_string(),
         },
-        format!("flush: {}", emitter.flush_policy.to_canonical_nspl()),
+        format!("flush: {}", emitter.flush_policy.to_canonical_plexus()),
         format!(
             "publishing mode: {}",
-            emitter.publishing_mode.to_canonical_nspl()
+            emitter.publishing_mode.to_canonical_plexus()
         ),
         format!(
             "filter-map: {}",
@@ -1014,7 +1014,7 @@ pub(in crate::application) fn format_emitter_describe_output(
     Ok(lines.join("\n"))
 }
 
-fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsplError> {
+fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalPlexusError> {
     Ok(match sink {
         EmitSink::Client(ClientSink::Consumer(ClientConsumerSink { schema })) => {
             format!("CLIENT schema={}", schema.as_str())
@@ -1026,8 +1026,8 @@ fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsp
         })) => format!(
             "HTTP client={} method={} path={}",
             client.as_str(),
-            expression_to_nspl(method)?,
-            expression_to_nspl(path)?
+            expression_to_plexus(method)?,
+            expression_to_plexus(path)?
         ),
         EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink { client, topic })) => {
             format!("KAFKA client={} topic={}", client.as_str(), topic.as_str())
@@ -1075,7 +1075,7 @@ fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsp
                     let value = match group {
                         nervix_models::SqsFifoGroup::FromBranch => "FROM BRANCH".to_string(),
                         nervix_models::SqsFifoGroup::Expression(expression) => {
-                            nervix_models::expression_to_nspl(expression)
+                            nervix_models::expression_to_plexus(expression)
                                 .unwrap_or_else(|_| "<unrenderable expression>".to_string())
                         }
                     };
@@ -1528,11 +1528,11 @@ fn format_window_aggregate_demand(
             demand
                 .functions
                 .iter()
-                .map(|function| function.nspl_name())
+                .map(|function| function.plexus_name())
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        format!("  storage: {}", demand.storage.nspl_name()),
+        format!("  storage: {}", demand.storage.plexus_name()),
         format!(
             "  references: {}",
             references.get(demand.id).copied().unwrap_or(0)

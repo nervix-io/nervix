@@ -5,12 +5,12 @@ Feature: MongoDB emission
     And MongoDB is running
     Given runtime replication is configured with replica count <replicas> and snapshot interval "100ms"
     And a <nodes> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     And MongoDB collection "notifications_mongodb_out_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -86,12 +86,12 @@ Feature: MongoDB emission
     And MongoDB is running
     Given runtime replication is configured with replica count <replicas> and snapshot interval "100ms"
     And a <nodes> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And MongoDB collection "notifications_mongodb_conflict_{{test_id}}" with unique user id exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -164,12 +164,12 @@ Feature: MongoDB emission
     And MongoDB is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And MongoDB collection "poison_mongodb_{{test_id}}" rejecting poison actions exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -260,12 +260,12 @@ Feature: MongoDB emission
     And MongoDB is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And MongoDB collection "batch_mongodb_{{test_id}}" recording insert command sizes exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
@@ -315,12 +315,12 @@ Feature: MongoDB emission
     And MongoDB is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And MongoDB collection "range_mongodb_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id U64 OPTIONAL,

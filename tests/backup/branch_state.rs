@@ -18,8 +18,8 @@ const DELIVERY_WINDOW: Duration = Duration::from_millis(350);
 /// How long a repeated post waits before posting again.
 const REPOST_INTERVAL: Duration = Duration::from_millis(100);
 
-#[given(expr = "these NSPL commands are saved as placeholder {string}")]
-fn given_nspl_commands_are_saved_as_placeholder(
+#[given(expr = "these Plexus commands are saved as placeholder {string}")]
+fn given_plexus_commands_are_saved_as_placeholder(
     world: &mut ScenarioWorld,
     placeholder: String,
     #[step] step: &Step,

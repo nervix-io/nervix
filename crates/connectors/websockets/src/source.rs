@@ -7,7 +7,7 @@
 //!   delivery, and suspend and close operations.
 //! - **Depends on.** The source contract, typed plans and host services, compiled signaling engine,
 //!   vocabulary values, execution primitives, TLS configuration, and WebSocket transport.
-//! - **Must not know.** Configuration Models, NSPL, runtime collectors, relays, branches,
+//! - **Must not know.** Configuration Models, Plexus, runtime collectors, relays, branches,
 //!   schedules, registry state, endpoint listeners, or host intake, admission and retry loops.
 //!
 //! Current boundary violation: the composer hard-codes the source's buffering, flush and

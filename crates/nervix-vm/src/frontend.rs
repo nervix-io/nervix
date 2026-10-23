@@ -2,7 +2,7 @@
 //!
 //! - **Owns.** Converting semantic Models once into programs accepted by the expression VM.
 //! - **Depends on.** The vocabulary, Arrow schemas, and the VM's program types.
-//! - **Must not know.** NSPL tokens or diagnostics, registry state, or runtime tasks.
+//! - **Must not know.** Plexus tokens or diagnostics, registry state, or runtime tasks.
 
 #![cfg_attr(
     nervix_lint,
@@ -2017,12 +2017,12 @@ mod tests {
     }
 
     fn expression(source: &str) -> ModelExpression {
-        nervix_nspl::parse_expression(source).assured("test expressions are valid NSPL")
+        nervix_plexus::parse_expression(source).assured("test expressions are valid Plexus")
     }
 
     fn construction(source: &str) -> RouteConstruction {
-        nervix_nspl::parse_route_construction(source)
-            .assured("test route constructions are valid NSPL")
+        nervix_plexus::parse_route_construction(source)
+            .assured("test route constructions are valid Plexus")
     }
 
     fn nullable_schema(fields: &[(&str, DataType)]) -> Schema {

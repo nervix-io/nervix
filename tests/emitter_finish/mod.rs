@@ -16,7 +16,7 @@ use cucumber::{then, when};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::time::Instant;
 
-use super::{NodeSession, ScenarioWorld, execute_nspl_commands_on_leader, parse_duration_text};
+use super::{NodeSession, ScenarioWorld, execute_plexus_commands_on_leader, parse_duration_text};
 
 /// When a STOP completed, and when the endpoint it ran beside resumed.
 #[derive(Debug)]
@@ -59,7 +59,7 @@ async fn stop_while_endpoint_resumes(world: &mut ScenarioWorld, name: String, de
         .verified("the scenario configured the stallable endpoint it resumes")
         .resume_after(delay);
     let stop = async {
-        let result = execute_nspl_commands_on_leader(world, "STOP;").await;
+        let result = execute_plexus_commands_on_leader(world, "STOP;").await;
         StoppedDomain {
             result,
             at: Instant::now(),

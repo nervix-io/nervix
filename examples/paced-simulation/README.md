@@ -7,7 +7,7 @@ emitters, all on one session.
 
 | File | What it is |
 | --- | --- |
-| `paced_simulation.nspl` | The graph: a paced domain, client ingestors with `TIMESTAMP AT` and `TIMESTAMP NOW`, a branched relay, and attached client emitters for readings and rejection notices |
+| `paced_simulation.plexus` | The graph: a paced domain, client ingestors with `TIMESTAMP AT` and `TIMESTAMP NOW`, a branched relay, and attached client emitters for readings and rejection notices |
 | `rust/` | The Rust driver, `nervix-paced-simulation`, built on the Rust client library |
 | `python/paced_simulation.py` | The Python driver, built on the shared C binding through `ctypes` and the standard library alone |
 
@@ -25,7 +25,7 @@ the CLI's domain selection. `TIME RATE 4.0` runs domain time four times faster t
 ```bash
 nervix-cli --command "CREATE PACED DOMAIN paced_simulation WITH PERIOD 100ms SKEW 100ms;"
 nervix-cli --domain paced_simulation --command \
-  "$(sed -n '/^BEGIN;/,$p' examples/paced-simulation/paced_simulation.nspl)"
+  "$(sed -n '/^BEGIN;/,$p' examples/paced-simulation/paced_simulation.plexus)"
 nervix-cli --domain paced_simulation --command "START AT NOW TIME RATE 4.0;"
 ```
 

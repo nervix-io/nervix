@@ -7,7 +7,7 @@
 //!   acknowledgement and requeue.
 //! - **Depends on.** The connector contract, typed client configuration entries, the crate's
 //!   broker connection, `error-stack`, Tokio and `lapin`.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,

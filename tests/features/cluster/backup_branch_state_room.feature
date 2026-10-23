@@ -3,7 +3,7 @@ Feature: Deduplicator and window restore conversions refused for room
   that unit again instead of failing the restore.
 
   Background:
-    Given these NSPL commands are saved as placeholder "branch_state_models"
+    Given these Plexus commands are saved as placeholder "branch_state_models"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA payment ( tenant STRING, transaction_id STRING, amount I64 );
@@ -61,7 +61,7 @@ Feature: Deduplicator and window restore conversions refused for room
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       {{branch_state_models}}
       CREATE SUBSCRIPTION source_payments TO unique_payments;
@@ -109,7 +109,7 @@ Feature: Deduplicator and window restore conversions refused for room
       """
       {"tenant":"probe","latency":1}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restored_payments TO unique_payments;
       """
@@ -155,7 +155,7 @@ Feature: Deduplicator and window restore conversions refused for room
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       {{branch_state_models}}
       CREATE SUBSCRIPTION source_summaries TO metric_summaries;
@@ -206,7 +206,7 @@ Feature: Deduplicator and window restore conversions refused for room
       """
       {"tenant":"probe","latency":1}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restored_summaries TO metric_summaries;
       """

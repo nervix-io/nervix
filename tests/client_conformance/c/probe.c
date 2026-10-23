@@ -1166,7 +1166,7 @@ static reported_fields reported_fields_of(const nx_schema *schema) {
     return result;
 }
 
-/* A field's type in NSPL's spelling, with nested fixed-size lists as dimensions. */
+/* A field's type in Plexus's spelling, with nested fixed-size lists as dimensions. */
 static void append_type(line *target, const level_spec *levels, size_t count) {
     if (levels[0].type == NX_TYPE_LIST) {
         append(target, "VEC<");

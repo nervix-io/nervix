@@ -48,7 +48,7 @@ use nervix_interconnect::{
     Transport, TransportClock, TransportIdentity, TransportOptions,
 };
 use nervix_models::{ClusterNodeName, NodeEndpoint};
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statement_sources};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statement_sources};
 use nervix_primitives::{
     runtime::Handle,
     sync::{

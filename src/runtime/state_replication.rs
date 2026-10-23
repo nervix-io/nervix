@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** In-memory checkpoints, transfer activation and branch-state restoration.
 //! - **Depends on.** Typed runtime snapshots, interconnect transfer and node schedules.
-//! - **Must not know.** NSPL parsing, graph validation or external connector configuration.
+//! - **Must not know.** Plexus parsing, graph validation or external connector configuration.
 
 #![cfg_attr(
     nervix_lint,

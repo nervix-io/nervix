@@ -14,7 +14,7 @@ Feature: Client ingestors
     And HTTP receiver "sink" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (
@@ -69,7 +69,7 @@ Feature: Client ingestors
       START;
       """
     And <session> is connected to the leader node
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR orders_in;
       """
@@ -126,7 +126,7 @@ Feature: Client ingestors
 
       {"order_id":"o-3","amount_cents":900,"card":"4111-4"}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW INGESTORS;
       """
@@ -155,7 +155,7 @@ Feature: Client ingestors
     And HTTP receiver "sink" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (
@@ -286,7 +286,7 @@ Feature: Client ingestors
     And HTTP receiver "sink" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (
@@ -331,13 +331,13 @@ Feature: Client ingestors
     And <session> cannot open a producer on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE" with 1 batch and "33MiB" of credit because "invalid limits"
     When <session> opens producer "large" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE" with 1 batch and "32MiB" of credit
     Then <session> cannot open a producer on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE" because "session capacity exhausted"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
     Then producer "large" eventually ends because "domain stopped"
     And <session> cannot open a producer on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE" because "domain stopped"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -346,7 +346,7 @@ Feature: Client ingestors
       | region | order_id | amount | card   |
       | us     | o-9      | 4      | 4111-9 |
     Then batch "after start" completes
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DROP INGESTOR orders_in;
       """
@@ -363,7 +363,7 @@ Feature: Client ingestors
     And HTTP receiver "sink" answers unscripted requests with "hold response until released"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (
@@ -430,7 +430,7 @@ Feature: Client ingestors
     And HTTP receiver "sink" answers unscripted requests with "hold response until released"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       CREATE SCHEMA order_in (
@@ -459,7 +459,7 @@ Feature: Client ingestors
       """
     And client "app" is connected to node "node-1"
     When client "app" opens producer "orders" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE" with 2 batches and "1MiB" of credit
-    And client "app" executes these NSPL commands
+    And client "app" executes these Plexus commands
       """
       ATTACH DOMAIN CLOCK;
       """
@@ -482,7 +482,7 @@ Feature: Client ingestors
     # The producer's credit is spent and its batches wait for the graph, while the same session
     # still answers commands and delivers its attached domain clock.
     And within "10s" client "app" receives a tick for its attached domain clock
-    When client "app" executes these NSPL commands
+    When client "app" executes these Plexus commands
       """
       SHOW INGESTORS;
       """
@@ -501,7 +501,7 @@ Feature: Client ingestors
     Then batch "b1" completes
     And producer "orders" holds no batches
     And HTTP receiver "sink" has captured exactly 2 requests
-    When client "app" executes these NSPL commands
+    When client "app" executes these Plexus commands
       """
       BEGIN;
       """
@@ -522,7 +522,7 @@ Feature: Client ingestors
     And HTTP receiver "sink" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (
@@ -576,7 +576,7 @@ Feature: Client ingestors
     # Both branches have partial batches at a cadence much longer than the test. The hold must
     # force them through the shared relay while it remains open, then wait for the sink's ACK.
     Given client "alter owner" is connected to the leader node
-    When client "alter owner" executes these NSPL commands
+    When client "alter owner" executes these Plexus commands
       """
       BEGIN;
       ALTER CLIENT PRODUCER INGESTOR orders_in REPLACE ROUTE TO orders
@@ -584,7 +584,7 @@ Feature: Client ingestors
         FLUSH EACH 10ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
     Then client "alter owner" transaction id is saved as placeholder "alter_transaction"
-    When client "alter owner" begins executing these NSPL commands in the background
+    When client "alter owner" begins executing these Plexus commands in the background
       """
       COMMIT;
       """
@@ -595,7 +595,7 @@ Feature: Client ingestors
       producers: 1
       """
     And HTTP receiver "sink" eventually receives at least 1 request
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR orders_in;
       """
@@ -604,7 +604,7 @@ Feature: Client ingestors
       FLUSH EACH 1h
       """
     When HTTP receiver "sink" releases its held responses with "respond 200"
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And transaction "{{alter_transaction}}" eventually has state "COMMITTED"
     And transaction "{{alter_transaction}}" report step 1 eventually records planned quiesce "ENTITY_PAUSE", actual quiesce "ENTITY_PAUSE", execution "APPLIED", and outcomes "REQUESTED,CONFIRMED,RELEASED|REQUESTED,CONFIRMED,RELEASED"
     And batch "held" completes
@@ -615,7 +615,7 @@ Feature: Client ingestors
       | eu     | o-5      | 5      | 4111-5 |
     Then batch "after flush change" completes
     # A new acknowledgement window is a new endpoint contract.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER CLIENT PRODUCER INGESTOR orders_in SET FROM SCHEMA order_in
         MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
@@ -659,7 +659,7 @@ Feature: Client ingestors
     And HTTP receiver "sink" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (
@@ -711,7 +711,7 @@ Feature: Client ingestors
       admitted batches: 1
       """
     Given client "alter owner" is connected to the leader node
-    When client "alter owner" executes these NSPL commands
+    When client "alter owner" executes these Plexus commands
       """
       BEGIN;
       ALTER CLIENT PRODUCER INGESTOR orders_in SET FROM SCHEMA order_in
@@ -719,7 +719,7 @@ Feature: Client ingestors
         ON QUIESCE SUSPEND;
       """
     Then client "alter owner" transaction id is saved as placeholder "alter_transaction"
-    When client "alter owner" begins executing these NSPL commands in the background
+    When client "alter owner" begins executing these Plexus commands in the background
       """
       COMMIT;
       """
@@ -732,14 +732,14 @@ Feature: Client ingestors
     And HTTP receiver "sink" eventually receives at least 1 request
     Given the next <failure> in domain "{{domain}}" <disposition>
     When HTTP receiver "sink" releases its held responses with "respond 200"
-    Then the background NSPL execution fails with "<error>"
+    Then the background Plexus execution fails with "<error>"
     And transaction "{{alter_transaction}}" eventually has state "FAILED"
     And transaction "{{alter_transaction}}" report step 1 eventually records planned quiesce "ENTITY_PAUSE", actual quiesce "ENTITY_PAUSE", execution "FAILED", and outcomes "<outcomes>"
     And the last command error contains
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR orders_in;
       """
@@ -752,7 +752,7 @@ Feature: Client ingestors
       | region | order_id | amount | card   |
       | us     | o-4      | 4      | 4111-4 |
       | eu     | o-5      | 5      | 4111-5 |
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       ALTER CLIENT PRODUCER INGESTOR orders_in REPLACE ROUTE TO orders
         INHERIT ALL BRANCHED BY by_region SET region = message.region
@@ -792,7 +792,7 @@ Feature: Client ingestors
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (
@@ -823,7 +823,7 @@ Feature: Client ingestors
     # the ingestor executes on another node.
     Then the current leader node is saved as placeholder "entry"
     And a node other than placeholder "entry" is saved as placeholder "owner"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
       """
@@ -840,7 +840,7 @@ Feature: Client ingestors
       producers: 1
       forwarded producers: 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{entry}} IGNORE PREFERENCES;
       """
@@ -868,7 +868,7 @@ Feature: Client ingestors
     And HTTP receiver "sink" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (
@@ -895,7 +895,7 @@ Feature: Client ingestors
         ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE INGESTOR orders_in;
       """
@@ -923,7 +923,7 @@ Feature: Client ingestors
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (
@@ -953,7 +953,7 @@ Feature: Client ingestors
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "owner"
     And a node other than placeholders "leader" and "owner" is saved as placeholder "entry"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
       """
@@ -981,7 +981,7 @@ Feature: Client ingestors
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (
@@ -1011,7 +1011,7 @@ Feature: Client ingestors
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "owner"
     And a node other than placeholders "leader" and "owner" is saved as placeholder "entry"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
       RELOCATE RELAY orders ONTO NODE {{owner}} IGNORE PREFERENCES;
@@ -1057,7 +1057,7 @@ Feature: Client ingestors
     And HTTP receiver "sink" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (
@@ -1111,7 +1111,7 @@ Feature: Client ingestors
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (
@@ -1140,7 +1140,7 @@ Feature: Client ingestors
       """
     Then the current leader node is saved as placeholder "entry"
     And a node other than placeholder "entry" is saved as placeholder "owner"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
       """
@@ -1164,7 +1164,7 @@ Feature: Client ingestors
   @client_ingestor @client_io_03_producer @client_io_03_socket_loss
   Scenario Outline: A producer restores its attachment after its session socket is lost
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (region STRING, order_id STRING);
@@ -1199,7 +1199,7 @@ Feature: Client ingestors
   @client_ingestor @client_io_03_producer @client_io_03_relocation
   Scenario: A producer follows planned relocation without a new application open
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (region STRING, order_id STRING);
@@ -1213,7 +1213,7 @@ Feature: Client ingestors
       """
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "next_owner"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{leader}} IGNORE PREFERENCES;
       """
@@ -1223,7 +1223,7 @@ Feature: Client ingestors
       | region | order_id |
       | eu     | o-1      |
     Then batch "before relocation" completes
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{next_owner}} IGNORE PREFERENCES;
       """
@@ -1239,7 +1239,7 @@ Feature: Client ingestors
     And HTTP receiver "sink" answers unscripted requests with "hold response until released"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (

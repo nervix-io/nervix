@@ -3,7 +3,7 @@ set -eEuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 compose_file="${script_dir}/compose.yaml"
-fixture_file="${script_dir}/fixtures/baseline.nspl"
+fixture_file="${script_dir}/fixtures/baseline.plexus"
 fixture_generator="${script_dir}/fixtures/generate-baseline.jq"
 # shellcheck source=tool-images.sh
 source "${script_dir}/tool-images.sh"
@@ -325,13 +325,13 @@ load_replay_settings() {
            then "the load interval" else empty end),
           (if ((.fixtures.input.sha256 | digest) and (.fixtures.input.records | type == "number")) | not
            then "the input fixture" else empty end),
-          (if (.fixtures.graph.sha256 | digest) | not then "the NSPL graph" else empty end)
+          (if (.fixtures.graph.sha256 | digest) | not then "the Plexus graph" else empty end)
         ] | join(", ")' "${manifest}")"
     [[ -z "${missing}" ]] \
         || setup_error "the replay manifest ${manifest} does not record ${missing}, so the experiment cannot be reconstructed"
     local entry
     for entry in 'mixed/plan.json .mixed.plan.sha256' 'fixtures/input.ndjson .fixtures.input.sha256' \
-        'fixtures/baseline.nspl .fixtures.graph.sha256'; do
+        'fixtures/baseline.plexus .fixtures.graph.sha256'; do
         local path="${entry%% *}"
         local field="${entry#* }"
         [[ -s "${replay_dir}/${path}" ]] || setup_error "the replay run directory lacks its recorded ${path}"
@@ -421,7 +421,7 @@ backup_state_graph=false
 case "${scenario}" in
     backup-cycles | restore-fresh-cluster | restore-fault | restore-volume) backup_state_graph=true ;;
 esac
-# The restore scenarios also install fixtures/restore-state.nspl, a WASM processor whose guest
+# The restore scenarios also install fixtures/restore-state.plexus, a WASM processor whose guest
 # saves this many padded bytes for every branch: a restore-fault archive's guest saves hold its
 # staging long enough under the hold delay, and a restore-volume archive's exceed the node's 32 MiB
 # bulk budget.
@@ -816,7 +816,7 @@ update_manifest() {
 }
 
 # Fixes a mixed-instability experiment before the run alters anything: the validated action plan,
-# the fixture records and the NSPL graph, each kept in the run directory with the digest a replay
+# the fixture records and the Plexus graph, each kept in the run directory with the digest a replay
 # checks, and the limits the run judges. A seeded plan is generated here; a supplied or replayed one
 # is copied. An invalid plan fails the run as a setup error before any container exists.
 prepare_mixed_experiment() {
@@ -847,7 +847,7 @@ prepare_mixed_experiment() {
     plan_end="$(jq -r '.steps[-1].at_seconds + .steps[-1].estimated_seconds' "${plan}")"
     if [[ -n "${replay_dir}" ]]; then
         cp "${replay_dir}/fixtures/input.ndjson" "${artifact_dir}/fixtures/input.ndjson"
-        cp "${replay_dir}/fixtures/baseline.nspl" "${artifact_dir}/fixtures/baseline.nspl"
+        cp "${replay_dir}/fixtures/baseline.plexus" "${artifact_dir}/fixtures/baseline.plexus"
     else
         # The load produces one record a second until the run stops it, so the fixture lasts the
         # planned timeline and fifteen minutes of startup and final boundaries, and by default twice
@@ -864,11 +864,11 @@ prepare_mixed_experiment() {
         fi
         jq -nc --arg run_id "${run_id}" --argjson count "${record_count}" \
             -f "${fixture_generator}" >"${artifact_dir}/fixtures/input.ndjson"
-        cp "${script_dir}/fixtures/baseline.nspl" "${artifact_dir}/fixtures/baseline.nspl"
+        cp "${script_dir}/fixtures/baseline.plexus" "${artifact_dir}/fixtures/baseline.plexus"
     fi
     [[ "$(wc -l <"${artifact_dir}/fixtures/input.ndjson")" -eq "${record_count}" ]] \
         || setup_error "the input fixture does not hold ${record_count} records"
-    fixture_file="${artifact_dir}/fixtures/baseline.nspl"
+    fixture_file="${artifact_dir}/fixtures/baseline.plexus"
     # The dollars in this jq filter are jq variables, not shell expansion.
     # shellcheck disable=SC2016
     update_manifest '.fixture_record_limit = $records
@@ -878,7 +878,7 @@ prepare_mixed_experiment() {
                            steps: ($plan[0].steps | length), planned_end_seconds: ($plan_end | tonumber)},
                     limits: {max_memory_bytes: $memory, max_recovery_backlog: $backlog, max_pending: $pending}}
         | .fixtures = {input: {file: "fixtures/input.ndjson", sha256: $input_sha256, records: $records},
-                       graph: {file: "fixtures/baseline.nspl", sha256: $graph_sha256}}
+                       graph: {file: "fixtures/baseline.plexus", sha256: $graph_sha256}}
         | .replay_of = $replay_of' \
         --argjson records "${record_count}" --arg seed "${mixed_seed}" --arg policy "${mixed_policy}" \
         --arg duration "${mixed_duration}" --slurpfile plan "${plan}" --arg source "${plan_source}" \
@@ -1521,7 +1521,7 @@ finish() {
                     evidence_paths+=("${evidence_path}")
                 fi
             done
-            for evidence_path in manifest.json fixtures/input.ndjson fixtures/baseline.nspl \
+            for evidence_path in manifest.json fixtures/input.ndjson fixtures/baseline.plexus \
                 mixed/plan-validation.json results/mixed-trace.json results/mixed-resources.json \
                 results/mixed-instability.json; do
                 if [[ -s "${artifact_dir}/${evidence_path}" ]]; then
@@ -2266,12 +2266,12 @@ for container_id in "${node_containers[@]}"; do
         || { printf 'container %s uses %s instead of %s\n' "${container_id}" "${running_image}" "${image_id}" >&2; exit 1; }
 done
 
-phase "NSPL graph installation"
-nspl_fixture="$(<"${fixture_file}")"
+phase "Plexus graph installation"
+plexus_fixture="$(<"${fixture_file}")"
 if [[ "${backup_graph}" == true ]]; then
     # shellcheck source=backup-scenario.sh
     source "${script_dir}/backup-scenario.sh"
-    nspl_fixture="$(backup_graph_fixture "${nspl_fixture}")" \
+    plexus_fixture="$(backup_graph_fixture "${plexus_fixture}")" \
         || setup_error 'the backup fixture does not hold exactly one consumer-group Kafka offset clause to replace'
 fi
 cli_command 'CREATE UNPACED DOMAIN chaos_baseline;' \
@@ -2305,15 +2305,15 @@ if [[ "${scenario}" == stateful ]]; then
     grep -Fxq 'uploaded resource version 1' "${artifact_dir}/public/upload-wasm-resource.txt" \
         || setup_error 'the packaged CLI did not upload the WASM fixture as resource version 1'
 fi
-domain_cli_command "${nspl_fixture}" \
-    >"${artifact_dir}/public/configure-nspl.txt" 2>&1
+domain_cli_command "${plexus_fixture}" \
+    >"${artifact_dir}/public/configure-plexus.txt" 2>&1
 if [[ "${scenario}" == stateful ]]; then
-    domain_cli_command "$(<"${script_dir}/fixtures/stateful.nspl")" \
-        >"${artifact_dir}/public/configure-stateful-nspl.txt" 2>&1
+    domain_cli_command "$(<"${script_dir}/fixtures/stateful.plexus")" \
+        >"${artifact_dir}/public/configure-stateful-plexus.txt" 2>&1
 fi
 if [[ "${backup_state_graph}" == true ]]; then
-    domain_cli_command "$(<"${script_dir}/fixtures/backup-state.nspl")" \
-        >"${artifact_dir}/public/configure-backup-state-nspl.txt" 2>&1
+    domain_cli_command "$(<"${script_dir}/fixtures/backup-state.plexus")" \
+        >"${artifact_dir}/public/configure-backup-state-plexus.txt" 2>&1
 fi
 if [[ -n "${restore_guest_bytes}" ]]; then
     # The padded guest is WebAssembly text generated for this run's save size, which the packaged
@@ -2339,15 +2339,15 @@ if [[ -n "${restore_guest_bytes}" ]]; then
         >"${artifact_dir}/public/upload-padded-resource.txt" 2>&1
     grep -Fxq 'uploaded resource version 1' "${artifact_dir}/public/upload-padded-resource.txt" \
         || setup_error 'the packaged CLI did not upload the padded guest as resource version 1'
-    domain_cli_command "$(<"${script_dir}/fixtures/restore-state.nspl")" \
-        >"${artifact_dir}/public/configure-restore-state-nspl.txt" 2>&1
+    domain_cli_command "$(<"${script_dir}/fixtures/restore-state.plexus")" \
+        >"${artifact_dir}/public/configure-restore-state-plexus.txt" 2>&1
 fi
 domain_cli_command 'START;' >"${artifact_dir}/public/start-domain.txt" 2>&1
 if [[ "${scenario}" == domain-time ]]; then
     cli_command 'CREATE PACED DOMAIN chaos_paced WITH PERIOD 1s SKEW 1s;' \
         >"${artifact_dir}/public/create-paced-domain.txt" 2>&1
-    run_cli chaos_paced "$(<"${script_dir}/fixtures/paced.nspl")" \
-        >"${artifact_dir}/public/configure-paced-nspl.txt" 2>&1
+    run_cli chaos_paced "$(<"${script_dir}/fixtures/paced.plexus")" \
+        >"${artifact_dir}/public/configure-paced-plexus.txt" 2>&1
     run_cli chaos_paced 'START AT NOW TIME RATE 4.0;' \
         >"${artifact_dir}/public/start-paced-domain.txt" 2>&1
 fi

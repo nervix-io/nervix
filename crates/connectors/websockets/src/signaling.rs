@@ -6,7 +6,7 @@
 //!   encoding and matching, and accepted-data delivery through the caller's sink.
 //! - **Depends on.** The connector contract, typed signaling plans and host services, vocabulary
 //!   values, jaq, protobuf reflection, execution primitives, WebSocket transport, and contextual errors.
-//! - **Must not know.** Configuration Models, NSPL, registry or resource-store state, graph
+//! - **Must not know.** Configuration Models, Plexus, registry or resource-store state, graph
 //!   routing, relays, collectors, endpoint selection, or host intake and retry policy.
 //!
 //! Current boundary violation: `compile_parts` takes `SignalingWireFormat` and

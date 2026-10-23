@@ -1,5 +1,7 @@
 # Client Ingestors And Emitters
 
+*Plexus, the Nervix graph definition language.*
+
 Authenticated applications participate in a Nervix graph through persisted, domain-owned
 `CLIENT PRODUCER` ingestors and `TO CLIENT` emitters. Producers submit native Arrow batches;
 consumers receive constructed Arrow output and explicitly acknowledge, retry, or reject each
@@ -37,10 +39,10 @@ native endpoints instead name an internal schema directly and use the existing s
 Starting a domain needs no connected application. With no consumer, an emitter retains bounded
 pending work and applies graph backpressure.
 
-The language parses NSPL once into structured Models. The registry validates domain references,
+The language parses Plexus once into structured Models. The registry validates domain references,
 exact schemas, sensitivity, branch declarations, construction, policies and capabilities. Pure
 decisions lower those validated inputs into native source and sink plans in one execution revision.
-The data plane executes plans without reading Models or reparsing executable NSPL.
+The data plane executes plans without reading Models or reparsing executable Plexus.
 
 | Layer | Responsibility on this path |
 | --- | --- |
@@ -115,10 +117,10 @@ declared output. It requires a running Nervix cluster and authenticated session 
 there is no external broker, queue, codec, resource upload or connector client to provision.
 The `private_note` value is deliberately exported through explicit leakage.
 
-Save the block as `application.nspl`. The model definitions form one transaction. The CLI commands
+Save the block as `application.plexus`. The model definitions form one transaction. The CLI commands
 below create the domain, select it with `--domain`, load the graph, then start it in separate phases.
 
-```nspl
+```plexus
 BEGIN;
 CREATE SCHEMA application_event (
   event_id STRING,
@@ -170,7 +172,7 @@ address when they differ from these examples:
 ```bash
 nervix-cli --server http://127.0.0.1:47391 --username default \
   --password "$NERVIX_PASSWORD" --command "CREATE UNPACED DOMAIN application;"
-nervix-cli --domain application --command "$(cat application.nspl)"
+nervix-cli --domain application --command "$(cat application.plexus)"
 nervix-cli --domain application --command "START;"
 nervix-cli --domain application --command "SHOW CREATE INGESTOR submit_events;"
 nervix-cli --domain application --command "DESCRIBE EMITTER receive_events;"
@@ -224,7 +226,7 @@ configuration runs in the `application` graph above, selected with `--domain app
 typed default works before a branch has materialized state; another source may later populate
 `tenant_limits`.
 
-```nspl
+```plexus
 BEGIN;
 CREATE SCHEMA tenant_limit (maximum I64);
 CREATE RELAY tenant_limits
@@ -599,7 +601,7 @@ that graph and start its domain, then run either application:
 nervix-cli --command \
   "CREATE PACED DOMAIN paced_simulation WITH PERIOD 100ms SKEW 100ms;"
 nervix-cli --domain paced_simulation --command \
-  "$(sed -n '/^BEGIN;/,$p' examples/paced-simulation/paced_simulation.nspl)"
+  "$(sed -n '/^BEGIN;/,$p' examples/paced-simulation/paced_simulation.plexus)"
 nervix-cli --domain paced_simulation --command "START AT NOW TIME RATE 4.0;"
 just paced-simulation --server http://127.0.0.1:47391 \
   --ticks 100 --sensors 3 --inspect-every 1s \
@@ -624,10 +626,10 @@ ledger and applies effects by stable reading ID before ACK. `--timestamps now` s
 comparison ingestor; `--invalid-every 3` exercises the error route. The rejection-notice consumer
 is outside the original source ACK chain, so the drivers separately wait for those notices.
 
-For a running instance, save this compatible ingestor change as `alteration.nspl`; it demonstrates
+For a running instance, save this compatible ingestor change as `alteration.plexus`; it demonstrates
 same-generation reopening with buffered input:
 
-```nspl
+```plexus
 BEGIN;
 ALTER CLIENT PRODUCER INGESTOR simulated_readings
   SET FROM SCHEMA reading
@@ -638,7 +640,7 @@ COMMIT;
 ```
 
 ```bash
-nervix-cli --domain paced_simulation --command "$(cat alteration.nspl)"
+nervix-cli --domain paced_simulation --command "$(cat alteration.plexus)"
 ```
 
 The drivers recheck endpoint state during clock/credit waits every 200 ms and retry an unavailable
@@ -669,7 +671,7 @@ Inspecting endpoints is read-only and claims no work. Run these commands with
 `nervix-cli --domain application --command '<one statement>'`, one invocation per statement,
 or in a REPL that has selected the domain:
 
-```nspl
+```plexus
 SHOW CREATE INGESTOR submit_events;
 SHOW CREATE EMITTER receive_events;
 SHOW INGESTORS;

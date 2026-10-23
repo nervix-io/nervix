@@ -651,11 +651,11 @@ fn given_archive_path_is_saved(world: &mut ScenarioWorld, file: String, placehol
 async fn show_create_statements(path: PathBuf, domain: DomainName) -> Vec<String> {
     let archived = archived_models(path, domain).await;
     let statements = parse_client_statements(&archived)
-        .unwrap_or_else(|error| panic!("models.nspl parses: {error:?}\n{archived}"));
+        .unwrap_or_else(|error| panic!("models.plexus parses: {error:?}\n{archived}"));
     let mut shows = Vec::with_capacity(statements.len());
     for statement in statements {
         let ClientStatement::Server(Statement::Create(create)) = statement else {
-            panic!("models.nspl holds only model creations:\n{archived}");
+            panic!("models.plexus holds only model creations:\n{archived}");
         };
         shows.push(format!(
             "SHOW CREATE {} {};",
@@ -2158,7 +2158,7 @@ async fn given_archive_with_models_replaced(
         let copy = copy_of_archive(&source);
         let models_path = SectionPath::domain_models(&domain).to_string();
         let text =
-            String::from_utf8(copy.sections[&models_path].clone()).expect("models.nspl is UTF-8");
+            String::from_utf8(copy.sections[&models_path].clone()).expect("models.plexus is UTF-8");
         assert!(
             text.contains(&needle),
             "the models of '{domain}' hold '{needle}':\n{text}"

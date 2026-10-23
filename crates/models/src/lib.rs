@@ -2,9 +2,9 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** Every NSPL Model, validated name and HTTP request-field types, `Timestamp`, branch
+//! - **Owns.** Every Plexus Model, validated name and HTTP request-field types, `Timestamp`, branch
 //!   and node references, the index that keys a domain's Models by the node each one configures,
-//!   structured message errors, and the canonical NSPL rendering of a Model.
+//!   structured message errors, and the canonical Plexus rendering of a Model.
 //! - **Depends on.** Serialization and primitive crates, and Arrow's schema types behind the
 //!   `arrow` feature for the one Arrow data type each schema type is represented as.
 //! - **Must not know.** How a Model was parsed, validated, scheduled or executed. No parser span,
@@ -69,10 +69,10 @@ pub use backup::{
     BackupDomainSummary, BackupQuiesceCounters, BackupResources, BackupScope, DescribeBackup,
 };
 pub use canonical::{
-    CanonicalNsplError, NSPL_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_nspl,
-    alter_cbor_wire_schema_to_canonical_nspl, alter_json_wire_schema_to_canonical_nspl,
-    canonical_nspl_document, expression_to_nspl, ingest_quiesce_to_nspl,
-    ingestor_input_body_to_nspl, string_literal,
+    CanonicalPlexusError, PLEXUS_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_plexus,
+    alter_cbor_wire_schema_to_canonical_plexus, alter_json_wire_schema_to_canonical_plexus,
+    canonical_plexus_document, expression_to_plexus, ingest_quiesce_to_plexus,
+    ingestor_input_body_to_plexus, string_literal,
 };
 pub use client_consumer::{
     CLIENT_CONSUMER_NODE_BYTES, CLIENT_CONSUMER_SESSION_BYTES, ClientConsumerLimits,

@@ -441,7 +441,8 @@ fn statement_splitting_returns_exact_source_slices() {
     let query = "USE prod; LIST DOMAINS;";
 
     assert_eq!(
-        split_query_statements(query).assured("the literal statement batch is valid current NSPL"),
+        split_query_statements(query)
+            .assured("the literal statement batch is valid current Plexus"),
         ["USE prod;", "LIST DOMAINS;"]
     );
 }
@@ -457,9 +458,9 @@ fn statement_splitting_reports_invalid_source_with_context() {
     );
 
     let rejection = error
-        .downcast_ref::<nervix_nspl::schema::ParseFromSourceError>()
+        .downcast_ref::<nervix_plexus::schema::ParseFromSourceError>()
         .assured("the split keeps the language's report beneath its own context");
-    let nervix_nspl::schema::ParseFromSourceError::Parse { diagnostics, .. } = rejection else {
+    let nervix_plexus::schema::ParseFromSourceError::Parse { diagnostics, .. } = rejection else {
         panic!("the batch lexes, so parsing rejects it: {rejection:?}");
     };
     let span = diagnostics
@@ -1532,7 +1533,7 @@ fn subscription_query_is_rendered() {
         .dropping()
         .with_batch_sample_rate("0.1")
         .with_where_clause(
-            nervix_nspl::parse_expression("input.tenant = \"acme\"")
+            nervix_plexus::parse_expression("input.tenant = \"acme\"")
                 .expect("valid subscription expression"),
         );
     assert_eq!(
@@ -1542,7 +1543,7 @@ fn subscription_query_is_rendered() {
     );
 
     assert_eq!(
-        nervix_nspl::subscribe::delete_subscription_query("sampled_orders"),
+        nervix_plexus::subscribe::delete_subscription_query("sampled_orders"),
         "DELETE SUBSCRIPTION sampled_orders;"
     );
 }

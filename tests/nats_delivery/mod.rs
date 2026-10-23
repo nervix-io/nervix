@@ -19,7 +19,7 @@ use cucumber::{then, when};
 use nervix_primitives::time::Instant;
 
 use super::{
-    NodeSession, ScenarioWorld, emitter_finish::StopTiming, execute_nspl_commands_on_leader,
+    NodeSession, ScenarioWorld, emitter_finish::StopTiming, execute_plexus_commands_on_leader,
     parse_duration_text,
 };
 use crate::common::nats_endpoint::NatsEndpoint;
@@ -60,7 +60,7 @@ async fn stop_while_controlled_endpoint_returns(world: &mut ScenarioWorld, delay
     let delay = parse_duration_text(&delay).expect("the scenario declares a valid fault duration");
     let forward = controlled_endpoint(world).forward_everything_after(delay);
     let stop = async {
-        let result = execute_nspl_commands_on_leader(world, "STOP;").await;
+        let result = execute_plexus_commands_on_leader(world, "STOP;").await;
         StoppedDomain {
             result,
             at: Instant::now(),

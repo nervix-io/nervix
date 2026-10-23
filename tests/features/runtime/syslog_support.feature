@@ -3,11 +3,11 @@ Feature: Syslog support
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And Syslog UDP emission endpoint "{{syslog_emit_addr}}" is observed
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (
         facility U8,
@@ -54,7 +54,7 @@ Feature: Syslog support
       CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
       START;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       SHOW CREATE CODEC syslog_codec;
       """
@@ -110,11 +110,11 @@ Feature: Syslog support
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And Syslog UDP emission endpoint "{{syslog_emit_addr}}" is observed
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (
         facility U8,
@@ -174,11 +174,11 @@ Feature: Syslog support
   Scenario Outline: Invalid Syslog transport configuration names the connector failure at startup
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (
         message STRING
@@ -202,7 +202,7 @@ Feature: Syslog support
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "failed to initialize ingestor 'invalid_syslog_intake' in domain '{{domain}}': invalid Syslog client config key 'framing': UDP does not use stream framing"
+    When these Plexus commands fail with "failed to initialize ingestor 'invalid_syslog_intake' in domain '{{domain}}': invalid Syslog client config key 'framing': UDP does not use stream framing"
       """
       START;
       """
@@ -215,20 +215,20 @@ Feature: Syslog support
   Scenario Outline: Syslog TLS intake uses RFC 5425 framing and mounted mutual TLS identity
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has TLS resource directory "syslog_tls_dir" for hosts "127.0.0.1"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE syslog_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE syslog_tls VERSION "{{syslog_tls_dir}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (
         message STRING
@@ -278,11 +278,11 @@ Feature: Syslog support
   Scenario Outline: Syslog TCP intake accepts mixed RFC 6587 framing and exposes peer metadata
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (
         message STRING
@@ -343,11 +343,11 @@ Feature: Syslog support
   Scenario Outline: Syslog TCP intake reassembles a <framing> frame split across two reads
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (
         message STRING
@@ -402,20 +402,20 @@ Feature: Syslog support
   Scenario Outline: Syslog TLS intake reassembles an octet-counted frame split across two reads
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has TLS resource directory "syslog_tls_dir" for hosts "127.0.0.1"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE syslog_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE syslog_tls VERSION "{{syslog_tls_dir}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (
         message STRING
@@ -472,20 +472,20 @@ Feature: Syslog support
   Scenario Outline: A Syslog TLS listener closes a client that stalls its handshake within connect_timeout_ms
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has TLS resource directory "syslog_tls_dir" for hosts "127.0.0.1"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE syslog_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE syslog_tls VERSION "{{syslog_tls_dir}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (
         message STRING
@@ -538,11 +538,11 @@ Feature: Syslog support
   Scenario Outline: A Syslog TCP listener closes a connection idle beyond idle_timeout_ms
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (
         message STRING
@@ -592,11 +592,11 @@ Feature: Syslog support
   Scenario Outline: A Syslog UDP datagram larger than max_message_size is dropped and counted
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (
         message STRING
@@ -652,11 +652,11 @@ Feature: Syslog support
   Scenario Outline: A Syslog UDP listener binds a fresh port when another socket took the port the scenario drew for it
     Given a <cluster_size> node nervix cluster is started
     And another socket binds UDP on the port the scenario drew for its syslog ingest address
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (
         facility U8,

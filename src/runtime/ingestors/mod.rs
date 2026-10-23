@@ -7,7 +7,7 @@
 //!   client source the node hosts, which is the only place an input plan's kind selects anything.
 //! - **Depends on.** Ingestor start plans, the host source launcher, every source connector, and
 //!   the endpoint and client sources the server keeps.
-//! - **Must not know.** NSPL parsing, registry validation, or placement computation.
+//! - **Must not know.** Plexus parsing, registry validation, or placement computation.
 
 #![cfg_attr(
     nervix_lint,

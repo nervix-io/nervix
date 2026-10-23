@@ -1,5 +1,7 @@
 # Property Testing And Fuzzing
 
+*Plexus, the Nervix graph definition language.*
+
 Bolero is Nervix's default property-test engine for representation correctness. Each property is
 an ordinary Rust test beside its production owner and a registered custom libFuzzer target. The
 generator, production path and assertion are the same in both modes.
@@ -46,14 +48,14 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `client-ffi-field-descriptors` | `nervix-client-ffi` field descriptor ABI equality both ways: a host's level-by-level description becomes the complete original field, and the field and level accessors read back its canonical description as the header's `nx_type` values | every scalar inside 0 to 32 `LIST` and `FIXED_LIST` levels of 1 to `INT32_MAX` elements, either nullability and sensitivity, names from the whole name rule spelled in any letter case, v1 | 256 | 2048 bytes |
 | `client-ffi-field-descriptors-malformed` | `nervix-client-ffi` invalid-argument refusal that leaves the field list as the accepted calls built it | unknown types, lengths on scalar and `LIST` levels, empty and oversized `FIXED_LIST` levels, a 33rd list, refused names, elements without an open field, fields before the open one's element, an open last field, and reads past a field's last level or past the last field, v1 | 256 | 4096 bytes |
 | `client-processor-choice-request` | `nervix-client-wire` processor choice request round-trip equality | current targets with relay context, search, page and identity, v1 | 128 | 32 bytes |
-| `nspl-expression` | `nervix-nspl` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | NSPL expressions of every form, v5 | 256 | 512 bytes |
-| `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | Plexus Models of every family, client emitters included, v12 | 256 | 2048 bytes |
-| `nspl-archive-model` | `nervix-nspl` complete ordered canonical Model equality through export, restore reads, reparse and re-export | cluster/domain archives with multiple ordered documents and every Model family, v13 | 128 | 4096 bytes |
-| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | Plexus statements of every form, session-only forms included, v10 | 256 | 2048 bytes |
-| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v10 | 256 | 2048 bytes |
-| `nspl-expression-text` | `nervix-nspl` edited expression text reads as the same expression, or as none, through a statement and the standalone expression, expression-list and route-construction readers | edited canonical expressions, v3 | 256 | 512 bytes |
-| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v10 | 256 | 4096 bytes |
-| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v9 | 256 | 4096 bytes |
+| `plexus-expression` | `nervix-plexus` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | Plexus expressions of every form, v5 | 256 | 512 bytes |
+| `plexus-model` | `nervix-plexus` canonical `CREATE` render and client and server reparse equality | Plexus Models of every family, client emitters included, v12 | 256 | 2048 bytes |
+| `plexus-archive-model` | `nervix-plexus` complete ordered canonical Model equality through export, restore reads, reparse and re-export | cluster/domain archives with multiple ordered documents and every Model family, v13 | 128 | 4096 bytes |
+| `plexus-statement` | `nervix-plexus` canonical statement render and client and server reparse equality | Plexus statements of every form, session-only forms included, v10 | 256 | 2048 bytes |
+| `plexus-statement-text` | `nervix-plexus` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v10 | 256 | 2048 bytes |
+| `plexus-expression-text` | `nervix-plexus` edited expression text reads as the same expression, or as none, through a statement and the standalone expression, expression-list and route-construction readers | edited canonical expressions, v3 | 256 | 512 bytes |
+| `plexus-format-document` | `nervix-plexus-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v10 | 256 | 4096 bytes |
+| `plexus-format-text` | `nervix-plexus-format` refuses unparseable text or formats it keeping its statements | edited documents, v9 | 256 | 4096 bytes |
 | `models-names` | `nervix-models` name text, conversion, JSON, archive and Model-name widening equality | every name type, v1 | 256 | 256 bytes |
 | `models-name-validation` | `nervix-models` name parsing matches the name rule; decoders accept only canonical text | arbitrary text, v1 | 256 | 256 bytes |
 | `models-timestamps` | `nervix-models` integer, RFC 3339, JSON, archive and chrono equality | every signed Unix nanosecond, v1 | 256 | 64 bytes |
@@ -257,7 +259,7 @@ owners of callback, ACK, checkpoint and recovery semantics.
 their owning frame or Arrow representations in test code. It reads a property's bytes
 as a sequence of bounded choices, so the same bytes always build the same value and a saved failure
 replays exactly. It is a harness outside the layer order: it depends only on the vocabulary, and
-states what NSPL can spell as a rule over values instead of calling the parser, so the vocabulary's
+states what Plexus can spell as a rule over values instead of calling the parser, so the vocabulary's
 own properties use it without a language dependency. No product code names it.
 
 For native client producers and consumers it draws the window a client asks for and is granted,
@@ -270,9 +272,9 @@ must carry every type on every run.
 
 A generator draws from one of two domains:
 
-- **NSPL** holds the values canonical NSPL spells and reads back as themselves. The language
+- **Plexus** holds the values canonical Plexus spells and reads back as themselves. The language
   properties draw from it.
-- **Vocabulary** holds every value the vocabulary types hold, including states NSPL has no
+- **Vocabulary** holds every value the vocabulary types hold, including states Plexus has no
   spelling for: negative, signed-zero and non-finite numeric literals, empty arrays, a `CASE`
   without a `WHEN`, casts to collection types, and the statement and Model states listed under
   [Uncovered Boundaries](#uncovered-boundaries). Stored and archived forms carry these states, so
@@ -287,15 +289,15 @@ embeds an expression, including a call to a built-in named like a keyword that b
 clause, such as `max`, `right` or `replace`, and a field in the `output` or `right` scope. Routes
 are generated in every shape a node family allows: transforming and set-only construction,
 `INHERIT`, ordered `SET`, `FLUSH EACH` and `FLUSH IMMEDIATE`, and branches declared per route or
-node-wide. A name of any kind may spell any NSPL keyword, statement and expression keywords alike,
+node-wide. A name of any kind may spell any Plexus keyword, statement and expression keywords alike,
 and a field, UDF or function name inside an expression or a route construction may also hold a `-`,
-`~` or `.`, or begin with a digit, which canonical NSPL writes between backticks. Names reach both
+`~` or `.`, or begin with a digit, which canonical Plexus writes between backticks. Names reach both
 length limits, and counts reach the largest value their field holds.
 The language properties also sweep sixteen deterministic byte sequences through every Model
 family, every emitter sink and every statement form on every ordinary run, so none is left to the
 random cases.
 
-The NSPL Postgres generator keeps `DO UPDATE` targets nonempty and leaves at least one `VALUES`
+The Plexus Postgres generator keeps `DO UPDATE` targets nonempty and leaves at least one `VALUES`
 column outside the conflict target, as the grammar requires. The vocabulary domain also generates
 updates whose target includes every mapped column, so archive equality still covers those values.
 
@@ -308,7 +310,7 @@ boundaries in one-node and three-node clusters, including a follower read and fu
 
 Rejection targets start from valid canonical text and edit up to three characters, inserting,
 deleting or replacing delimiters, quotes, comment markers, line endings, digits and non-ASCII
-characters. The result is mostly no longer NSPL and sometimes still is, so both the rejection and
+characters. The result is mostly no longer Plexus and sometimes still is, so both the rejection and
 the acceptance paths are exercised.
 
 The expression-text target edits a canonical expression up to four times, deleting a character or
@@ -324,14 +326,14 @@ it as the same expression, or none of them reads it as one.
 The generated domains exclude states whose representation is not lossless. Each exclusion is a
 recorded boundary, not a claim:
 
-- Canonical NSPL writes a negative literal, `-0.0` included, as `-` applied to its magnitude, and
+- Canonical Plexus writes a negative literal, `-0.0` included, as `-` applied to its magnitude, and
   reads it back that way. NaN and the infinities have no spelling, and rendering them fails with a
-  typed error. The NSPL domain therefore holds only non-negative finite literals.
+  typed error. The Plexus domain therefore holds only non-negative finite literals.
 - Outside an expression or a route construction, a generated name is one lower-case ASCII
-  identifier, because canonical NSPL writes a name holding a `-`, `~` or `.`, or beginning with a
+  identifier, because canonical Plexus writes a name holding a `-`, `~` or `.`, or beginning with a
   digit, between backticks only inside one. The name properties cover the whole name rule on each
-  name type directly. In the NSPL domain a relay is never named `message` or `branch`, and a
-  placement member is never named like an `ALTER` operation keyword, because NSPL reads those words
+  name type directly. In the Plexus domain a relay is never named `message` or `branch`, and a
+  placement member is never named like an `ALTER` operation keyword, because Plexus reads those words
   there as its own.
 - `DROP` has no form for branches, generators, hash maps, signaling protocols, WASM processors or
   window processors, an HTTP emitter has no `BATCH` clause, a correlator's filter has no
@@ -546,17 +548,17 @@ just install-cargo-bolero
 just help
 just fuzz-list
 just test-bolero
-just test-bolero nspl-model
-just fuzz nspl-model 30
+just test-bolero plexus-model
+just fuzz plexus-model 30
 just fuzz-all 30
 just fuzz-plan 3
 just fuzz-all 30 2/3
 just prepare-bolero-shard 1/3
 just coverage-bolero 30
 just qualify-bolero
-just fuzz-replay nspl-model <saved-input>
-just fuzz-replay-sanitizer nspl-model <saved-input>
-just fuzz-reduce nspl-model <saved-input>
+just fuzz-replay plexus-model <saved-input>
+just fuzz-replay-sanitizer plexus-model <saved-input>
+just fuzz-reduce plexus-model <saved-input>
 just combine-bolero-fuzz <shard-evidence> <output>
 ```
 

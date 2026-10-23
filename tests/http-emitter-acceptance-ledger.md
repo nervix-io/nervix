@@ -58,7 +58,7 @@ Refreshed on 24 September 2026:
 
 | Prerequisite | Status | Blocks |
 | --- | --- | --- |
-| [Emitter Batching 02: Add optional batching to NSPL, Models and execution plans](https://app.clickup.com/t/86bc73jbb) | IN PROGRESS | HTTP Emitter 02 |
+| [Emitter Batching 02: Add optional batching to Plexus, Models and execution plans](https://app.clickup.com/t/86bc73jbb) | IN PROGRESS | HTTP Emitter 02 |
 | [Emitter Batching 06: Preserve batch membership through acknowledgements and retries](https://app.clickup.com/t/86bc73jd6) | FOCUS, itself blocked by Emitter Batching 05 and the publish-outcome consolidation | HTTP Emitter 04 |
 | [Connectors 14: Qualify the connector crates end to end and close out the server manifest](https://app.clickup.com/t/86bc21vve) | IN PROGRESS | HTTP Emitter 05 |
 | [Collapse the emitter task loop's repeated publish-outcome handling](https://app.clickup.com/t/86bc6r9m9) | PRE-FOCUS | Emitter Batching 06, and through it HTTP Emitter 04 |
@@ -294,7 +294,7 @@ body: both counted every request's method, target and headers, and the bodyless 
 counted the source records it sent no body for. The configuration round trip already
 passed, since `DESCRIBE EMITTER` rendered the request contract before this task.
 
-Every criterion runs through NSPL against the HTTP receiver on one and three nodes unless its row
+Every criterion runs through Plexus against the HTTP receiver on one and three nodes unless its row
 names a topology. The owning task adds the criterion's scenarios red, turns them green, and keeps
 them in the ordinary suite; HTTP Emitter 09 composes the complete matrix and closes it. The table
 below is the plan each owning task kept; [the completed matrix](#the-completed-matrix) records what
@@ -380,7 +380,7 @@ results](#commands-and-results) records both runs.
 | 10. Terminal `400`, `404`, `409`, `413` and redirects route through the message-error route with safe diagnostics and the original branch; other records continue; `Location` is not followed | `http_emitter_responses.feature`: terminal responses; `http_emitter_retries.feature`: terminal with original input, state and body, and in interleaved branches; `http_emitter.feature`: interleaved branches of two relays | 26 | Code `external`, operation `publish` and `HTTP endpoint answered with status <n>` for `101`, `301`, `304`, `308`, `400`, `404`, `409` and `413`, with the input-only tenant, the captured state and the attempted body, in each record's branch; the next record is captured; the `Location` receiver captures nothing |
 | 11. HTTPS trust, hostname verification and mounted client certificates follow the configuration; an invalid certificate never produces an acknowledged request | `http_emitter_transport.feature`: a mounted client certificate; a failed handshake; no client certificate | 8 | A request over mutual TLS with mounted files; `UnknownIssuer`, `certificate not valid for name` and `received fatal alert: CertificateRequired` reported while nothing is captured |
 | 12. Interleaved branches and several source relays keep independent collection and request values, and error routes keep the exact branch | `http_emitter.feature`: interleaved branches; interleaved branches of two source relays; `http_emitter_transport.feature`: one emitter across its relays | 6 | Per-branch and per-relay request lines, headers and bodies behind `COLLECT FOR 200ms`; each refusal in its own branch with its own relay's value; never more than one request awaiting a response |
-| 13. Create, inspect, formatting and `ALTER` keep expressions and body mode; invalid body-mode replacements leave the emitter unchanged; a replacement drains under its admitted configuration; a transactional replacement validates first | `http_emitter.feature`: body selections round-trip; `http_emitter_lifecycle.feature`: `ALTER` drains, a failed drain, a body-mode change and transactional replacement, quiesce levels, stopping an undrainable domain; `tools/nspl_format.feature`: HTTP emitters formatted | 13 | `SHOW CREATE` and `DESCRIBE` after `CREATE` and `ALTER`; the formatter's canonical text for both body modes; refused `SET TO`, `DROP ENCODE` and `SET BATCH` leave the emitter as it was; the held request completes at its first destination; two refused commits leave the original emitter delivering; the reported quiesce levels |
+| 13. Create, inspect, formatting and `ALTER` keep expressions and body mode; invalid body-mode replacements leave the emitter unchanged; a replacement drains under its admitted configuration; a transactional replacement validates first | `http_emitter.feature`: body selections round-trip; `http_emitter_lifecycle.feature`: `ALTER` drains, a failed drain, a body-mode change and transactional replacement, quiesce levels, stopping an undrainable domain; `tools/plexus_format.feature`: HTTP emitters formatted | 13 | `SHOW CREATE` and `DESCRIBE` after `CREATE` and `ALTER`; the formatter's canonical text for both body modes; refused `SET TO`, `DROP ENCODE` and `SET BATCH` leave the emitter as it was; the held request completes at its first destination; two refused commits leave the original emitter delivering; the reported quiesce levels |
 | 14. A graceful drain completes eligible requests; a forced ending leaves unresolved attached work to source recovery; a lost successful response causes the permitted duplicate | `http_emitter_lifecycle.feature`: graceful shutdown force-flushes; a shutdown deadline leaves work for redelivery; `http_emitter_retries.feature`: a lost response is sent again | 6 | The hourly flush publishes during the drain; after the drain deadline the held connection is released, the Kafka offset stays below the record, and after restart the same request is redelivered and committed; the applied record is captured twice, identically |
 
 ### Execution bounds
@@ -416,7 +416,7 @@ branches and error routes, and node shutdown.
 | `just test-scenarios --input tests/features/runtime/http_emitter_responses.feature --retry 0` | 64 scenarios, 976 steps passed |
 | `just test-scenarios --input tests/features/runtime/http_emitter.feature --retry 0` | 32 scenarios, 474 steps passed |
 | `just test-scenarios --input 'tests/features/runtime/http_emitter_\{lifecycle,retries,inspection\}.feature' --retry 0` | 58 scenarios, 56 passed. Both examples of the transactional replacement expected its append to be refused, which the control plane defers to `COMMIT`; the scenario now asserts the refused commit and passed with `--name body-mode --retry 0`: 2 scenarios, 82 steps |
-| `just test-scenarios --input tests/features/tools/nspl_format.feature --retry 0` | 15 scenarios, 70 steps passed |
+| `just test-scenarios --input tests/features/tools/plexus_format.feature --retry 0` | 15 scenarios, 70 steps passed |
 | `just test-scenarios --input 'tests/features/runtime/http_\{emitter,emitter_responses,emitter_transport,emitter_retries,emitter_lifecycle,emitter_inspection,receiver\}.feature' --retry 0` | 180 scenarios at a load average near 50, with 24 run slots 94% busy: 165 passed. All 15 failures were three-node setup commands refused because leadership moved while the command was admitted or applied, 8 of them in scenarios this task left unchanged |
 | The same selection with the suite's two retries | 180 scenarios, 2,991 steps passed at a load average near 80, 12 of them after a retry. Eighteen of the 19 retried attempts failed at that setup step. The other lost its batch on three nodes in the unchanged unencodable-body scenario: the emitter could not fetch the `routes` relay's materialized state from its owner within the interconnect deadline, and it passed on retry |
 | The same selection after merging `d9c65a00`, with the suite's two retries | 180 scenarios, 2,870 steps passed without a retry; the receiver regressions, 14, and the formatter feature, 15 scenarios, passed again |
@@ -425,9 +425,9 @@ branches and error routes, and node shutdown.
 | `just test-package-lib nervix-models http_request` | 4 passed |
 | `just test-lib http` | 22 passed |
 | `just test-shuttle-package nervix-server emitter_record_writes` | 5 Shuttle checks passed in 10 executions |
-| `just nspl-completion-walk` | No completion finding outside the baseline |
+| `just plexus-completion-walk` | No completion finding outside the baseline |
 | `just ratchet` | Passed with every count unchanged |
-| `just validate` | Passed: formatting, Clippy over every target including the scenario and liveness harnesses, the public NSPL skill, documented NSPL, clock boundaries, typed errors, the primitive boundary and the dependency checks. After the merge, `just validate-primitive-boundary`, `just cargo-fmt-check` and `just cargo-clippy-package nervix-server --features 'benchmarks testing'` passed again |
+| `just validate` | Passed: formatting, Clippy over every target including the scenario and liveness harnesses, the public Plexus skill, documented Plexus, clock boundaries, typed errors, the primitive boundary and the dependency checks. After the merge, `just validate-primitive-boundary`, `just cargo-fmt-check` and `just cargo-clippy-package nervix-server --features 'benchmarks testing'` passed again |
 | `just book dev` | Passed: 159 documentation and script tests, and the HTML, `llms` and Markdown books |
 
 The lost batch follows the documented contract rather than an HTTP emitter rule. A transport failure

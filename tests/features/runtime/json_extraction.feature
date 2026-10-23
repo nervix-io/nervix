@@ -2,11 +2,11 @@ Feature: Typed JSON extraction
   Scenario Outline: JSON_VALUE reads declared scalar and collection types from one document
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA raw_event (
         id STRING,
@@ -98,11 +98,11 @@ Feature: Typed JSON extraction
   Scenario Outline: Strict extraction names each defect and TRY_JSON_VALUE yields a typed null
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA raw_document (
         id STRING,
@@ -210,11 +210,11 @@ Feature: Typed JSON extraction
   Scenario Outline: A conditional arm reads only the documents of the messages that select it
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA routed_document (
         id STRING,
@@ -287,7 +287,7 @@ Feature: Typed JSON extraction
 
   Scenario Outline: A JSON extraction keeps the type and sensitivity contract of its statement
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "<error>"
+    When these Plexus commands fail with "<error>"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA raw_document (

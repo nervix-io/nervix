@@ -1138,7 +1138,7 @@ pub(super) enum PlannedSidecar {
 }
 
 /// How a planned failure names the program whose rejected messages report `operation`: by the
-/// clause the node's NSPL spells it with, or by the operation's own name.
+/// clause the node's Plexus spells it with, or by the operation's own name.
 pub(super) struct ProgramName(MessageErrorOperation);
 
 impl ProgramName {

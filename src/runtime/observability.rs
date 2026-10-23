@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Read-only descriptions and metrics derived from installed runtime state.
 //! - **Depends on.** Execution plans, branch-local state and runtime metric collectors.
-//! - **Must not know.** NSPL parsing, persistence mutations or external telemetry transport.
+//! - **Must not know.** Plexus parsing, persistence mutations or external telemetry transport.
 
 #![cfg_attr(
     nervix_lint,

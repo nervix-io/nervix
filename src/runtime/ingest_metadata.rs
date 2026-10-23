@@ -4,7 +4,7 @@
 //! - **Owns.** Connector metadata columns and VM namespaces for accepted input batches.
 //! - **Depends on.** Arrow arrays, the connector contract's metadata rows and header trait, and
 //!   explicit execution timestamps.
-//! - **Must not know.** NSPL parsing, source-client lifecycle or persisted control state.
+//! - **Must not know.** Plexus parsing, source-client lifecycle or persisted control state.
 
 #![cfg_attr(
     nervix_lint,

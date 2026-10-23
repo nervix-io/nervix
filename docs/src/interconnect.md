@@ -1,5 +1,7 @@
 # Cluster Interconnect
 
+*Plexus, the Nervix graph definition language.*
+
 The cluster interconnect is the authenticated transport between Nervix nodes. It carries cluster
 membership, consensus traffic, control-plane requests, domain-clock progress, relay batches,
 replicated runtime state, resources, and snapshots. It is present on every live node and remains
@@ -281,7 +283,7 @@ one concrete fingerprint, the explicit unbranched instance, or all concrete bran
 match the complete domain, relay and entity set, purpose, and scope. It cannot widen a one-branch
 hold or release another reset's hold.
 
-An operator's NSPL reset enters through the ordinary typed session command protocol and ordered
+An operator's Plexus reset enters through the ordinary typed session command protocol and ordered
 transaction planner. The transaction step retains the command execution reference and exact scope;
 the leader uses that reference when invoking this same coordinator request. A reconnect or a new
 leader resumes the recorded step with the same identity. No separate public reset wire request or

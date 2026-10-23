@@ -1,6 +1,8 @@
 # VM Functions
 
-Every NSPL expression runs through one expression VM. That covers a route's `SET`, `WHERE`, and
+*Plexus, the Nervix graph definition language.*
+
+Every Plexus expression runs through one expression VM. That covers a route's `SET`, `WHERE`, and
 `INVOKE`, a source or processor filter, a key or ordering expression, an emitter mapping, and a
 window aggregate's arguments. This chapter is the implementation reference for that VM and its
 function catalog. It covers:
@@ -45,7 +47,7 @@ separately from [execution and concurrency evidence](./execution-primitives.md#v
 | Layer | Owner | What it owns |
 | --- | --- | --- |
 | Vocabulary | Expression Models in `nervix-models` | `Expression`, `RouteConstruction`, `Assignment`, `Invocation`, and `JsonPath`. A builtin name is a validated `BuiltinFunctionName` identifier, not a closed set, and a UDF name is a `UdfName`. |
-| Language | `nervix-nspl` | Parsing a call as a generic `name(args)` or `udf::name(args)` into those Models. The grammar has no function-name table; completion emits a typed builtin or UDF expectation at a call position. |
+| Language | `nervix-plexus` | Parsing a call as a generic `name(args)` or `udf::name(args)` into those Models. The grammar has no function-name table; completion emits a typed builtin or UDF expectation at a call position. |
 | Engines and infrastructure | `nervix-vm` | Lowering Models into VM programs, the semantic catalog of every operator, cast, and builtin, type and sensitivity checking, compilation into instructions over typed registers, every kernel, window aggregate lowering and route compilation, and where an execution runs: inline, or admitted through the node's bounded executor onto its data or extension workers. |
 | Engines and infrastructure | `nervix-roto` | Compiling a typed UDF program on the node's bulk workers, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
 | Decisions | Registry validation and resource planning | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, then selecting scheduled UDF programs and lowering generator and emitter routes, source filters, HTTP fields, ordering groups and sink mappings against their declared scopes. |
@@ -91,7 +93,7 @@ Each representation is produced once, at its boundary, and the next stage consum
 
 ```mermaid
 flowchart LR
-    Text["NSPL text"] -->|parsed once| Model["Expression Models"]
+    Text["Plexus text"] -->|parsed once| Model["Expression Models"]
     Model -->|lowered once| Program["VM Program"]
     Program -->|"types, sensitivity, folding, sharing, registers"| Compiled["CompiledProgram"]
     Compiled -->|"executed per batch"| Result["ExecutionResult"]
@@ -102,7 +104,7 @@ flowchart LR
 
 Models are persisted; programs are not. A compiled program and everything prepared inside it, such
 as a compiled regular expression or an `IN` set, live in memory beside the runtime node that runs
-it. Nothing prepared at compile time ever enters a stored Model, and no executable NSPL text is
+it. Nothing prepared at compile time ever enters a stored Model, and no executable Plexus text is
 stored for a runtime to parse again.
 
 ### Lowering
@@ -150,7 +152,7 @@ A span in the VM is an operation ordinal, not a source offset: the i-th assignme
 runtime maps a span back to the node, route, operation, operation index, and fields that a
 structured message error reports.
 
-The VM never parses NSPL in production code. `nervix-nspl` is a development dependency that only
+The VM never parses Plexus in production code. `nervix-plexus` is a development dependency that only
 its tests and benchmarks use to build Models from text.
 
 ### The Semantic Catalog
@@ -197,7 +199,7 @@ The compiler in `compiler.rs` infers every expression's type from its input bind
 catalog. Argument types match by Arrow `DataType` equality. No numeric widening, parsing,
 stringification, or datetime–text interchange happens unless the program spells it out as a cast,
 `TRY_CAST`, or `JSON_VALUE`. Messages name types by their Arrow names, which the
-[reference](./filter-map-functions.md#errors) maps back to NSPL names. A result is optional when
+[reference](./filter-map-functions.md#errors) maps back to Plexus names. A result is optional when
 any argument is, unless the catalog or `expr_may_be_null` records an exception. The exceptions are
 listed in [Function Properties](./filter-map-functions.md#function-properties).
 
@@ -494,7 +496,7 @@ restore. Relay snapshot transfers use quota-owned files independently of the win
 
 This example traces one assignment from its declaration to its execution:
 
-```nspl,ignore
+```plexus,ignore
 SET bounded = clamp(input.latency_ms, 0, input.budget_ms)
 ```
 
@@ -558,9 +560,9 @@ A `TypedArray` has one variant per scalar register type, plus these:
 - `Generic`, for lists
 - `Uninitialized`, for an output no assignment has written yet
 
-Each NSPL type has one Arrow representation, and the VM executes over all of them:
+Each Plexus type has one Arrow representation, and the VM executes over all of them:
 
-| NSPL type | Arrow type |
+| Plexus type | Arrow type |
 | --- | --- |
 | `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64` | The matching unsigned or signed integer type |
 | `F32`, `F64` | `Float32`, `Float64` |
@@ -798,11 +800,11 @@ about vector instructions it supports.
 ### Arrow Kernel Reuse
 
 The VM reuses Arrow kernels from `arrow-arith`, `arrow-ord`, `arrow-select`, `arrow-string`, and
-`arrow-cast` wherever their semantics are exactly NSPL's. It deliberately avoids them in these
+`arrow-cast` wherever their semantics are exactly Plexus's. It deliberately avoids them in these
 cases:
 
 - **Numeric comparisons.** Arrow's comparison kernels order floats by the IEEE 754 total order.
-  NSPL comparison is IEEE 754 equality and ordering, in which NaN equals nothing and the two zeros
+  Plexus comparison is IEEE 754 equality and ordering, in which NaN equals nothing and the two zeros
   are equal. `numeric::Comparison` evaluates every numeric comparison, integers included, over the
   value buffers. `IS DISTINCT FROM`, `nullif`, list `contains`, `IN`, `greatest`, `least`, and
   `clamp` apply the same float rules.
@@ -1275,7 +1277,7 @@ the branch incarnation, the window model digest and every histogram's delayed re
 with bounded groups of the retained input rows and their argument columns as Arrow IPC. A restore
 converts those groups back into a native snapshot, which the branch task restores as it restores
 any other: every row is re-admitted in order, and the histograms take their delayed removals back.
-The window model digest is the BLAKE3 hash of the window processor's canonical NSPL, so a window
+The window model digest is the BLAKE3 hash of the window processor's canonical Plexus, so a window
 whose `WIDTH`, `STEP`, state limit or aggregates changed starts empty instead.
 
 How each ending treats the window:
@@ -1329,7 +1331,7 @@ Treat this as the checklist for a new builtin, or for a new family.
    Otherwise the compiler shares it and gives it no selection, so the errors of unselected `CASE`
    arms would leak into error handling.
 5. **Choose the kernel.**
-   - Reuse an Arrow kernel when its semantics are exactly NSPL's, including float ordering,
+   - Reuse an Arrow kernel when its semantics are exactly Plexus's, including float ordering,
      overflow, and null rules.
    - Otherwise write one pass over value buffers with the checked lanes, pushing failures from a
      bitmap.
@@ -1369,7 +1371,7 @@ Treat this as the checklist for a new builtin, or for a new family.
 11. **Document it.**
     - Add its contract to [Expression Functions](./filter-map-functions.md), including a catalog
       row.
-    - Update the NSPL skill only where its routing or checks change, then regenerate the book.
+    - Update the Plexus skill only where its routing or checks change, then regenerate the book.
     - Update this chapter when the function changes a mechanism rather than adding an instance of
       one.
 

@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Binding planned expression programs to runtime schemas, state and UDFs.
 //! - **Depends on.** Typed execution plans, the expression VM and runtime infrastructure.
-//! - **Must not know.** NSPL text, parser state or control-plane transactions.
+//! - **Must not know.** Plexus text, parser state or control-plane transactions.
 //!
 //! Ingestor, reingestor, emitter and message-error programs arrive lowered by their decision-layer
 //! plans. Some processor compile functions still receive semantic Models directly instead of
@@ -1996,7 +1996,7 @@ mod tests {
 
     #[test]
     fn processor_key_expressions_reject_relay_qualified_fields() {
-        assert!(nervix_nspl::parse_expression("incoming_notifications.sequence").is_err());
+        assert!(nervix_plexus::parse_expression("incoming_notifications.sequence").is_err());
     }
 
     #[nervix_primitives::test]

@@ -11,7 +11,7 @@ Kafka-fed `orders` relay with a new payments feed.
 
 ## The Payments Feed
 
-```nspl
+```plexus
 BEGIN;
 
 CREATE SCHEMA payment_record (
@@ -51,7 +51,7 @@ Matched pairs become `paid_orders` records. Orders that see no payment within `M
 forwarded to `unpaid_orders` by the left side's timeout action; unmatched payments are dropped by
 the right side's:
 
-```nspl
+```plexus
 CREATE SCHEMA paid_order (
   order_id STRING,
   customer STRING,

@@ -4,7 +4,7 @@
 //! May depend on: the branch lifecycle a replica keeps, the replica's record of the entity's branch
 //! checkpoints, replica installation and the interconnect dispatcher.
 //! Must not know: how an owner answers a request or keeps its catalog, what a checkpoint holds,
-//! NSPL parsing, or control-plane transactions.
+//! Plexus parsing, or control-plane transactions.
 
 #![cfg_attr(
     nervix_lint,

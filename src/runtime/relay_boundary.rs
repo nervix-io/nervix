@@ -6,7 +6,7 @@
 //!   retention, owner tasks, and materialized relay state.
 //! - **Depends on.** Validated execution graphs, compiled schemas, execution admission, and the
 //!   interconnect dispatcher.
-//! - **Must not know.** NSPL text, transactions, consensus operations, or connector internals.
+//! - **Must not know.** Plexus text, transactions, consensus operations, or connector internals.
 
 #![cfg_attr(
     nervix_lint,
@@ -44,7 +44,7 @@ const _: () = assert!(
     "an idle relay channel rotates before its receiver's watermark retention ends"
 );
 
-/// A count NSPL configures, narrowed to the width this node addresses memory with.
+/// A count Plexus configures, narrowed to the width this node addresses memory with.
 ///
 /// Both halves of the narrowing hold before it runs: the Models keep these counts non-zero, and
 /// the supported targets address memory at least as wide as the `u64` they are written as.

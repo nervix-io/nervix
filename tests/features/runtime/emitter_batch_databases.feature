@@ -10,12 +10,12 @@ Feature: Database emitter batches
     Given <sink> is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the "<sink>" batch table "batched_{{test_id}}" recording its writes exists
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING, tags <tags_type>, raw STRING );
       CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
@@ -90,13 +90,13 @@ Feature: Database emitter batches
     Given <sink> is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the "<sink>" batch table "limit_a_{{test_id}}" recording its writes exists
     And the "<sink>" batch table "limit_b_{{test_id}}" recording its writes exists
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
@@ -162,12 +162,12 @@ Feature: Database emitter batches
     Given <sink> is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the "<sink>" batch table "rejecting_{{test_id}}" rejecting poison notes exists
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event (
@@ -237,13 +237,13 @@ Feature: Database emitter batches
     Given <sink> is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the "<sink>" batch table "updated_{{test_id}}" keyed by seq exists
     And the "<sink>" batch table "kept_{{test_id}}" keyed by seq exists
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
@@ -305,12 +305,12 @@ Feature: Database emitter batches
     Given <sink> is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the "<sink>" batch table "retried_{{test_id}}" recording its writes exists
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
@@ -372,12 +372,12 @@ Feature: Database emitter batches
     Given MySQL is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the "MySQL" batch table "placeholders_{{test_id}}" recording its writes exists
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
@@ -425,12 +425,12 @@ Feature: Database emitter batches
     Given MongoDB is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the "MongoDB" batch table "documents_{{test_id}}" recording its writes exists
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event (

@@ -513,7 +513,7 @@ struct ScenarioWorld {
     temp_root: Option<TempDir>,
     formatter_root: Option<TempDir>,
     formatter_exit_code: Option<i32>,
-    /// Contents each NSPL file was given, so "is unchanged" has something to compare against.
+    /// Contents each Plexus file was given, so "is unchanged" has something to compare against.
     formatter_original_files: BTreeMap<String, String>,
     last_cluster_operation_elapsed: Option<Duration>,
     browser_page: Option<playwright_rs::Page>,
@@ -523,7 +523,7 @@ struct ScenarioWorld {
     browser: Option<playwright_rs::Browser>,
     playwright: Option<Playwright>,
     dependencies: TestDependencies,
-    background_nspl: Option<AbortOnDropHandle<Result<String, String>>>,
+    background_plexus: Option<AbortOnDropHandle<Result<String, String>>>,
     background_command_result:
         Option<AbortOnDropHandle<std::io::Result<nervix_client_wire::CommandOutcome>>>,
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
@@ -3245,7 +3245,7 @@ async fn given_server_process_cluster_is_started(
     );
 }
 
-#[given("the server process cluster is configured with these NSPL commands")]
+#[given("the server process cluster is configured with these Plexus commands")]
 async fn given_server_process_cluster_is_configured(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -3255,7 +3255,7 @@ async fn given_server_process_cluster_is_configured(
         .server_process_cluster
         .as_ref()
         .verified("the preceding step started a real-process cluster");
-    for statement in nspl_statements(&commands) {
+    for statement in plexus_statements(&commands) {
         nervix_primitives::task::consume_budget().await;
         let output = cluster
             .run_commands(&world.domain, &statement)
@@ -3266,8 +3266,8 @@ async fn given_server_process_cluster_is_configured(
 }
 
 #[when(
-    expr = "this NSPL command request with execution reference {string} is executed on the server \
-            process cluster"
+    expr = "this Plexus command request with execution reference {string} is executed on the \
+            server process cluster"
 )]
 async fn when_exact_command_is_executed_on_server_process_cluster(
     world: &mut ScenarioWorld,
@@ -3327,7 +3327,7 @@ async fn when_open_transaction_is_held_on_server_process_cluster(
     world.active_session = Some(session);
 }
 
-#[when("the held server process cluster transaction queues these NSPL commands")]
+#[when("the held server process cluster transaction queues these Plexus commands")]
 async fn when_held_server_process_cluster_transaction_queues(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -3337,7 +3337,7 @@ async fn when_held_server_process_cluster_transaction_queues(
         .active_session
         .as_mut()
         .verified("the preceding step held a transaction session");
-    for statement in nspl_statements(&commands) {
+    for statement in plexus_statements(&commands) {
         nervix_primitives::task::consume_budget().await;
         let result = session
             .run_command_result(&statement)
@@ -3610,8 +3610,8 @@ async fn start_server_process_without_waiting(
     world.server_process = Some(process);
 }
 
-#[given("the server process is configured with these NSPL commands")]
-async fn given_server_process_is_configured_with_nspl_commands(
+#[given("the server process is configured with these Plexus commands")]
+async fn given_server_process_is_configured_with_plexus_commands(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
@@ -3620,7 +3620,7 @@ async fn given_server_process_is_configured_with_nspl_commands(
         .server_process
         .as_ref()
         .verified("the preceding step started a nervix-server process");
-    for statement in nspl_statements(&commands) {
+    for statement in plexus_statements(&commands) {
         if let Err(error) = process.run_commands(&world.domain, &statement).await {
             panic!(
                 "nervix-server rejected {statement:?}: {error}\n{}",
@@ -3662,8 +3662,8 @@ async fn when_open_transaction_is_held_on_server_process(
     world.active_session = Some(session);
 }
 
-#[when("these NSPL commands are executed on the server process")]
-async fn when_nspl_commands_are_executed_on_server_process(
+#[when("these Plexus commands are executed on the server process")]
+async fn when_plexus_commands_are_executed_on_server_process(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
@@ -3673,7 +3673,7 @@ async fn when_nspl_commands_are_executed_on_server_process(
         .as_ref()
         .verified("the preceding step started a nervix-server process");
     world.last_command_output = None;
-    for statement in nspl_statements(&commands) {
+    for statement in plexus_statements(&commands) {
         let output = process.run_commands(&world.domain, &statement).await;
         world.last_command_output = Some(output.unwrap_or_else(|error| {
             panic!(
@@ -4356,14 +4356,14 @@ fn then_server_process_log_does_not_contain(world: &mut ScenarioWorld, fragment:
 /// `CARGO_BIN_EXE_` is only defined for binaries of the test target's own package, and the
 /// formatter lives in its own crate, so it is located by its neighbour in the same target
 /// directory. `just test-scenarios` builds it through `tests-deps`.
-fn nspl_format_binary() -> PathBuf {
+fn plexus_format_binary() -> PathBuf {
     let candidate = Path::new(env!("CARGO_BIN_EXE_nervix-server"))
         .parent()
         .expect("the server binary must live in a directory")
-        .join("nervix-nspl-format");
+        .join("nervix-plexus-format");
     assert!(
         candidate.exists(),
-        "nervix-nspl-format must be built beside nervix-server; run `just test-scenarios`"
+        "nervix-plexus-format must be built beside nervix-server; run `just test-scenarios`"
     );
     candidate
 }
@@ -5196,12 +5196,12 @@ async fn then_cli_repl_ends_successfully(world: &mut ScenarioWorld) {
     }
 }
 
-/// The directory holding the NSPL files a formatter scenario writes.
+/// The directory holding the Plexus files a formatter scenario writes.
 fn formatter_root(world: &mut ScenarioWorld) -> PathBuf {
     if world.formatter_root.is_none() {
         world.formatter_root = Some(
             tempfile::Builder::new()
-                .prefix("nervix-nspl-format-")
+                .prefix("nervix-plexus-format-")
                 .tempdir()
                 .expect("formatter scenarios need a temporary directory"),
         );
@@ -5222,15 +5222,15 @@ fn record_formatter_output(world: &mut ScenarioWorld, output: std::process::Outp
         Some(String::from_utf8(output.stderr).expect("formatter errors must be UTF-8"));
 }
 
-#[given(regex = r#"^an NSPL file "([^"]+)" containing$"#)]
-fn given_an_nspl_file_containing(world: &mut ScenarioWorld, name: String, #[step] step: &Step) {
+#[given(regex = r#"^a Plexus file "([^"]+)" containing$"#)]
+fn given_an_plexus_file_containing(world: &mut ScenarioWorld, name: String, #[step] step: &Step) {
     let root = formatter_root(world);
     let path = root.join(&name);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("NSPL file directory must be created");
+        std::fs::create_dir_all(parent).expect("Plexus file directory must be created");
     }
     let contents = format!("{}\n", docstring(step).trim());
-    std::fs::write(&path, &contents).expect("NSPL file must be written");
+    std::fs::write(&path, &contents).expect("Plexus file must be written");
     world.formatter_original_files.insert(name, contents);
 }
 
@@ -5259,8 +5259,8 @@ fn unescaped_step_text(text: &str) -> String {
     output
 }
 
-#[given(regex = r#"^an NSPL file "([^"]+)" containing the escaped text$"#)]
-fn given_an_nspl_file_containing_escaped_text(
+#[given(regex = r#"^a Plexus file "([^"]+)" containing the escaped text$"#)]
+fn given_an_plexus_file_containing_escaped_text(
     world: &mut ScenarioWorld,
     name: String,
     #[step] step: &Step,
@@ -5268,75 +5268,75 @@ fn given_an_nspl_file_containing_escaped_text(
     let root = formatter_root(world);
     let path = root.join(&name);
     let contents = unescaped_step_text(docstring(step).trim());
-    std::fs::write(&path, &contents).expect("NSPL file must be written");
+    std::fs::write(&path, &contents).expect("Plexus file must be written");
     world.formatter_original_files.insert(name, contents);
 }
 
-#[when("the nervix-nspl-format help is requested")]
-fn when_nspl_format_help_is_requested(world: &mut ScenarioWorld) {
-    let output = Command::new(nspl_format_binary())
+#[when("the nervix-plexus-format help is requested")]
+fn when_plexus_format_help_is_requested(world: &mut ScenarioWorld) {
+    let output = Command::new(plexus_format_binary())
         .arg("--help")
         .output()
-        .expect("nervix-nspl-format help must run");
+        .expect("nervix-plexus-format help must run");
     record_formatter_output(world, output);
 }
 
-#[when(regex = r#"^nervix-nspl-format formats the NSPL file "([^"]+)"$"#)]
-fn when_nspl_format_formats_file(world: &mut ScenarioWorld, name: String) {
+#[when(regex = r#"^nervix-plexus-format formats the Plexus file "([^"]+)"$"#)]
+fn when_plexus_format_formats_file(world: &mut ScenarioWorld, name: String) {
     let root = formatter_root(world);
-    let output = Command::new(nspl_format_binary())
+    let output = Command::new(plexus_format_binary())
         .arg(&name)
         .current_dir(&root)
         .output()
-        .expect("nervix-nspl-format must run");
+        .expect("nervix-plexus-format must run");
     record_formatter_output(world, output);
 }
 
-#[when("nervix-nspl-format formats the NSPL directory")]
-fn when_nspl_format_formats_directory(world: &mut ScenarioWorld) {
+#[when("nervix-plexus-format formats the Plexus directory")]
+fn when_plexus_format_formats_directory(world: &mut ScenarioWorld) {
     let root = formatter_root(world);
-    let output = Command::new(nspl_format_binary())
+    let output = Command::new(plexus_format_binary())
         .arg(".")
         .current_dir(&root)
         .output()
-        .expect("nervix-nspl-format must run");
+        .expect("nervix-plexus-format must run");
     record_formatter_output(world, output);
 }
 
-#[when("nervix-nspl-format checks the NSPL directory")]
-fn when_nspl_format_checks_directory(world: &mut ScenarioWorld) {
+#[when("nervix-plexus-format checks the Plexus directory")]
+fn when_plexus_format_checks_directory(world: &mut ScenarioWorld) {
     let root = formatter_root(world);
-    let output = Command::new(nspl_format_binary())
+    let output = Command::new(plexus_format_binary())
         .args([".", "--check"])
         .current_dir(&root)
         .output()
-        .expect("nervix-nspl-format must run");
+        .expect("nervix-plexus-format must run");
     record_formatter_output(world, output);
 }
 
-#[when(regex = r#"^nervix-nspl-format checks the NSPL file "([^"]+)"$"#)]
-fn when_nspl_format_checks_file(world: &mut ScenarioWorld, name: String) {
+#[when(regex = r#"^nervix-plexus-format checks the Plexus file "([^"]+)"$"#)]
+fn when_plexus_format_checks_file(world: &mut ScenarioWorld, name: String) {
     let root = formatter_root(world);
-    let output = Command::new(nspl_format_binary())
+    let output = Command::new(plexus_format_binary())
         .args(["--check", &name])
         .current_dir(&root)
         .output()
-        .expect("nervix-nspl-format must run");
+        .expect("nervix-plexus-format must run");
     record_formatter_output(world, output);
 }
 
-#[when("nervix-nspl-format formats the standard input")]
-fn when_nspl_format_formats_stdin(world: &mut ScenarioWorld, #[step] step: &Step) {
+#[when("nervix-plexus-format formats the standard input")]
+fn when_plexus_format_formats_stdin(world: &mut ScenarioWorld, #[step] step: &Step) {
     use std::process::Stdio;
 
     let contents = format!("{}\n", docstring(step).trim());
-    let mut child = Command::new(nspl_format_binary())
+    let mut child = Command::new(plexus_format_binary())
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("nervix-nspl-format must run");
+        .expect("nervix-plexus-format must run");
     child
         .stdin
         .as_mut()
@@ -5345,7 +5345,7 @@ fn when_nspl_format_formats_stdin(world: &mut ScenarioWorld, #[step] step: &Step
         .expect("standard input must be written");
     let output = child
         .wait_with_output()
-        .expect("nervix-nspl-format must finish");
+        .expect("nervix-plexus-format must finish");
     record_formatter_output(world, output);
 }
 
@@ -5363,10 +5363,10 @@ fn then_the_formatter_exits_with_code(world: &mut ScenarioWorld, expected: i32) 
     );
 }
 
-#[then(regex = r#"^the NSPL file "([^"]+)" contains$"#)]
-fn then_the_nspl_file_contains(world: &mut ScenarioWorld, name: String, #[step] step: &Step) {
+#[then(regex = r#"^the Plexus file "([^"]+)" contains$"#)]
+fn then_the_plexus_file_contains(world: &mut ScenarioWorld, name: String, #[step] step: &Step) {
     let root = formatter_root(world);
-    let actual = std::fs::read_to_string(root.join(&name)).expect("NSPL file must be readable");
+    let actual = std::fs::read_to_string(root.join(&name)).expect("Plexus file must be readable");
     let expected = docstring(step).trim();
     assert!(
         actual.contains(expected),
@@ -5374,14 +5374,14 @@ fn then_the_nspl_file_contains(world: &mut ScenarioWorld, name: String, #[step] 
     );
 }
 
-#[then(regex = r#"^the NSPL file "([^"]+)" contains the escaped text$"#)]
-fn then_the_nspl_file_contains_escaped_text(
+#[then(regex = r#"^the Plexus file "([^"]+)" contains the escaped text$"#)]
+fn then_the_plexus_file_contains_escaped_text(
     world: &mut ScenarioWorld,
     name: String,
     #[step] step: &Step,
 ) {
     let root = formatter_root(world);
-    let actual = std::fs::read_to_string(root.join(&name)).expect("NSPL file must be readable");
+    let actual = std::fs::read_to_string(root.join(&name)).expect("Plexus file must be readable");
     let expected = unescaped_step_text(docstring(step).trim());
     assert!(
         actual.contains(&expected),
@@ -5389,15 +5389,15 @@ fn then_the_nspl_file_contains_escaped_text(
     );
 }
 
-#[then(regex = r#"^the NSPL file "([^"]+)" is unchanged$"#)]
-fn then_the_nspl_file_is_unchanged(world: &mut ScenarioWorld, name: String) {
+#[then(regex = r#"^the Plexus file "([^"]+)" is unchanged$"#)]
+fn then_the_plexus_file_is_unchanged(world: &mut ScenarioWorld, name: String) {
     let expected = world
         .formatter_original_files
         .get(&name)
         .expect("the file must have been given before it is compared")
         .clone();
     let root = formatter_root(world);
-    let actual = std::fs::read_to_string(root.join(&name)).expect("NSPL file must be readable");
+    let actual = std::fs::read_to_string(root.join(&name)).expect("Plexus file must be readable");
     assert_eq!(actual, expected, "{name} was rewritten");
 }
 
@@ -7879,7 +7879,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
     let leader = current_leader_node(world).await;
     if create_domain {
         let domain_commands = format!("CREATE UNPACED DOMAIN {};", world.domain);
-        execute_nspl_commands_on_node(world, &leader, &domain_commands)
+        execute_plexus_commands_on_node(world, &leader, &domain_commands)
             .await
             .expect("the WASM reset scenario domain must be created");
     }
@@ -7923,7 +7923,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         "CREATE RESOURCE wasm_reset_guest;\nUPLOAD RESOURCE wasm_reset_guest VERSION \
          '{{wasm_processor}}';",
     );
-    for command in nspl_statements(&resource_commands) {
+    for command in plexus_statements(&resource_commands) {
         let outcome = client
             .execute(command.clone())
             .await
@@ -8034,7 +8034,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         "#
     );
     let commands = expand_placeholders(world, &commands);
-    let started = execute_nspl_commands_on_leader(world, &commands)
+    let started = execute_plexus_commands_on_leader(world, &commands)
         .await
         .expect("the WASM reset graph must start");
     world.active_session = Some(started.session);
@@ -11095,7 +11095,7 @@ async fn then_leader_records_current_raft_address(world: &mut ScenarioWorld, nod
     loop {
         nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
-        let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+        let status = run_plexus_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
             .await
             .expect("leader cluster status must be available");
         if status.lines().any(|line| line == expected) {
@@ -11117,7 +11117,7 @@ async fn then_leader_raft_log_stays_still(world: &mut ScenarioWorld, duration: S
     let mut initial = None;
     loop {
         nervix_primitives::task::consume_budget().await;
-        let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+        let status = run_plexus_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
             .await
             .expect("leader cluster status must be available");
         let index = status
@@ -11641,7 +11641,7 @@ async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node
             }
             return;
         }
-        if let Some(task) = world.background_nspl.as_mut() {
+        if let Some(task) = world.background_plexus.as_mut() {
             let node_name = crate::common::cluster::node_name(&node_id);
             nervix_primitives::select! {
                 () = fault_injection.wait_for_command_admission_pause(&node_name) => {},
@@ -11837,7 +11837,7 @@ async fn then_relocation_publication_pause_is_reached(world: &mut ScenarioWorld,
         .assured("the scenario uses an identifier-shaped domain name");
     let fault_injection = world.fault_injection.clone();
     let task = world
-        .background_nspl
+        .background_plexus
         .as_mut()
         .verified("the preceding step started a background relocation");
     nervix_primitives::time::timeout(Duration::from_secs(30), async {
@@ -11939,7 +11939,7 @@ async fn then_resource_installation_pause_is_reached(world: &mut ScenarioWorld, 
         panic!("resource installation pause on '{node_id}' was not reached: {error}")
     });
     let background = world
-        .background_nspl
+        .background_plexus
         .as_ref()
         .verified("the preceding step started a background resource upload");
     assert!(
@@ -12512,15 +12512,15 @@ async fn then_entity_gate_pause_is_reached(world: &mut ScenarioWorld, domain: St
         }
         // A gated command that already returned will never engage a gate, so report what it did
         // instead of waiting out a deadline it can no longer meet.
-        if let Some(background) = world.background_nspl.as_ref()
+        if let Some(background) = world.background_plexus.as_ref()
             && background.is_finished()
         {
             let outcome = world
-                .background_nspl
+                .background_plexus
                 .take()
                 .verified("the branch above already observed the background execution")
                 .await
-                .expect("background NSPL task must not panic");
+                .expect("background Plexus task must not panic");
             panic!(
                 "entity gate did not reach the armed pause for domain '{domain}': the gated \
                  command finished first with {outcome:?}"
@@ -12600,15 +12600,15 @@ async fn then_ownership_handoff_preparation_pause_is_reached(
         {
             return;
         }
-        if let Some(background) = world.background_nspl.as_ref()
+        if let Some(background) = world.background_plexus.as_ref()
             && background.is_finished()
         {
             let outcome = world
-                .background_nspl
+                .background_plexus
                 .take()
                 .verified("the branch above already observed the background execution")
                 .await
-                .expect("background NSPL task must not panic");
+                .expect("background Plexus task must not panic");
             panic!(
                 "ownership handoff did not reach the armed preparation pause for domain \
                  '{domain}': the command finished first with {outcome:?}"
@@ -13718,8 +13718,8 @@ fn resource_directory_ca_pem(world: &ScenarioWorld, placeholder: &str) -> String
         })
 }
 
-fn nspl_statements(input: &str) -> Vec<String> {
-    if let Ok(statements) = nervix_nspl::client_statement::parse_client_statement_sources(input) {
+fn plexus_statements(input: &str) -> Vec<String> {
+    if let Ok(statements) = nervix_plexus::client_statement::parse_client_statement_sources(input) {
         return statements
             .iter()
             .map(|statement| statement.source(input).to_string())
@@ -13745,7 +13745,7 @@ fn payload_matches_expected(actual: &str, expected: &str) -> bool {
 }
 
 fn requires_persistent_session(commands: &str) -> bool {
-    nspl_statements(commands).iter().any(|statement| {
+    plexus_statements(commands).iter().any(|statement| {
         let normalized = statement.trim().to_ascii_uppercase();
         normalized.starts_with("CREATE SUBSCRIPTION ")
             || normalized == "BEGIN;"
@@ -13766,7 +13766,7 @@ fn command_updates_subscription_state(current: bool, command: &str) -> bool {
 }
 
 fn commands_update_subscription_state(current: bool, commands: &str) -> bool {
-    nspl_statements(commands)
+    plexus_statements(commands)
         .into_iter()
         .fold(current, |state, command| {
             command_updates_subscription_state(state, &command)
@@ -13774,7 +13774,7 @@ fn commands_update_subscription_state(current: bool, commands: &str) -> bool {
 }
 
 fn record_avro_wire_optional_fields(world: &mut ScenarioWorld, commands: &str) {
-    for statement in nspl_statements(commands) {
+    for statement in plexus_statements(commands) {
         let normalized = statement.trim_start().to_ascii_uppercase();
         if !normalized.starts_with("CREATE WIRE AVRO SCHEMA ") {
             continue;
@@ -13798,11 +13798,12 @@ fn record_avro_wire_optional_fields(world: &mut ScenarioWorld, commands: &str) {
 }
 
 fn record_mqtt_ingestors(world: &mut ScenarioWorld, commands: &str) {
-    let Ok(parsed) = nervix_nspl::client_statement::parse_client_statement_sources(commands) else {
+    let Ok(parsed) = nervix_plexus::client_statement::parse_client_statement_sources(commands)
+    else {
         return;
     };
     for statement in parsed {
-        let nervix_nspl::client_statement::ClientStatement::Server(
+        let nervix_plexus::client_statement::ClientStatement::Server(
             nervix_models::Statement::Create(create),
         ) = statement.statement
         else {
@@ -13827,15 +13828,15 @@ fn record_mqtt_ingestors(world: &mut ScenarioWorld, commands: &str) {
 /// through the client and opens a raw session for the subscription alone.
 fn subscription_graph_statements(
     commands: &str,
-) -> Option<Vec<nervix_nspl::client_statement::ParsedClientStatement>> {
-    nervix_nspl::client_statement::parse_client_statement_sources(commands)
+) -> Option<Vec<nervix_plexus::client_statement::ParsedClientStatement>> {
+    nervix_plexus::client_statement::parse_client_statement_sources(commands)
         .ok()
         .filter(|statements| {
             let mut saw_subscription = false;
             let server_follows_subscription = statements.iter().any(|statement| {
                 if matches!(
                     statement.statement,
-                    nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
+                    nervix_plexus::client_statement::ClientStatement::CreateSubscription(_)
                 ) {
                     saw_subscription = true;
                     false
@@ -13843,7 +13844,7 @@ fn subscription_graph_statements(
                     saw_subscription
                         && matches!(
                             statement.statement,
-                            nervix_nspl::client_statement::ClientStatement::Server(_)
+                            nervix_plexus::client_statement::ClientStatement::Server(_)
                         )
                 }
             });
@@ -13851,26 +13852,28 @@ fn subscription_graph_statements(
                 && statements.iter().all(|statement| {
                     matches!(
                         statement.statement,
-                        nervix_nspl::client_statement::ClientStatement::Server(_)
-                            | nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
+                        nervix_plexus::client_statement::ClientStatement::Server(_)
+                            | nervix_plexus::client_statement::ClientStatement::CreateSubscription(
+                                _
+                            )
                     )
                 })
         })
 }
 
-async fn execute_nspl_commands_on_node(
+async fn execute_plexus_commands_on_node(
     world: &mut ScenarioWorld,
     node_id: &str,
     commands: &str,
 ) -> Result<TestSession, String> {
     record_avro_wire_optional_fields(world, commands);
     append_cucumber_log_line(&format!(
-        "nspl commands on node {node_id}: {}",
+        "plexus commands on node {node_id}: {}",
         commands.replace('\n', "\\n")
     ));
     if !requires_persistent_session(commands) {
-        for command in nspl_statements(commands) {
-            append_cucumber_log_line(&format!("nspl command on node {node_id}: {command}"));
+        for command in plexus_statements(commands) {
+            append_cucumber_log_line(&format!("plexus command on node {node_id}: {command}"));
             let output = world
                 .cluster()
                 .run_command(node_id, &world.domain, &command)
@@ -13890,14 +13893,14 @@ async fn execute_nspl_commands_on_node(
         let mut session = None;
         for statement in statements {
             let command = statement.source(commands);
-            append_cucumber_log_line(&format!("nspl command with subscription: {command}"));
+            append_cucumber_log_line(&format!("plexus command with subscription: {command}"));
             let output = match statement.statement {
-                nervix_nspl::client_statement::ClientStatement::Server(_) => world
+                nervix_plexus::client_statement::ClientStatement::Server(_) => world
                     .cluster()
                     .run_command(node_id, &world.domain, command)
                     .await
                     .map_err(|error| error.to_string())?,
-                nervix_nspl::client_statement::ClientStatement::CreateSubscription(_) => {
+                nervix_plexus::client_statement::ClientStatement::CreateSubscription(_) => {
                     if session.is_none() {
                         session = Some(
                             world
@@ -13928,8 +13931,8 @@ async fn execute_nspl_commands_on_node(
         .await
         .map_err(|error| error.to_string())?;
 
-    for command in nspl_statements(commands) {
-        append_cucumber_log_line(&format!("nspl command on session {node_id}: {command}"));
+    for command in plexus_statements(commands) {
+        append_cucumber_log_line(&format!("plexus command on session {node_id}: {command}"));
         match session.run_command(&command).await {
             Ok(output) => world.last_command_output = Some(output),
             Err(error) => return Err(error.to_string()),
@@ -13998,7 +14001,7 @@ async fn run_command_on_held_session(
 /// session holds no subscription and no transaction, it moves to that node with the command and
 /// the step goes on there. Once it holds one it stays where it is, as
 /// [`run_command_on_held_session`] describes.
-async fn execute_nspl_commands_on_leader(
+async fn execute_plexus_commands_on_leader(
     world: &mut ScenarioWorld,
     commands: &str,
 ) -> Result<NodeSession, String> {
@@ -14006,12 +14009,12 @@ async fn execute_nspl_commands_on_leader(
     if !requires_persistent_session(commands) || subscription_graph_statements(commands).is_some() {
         // The client library sends each command and recovers its outcome itself, the server
         // statements of a subscription graph included.
-        let session = execute_nspl_commands_on_node(world, &node, commands).await?;
+        let session = execute_plexus_commands_on_node(world, &node, commands).await?;
         return Ok(NodeSession { node, session });
     }
     record_avro_wire_optional_fields(world, commands);
     append_cucumber_log_line(&format!(
-        "nspl commands on node {node}: {}",
+        "plexus commands on node {node}: {}",
         commands.replace('\n', "\\n")
     ));
     let routes = world.cluster().leader_routes();
@@ -14022,10 +14025,10 @@ async fn execute_nspl_commands_on_leader(
         .map_err(|error| error.to_string())?;
     let mut current = NodeSession { node, session };
     let mut session_bound = false;
-    for command in nspl_statements(commands) {
+    for command in plexus_statements(commands) {
         nervix_primitives::task::consume_budget().await;
         append_cucumber_log_line(&format!(
-            "nspl command on session {}: {command}",
+            "plexus command on session {}: {command}",
             current.node
         ));
         if session_bound {
@@ -14075,13 +14078,13 @@ fn given_active_domain_is_saved_as_placeholder(world: &mut ScenarioWorld, placeh
     world.placeholders.insert(placeholder, world.domain.clone());
 }
 
-async fn run_nspl_commands_on_node(
+async fn run_plexus_commands_on_node(
     world: &ScenarioWorld,
     node_id: &str,
     commands: &str,
 ) -> Result<String, String> {
     let mut last_output = String::new();
-    for command in nspl_statements(commands) {
+    for command in plexus_statements(commands) {
         last_output = world
             .cluster()
             .run_command(node_id, &world.domain, &command)
@@ -14091,8 +14094,8 @@ async fn run_nspl_commands_on_node(
     Ok(last_output)
 }
 
-#[when(expr = "these NSPL commands are attempted on node {string}")]
-async fn when_these_nspl_commands_are_attempted_on_node(
+#[when(expr = "these Plexus commands are attempted on node {string}")]
+async fn when_these_plexus_commands_are_attempted_on_node(
     world: &mut ScenarioWorld,
     node_id: String,
     #[step] step: &Step,
@@ -14101,31 +14104,31 @@ async fn when_these_nspl_commands_are_attempted_on_node(
     world.last_command_output = None;
     let node_id = expand_placeholders(world, &node_id);
     let commands = expand_placeholders(world, docstring(step));
-    match run_nspl_commands_on_node(world, &node_id, &commands).await {
+    match run_plexus_commands_on_node(world, &node_id, &commands).await {
         Ok(output) => world.last_command_output = Some(output),
         Err(error) => world.last_command_error = Some(error),
     }
 }
 
-#[when("these NSPL commands begin executing in the background")]
-async fn when_these_nspl_commands_begin_executing_in_the_background(
+#[when("these Plexus commands begin executing in the background")]
+async fn when_these_plexus_commands_begin_executing_in_the_background(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
     assert!(
-        world.background_nspl.is_none(),
-        "a background NSPL execution is already active"
+        world.background_plexus.is_none(),
+        "a background Plexus execution is already active"
     );
     let commands = expand_placeholders(world, docstring(step));
-    let statements = nspl_statements(&commands);
+    let statements = plexus_statements(&commands);
     let leader = current_leader_node(world).await;
     let mut session = world
         .cluster()
         .open_session(&leader, &world.domain)
         .await
-        .expect("failed to open background NSPL session");
+        .expect("failed to open background Plexus session");
     let routes = world.cluster().leader_routes();
-    world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+    world.background_plexus = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
         async move {
             let mut last_output = String::new();
             for command in statements {
@@ -14137,7 +14140,7 @@ async fn when_these_nspl_commands_begin_executing_in_the_background(
     )));
 }
 
-#[when("this NSPL command request begins executing in the background on the leader node")]
+#[when("this Plexus command request begins executing in the background on the leader node")]
 async fn when_command_request_begins_in_background(world: &mut ScenarioWorld, #[step] step: &Step) {
     assert!(
         world.background_command_result.is_none(),
@@ -14156,7 +14159,7 @@ async fn when_command_request_begins_in_background(world: &mut ScenarioWorld, #[
 }
 
 #[when(
-    expr = "this NSPL command request with execution reference {string} begins executing in the \
+    expr = "this Plexus command request with execution reference {string} begins executing in the \
             background on the leader node"
 )]
 async fn when_referenced_command_request_begins_in_background(
@@ -14186,8 +14189,8 @@ async fn when_referenced_command_request_begins_in_background(
 }
 
 #[when(
-    expr = "an exact retry of this NSPL command request with execution reference {string} begins \
-            in parallel on the leader node"
+    expr = "an exact retry of this Plexus command request with execution reference {string} \
+            begins in parallel on the leader node"
 )]
 async fn when_exact_command_retry_begins_in_parallel(
     world: &mut ScenarioWorld,
@@ -14195,8 +14198,8 @@ async fn when_exact_command_retry_begins_in_parallel(
     #[step] step: &Step,
 ) {
     assert!(
-        world.background_nspl.is_none(),
-        "a background NSPL execution is already active"
+        world.background_plexus.is_none(),
+        "a background Plexus execution is already active"
     );
     let query = expand_placeholders(world, docstring(step));
     let execution_reference = command_execution_reference(world, &execution_reference);
@@ -14206,7 +14209,7 @@ async fn when_exact_command_retry_begins_in_parallel(
         .open_session(&leader, &world.domain)
         .await
         .unwrap_or_else(|error| panic!("failed to open the exact retry session: {error}"));
-    world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+    world.background_plexus = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
         async move {
             let result = session
                 .run_command_result_with_reference(&query, &execution_reference)
@@ -14221,10 +14224,6 @@ async fn when_exact_command_retry_begins_in_parallel(
     )));
 }
 
-#[when(
-    expr = "the active session begins this NSPL command request with execution reference {string} \
-            in the background"
-)]
 #[when(
     expr = "the active session begins this Plexus command request with execution reference \
             {string} in the background"
@@ -14256,8 +14255,8 @@ async fn when_active_session_referenced_command_begins_in_background(
 }
 
 #[when(
-    expr = "the active session sends this NSPL command request with execution reference {string} \
-            without reading its response"
+    expr = "the active session sends this Plexus command request with execution reference \
+            {string} without reading its response"
 )]
 async fn when_active_session_sends_referenced_command_without_reading_response(
     world: &mut ScenarioWorld,
@@ -14310,10 +14309,6 @@ async fn when_background_command_caller_deadline_expires(
 }
 
 #[when(
-    expr = "this NSPL command request with execution reference {string} is executed on the leader \
-            node"
-)]
-#[when(
     expr = "this Plexus command request with execution reference {string} is executed on the \
             leader node"
 )]
@@ -14327,8 +14322,8 @@ async fn when_referenced_command_request_is_executed_on_leader(
 }
 
 #[when(
-    expr = "this NSPL command request with an execution reference created {string} before now is \
-            executed on the leader node"
+    expr = "this Plexus command request with an execution reference created {string} before now \
+            is executed on the leader node"
 )]
 async fn when_command_request_with_reference_created_before_now_is_executed(
     world: &mut ScenarioWorld,
@@ -14344,7 +14339,7 @@ async fn when_command_request_with_reference_created_before_now_is_executed(
 }
 
 #[when(
-    expr = "this NSPL command request with an execution reference created {string} after now is \
+    expr = "this Plexus command request with an execution reference created {string} after now is \
             executed on the leader node"
 )]
 async fn when_command_request_with_reference_created_after_now_is_executed(
@@ -14361,8 +14356,8 @@ async fn when_command_request_with_reference_created_after_now_is_executed(
 }
 
 #[when(
-    "this NSPL command request with an execution reference without a creation time is executed on \
-     the leader node"
+    "this Plexus command request with an execution reference without a creation time is executed \
+     on the leader node"
 )]
 async fn when_command_request_with_timeless_reference_is_executed(
     world: &mut ScenarioWorld,
@@ -14576,25 +14571,25 @@ async fn then_background_command_request_succeeds(world: &mut ScenarioWorld) {
     world.last_command_output = Some(result.message);
 }
 
-#[when(expr = "client {string} begins executing these NSPL commands in the background")]
+#[when(expr = "client {string} begins executing these Plexus commands in the background")]
 async fn when_named_client_begins_executing_in_the_background(
     world: &mut ScenarioWorld,
     name: String,
     #[step] step: &Step,
 ) {
     assert!(
-        world.background_nspl.is_none(),
-        "a background NSPL execution is already active"
+        world.background_plexus.is_none(),
+        "a background Plexus execution is already active"
     );
     let name = expand_placeholders(world, &name);
     let commands = expand_placeholders(world, docstring(step));
-    let statements = nspl_statements(&commands);
+    let statements = plexus_statements(&commands);
     let client = world
         .transaction_clients
         .get(&name)
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
-    world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+    world.background_plexus = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
         async move {
             let mut last_output = String::new();
             for command in statements {
@@ -14625,8 +14620,8 @@ async fn when_named_client_begins_resource_upload_in_the_background(
     identity: String,
 ) {
     assert!(
-        world.background_nspl.is_none(),
-        "a background NSPL execution is already active"
+        world.background_plexus.is_none(),
+        "a background Plexus execution is already active"
     );
     let name = expand_placeholders(world, &name);
     let resource = expand_placeholders(world, &resource);
@@ -14639,7 +14634,7 @@ async fn when_named_client_begins_resource_upload_in_the_background(
         .clone();
     let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
         .assured("the scenario identity is an identifier-shaped literal");
-    world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+    world.background_plexus = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
         async move {
             let upload_domain = client
                 .domain()
@@ -14667,35 +14662,35 @@ async fn when_named_client_begins_resource_upload_in_the_background(
 #[when("the background resource upload connection is dropped")]
 async fn when_background_resource_upload_connection_is_dropped(world: &mut ScenarioWorld) {
     let upload = world
-        .background_nspl
+        .background_plexus
         .take()
         .verified("the preceding step started a background resource upload");
     drop(upload);
     nervix_primitives::task::yield_now().await;
 }
 
-#[then("the background NSPL execution succeeds")]
-async fn then_the_background_nspl_execution_succeeds(world: &mut ScenarioWorld) {
+#[then("the background Plexus execution succeeds")]
+async fn then_the_background_plexus_execution_succeeds(world: &mut ScenarioWorld) {
     let task = world
-        .background_nspl
+        .background_plexus
         .take()
-        .expect("a background NSPL execution must be active");
+        .expect("a background Plexus execution must be active");
     let output = task
         .await
-        .expect("background NSPL task must not panic")
-        .expect("background NSPL execution must succeed");
+        .expect("background Plexus task must not panic")
+        .expect("background Plexus execution must succeed");
     world.last_command_output = Some(output);
 }
 
-#[then("the background NSPL execution does not report success")]
-async fn then_background_nspl_execution_does_not_report_success(world: &mut ScenarioWorld) {
+#[then("the background Plexus execution does not report success")]
+async fn then_background_plexus_execution_does_not_report_success(world: &mut ScenarioWorld) {
     let task = world
-        .background_nspl
+        .background_plexus
         .take()
-        .verified("a background NSPL execution must be active");
+        .verified("a background Plexus execution must be active");
     let result = task
         .await
-        .assured("the background NSPL task is owned by this scenario");
+        .assured("the background Plexus task is owned by this scenario");
     assert!(
         result.is_err(),
         "a command absent from the committed transaction was reported as successful"
@@ -14711,48 +14706,48 @@ fn then_last_command_request_succeeded(world: &mut ScenarioWorld) {
     );
 }
 
-#[then(expr = "the background NSPL execution fails with {string}")]
-async fn then_the_background_nspl_execution_fails_with(
+#[then(expr = "the background Plexus execution fails with {string}")]
+async fn then_the_background_plexus_execution_fails_with(
     world: &mut ScenarioWorld,
     expected: String,
 ) {
     let expected = expand_placeholders(world, &expected);
     let task = world
-        .background_nspl
+        .background_plexus
         .take()
-        .expect("a background NSPL execution must be active");
+        .expect("a background Plexus execution must be active");
     let error = task
         .await
-        .expect("background NSPL task must not panic")
-        .expect_err("background NSPL execution must fail");
+        .expect("background Plexus task must not panic")
+        .expect_err("background Plexus execution must fail");
     assert!(
         error.contains(&expected),
-        "background NSPL error must contain '{expected}', got: {error}"
+        "background Plexus error must contain '{expected}', got: {error}"
     );
     world.last_command_error = Some(error);
 }
 
-#[then("the background NSPL execution is discarded")]
-async fn then_the_background_nspl_execution_is_discarded(world: &mut ScenarioWorld) {
+#[then("the background Plexus execution is discarded")]
+async fn then_the_background_plexus_execution_is_discarded(world: &mut ScenarioWorld) {
     let task = world
-        .background_nspl
+        .background_plexus
         .take()
-        .expect("a background NSPL execution must be active");
+        .expect("a background Plexus execution must be active");
     drop(task);
 }
 
-#[when("the background NSPL execution is canceled")]
-async fn when_the_background_nspl_execution_is_canceled(world: &mut ScenarioWorld) {
+#[when("the background Plexus execution is canceled")]
+async fn when_the_background_plexus_execution_is_canceled(world: &mut ScenarioWorld) {
     let task = world
-        .background_nspl
+        .background_plexus
         .take()
-        .expect("a background NSPL execution must be active");
+        .expect("a background Plexus execution must be active");
     drop(task);
     nervix_primitives::task::yield_now().await;
 }
 
 fn commands_are_retry_safe_session_ops(commands: &str) -> bool {
-    nspl_statements(commands).into_iter().all(|command| {
+    plexus_statements(commands).into_iter().all(|command| {
         let normalized = command.trim().to_ascii_uppercase();
         normalized == "DESCRIBE DOMAIN;"
             || normalized.starts_with("DESCRIBE RELOCATION ")
@@ -14768,19 +14763,19 @@ fn commands_are_retry_safe_session_ops(commands: &str) -> bool {
     })
 }
 
-async fn run_nspl_commands_on_active_session(
+async fn run_plexus_commands_on_active_session(
     world: &mut ScenarioWorld,
     commands: &str,
 ) -> Result<(), String> {
     record_avro_wire_optional_fields(world, commands);
     append_cucumber_log_line(&format!(
-        "nspl commands on active session: {}",
+        "plexus commands on active session: {}",
         commands.replace('\n', "\\n")
     ));
     let routes = world.cluster().leader_routes();
-    for command in nspl_statements(commands) {
+    for command in plexus_statements(commands) {
         nervix_primitives::task::consume_budget().await;
-        append_cucumber_log_line(&format!("nspl command on active session: {command}"));
+        append_cucumber_log_line(&format!("plexus command on active session: {command}"));
         let session = world
             .active_session
             .as_mut()
@@ -14804,45 +14799,45 @@ async fn when_the_active_session_targets_domain(world: &mut ScenarioWorld, domai
         .set_domain(domain);
 }
 
-#[when("these NSPL commands are executed on the active session")]
+#[when("these Plexus commands are executed on the active session")]
 #[when("these Plexus statements are executed on the active session")]
-async fn when_these_nspl_commands_are_executed_on_the_active_session(
+async fn when_these_plexus_commands_are_executed_on_the_active_session(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
     world.last_command_error = None;
     world.last_command_output = None;
     let commands = expand_placeholders(world, docstring(step));
-    run_nspl_commands_on_active_session(world, &commands)
+    run_plexus_commands_on_active_session(world, &commands)
         .await
-        .expect("failed to execute NSPL commands on active session");
+        .expect("failed to execute Plexus commands on active session");
 }
 
-#[when("these NSPL commands fail on the active session")]
-async fn when_these_nspl_commands_fail_on_the_active_session(
+#[when("these Plexus commands fail on the active session")]
+async fn when_these_plexus_commands_fail_on_the_active_session(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
     world.last_command_error = None;
     world.last_command_output = None;
     let commands = expand_placeholders(world, docstring(step));
-    match run_nspl_commands_on_active_session(world, &commands).await {
-        Ok(()) => panic!("expected NSPL commands to fail on active session"),
+    match run_plexus_commands_on_active_session(world, &commands).await {
+        Ok(()) => panic!("expected Plexus commands to fail on active session"),
         Err(error) => world.last_command_error = Some(error),
     }
 }
 
-#[when("a new session executes these NSPL commands")]
-async fn when_a_new_session_executes_these_nspl_commands(
+#[when("a new session executes these Plexus commands")]
+async fn when_a_new_session_executes_these_plexus_commands(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
     world.last_command_error = None;
     world.last_command_output = None;
     let commands = expand_placeholders(world, docstring(step));
-    let ran = execute_nspl_commands_on_leader(world, &commands)
+    let ran = execute_plexus_commands_on_leader(world, &commands)
         .await
-        .expect("failed to execute NSPL commands on a new session");
+        .expect("failed to execute Plexus commands on a new session");
     world.active_session = Some(ran.session);
     world.active_session_node = Some(ran.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
@@ -14880,7 +14875,7 @@ async fn wait_for_mqtt_ingestors_ready(world: &mut ScenarioWorld) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             nervix_primitives::task::consume_budget().await;
-            let output = run_nspl_commands_on_node(
+            let output = run_plexus_commands_on_node(
                 world,
                 &leader,
                 &format!("DESCRIBE INGESTOR {ingestor};"),
@@ -14966,8 +14961,8 @@ fn chrome_executable_path() -> Option<&'static Path> {
     .find(|path| path.exists())
 }
 
-#[when("these NSPL commands are executed")]
-async fn when_these_nspl_commands_are_executed(world: &mut ScenarioWorld, #[step] step: &Step) {
+#[when("these Plexus commands are executed")]
+async fn when_these_plexus_commands_are_executed(world: &mut ScenarioWorld, #[step] step: &Step) {
     world.last_command_error = None;
     world.last_command_output = None;
     world.last_server_error = None;
@@ -14977,21 +14972,21 @@ async fn when_these_nspl_commands_are_executed(world: &mut ScenarioWorld, #[step
         && world.active_session.is_some()
         && world.active_session_node.as_deref() == Some(leader.as_str())
     {
-        run_nspl_commands_on_active_session(world, &commands)
+        run_plexus_commands_on_active_session(world, &commands)
             .await
-            .expect("failed to execute NSPL command on active session");
+            .expect("failed to execute Plexus command on active session");
         return;
     }
-    let ran = execute_nspl_commands_on_leader(world, &commands)
+    let ran = execute_plexus_commands_on_leader(world, &commands)
         .await
-        .expect("failed to execute NSPL setup command");
+        .expect("failed to execute Plexus setup command");
     world.active_session = Some(ran.session);
     world.active_session_node = Some(ran.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
-#[when("these NSPL commands are executed through the client on a follower node")]
-async fn when_these_nspl_commands_are_executed_through_the_client_on_a_follower_node(
+#[when("these Plexus commands are executed through the client on a follower node")]
+async fn when_these_plexus_commands_are_executed_through_the_client_on_a_follower_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
@@ -15018,7 +15013,7 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_a_follower_
     .await
     .expect("failed to connect follower client");
     let commands = expand_placeholders(world, docstring(step));
-    for command in nspl_statements(&commands) {
+    for command in plexus_statements(&commands) {
         let outcome = client
             .execute(command.clone())
             .await
@@ -15214,7 +15209,7 @@ async fn when_named_client_closes_cleanly(world: &mut ScenarioWorld, name: Strin
     drop(client);
 }
 
-#[when(expr = "client {string} executes these NSPL commands")]
+#[when(expr = "client {string} executes these Plexus commands")]
 #[when(expr = "client {string} executes these Plexus statements")]
 async fn when_named_client_executes_commands(
     world: &mut ScenarioWorld,
@@ -15231,7 +15226,7 @@ async fn when_named_client_executes_commands(
         .get(&name)
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
-    for command in nspl_statements(&commands) {
+    for command in plexus_statements(&commands) {
         nervix_primitives::task::consume_budget().await;
         let outcome = client
             .execute(command.clone())
@@ -15247,7 +15242,7 @@ async fn when_named_client_executes_commands(
     }
 }
 
-#[when(expr = "client {string} submits this NSPL command request")]
+#[when(expr = "client {string} submits this Plexus command request")]
 async fn when_named_client_submits_command_request(
     world: &mut ScenarioWorld,
     name: String,
@@ -15276,7 +15271,7 @@ async fn when_named_client_submits_command_request(
     world.last_client_request = Some(request);
 }
 
-#[when(expr = "client {string} fails to execute these NSPL commands")]
+#[when(expr = "client {string} fails to execute these Plexus commands")]
 async fn when_named_client_fails_to_execute_commands(
     world: &mut ScenarioWorld,
     name: String,
@@ -15291,7 +15286,7 @@ async fn when_named_client_fails_to_execute_commands(
         .get(&name)
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
-    for command in nspl_statements(&commands) {
+    for command in plexus_statements(&commands) {
         nervix_primitives::task::consume_budget().await;
         match client.execute(command.clone()).await {
             Ok(outcome) if outcome.succeeded() => {
@@ -15981,8 +15976,8 @@ async fn when_named_client_fails_to_attach_to_transaction(
     }
 }
 
-#[when("these NSPL commands are executed through the client on the leader node")]
-async fn when_these_nspl_commands_are_executed_through_the_client_on_the_leader_node(
+#[when("these Plexus commands are executed through the client on the leader node")]
+async fn when_these_plexus_commands_are_executed_through_the_client_on_the_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
@@ -16001,7 +15996,7 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_the_leader_
     )
     .await
     .expect("failed to connect leader client");
-    for command in nspl_statements(&commands) {
+    for command in plexus_statements(&commands) {
         let outcome = client
             .execute(command.clone())
             .await
@@ -16134,9 +16129,9 @@ async fn connect_to_node_with_credentials(
     }
 }
 
-#[when(expr = "these NSPL commands are executed through the client on node {string}")]
+#[when(expr = "these Plexus commands are executed through the client on node {string}")]
 #[when(expr = "these Plexus statements are executed through the client on node {string}")]
-async fn when_these_nspl_commands_are_executed_through_the_client_on_node(
+async fn when_these_plexus_commands_are_executed_through_the_client_on_node(
     world: &mut ScenarioWorld,
     node_id: String,
     #[step] step: &Step,
@@ -16160,7 +16155,7 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_node(
     .await
     .expect("failed to connect node client");
     let commands = expand_placeholders(world, docstring(step));
-    for command in nspl_statements(&commands) {
+    for command in plexus_statements(&commands) {
         let outcome = client
             .execute(command.clone())
             .await
@@ -16174,8 +16169,8 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_node(
     }
 }
 
-#[when(expr = "these NSPL commands fail through the client on node {string} with {string}")]
-async fn when_these_nspl_commands_fail_through_the_client_on_node_with(
+#[when(expr = "these Plexus commands fail through the client on node {string} with {string}")]
+async fn when_these_plexus_commands_fail_through_the_client_on_node_with(
     world: &mut ScenarioWorld,
     node_id: String,
     expected_error: String,
@@ -16199,7 +16194,7 @@ async fn when_these_nspl_commands_fail_through_the_client_on_node_with(
     .await
     .expect("failed to connect node client");
     let commands = expand_placeholders(world, docstring(step));
-    for command in nspl_statements(&commands) {
+    for command in plexus_statements(&commands) {
         let outcome = client
             .execute(command.clone())
             .await
@@ -16219,9 +16214,9 @@ async fn when_these_nspl_commands_fail_through_the_client_on_node_with(
     }
 }
 
-#[when("these NSPL commands are executed on the leader node")]
+#[when("these Plexus commands are executed on the leader node")]
 #[when("these Plexus statements are executed on the leader node")]
-async fn when_these_nspl_commands_are_executed_on_leader_node(
+async fn when_these_plexus_commands_are_executed_on_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
@@ -16238,21 +16233,21 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 nervix_primitives::task::consume_budget().await;
-                match run_nspl_commands_on_active_session(world, &commands).await {
+                match run_plexus_commands_on_active_session(world, &commands).await {
                     Ok(()) => break,
                     Err(error) => {
                         assert!(
                             Instant::now() < deadline,
-                            "failed to execute NSPL setup command on active session: {error:?}"
+                            "failed to execute Plexus setup command on active session: {error:?}"
                         );
                         nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
             }
         } else {
-            run_nspl_commands_on_active_session(world, &commands)
+            run_plexus_commands_on_active_session(world, &commands)
                 .await
-                .expect("failed to execute NSPL setup command on active session");
+                .expect("failed to execute Plexus setup command on active session");
         }
         return;
     }
@@ -16260,30 +16255,29 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             nervix_primitives::task::consume_budget().await;
-            match execute_nspl_commands_on_leader(world, &commands).await {
+            match execute_plexus_commands_on_leader(world, &commands).await {
                 Ok(ran) => break ran,
                 Err(error) => {
                     assert!(
                         Instant::now() < deadline,
-                        "failed to execute NSPL setup command on leader: {error:?}"
+                        "failed to execute Plexus setup command on leader: {error:?}"
                     );
                     nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }
     } else {
-        execute_nspl_commands_on_leader(world, &commands)
+        execute_plexus_commands_on_leader(world, &commands)
             .await
-            .expect("failed to execute NSPL setup command on leader")
+            .expect("failed to execute Plexus setup command on leader")
     };
     world.active_session = Some(ran.session);
     world.active_session_node = Some(ran.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
-#[when("this NSPL command request is executed on the leader node")]
 #[when("this Plexus command request is executed on the leader node")]
-async fn when_this_nspl_command_request_is_executed_on_leader_node(
+async fn when_this_plexus_command_request_is_executed_on_leader_node(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
@@ -16302,7 +16296,7 @@ async fn when_this_nspl_command_request_is_executed_on_leader_node(
 }
 
 #[when(
-    expr = "a new session attaches to transaction {string} and executes this NSPL command with \
+    expr = "a new session attaches to transaction {string} and executes this Plexus command with \
             execution reference {string} at transaction position {int}"
 )]
 async fn when_new_session_attaches_and_executes_referenced_command(
@@ -17136,8 +17130,8 @@ fn collect_regular_files(directory: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-#[when(expr = "these NSPL commands are executed on node {string}")]
-async fn when_these_nspl_commands_are_executed_on_node(
+#[when(expr = "these Plexus commands are executed on node {string}")]
+async fn when_these_plexus_commands_are_executed_on_node(
     world: &mut ScenarioWorld,
     node_id: String,
     #[step] step: &Step,
@@ -17149,21 +17143,21 @@ async fn when_these_nspl_commands_are_executed_on_node(
     let session = if commands_are_retry_safe_session_ops(&commands) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            match execute_nspl_commands_on_node(world, &node_id, &commands).await {
+            match execute_plexus_commands_on_node(world, &node_id, &commands).await {
                 Ok(session) => break session,
                 Err(error) => {
                     assert!(
                         Instant::now() < deadline,
-                        "failed to execute NSPL setup command on requested node: {error:?}"
+                        "failed to execute Plexus setup command on requested node: {error:?}"
                     );
                     nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }
     } else {
-        execute_nspl_commands_on_node(world, &node_id, &commands)
+        execute_plexus_commands_on_node(world, &node_id, &commands)
             .await
-            .expect("failed to execute NSPL setup command on requested node")
+            .expect("failed to execute Plexus setup command on requested node")
     };
     world.active_session = Some(session);
     world.active_session_node = Some(node_id);
@@ -17349,7 +17343,7 @@ async fn then_within_duration_describe_emitter_reports_iceberg_commit_waiting_fo
         nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let output =
-            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+            run_plexus_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
                 .await
                 .expect("describe emitter command must succeed");
         world.last_command_output = Some(output.clone());
@@ -17395,7 +17389,7 @@ async fn then_within_duration_describe_emitter_reports_metric_total(
         nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let output =
-            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+            run_plexus_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
                 .await
                 .expect("describe emitter command must succeed");
         world.last_command_output = Some(output.clone());
@@ -17796,7 +17790,7 @@ async fn when_the_unacknowledged_source_ingestor_is_created(
     let source = UnacknowledgedSourceFixture::parse(&source);
     source.prepare(world).await;
     let commands = expand_placeholders(world, &source.commands());
-    let created = execute_nspl_commands_on_leader(world, &commands)
+    let created = execute_plexus_commands_on_leader(world, &commands)
         .await
         .expect("failed to create the unacknowledged source's models on the leader");
     world.active_session = Some(created.session);
@@ -17876,10 +17870,10 @@ async fn when_bulk_execution_is_released(world: &mut ScenarioWorld, node_id: Str
         .release_execution(&crate::common::cluster::node_name(&node_id));
 }
 
-/// Run NSPL on a node and require it to finish inside a bound, which is how a scenario states that
+/// Run Plexus on a node and require it to finish inside a bound, which is how a scenario states that
 /// one class of work was not admitted behind another.
-#[then(expr = "within {string} these NSPL commands complete on node {string}")]
-async fn then_nspl_commands_complete_within(
+#[then(expr = "within {string} these Plexus commands complete on node {string}")]
+async fn then_plexus_commands_complete_within(
     world: &mut ScenarioWorld,
     duration: String,
     node_id: String,
@@ -17893,48 +17887,48 @@ async fn then_nspl_commands_complete_within(
     let started = Instant::now();
     let session = nervix_primitives::time::timeout(
         limit,
-        execute_nspl_commands_on_node(world, &node_id, &commands),
+        execute_plexus_commands_on_node(world, &node_id, &commands),
     )
     .await
-    .unwrap_or_else(|_| panic!("NSPL commands on '{node_id}' did not complete within {limit:?}"))
-    .unwrap_or_else(|error| panic!("failed to execute NSPL commands on '{node_id}': {error:?}"));
+    .unwrap_or_else(|_| panic!("Plexus commands on '{node_id}' did not complete within {limit:?}"))
+    .unwrap_or_else(|error| panic!("failed to execute Plexus commands on '{node_id}': {error:?}"));
     world.last_cluster_operation_elapsed = Some(started.elapsed());
     world.active_session = Some(session);
     world.active_session_node = Some(node_id);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
-#[then(expr = "within {string} these NSPL commands complete on the leader node")]
-#[when(expr = "within {string} these NSPL commands complete on the leader node")]
-async fn then_nspl_commands_complete_on_leader_within(
+#[then(expr = "within {string} these Plexus commands complete on the leader node")]
+#[when(expr = "within {string} these Plexus commands complete on the leader node")]
+async fn then_plexus_commands_complete_on_leader_within(
     world: &mut ScenarioWorld,
     duration: String,
     #[step] step: &Step,
 ) {
     let leader = current_leader_node(world).await;
-    then_nspl_commands_complete_within(world, duration, leader, step).await;
+    then_plexus_commands_complete_within(world, duration, leader, step).await;
 }
 
-#[given("the leader node is configured with these NSPL commands")]
+#[given("the leader node is configured with these Plexus commands")]
 #[given("the leader node is configured with these Plexus statements")]
-async fn given_the_leader_node_is_configured_with_these_nspl_commands(
+async fn given_the_leader_node_is_configured_with_these_plexus_commands(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
     world.last_command_error = None;
     world.last_command_output = None;
     let commands = expand_placeholders(world, docstring(step));
-    let configured = execute_nspl_commands_on_leader(world, &commands)
+    let configured = execute_plexus_commands_on_leader(world, &commands)
         .await
-        .expect("failed to execute NSPL setup command on leader");
+        .expect("failed to execute Plexus setup command on leader");
     world.active_session = Some(configured.session);
     world.active_session_node = Some(configured.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
-#[when(expr = "these NSPL commands fail with {string}")]
+#[when(expr = "these Plexus commands fail with {string}")]
 #[when(expr = "these Plexus statements fail with {string}")]
-async fn when_these_nspl_commands_fail_with(
+async fn when_these_plexus_commands_fail_with(
     world: &mut ScenarioWorld,
     expected_error: String,
     #[step] step: &Step,
@@ -17948,7 +17942,7 @@ async fn when_these_nspl_commands_fail_with(
 
     let expected_error = expand_placeholders(world, &expected_error);
     let commands = expand_placeholders(world, docstring(step));
-    match execute_nspl_commands_on_leader(world, &commands).await {
+    match execute_plexus_commands_on_leader(world, &commands).await {
         Ok(_) => panic!("expected commands to fail with {:?}", expected_error),
         Err(error) => {
             assert!(
@@ -17961,9 +17955,13 @@ async fn when_these_nspl_commands_fail_with(
     }
 }
 
-#[when(expr = "within {string} these NSPL commands on node {string} eventually fail with {string}")]
-#[then(expr = "within {string} these NSPL commands on node {string} eventually fail with {string}")]
-async fn when_within_these_nspl_commands_on_node_eventually_fail_with(
+#[when(
+    expr = "within {string} these Plexus commands on node {string} eventually fail with {string}"
+)]
+#[then(
+    expr = "within {string} these Plexus commands on node {string} eventually fail with {string}"
+)]
+async fn when_within_these_plexus_commands_on_node_eventually_fail_with(
     world: &mut ScenarioWorld,
     within: String,
     node_id: String,
@@ -17981,7 +17979,7 @@ async fn when_within_these_nspl_commands_on_node_eventually_fail_with(
     let deadline = Instant::now() + timeout;
     let mut last_outcome;
     loop {
-        match run_nspl_commands_on_node(world, &node_id, &commands).await {
+        match run_plexus_commands_on_node(world, &node_id, &commands).await {
             Ok(output) => last_outcome = format!("command succeeded: {output}"),
             Err(error) => {
                 if error.contains(&expected_error) {
@@ -18000,9 +17998,9 @@ async fn when_within_these_nspl_commands_on_node_eventually_fail_with(
     }
 }
 
-#[when("these NSPL commands fail")]
+#[when("these Plexus commands fail")]
 #[when("these Plexus statements fail")]
-async fn when_these_nspl_commands_fail(world: &mut ScenarioWorld, #[step] step: &Step) {
+async fn when_these_plexus_commands_fail(world: &mut ScenarioWorld, #[step] step: &Step) {
     world.last_command_error = None;
     world.last_command_output = None;
     world.last_server_error = None;
@@ -18011,7 +18009,7 @@ async fn when_these_nspl_commands_fail(world: &mut ScenarioWorld, #[step] step: 
     world.active_session_has_subscription = false;
 
     let commands = expand_placeholders(world, docstring(step));
-    match execute_nspl_commands_on_leader(world, &commands).await {
+    match execute_plexus_commands_on_leader(world, &commands).await {
         Ok(_) => panic!("expected commands to fail"),
         Err(error) => {
             append_cucumber_log_line(&format!("expected command failure observed: {error}"));
@@ -18039,7 +18037,7 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
         world,
         &build_ingestor_logic_commands(transport, output_schema, docstring(step), true),
     );
-    let started = execute_nspl_commands_on_leader(world, &commands)
+    let started = execute_plexus_commands_on_leader(world, &commands)
         .await
         .expect("failed to start ingestor logic fixture on leader");
     let NodeSession {
@@ -18077,7 +18075,7 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
         if owner == leader {
             world.active_session = Some(session);
         } else {
-            let owner_session = execute_nspl_commands_on_node(
+            let owner_session = execute_plexus_commands_on_node(
                 world,
                 &owner,
                 "CREATE SUBSCRIPTION logic_notifications_owner_subscription TO \
@@ -18121,7 +18119,7 @@ async fn when_the_ingestor_logic_fixture_fails_to_start_with_output_schema_and_p
         world,
         &build_ingestor_logic_commands(transport, output_schema, docstring(step), false),
     );
-    match execute_nspl_commands_on_leader(world, &commands).await {
+    match execute_plexus_commands_on_leader(world, &commands).await {
         Ok(_) => panic!("expected ingestor logic fixture to fail during leader validation"),
         Err(error) => {
             append_cucumber_log_line(&format!("logic fixture start failure observed: {error}"));
@@ -18158,8 +18156,8 @@ async fn when_the_ingestor_logic_transport_delivers_payload_fixture_with_headers
     }
 }
 
-#[when(expr = "these NSPL commands fail on a follower node with {string}")]
-async fn when_these_nspl_commands_fail_on_a_follower_node_with(
+#[when(expr = "these Plexus commands fail on a follower node with {string}")]
+async fn when_these_plexus_commands_fail_on_a_follower_node_with(
     world: &mut ScenarioWorld,
     expected_error: String,
     #[step] step: &Step,
@@ -18181,7 +18179,7 @@ async fn when_these_nspl_commands_fail_on_a_follower_node_with(
         .open_session(&follower, &world.domain)
         .await
         .expect("failed to open raw follower session");
-    for command in nspl_statements(&commands) {
+    for command in plexus_statements(&commands) {
         match session.run_command(&command).await {
             Ok(_) => panic!(
                 "expected follower commands to fail with {:?}",
@@ -21680,7 +21678,7 @@ async fn then_within_duration_describe_domain_section_metric_across_physical_nod
         last_totals.clear();
         for node_id in world.cluster().node_ids() {
             nervix_primitives::task::consume_budget().await;
-            match run_nspl_commands_on_node(world, &node_id, "DESCRIBE DOMAIN;").await {
+            match run_plexus_commands_on_node(world, &node_id, "DESCRIBE DOMAIN;").await {
                 Ok(output) => {
                     for (physical_node, total) in
                         metric_totals_in_indented_section(&output, &section, &prefix)
@@ -22364,8 +22362,10 @@ async fn then_last_command_output_owner_equals_placeholder(
     );
 }
 
-#[when("these NSPL commands are executed on a node that is not the last described hash map owner")]
-async fn when_these_nspl_commands_are_executed_on_non_hash_map_owner(
+#[when(
+    "these Plexus commands are executed on a node that is not the last described hash map owner"
+)]
+async fn when_these_plexus_commands_are_executed_on_non_hash_map_owner(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
@@ -22382,19 +22382,19 @@ async fn when_these_nspl_commands_are_executed_on_non_hash_map_owner(
         .node_other_than(&owner)
         .expect("cluster must contain a node other than the hash map owner");
     let commands = expand_placeholders(world, docstring(step));
-    let session = execute_nspl_commands_on_node(world, &node_id, &commands)
+    let session = execute_plexus_commands_on_node(world, &node_id, &commands)
         .await
-        .expect("failed to execute NSPL command on non-owner node");
+        .expect("failed to execute Plexus command on non-owner node");
     world.active_session = Some(session);
     world.active_session_node = Some(node_id);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 
 #[when(
-    "these NSPL commands are executed on a node that is not a holder of the last described hash \
+    "these Plexus commands are executed on a node that is not a holder of the last described hash \
      map"
 )]
-async fn when_these_nspl_commands_are_executed_on_non_hash_map_holder(
+async fn when_these_plexus_commands_are_executed_on_non_hash_map_holder(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
@@ -22424,9 +22424,9 @@ async fn when_these_nspl_commands_are_executed_on_non_hash_map_holder(
             )
         });
     let commands = expand_placeholders(world, docstring(step));
-    let session = execute_nspl_commands_on_node(world, &node_id, &commands)
+    let session = execute_plexus_commands_on_node(world, &node_id, &commands)
         .await
-        .expect("failed to execute NSPL command on non-holder node");
+        .expect("failed to execute Plexus command on non-holder node");
     world.active_session = Some(session);
     world.active_session_node = Some(node_id);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
@@ -22448,7 +22448,7 @@ async fn then_within_duration_describe_ingestor_on_leader_contains(
         nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let output =
-            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE INGESTOR {ingestor};"))
+            run_plexus_commands_on_node(world, &leader, &format!("DESCRIBE INGESTOR {ingestor};"))
                 .await
                 .expect("describe ingestor command must succeed");
         world.last_command_output = Some(output.clone());
@@ -22480,7 +22480,7 @@ async fn then_within_duration_describe_wasm_processor_on_leader_contains(
     loop {
         nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
-        let output = run_nspl_commands_on_node(
+        let output = run_plexus_commands_on_node(
             world,
             &leader,
             &format!("DESCRIBE WASM PROCESSOR {processor};"),
@@ -22527,7 +22527,7 @@ async fn then_all_wasm_branches_have_confirmed_checkpoint(
     );
     loop {
         nervix_primitives::task::consume_budget().await;
-        let output = run_nspl_commands_on_node(
+        let output = run_plexus_commands_on_node(
             world,
             &node,
             &format!("DESCRIBE WASM PROCESSOR {processor};"),
@@ -22602,10 +22602,13 @@ async fn then_describe_one_of_two_emitters_contains(
         let leader = current_leader_node(world).await;
         let mut outputs = Vec::with_capacity(emitters.len());
         for emitter in &emitters {
-            let output =
-                run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
-                    .await
-                    .expect("describe emitter command must succeed");
+            let output = run_plexus_commands_on_node(
+                world,
+                &leader,
+                &format!("DESCRIBE EMITTER {emitter};"),
+            )
+            .await
+            .expect("describe emitter command must succeed");
             if output.contains(expected.trim()) {
                 world.last_command_output = Some(output);
                 return;
@@ -22639,7 +22642,7 @@ async fn then_within_duration_describe_emitter_on_leader_contains(
         nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let output =
-            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+            run_plexus_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
                 .await
                 .expect("describe emitter command must succeed");
         world.last_command_output = Some(output.clone());
@@ -22729,7 +22732,7 @@ async fn then_within_duration_describe_emitter_reports_transient_error_with_next
         nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let output =
-            run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
+            run_plexus_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
                 .await
                 .expect("describe emitter command must succeed");
         world.last_command_output = Some(output.clone());
@@ -22799,7 +22802,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_equals_
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        match run_nspl_commands_on_node(
+        match run_plexus_commands_on_node(
             world,
             &node_id,
             &format!("DESCRIBE DEDUPLICATOR {deduplicator};"),
@@ -22848,7 +22851,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_differe
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        match run_nspl_commands_on_node(
+        match run_plexus_commands_on_node(
             world,
             &node_id,
             &format!("DESCRIBE DEDUPLICATOR {deduplicator};"),
@@ -23233,7 +23236,7 @@ async fn then_within_duration_node_eventually_reports_describe_stream_as(
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        match run_nspl_commands_on_node(world, &node_id, &commands).await {
+        match run_plexus_commands_on_node(world, &node_id, &commands).await {
             Ok(output) if describe_relay_output_reports(&output, &expected) => {
                 world.last_command_output = Some(output);
                 return;
@@ -23277,7 +23280,7 @@ async fn then_within_duration_node_eventually_reports_describe_ingestor_as(
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        match run_nspl_commands_on_node(world, &node_id, &commands).await {
+        match run_plexus_commands_on_node(world, &node_id, &commands).await {
             Ok(output) if output.contains(expected.as_str()) => {
                 world.last_command_output = Some(output);
                 return;
@@ -23315,7 +23318,7 @@ async fn then_within_duration_node_eventually_reports_describe_resource_as(
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        match run_nspl_commands_on_node(world, &node_id, &commands).await {
+        match run_plexus_commands_on_node(world, &node_id, &commands).await {
             Ok(output) if output.contains(expected.as_str()) => {
                 world.last_command_output = Some(output);
                 return;
@@ -23361,7 +23364,7 @@ async fn then_within_duration_node_eventually_reports_materialized_state_contain
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        match run_nspl_commands_on_node(world, &node_id, &command).await {
+        match run_plexus_commands_on_node(world, &node_id, &command).await {
             Ok(output) if output.contains(expected.trim()) => {
                 world.last_command_output = Some(output);
                 return;

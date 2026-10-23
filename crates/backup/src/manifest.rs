@@ -27,7 +27,7 @@ const MANIFEST_VERSION: u16 = 2;
 pub struct BackupManifest {
     /// The Nervix release that wrote the archive.
     pub producer_version: String,
-    /// The NSPL release its `models.nspl` sections are written in.
+    /// The Plexus release its `models.plexus` sections are written in.
     pub language_version: String,
     /// The cluster the archive was taken from.
     pub cluster_id: String,
@@ -84,8 +84,8 @@ pub struct SectionEntry {
 pub enum SectionContent {
     /// A record this crate owns, behind its header.
     Record(RecordKind),
-    /// Canonical NSPL text.
-    Nspl,
+    /// Canonical Plexus text.
+    Plexus,
     /// The original archive of a resource version, byte for byte.
     ResourceArchive,
     /// An opaque guest save, whose descriptor is an archive-owned record.
@@ -108,7 +108,7 @@ impl SectionContent {
                 Some(crate::materialized::MATERIALIZED_IDENTITIES_BYTES)
             }
             Self::Record(_) => Some(crate::section::MAX_RECORD_BYTES),
-            Self::Nspl | Self::ResourceArchive | Self::WasmGuestBlob => None,
+            Self::Plexus | Self::ResourceArchive | Self::WasmGuestBlob => None,
             Self::MaterializedColumns => Some(crate::materialized::MATERIALIZED_COLUMNS_BYTES),
             Self::DeduplicatorKeys | Self::WindowInputRows | Self::WindowArgumentColumns => {
                 Some(crate::branch_state::BRANCH_STATE_GROUP_BYTES)
@@ -305,7 +305,7 @@ impl BackupManifest {
                         }));
                     }
                 },
-                SectionContentWire::Nspl => SectionContent::Nspl,
+                SectionContentWire::Plexus => SectionContent::Plexus,
                 SectionContentWire::ResourceArchive => SectionContent::ResourceArchive,
                 SectionContentWire::WasmGuestBlob => SectionContent::WasmGuestBlob,
                 SectionContentWire::MaterializedColumns => SectionContent::MaterializedColumns,
@@ -346,7 +346,7 @@ impl From<SectionContent> for SectionContentWire {
     fn from(content: SectionContent) -> Self {
         match content {
             SectionContent::Record(kind) => Self::Record { kind: kind.tag() },
-            SectionContent::Nspl => Self::Nspl,
+            SectionContent::Plexus => Self::Plexus,
             SectionContent::ResourceArchive => Self::ResourceArchive,
             SectionContent::WasmGuestBlob => Self::WasmGuestBlob,
             SectionContent::MaterializedColumns => Self::MaterializedColumns,

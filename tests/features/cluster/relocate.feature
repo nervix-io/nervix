@@ -6,7 +6,7 @@ Feature: Relocating runtime nodes onto a named cluster node
     And runtime state replica polling is paused
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA state_event ( tenant STRING, id I64 );
@@ -42,7 +42,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       key={"tenant":"acme"} payload={"id":1,"tenant":"acme"}
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       RELOCATE RELAY moving_state ONTO NODE {{state_destination}} IGNORE PREFERENCES;
       """
@@ -57,7 +57,7 @@ Feature: Relocating runtime nodes onto a named cluster node
     And runtime state replica polling is paused
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA state_event ( tenant STRING, id I64 );
@@ -103,16 +103,16 @@ Feature: Relocating runtime nodes onto a named cluster node
     Given runtime replication is configured with replica count 0 and snapshot interval "1h"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction ( tenant STRING, transaction_id STRING );
       CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
@@ -140,12 +140,12 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO deduped INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION deduped_seen TO deduped;
       """
@@ -165,7 +165,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       {"tenant":"beta","transaction_id":"txn-1"}
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       STOP;
       RELOCATE DEDUPLICATOR dedup_txns ONTO NODE node-2 IGNORE PREFERENCES;
@@ -190,16 +190,16 @@ Feature: Relocating runtime nodes onto a named cluster node
     Given runtime replication is configured with replica count 0 and snapshot interval "1h"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction ( tenant STRING, transaction_id STRING );
       CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
@@ -226,12 +226,12 @@ Feature: Relocating runtime nodes onto a named cluster node
         BRANCHED BY by_tenant
         TO deduped INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE DEDUPLICATOR dedup_txns ONTO NODE node-2 IGNORE PREFERENCES;
       START;
@@ -240,7 +240,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       starting domain '{{domain}}'
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION deduped_seen TO deduped;
       """
@@ -259,18 +259,18 @@ Feature: Relocating runtime nodes onto a named cluster node
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" has state-rejecting WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE rejecting_guest;
       UPLOAD RESOURCE rejecting_guest VERSION '{{wasm_processor}}';
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( value I32 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( value integer );
@@ -294,12 +294,12 @@ Feature: Relocating runtime nodes onto a named cluster node
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restored_seen TO restored_events;
       """
@@ -311,11 +311,11 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       {"value":1}
       """
-    When these NSPL commands fail with "wasm processor 'stateful_guest' application state restoration failed (unbranched, resource 'rejecting_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision"
+    When these Plexus commands fail with "wasm processor 'stateful_guest' application state restoration failed (unbranched, resource 'rejecting_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision"
       """
       RELOCATE WASM PROCESSOR stateful_guest ONTO NODE node-2 IGNORE PREFERENCES;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -329,17 +329,17 @@ Feature: Relocating runtime nodes onto a named cluster node
     Given runtime replication is configured with replica count 0 and snapshot interval "1h"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( id I64 );
       CREATE RELAY inbound SCHEMA event UNBRANCHED;
@@ -348,13 +348,13 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO outbound INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
     Given ownership handoff for domain "{{domain}}" pauses after preparation
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
       """
@@ -364,8 +364,8 @@ Feature: Relocating runtime nodes onto a named cluster node
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
     When the ownership handoff preparation pause for domain "{{domain}}" is released
-    Then the background NSPL execution fails with "destination node 'node-2' changed process incarnation during ownership handoff"
-    When these NSPL commands are executed on the leader node
+    Then the background Plexus execution fails with "destination node 'node-2' changed process incarnation during ownership handoff"
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -373,7 +373,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       - domain={{domain}} kind=junction name=moving_route owner=node-1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
@@ -389,16 +389,16 @@ Feature: Relocating runtime nodes onto a named cluster node
     And entity gate deadline is configured as "1s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( id I64 );
       CREATE RELAY inbound SCHEMA event UNBRANCHED;
@@ -407,21 +407,21 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO outbound INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
     Given ownership handoff for domain "{{domain}}" pauses before its prepare response
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
       """
     Then the ownership handoff prepare response pause for domain "{{domain}}" is reached
-    And the background NSPL execution fails with "timed out preparing"
+    And the background Plexus execution fails with "timed out preparing"
     When the ownership handoff prepare response pause for domain "{{domain}}" is released
     And physical time passes for "500ms"
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
@@ -436,16 +436,16 @@ Feature: Relocating runtime nodes onto a named cluster node
     Given runtime replication is configured with replica count 0 and snapshot interval "1h"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( id I64 );
       CREATE RELAY inbound SCHEMA event UNBRANCHED;
@@ -454,21 +454,21 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO outbound INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
     Given ownership handoff for domain "{{domain}}" pauses after preparation
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
       """
     Then the ownership handoff preparation pause for domain "{{domain}}" is reached
-    When the background NSPL execution is canceled
+    When the background Plexus execution is canceled
     And the ownership handoff preparation pause for domain "{{domain}}" is released
     And physical time passes for "1s"
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
@@ -484,16 +484,16 @@ Feature: Relocating runtime nodes onto a named cluster node
     And entity gate deadline is configured as "1s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( id I64 );
       CREATE RELAY inbound SCHEMA event UNBRANCHED;
@@ -502,14 +502,14 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO outbound INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
     And leadership is transferred to node "node-3"
     Given ownership handoff for domain "{{domain}}" pauses after preparation
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
       """
@@ -517,11 +517,11 @@ Feature: Relocating runtime nodes onto a named cluster node
     When leadership is transferred to node "node-1"
     Then node "node-1" eventually reports leader "node-1"
     When physical time passes for "3s"
-    And the background NSPL execution is canceled
+    And the background Plexus execution is canceled
     And the ownership handoff preparation pause for domain "{{domain}}" is released
     And node "node-3" is stopped
     And physical time passes for "12s"
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
@@ -537,7 +537,7 @@ Feature: Relocating runtime nodes onto a named cluster node
     And runtime state replica polling is paused
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA state_event ( tenant STRING, id I64 );
@@ -581,7 +581,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       key={"tenant":"acme"} payload={"id":7,"tenant":"acme"}
       """
-    When these NSPL commands are executed through the client on node "{{promoted_state_replica}}"
+    When these Plexus commands are executed through the client on node "{{promoted_state_replica}}"
       """
       SHOW CLUSTER STATUS;
       """
@@ -595,7 +595,7 @@ Feature: Relocating runtime nodes onto a named cluster node
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA state_event ( tenant STRING, id I64 );
@@ -611,7 +611,7 @@ Feature: Relocating runtime nodes onto a named cluster node
     When node "{{failed_state_owner}}" is stopped
     Then node "{{surviving_node}}" eventually observes a stable leader
     And within "20s" node "{{surviving_node}}" eventually reports scheduled "relay" "moving_state" owner different from placeholder "failed_state_owner"
-    When these NSPL commands are executed through the client on node "{{surviving_node}}"
+    When these Plexus commands are executed through the client on node "{{surviving_node}}"
       """
       SHOW RELAY moving_state MATERIALIZED STATE;
       """
@@ -619,7 +619,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       relay 'moving_state' materialized state is empty
       """
-    When these NSPL commands are executed through the client on node "{{surviving_node}}"
+    When these Plexus commands are executed through the client on node "{{surviving_node}}"
       """
       SHOW CLUSTER STATUS;
       """
@@ -632,17 +632,17 @@ Feature: Relocating runtime nodes onto a named cluster node
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction ( tenant STRING, transaction_id STRING, amount I64 );
       CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
@@ -671,12 +671,12 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO deduped INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION deduped_seen TO deduped;
       """
@@ -706,7 +706,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       {"amount":20,"tenant":"beta","transaction_id":"txn-1"}
       """
     And the last relay subscription payload contains key fragment '{"tenant":"beta"}'
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       RELOCATE DEDUPLICATOR dedup_txns ONTO NODE node-2 FOLLOW PREFERENCES;
       """
@@ -728,7 +728,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       hold duration:
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       SHOW CLUSTER STATUS;
       """
@@ -766,17 +766,17 @@ Feature: Relocating runtime nodes onto a named cluster node
   Scenario: A corridor selection moves every covered runtime node in one relocation
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA corridor_event ( id I64 );
       CREATE RELAY corridor_input SCHEMA corridor_event UNBRANCHED;
@@ -793,7 +793,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO corridor_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -817,7 +817,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       - kind=relay name=corridor_stage_two group=6 strategy=ignore reason=selected owner=node-1 moves=yes
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -833,12 +833,12 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       - domain={{domain}} kind=relay name=corridor_input owner=node-1
       """
-    When these NSPL commands fail with "relocation covers no runtime node: no FROM/TO pair is connected"
+    When these Plexus commands fail with "relocation covers no runtime node: no FROM/TO pair is connected"
       """
       RELOCATE FROM JUNCTION corridor_sink TO JUNCTION corridor_source
         ONTO NODE node-3 IGNORE PREFERENCES;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       DESCRIBE RELOCATION FROM JUNCTION corridor_source, JUNCTION corridor_sink
         TO JUNCTION corridor_sink
@@ -853,17 +853,17 @@ Feature: Relocating runtime nodes onto a named cluster node
   Scenario: A hard colocation group moves whole under either preference strategy
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA group_event ( id I64 );
       CREATE RELAY group_input SCHEMA group_event UNBRANCHED;
@@ -876,7 +876,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE PLACEMENT keep_group FROM group_head TO group_tail REQUIRE COLOCATION;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -898,13 +898,13 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       - kind=relay name=group_middle group=1 strategy=ignore reason=required owner=node-1 moves=yes
       """
-    When these NSPL commands fail with "conflicting preference strategies for hard group [junction group_head, junction group_tail, relay group_middle]"
+    When these Plexus commands fail with "conflicting preference strategies for hard group [junction group_head, junction group_tail, relay group_middle]"
       """
       RELOCATE JUNCTION group_head ONTO NODE node-3 FOLLOW PREFERENCES
         FOR JUNCTION group_head IGNORE PREFERENCES
         FOR JUNCTION group_tail FOLLOW PREFERENCES;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       RELOCATE JUNCTION group_tail ONTO NODE node-3 FOLLOW PREFERENCES;
       SHOW CLUSTER STATUS;
@@ -921,17 +921,17 @@ Feature: Relocating runtime nodes onto a named cluster node
   Scenario: Preferences shape the unit and follow the statement default
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA chain_event ( id I64 );
       CREATE RELAY chain_input SCHEMA chain_event UNBRANCHED;
@@ -948,7 +948,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE PLACEMENT prefer_second FROM chain_partner TO chain_distant PREFER COLOCATION RANK 1;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -978,7 +978,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       unsatisfied preferences: 0
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DESCRIBE RELOCATION JUNCTION chain_head ONTO NODE node-2 FOLLOW PREFERENCES
         FOR JUNCTION chain_partner IGNORE PREFERENCES;
@@ -997,7 +997,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       - prefer colocation chain_distant <-> chain_partner (prefer_second)
       - prefer colocation chain_partner <-> chain_second (prefer_second)
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DESCRIBE RELOCATION JUNCTION chain_head ONTO NODE node-2 IGNORE PREFERENCES
         FOR JUNCTION chain_head FOLLOW PREFERENCES;
@@ -1014,12 +1014,12 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       name=chain_distant
       """
-    When these NSPL commands fail with "junction 'chain_distant' is not part of the relocation"
+    When these Plexus commands fail with "junction 'chain_distant' is not part of the relocation"
       """
       RELOCATE JUNCTION chain_head ONTO NODE node-2 IGNORE PREFERENCES
         FOR JUNCTION chain_distant FOLLOW PREFERENCES;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE JUNCTION chain_head ONTO NODE node-2 FOLLOW PREFERENCES;
       SHOW CLUSTER STATUS;
@@ -1036,17 +1036,17 @@ Feature: Relocating runtime nodes onto a named cluster node
   Scenario: A separation partner is held out of the unit and reported when it owns the destination
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA split_event ( id I64 );
       CREATE RELAY split_input SCHEMA split_event UNBRANCHED;
@@ -1060,7 +1060,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE PLACEMENT spread_split FROM split_head TO split_partner SUGGEST SEPARATION RANK 1;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -1078,7 +1078,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       unsatisfied preferences: 0
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DESCRIBE RELOCATION JUNCTION split_partner ONTO NODE node-2 FOLLOW PREFERENCES;
       """
@@ -1091,17 +1091,17 @@ Feature: Relocating runtime nodes onto a named cluster node
   Scenario: A described plan matches the plan the relocation executes
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA plan_event ( id I64 );
       CREATE RELAY plan_input SCHEMA plan_event UNBRANCHED;
@@ -1110,7 +1110,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO plan_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -1121,7 +1121,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       relocation onto node 'node-2'
       """
     Then the last command output is saved as the relocation plan
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -1129,7 +1129,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       - domain={{domain}} kind=junction name=plan_route owner=node-1
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       RELOCATE JUNCTION plan_route ONTO NODE node-2 FOLLOW PREFERENCES;
       """
@@ -1138,17 +1138,17 @@ Feature: Relocating runtime nodes onto a named cluster node
   Scenario: A selection already on the destination reports a dynamic plan and writes nothing
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA noop_event ( id I64 );
       CREATE RELAY noop_input SCHEMA noop_event UNBRANCHED;
@@ -1157,7 +1157,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO noop_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -1177,7 +1177,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       hold duration:
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -1189,12 +1189,12 @@ Feature: Relocating runtime nodes onto a named cluster node
   Scenario: Invalid relocations are rejected without touching the schedule
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reject_event ( id I64 );
       CREATE WIRE JSON SCHEMA reject_event_wire MODE STRICT ( id integer );
@@ -1214,35 +1214,35 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO reject_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands fail with "junction 'missing_route' does not exist in domain '{{domain}}'"
+    And these Plexus commands fail with "junction 'missing_route' does not exist in domain '{{domain}}'"
       """
       RELOCATE JUNCTION missing_route ONTO NODE node-2 FOLLOW PREFERENCES;
       """
-    And these NSPL commands fail with "ingestor 'listener_source' cannot be relocated: server-listener ingestors execute on every cluster node"
+    And these Plexus commands fail with "ingestor 'listener_source' cannot be relocated: server-listener ingestors execute on every cluster node"
       """
       RELOCATE INGESTOR listener_source ONTO NODE node-2 FOLLOW PREFERENCES;
       """
-    And these NSPL commands fail with "node 'node-9' is not a raft member"
+    And these Plexus commands fail with "node 'node-9' is not a raft member"
       """
       RELOCATE JUNCTION reject_route ONTO NODE node-9 FOLLOW PREFERENCES;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-3;
       """
-    And these NSPL commands fail with "node 'node-3' is cordoned"
+    And these Plexus commands fail with "node 'node-3' is cordoned"
       """
       RELOCATE JUNCTION reject_route ONTO NODE node-3 FOLLOW PREFERENCES;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       BEGIN;
       """
-    And these NSPL commands fail on the active session
+    And these Plexus commands fail on the active session
       """
       RELOCATE JUNCTION reject_route ONTO NODE node-2 FOLLOW PREFERENCES;
       """
@@ -1250,7 +1250,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       RELOCATE cannot be queued in a transaction
       """
-    When these NSPL commands fail on the active session
+    When these Plexus commands fail on the active session
       """
       DESCRIBE RELOCATION JUNCTION reject_route ONTO NODE node-2 FOLLOW PREFERENCES;
       """
@@ -1258,12 +1258,12 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       DESCRIBE cannot be queued in a transaction
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       REVERT;
       """
     And node "node-3" is stopped
-    Then within "60s" these NSPL commands on node "node-1" eventually fail with "is not a live raft voter"
+    Then within "60s" these Plexus commands on node "node-1" eventually fail with "is not a live raft voter"
       """
       RELOCATE JUNCTION reject_route ONTO NODE node-3 FOLLOW PREFERENCES;
       """
@@ -1271,18 +1271,18 @@ Feature: Relocating runtime nodes onto a named cluster node
   Scenario: A runtime node is relocated again after failover reassigns it
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
     And node "node-1" eventually reports leader "node-1"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-1;
       CORDON NODE node-2;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA failover_event ( id I64 );
       CREATE WIRE JSON SCHEMA failover_event_wire MODE STRICT ( id integer );
@@ -1302,7 +1302,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO failover_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-1;
       UNCORDON NODE node-2;
@@ -1316,7 +1316,7 @@ Feature: Relocating runtime nodes onto a named cluster node
     When application health responses from node "node-3" fail
     Then node "node-1" eventually reports status containing "raft member 'node-3' is marked unavailable by application health"
     And within "60s" node "node-1" eventually reports scheduled "junction" "failover_route" owner different from placeholder "failover_owner"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       RELOCATE JUNCTION failover_route ONTO NODE node-2 FOLLOW PREFERENCES;
       SHOW CLUSTER STATUS;
@@ -1325,7 +1325,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       - domain={{domain}} kind=junction name=failover_route owner=node-2
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION failover_seen TO failover_output;
       """
@@ -1344,12 +1344,12 @@ Feature: Relocating runtime nodes onto a named cluster node
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And Kafka topic "promote_events_{{test_id}}" exists with 1 partitions
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CREATE SCHEMA promote_event ( tenant STRING, id I64, source STRING );
       CREATE WIRE JSON SCHEMA promote_event_wire MODE STRICT (
@@ -1382,7 +1382,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then the last cluster status owner for scheduled "ingestor" "promote_source" is saved as placeholder "promote_owner"
     And the first replica for scheduled "ingestor" "promote_source" in the last cluster status is saved as placeholder "promote_replica"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION promote_seen TO promote_output;
       """
@@ -1399,7 +1399,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       key={"tenant":"acme"} | "tenant":"acme" | "id":1 | "source":"before-acme"
       key={"tenant":"beta"} | "tenant":"beta" | "id":2 | "source":"before-beta"
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       RELOCATE INGESTOR promote_source ONTO NODE {{promote_replica}} IGNORE PREFERENCES;
       """
@@ -1427,17 +1427,17 @@ Feature: Relocating runtime nodes onto a named cluster node
     Given entity gate deadline is configured as "60s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA exclusive_event ( id I64 );
       CREATE RELAY exclusive_input SCHEMA exclusive_event UNBRANCHED;
@@ -1446,27 +1446,27 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO exclusive_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
     Given the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       RELOCATE JUNCTION exclusive_route ONTO NODE node-2 FOLLOW PREFERENCES;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
-    When these NSPL commands fail with "domain '{{domain}}' mutation is owned by command"
+    When these Plexus commands fail with "domain '{{domain}}' mutation is owned by command"
       """
       ALTER RELAY exclusive_output SET CAPACITY 32;
       """
-    And these NSPL commands fail with "domain '{{domain}}' mutation is owned by command"
+    And these Plexus commands fail with "domain '{{domain}}' mutation is owned by command"
       """
       RELOCATE JUNCTION exclusive_route ONTO NODE node-3 FOLLOW PREFERENCES;
       """
     And the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And the last command output contains
       """
       relocated 1 of 1 runtime node(s) onto node 'node-2'
@@ -1523,17 +1523,17 @@ Feature: Relocating runtime nodes onto a named cluster node
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA abort_event ( seq I64 );
       CREATE WIRE JSON SCHEMA abort_event_wire MODE STRICT ( seq integer );
@@ -1561,7 +1561,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -1576,12 +1576,12 @@ Feature: Relocating runtime nodes onto a named cluster node
       transient error: fault injector stalled emitter publish
       """
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
-    When these NSPL commands fail with "timed out draining domain"
+    When these Plexus commands fail with "timed out draining domain"
       """
       RELOCATE FROM JUNCTION abort_route TO EMITTER stalled_emitter
         ONTO NODE node-2 IGNORE PREFERENCES;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -1598,7 +1598,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       "seq":1
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       RELOCATE FROM JUNCTION abort_route TO EMITTER stalled_emitter
         ONTO NODE node-2 IGNORE PREFERENCES;
@@ -1626,17 +1626,17 @@ Feature: Relocating runtime nodes onto a named cluster node
     And Kafka is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA wait_event ( id I64, source STRING );
       CREATE WIRE JSON SCHEMA wait_event_wire MODE STRICT ( id integer, source string );
@@ -1677,12 +1677,12 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO moved_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION untouched_output_seen TO untouched_output;
       """
@@ -1691,7 +1691,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       {"id":7,"source":"input"}
       """
     Then the relay subscription does not receive a payload within "5s"
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       RELOCATE JUNCTION moved_route ONTO NODE node-2 FOLLOW PREFERENCES;
       """
@@ -1712,17 +1712,17 @@ Feature: Relocating runtime nodes onto a named cluster node
   Scenario: A relocated assignment survives reconciliation, a dynamic alteration and a restart
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA durable_event ( seq I64 );
       CREATE RELAY durable_input SCHEMA durable_event UNBRANCHED;
@@ -1731,7 +1731,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO durable_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -1741,13 +1741,13 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       relocated 1 of 1 runtime node(s) onto node 'node-2'
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "durable_route" is saved as placeholder "relocated_owner"
     And for "5s" node "node-1" keeps reporting scheduled "junction" "durable_route" owner equal to placeholder "relocated_owner"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       ALTER RELAY durable_output SET CAPACITY 32;
       """
@@ -1755,7 +1755,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       quiesce level: DYNAMIC
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       STOP;
       START;
@@ -1774,12 +1774,12 @@ Feature: Relocating runtime nodes onto a named cluster node
     And a 3 node nervix cluster is started
     And Kafka topic "relay_state_{{test_id}}" exists with 1 partitions
     And Kafka topic "relay_reader_{{test_id}}" exists with 1 partitions
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA state_event ( tenant STRING, id I64, source STRING );
       CREATE WIRE JSON SCHEMA state_event_wire MODE STRICT (
@@ -1828,7 +1828,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     Then the last command output owner is saved as placeholder "state_owner"
     And the first replica in the last command output is saved as placeholder "state_replica"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION reader_output_seen TO reader_output;
       """
@@ -1869,7 +1869,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       key={"tenant":"acme"} | "tenant":"acme" | "id":11 | "source":"before-acme"
       key={"tenant":"beta"} | "tenant":"beta" | "id":12 | "source":"before-beta"
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       RELOCATE RELAY moving_state ONTO NODE {{state_replica}} IGNORE PREFERENCES;
       """
@@ -1877,7 +1877,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       - kind=relay name=moving_state group=1 strategy=ignore reason=selected owner={{state_owner}} moves=yes replicas={{state_owner}} promoted_replica=yes
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       SHOW RELAY moving_state MATERIALIZED STATE;
       """

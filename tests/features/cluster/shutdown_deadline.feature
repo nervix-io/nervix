@@ -3,7 +3,7 @@ Feature: Process shutdown deadline
 
   Scenario Outline: Graceful shutdown cancels an accepted resource upload <progress>
     Given a nervix-server process is started
-    And the server process is configured with these NSPL commands
+    And the server process is configured with these Plexus commands
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE held_archive;
@@ -22,11 +22,11 @@ Feature: Process shutdown deadline
 
   Scenario Outline: The shutdown deadline ends a process whose drain cannot finish in a <pace> domain
     Given a nervix-server process is started with drain timeout "10m" and shutdown timeout "5s"
-    And the server process is configured with these NSPL commands
+    And the server process is configured with these Plexus commands
       """
       <domain>
       """
-    And the server process is configured with these NSPL commands
+    And the server process is configured with these Plexus commands
       """
       CREATE SCHEMA held_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );

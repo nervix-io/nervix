@@ -48,7 +48,7 @@ use nervix_client_core::{
 };
 use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
-use nervix_nspl::client_statement::{
+use nervix_plexus::client_statement::{
     ClientStatement, local_path_fragment, parse_client_statements, parse_upload_resource_query,
 };
 use nervix_primitives::{
@@ -126,10 +126,10 @@ struct Args {
     /// Overall BACKUP command wait across all domain cuts, redirects and reconnects (default 10m)
     #[arg(long, global = true, value_parser = nervix_models::parse_duration_text)]
     backup_wait_timeout: Option<std::time::Duration>,
-    /// Run NSPL statements once and exit instead of starting the interactive REPL
+    /// Run Plexus statements once and exit instead of starting the interactive REPL
     #[arg(long, conflicts_with = "suggest")]
     command: Option<String>,
-    /// Print completion candidates for NSPL input as JSON and exit
+    /// Print completion candidates for Plexus input as JSON and exit
     #[arg(long, conflicts_with = "command")]
     suggest: Option<String>,
     /// UTF-8 byte cursor in --suggest input; defaults to the end
@@ -161,7 +161,7 @@ enum Command {
         /// Optional per-arrival batch sample rate from 0.0 through 1.0
         #[arg(long)]
         batch_sample_rate: Option<String>,
-        /// Optional NSPL predicate applied to delivered records
+        /// Optional Plexus predicate applied to delivered records
         #[arg(long = "where")]
         where_clause: Option<String>,
     },
@@ -1720,7 +1720,7 @@ fn subscribe_request(
     let Some(where_clause) = where_clause else {
         return Ok(request);
     };
-    let where_clause = nervix_nspl::parse_expression(where_clause)
+    let where_clause = nervix_plexus::parse_expression(where_clause)
         .change_context(ClientError::InvalidSubscriptionWhere)?;
     Ok(request.with_where_clause(where_clause))
 }
@@ -1788,7 +1788,7 @@ mod tests {
             "--command",
             "BACKUP CLUSTER TO 'cluster.nvxb';",
         ])
-        .assured("NSPL accepts the global backup wait option");
+        .assured("Plexus accepts the global backup wait option");
         let options = connect_options_from_args(&args).assured("connect options are valid");
         assert_eq!(
             options.backup_wait_timeout,
@@ -2158,7 +2158,7 @@ mod tests {
 
     #[test]
     fn use_domain_parser_accepts_repl_command() {
-        use nervix_nspl::client_statement::parse_use_domain;
+        use nervix_plexus::client_statement::parse_use_domain;
 
         assert_eq!(
             parse_use_domain("USE prod;")

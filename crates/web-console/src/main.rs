@@ -50,9 +50,9 @@ use nervix_models::{
     CommandExecutionReference, CreateSubscription, DomainName, DomainPace, DomainStatus, ModelKind,
     RelayName, ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
     ResourceVersionDescription, ResourceVersionEntries, Statement, SubscriptionName, Timestamp,
-    TransactionLifecycle, TransactionStatus, expression_to_nspl,
+    TransactionLifecycle, TransactionStatus, expression_to_plexus,
 };
-use nervix_nspl::client_statement::{
+use nervix_plexus::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
 };
 use nervix_primitives::unmodeled::futures::{AbortHandle, Abortable};
@@ -514,7 +514,7 @@ struct SuggestionQuery {
 /// A request the console sends over its session, together with what its reply is for.
 #[derive(Clone)]
 enum ConsoleRequest {
-    /// Executes NSPL statements.
+    /// Executes Plexus statements.
     Command {
         request: CommandRequest,
         purpose: CommandPurpose,
@@ -3802,8 +3802,8 @@ fn subscription_tab_title(subscription: &CreateSubscription) -> String {
     let Some(filter) = &subscription.where_clause else {
         return relay;
     };
-    let filter = expression_to_nspl(filter)
-        .assured("an expression the NSPL parser produced renders back to NSPL");
+    let filter = expression_to_plexus(filter)
+        .assured("an expression the Plexus parser produced renders back to Plexus");
     format!("{relay} {filter}")
 }
 
@@ -5988,7 +5988,7 @@ fn ReplPanel(
                     }
                 >
                     <SidebarIcon kind="terminal" />
-                    <span>"NSPL REPL"</span>
+                    <span>"Plexus REPL"</span>
                 </button>
                 <For
                     each=move || subscription_tabs.get()
