@@ -16,6 +16,11 @@ semantics. The state rules here apply to those systems without replacing their d
 [Execution Plans](./execution-plans.md) follows the validated values into a complete installed
 revision.
 
+Opening a WebSockets ingest metadata builder validates the frame-label byte capacity derived from
+the group's row bound and the vocabulary's frame labels. An estimate that exceeds the address space
+is a typed error before allocation; the ingest group adds the opening operation's context and
+retains the cause for its general-error policy.
+
 The Pulsar sink's running publishing choice keeps related state together: the `NO ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
 confirmation settings. An empty receipt collection means there are no outstanding receipts,
@@ -121,6 +126,12 @@ No fabricated close code stands for an absent status. The source removes the exa
 before its bounded closing wait, so cancellation leaves it needing a new resume. The
 [connector contract](./connector-contract.md#source-boundary) owns the retry and payload lifetime
 effects.
+
+WebSockets upgrade fields cross from literal semantic Models into `WebsocketsUpgradeHeaders`,
+whose private representation enforces HTTP bounds and WebSocket protocol-name restrictions before
+an execution plan receives it. `WebsocketDataFrame` carries either text or binary payload, so a
+text tag cannot accompany invalid UTF-8. Each message retains its connection's immutable response
+header snapshot; the quiesce buffer retains the same handle beside the typed frame kind.
 
 Zero work outstanding, an initial sequence value, an empty payload, and a genuinely empty result
 remain ordinary values. A documented scalar function may return zero for a particular input;

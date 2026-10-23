@@ -14324,6 +14324,7 @@ async fn when_these_nspl_commands_are_attempted_on_node(
 }
 
 #[when("these NSPL commands begin executing in the background")]
+#[when("these Plexus commands begin executing in the background")]
 #[when("these Plexus statements begin executing in the background")]
 async fn when_these_nspl_commands_begin_executing_in_the_background(
     world: &mut ScenarioWorld,
