@@ -2147,6 +2147,13 @@ verdicts stay the scenarios' own, with the product's deadlines and the suite's b
 
 ## Deterministic Concurrency Verification
 
+The relay interaction's ordinary output-wake test stages a collected batch through the production
+admission path and awaits its domain-owned collection deadline before making the output wake
+ready. It requires the wake to win and the exact batch to remain deliverable afterwards. Its initial
+pending poll uses an empty input, so establishing that state does not depend on finishing a poll
+within a one-millisecond wall-clock interval. This checks arbitration against two ready events
+without changing production timing or synchronization.
+
 The Pulsar sink uses the shared `ConfirmationWindow` and its registered property and Shuttle
 checks for concurrent broker answers, timeout and enqueue failure. Under `NO ACK`, one sink task
 owns its retained send receipts and the first failed receipt; it collects completed receipts
