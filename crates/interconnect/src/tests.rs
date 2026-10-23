@@ -1712,6 +1712,48 @@ async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
     transport_b.shutdown().await;
 }
 
+#[test]
+fn each_relay_grant_refusal_counts_under_its_own_reason_and_fails_a_request_by_its_class() {
+    use strum::{EnumCount as _, IntoEnumIterator as _};
+
+    let observations = observation::TransportObservations::default();
+    for refusal in RelayGrantRefusal::iter() {
+        observations.relay_grant_refused(ConnectionDirection::Inbound, refusal);
+    }
+    let counters = observations.counters();
+    let inbound = counters.relay_grant_refusals[ConnectionDirection::Inbound.index()];
+    let outbound = counters.relay_grant_refusals[ConnectionDirection::Outbound.index()];
+    assert_eq!(
+        inbound,
+        [1; RelayGrantRefusal::COUNT],
+        "every refusal reason has a counter of its own"
+    );
+    assert_eq!(outbound, [0; RelayGrantRefusal::COUNT]);
+
+    for refusal in RelayGrantRefusal::iter() {
+        let class = StreamResetReason::of(&TransportError::RelayGrantRefused(refusal));
+        let expected = match refusal {
+            RelayGrantRefusal::Memory
+            | RelayGrantRefusal::QueueItem
+            | RelayGrantRefusal::TerminalOutcome
+            | RelayGrantRefusal::ChannelBusy => StreamResetReason::Capacity,
+            RelayGrantRefusal::SenderEpoch
+            | RelayGrantRefusal::BodyTooLarge
+            | RelayGrantRefusal::MissingAdmission
+            | RelayGrantRefusal::ForeignRegistrar
+            | RelayGrantRefusal::ContentConflict
+            | RelayGrantRefusal::OutOfOrder
+            | RelayGrantRefusal::AdmissionActive => StreamResetReason::Peer,
+        };
+        assert_eq!(class, expected, "{refusal}");
+        assert_eq!(
+            refusal.is_capacity(),
+            expected == StreamResetReason::Capacity,
+            "{refusal}"
+        );
+    }
+}
+
 #[nervix_primitives::test]
 async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
     let options = TransportOptions {
