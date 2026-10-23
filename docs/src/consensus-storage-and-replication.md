@@ -287,6 +287,11 @@ Committed-range application, startup replay, and leader-bounded replication stre
 successive admitted chunks. A chunk targets 1 MiB or 1,024 entries, whichever is reached first, and
 one oversized first entry travels alone. The reader releases the ordered storage worker between
 chunks and retains the chunk's memory charge until its entries have been handed to the consumer.
+Handing out the final entry releases the exhausted iterator allocation and its charge before that
+poll returns. A consumer that parks with its final entry therefore holds no empty chunk that could
+keep another reader or a source control call out of the Commands class. The reader retains an
+explicit exhausted boundary, without the allocation, so a subsequent chunk still yields before
+requesting the ordered storage worker.
 
 There is no range-size failure at 2 MiB or at any other aggregate backlog size. A committed range
 and a startup backlog may span any number of chunks. The state-machine worker applies the entries
