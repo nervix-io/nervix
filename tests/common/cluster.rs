@@ -4565,30 +4565,36 @@ pub(crate) async fn publish_mqtt_burst_to_address(
         }
     }));
 
-    let published = timeout(BROKER_TIMEOUT, async {
+    // The broker-operation timeout bounds each publication's queueing and completion rather than
+    // the whole burst, so a burst fails only once the broker answers none of its publications for
+    // that long. A broker the parallel suite loads answers a burst of 2,000 QoS 1 publications in
+    // more than one timeout while it answers each of them well within it.
+    let published = async {
         let mut notices = Vec::with_capacity(count);
         for _ in 0..count {
             nervix_primitives::task::consume_budget().await;
-            notices.push(
-                client
-                    .publish_tracked(topic, payload, PublishOptions::new(qos))
-                    .await
-                    .map_err(io::Error::other)?,
-            );
+            let queued = timeout(
+                BROKER_TIMEOUT,
+                client.publish_tracked(topic, payload, PublishOptions::new(qos)),
+            )
+            .await
+            .map_err(|elapsed| io::Error::new(io::ErrorKind::TimedOut, elapsed))?;
+            notices.push(queued.map_err(io::Error::other)?);
         }
         // Queue the complete burst before waiting so completion tracking preserves its demand.
         for notice in notices {
-            notice
-                .wait_completion_async()
+            nervix_primitives::task::consume_budget().await;
+            let completed = timeout(BROKER_TIMEOUT, notice.wait_completion_async())
                 .await
-                .map_err(io::Error::other)?;
+                .map_err(|elapsed| io::Error::new(io::ErrorKind::TimedOut, elapsed))?;
+            completed.map_err(io::Error::other)?;
         }
         Ok::<_, io::Error>(())
-    })
+    }
     .await;
     driver.abort();
     let _ = driver.await;
-    published.map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
+    published
 }
 
 async fn ensure_rabbitmq_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
