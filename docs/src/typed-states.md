@@ -147,6 +147,15 @@ identifier access and verifies offsets and counts before constructing owned valu
 
 ## Absence And Distinct States
 
+**MQTT size admission.** A source packet is either an admitted publish with independently owned
+bytes or an oversized outcome with an optional prepared acknowledgement. Absence means that QoS
+requires none or the client acknowledges automatically. A discard is explicitly deferred for
+its ordinary prefix, unrequested with its deadline, or requested with its confirmation target.
+The following read starts its optional keep-alive deadline after the host acknowledges the
+ordinary prefix; that original deadline then survives cancellation. The connection retains at
+most one discard and clears it only when it returns the size outcome after confirmation. See
+[MQTT source connections](./connector-contract.md#mqtt-source-connections).
+
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input
 is unchanged creates no retirement. A connector session catalog has a private constructor that

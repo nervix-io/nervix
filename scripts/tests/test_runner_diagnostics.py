@@ -85,8 +85,23 @@ class CalibrationTests(unittest.TestCase):
 
     def test_tool_timeout_keeps_completed_output_and_reaps_its_process(self) -> None:
         import sys
-        probe = diagnostics.run_probe([sys.executable, "-c",
-            "import time; print('measurement before stall', flush=True); time.sleep(30)"], 0.2)
+        popen = subprocess.Popen
+
+        def ready_process(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            # Establish completed output before testing its retention across a timeout. Process
+            # startup need not finish inside the probe's short stalled-tool budget on a busy host.
+            ready = process.stderr.readline()
+            if ready != "ready\n":
+                process.kill()
+                process.communicate()
+                self.fail(f"the fixture did not publish its ready signal: {ready!r}")
+            return process
+
+        with mock.patch.object(diagnostics.subprocess, "Popen", side_effect=ready_process):
+            probe = diagnostics.run_probe([sys.executable, "-c",
+                "import sys, time; print('measurement before stall', flush=True); "
+                "print('ready', file=sys.stderr, flush=True); time.sleep(30)"], 0.2)
         self.assertTrue(probe["timed_out"])
         self.assertLess(probe["returncode"], 0)
         self.assertIn("measurement before stall", probe["stdout"])

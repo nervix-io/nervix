@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** The MQTT client and event loop each source instance subscribes through, its
 //!   session and quality-of-service settings, the Maximum Packet Size and the Receive Maximum every
-//!   connection advertises and the refusal of a larger packet, the shared subscription every
+//!   connection advertises and local admission of bounded publishes, the shared subscription every
 //!   instance joins, the client identity each instance connects with, the batches a read gathers
 //!   from its connection's read-ahead and how a read ends when the host cancels it, manual
 //!   acknowledgement of publishes and its confirmation once written, the local replay of publishes
@@ -48,14 +48,14 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
-    ClientConfigEntry, ConnectorKind, MQTT_SOURCE_MAXIMUM_PACKET_BYTES, MqttQos, MqttSession,
+    ClientConfigEntry, ConnectorKind, MQTT_MAXIMUM_PACKET_BYTES, MqttQos, MqttSession,
 };
 use nervix_primitives::time::{Instant, timeout, timeout_at};
 use rumqttc::{
     AckMode, AsyncClient, BrokerSessionResumePolicy, ConnectionError, DisconnectProperties,
-    DisconnectReasonCode, Event, EventLoop, Incoming, MqttOptions, Outgoing, Publish, QoS,
-    SessionMode, StateError, SubscribeReasonCode, TlsConfiguration, Transport as MqttTransport,
-    UnsubAckReason, mqttbytes::Error as MqttPacketError,
+    DisconnectReasonCode, Event, EventLoop, Incoming, ManualAck, MqttOptions, Outgoing, PubAck,
+    PubRec, Publish, QoS, SessionMode, SubscribeReasonCode, TlsConfiguration,
+    Transport as MqttTransport, UnsubAckReason,
 };
 use thiserror::Error;
 use url::{Host, Url};
@@ -66,10 +66,7 @@ use crate::connection::{MqttConnectionError, MqttDialer};
 /// before the host reads them.
 ///
 /// In an `ACK` mode every connection advertises its window and this many more as its Receive
-/// Maximum, and its read-ahead holds every publish the Receive Maximum admits. A broker that
-/// discards a publish above the advertised Maximum Packet Size may keep counting it against the
-/// Receive Maximum, waiting for an acknowledgement the source never sends, as EMQX does, so the
-/// window still fills around this many such publishes. Under `NO ACK` the client acknowledges every
+/// Maximum, and its read-ahead holds every publish the Receive Maximum admits. Under `NO ACK` the client acknowledges every
 /// publish on receipt, the broker holds back none, and the read-ahead holds this many.
 ///
 /// A policy input: enough to keep a connection reading, and so sending its keep-alive, while the
@@ -77,6 +74,17 @@ use crate::connection::{MqttConnectionError, MqttDialer};
 /// publish at quality of service 0, and few enough to bound what a source that stops drops with its
 /// connection.
 const HEADROOM: NonZeroU16 = nonzero_ext::nonzero!(64_u16);
+
+/// Admission releases or copies a packet's frame bytes before the client decodes another packet.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "classifying every decoded packet before decoding the next bounds retained raw \
+                  frames to one"
+    )
+)]
+const DECODED_PACKET_BATCH: usize = 1;
 
 const MQTT: &str = "mqtt";
 /// The template a multi-instance client identity must contain, so that every instance connects
@@ -112,12 +120,6 @@ pub enum MqttSourceError {
     SubscriptionRefused,
     #[error("failed to receive an MQTT message")]
     Receive,
-    #[error(
-        "the {connector} broker sent a packet of {packet_bytes} bytes, above the Maximum Packet \
-         Size of {maximum} bytes the connection advertised",
-        connector = ConnectorKind::Mqtt
-    )]
-    PacketTooLarge { packet_bytes: usize, maximum: u32 },
     #[error("the MQTT connection is closed")]
     Disconnected,
     #[error("failed to acknowledge an MQTT message")]
@@ -153,31 +155,21 @@ pub enum MqttSourceError {
 type MqttSourceResult<T> = Result<T, Report<MqttSourceError>>;
 
 impl MqttSourceError {
-    /// The failure of a read whose connection the client's event loop ended with `error`: a packet
-    /// above the advertised Maximum Packet Size, which the client refused with a `DISCONNECT`, or
-    /// any other lost connection.
+    /// The typed cause of a connection the client's event loop ended with `error`.
     fn lost_connection(error: ConnectionError) -> Report<Self> {
-        let refused = match &error {
-            ConnectionError::MqttState(StateError::Deserialization(
-                MqttPacketError::PayloadSizeLimitExceeded { pkt_size, max },
-            )) => Some(Self::PacketTooLarge {
-                packet_bytes: *pkt_size,
-                maximum: *max,
-            }),
-            _ => None,
-        };
-        let lost = MqttConnectionError::report(error);
-        match refused {
-            Some(refused) => lost.change_context(refused),
-            None => lost.change_context(Self::Receive),
-        }
+        MqttConnectionError::report(error).change_context(Self::Receive)
     }
 
     /// Whether a read that failed with this error lost its connection.
     fn ends_connection(&self) -> bool {
         matches!(
             self,
-            Self::Receive | Self::PacketTooLarge { .. } | Self::Driver | Self::Disconnected
+            Self::Receive
+                | Self::Driver
+                | Self::Disconnected
+                | Self::Acknowledge
+                | Self::ReadAheadFull { .. }
+                | Self::AcknowledgementDeadline { .. }
         )
     }
 }
@@ -365,7 +357,25 @@ struct UnstartedConnection {
 )]
 trait PublishRead: Send {
     /// Waits until the connection yields its next publish.
-    fn next_publish(&mut self) -> impl Future<Output = MqttSourceResult<Publish>> + Send;
+    fn next_publish(&mut self)
+    -> impl Future<Output = MqttSourceResult<PublishReadOutcome>> + Send;
+
+    /// Takes a following publish, or ends the ordinary prefix before acknowledging a discard.
+    fn gather_publish(
+        &mut self,
+    ) -> impl Future<Output = MqttSourceResult<GatherPublishOutcome>> + Send;
+}
+
+/// An admitted publish or one size rejection whose acknowledgement is already written.
+enum PublishReadOutcome {
+    Message(Box<Publish>),
+    Oversized,
+}
+
+/// A following publish, or a boundary whose discard remains in the connection for the next read.
+enum GatherPublishOutcome {
+    Message(Box<Publish>),
+    Boundary,
 }
 
 impl MqttSourcePlan {
@@ -588,12 +598,12 @@ impl MqttSourcePlan {
             MqttSession::Clean => SessionMode::Clean,
             MqttSession::Persistent => SessionMode::Persistent,
         });
-        // Advertised in every CONNECT, the bound obliges the broker to discard a larger publish
-        // for this subscriber rather than send it, so a persistent session never presents it
-        // again, and the client refuses a larger packet a broker sends anyway.
-        let maximum_packet_size = u32::try_from(MQTT_SOURCE_MAXIMUM_PACKET_BYTES)
+        // Receive every legal packet so local admission can acknowledge oversized publishes and
+        // release their broker inflight slots. Classify one decoded packet before reading another.
+        let maximum_packet_size = u32::try_from(MQTT_MAXIMUM_PACKET_BYTES)
             .assured("the vocabulary bounds the declared size by MQTT's Four Byte Integer");
         options.set_max_packet_size(Some(maximum_packet_size));
+        options.set_read_batch_size(DECODED_PACKET_BATCH);
         if session == MqttSession::Persistent {
             // Nervix deliberately keeps in-flight messages and ACK state in memory. After an
             // owner change, accept the broker's retained session and let it redeliver pending
@@ -730,6 +740,15 @@ impl MqttSourcePosition {
     }
 }
 
+/// Prepares an acknowledgement without retaining any topic, payload or properties.
+fn acknowledgement(publish: &Publish) -> Option<ManualAck> {
+    match publish.qos {
+        QoS::AtMostOnce => None,
+        QoS::AtLeastOnce => Some(ManualAck::PubAck(PubAck::new(publish.pkid, None))),
+        QoS::ExactlyOnce => Some(ManualAck::PubRec(PubRec::new(publish.pkid, None))),
+    }
+}
+
 /// One received publish. MQTT carries no headers into the ingest namespace.
 pub struct MqttSourceMessage {
     position: MqttSourcePosition,
@@ -769,8 +788,8 @@ impl SourceMessage for MqttSourceMessage {
 
 /// How gathering the publishes that follow a batch's first ended, when it did not fail.
 enum Gathered {
-    /// The batch holds as many publishes as the host asked for.
-    Full,
+    /// The batch is full or the following discard ends its ordinary prefix.
+    Ready,
     /// The host cancelled the read while it waited for the next publish.
     Cancelled,
 }
@@ -795,7 +814,8 @@ impl MqttSource {
 
     /// Reads one batch from `publishes`: its first publish, and under a batch timeout the
     /// publishes that follow it, until the batch holds `request.max_messages` or the timeout,
-    /// counted from the first publish, passes.
+    /// counted from the first publish, passes. A discard ends the ordinary prefix before its
+    /// acknowledgement starts, preserving MQTT acknowledgement order.
     ///
     /// The read observes the host's cancellation whenever it waits for a publish, so a read the
     /// host cancels ends at once with every publish it gathered, rather than once its batch is
@@ -813,7 +833,14 @@ impl MqttSource {
                 gathered: Vec::new(),
             });
         };
-        let first = first?;
+        let first = match first? {
+            PublishReadOutcome::Message(publish) => *publish,
+            PublishReadOutcome::Oversized => {
+                return Ok(SourceBatch::Oversized {
+                    payloads: NonZeroUsize::MIN,
+                });
+            }
+        };
         let mut messages = Vec::with_capacity(request.max_messages.get());
         messages.push(MqttSourceMessage::new(first));
         if request.max_messages == NonZeroUsize::MIN {
@@ -828,7 +855,7 @@ impl MqttSource {
         let gathering = Self::gather(publishes, &mut messages, request.max_messages, cancellation);
         let gathered = timeout_at(deadline, gathering).await;
         match gathered {
-            Ok(Ok(Gathered::Full)) => Ok(SourceBatch::Messages(messages)),
+            Ok(Ok(Gathered::Ready)) => Ok(SourceBatch::Messages(messages)),
             Ok(Ok(Gathered::Cancelled)) => Ok(SourceBatch::Interrupted { gathered: messages }),
             Ok(Err(error)) => Err(error),
             // The batch timeout passed: the batch holds every publish it gathered until then.
@@ -847,15 +874,19 @@ impl MqttSource {
         while messages.len() < max_messages.get() {
             nervix_primitives::task::consume_budget().await;
             let Some(next) = cancellation
-                .unless_cancelled(publishes.next_publish())
+                .unless_cancelled(publishes.gather_publish())
                 .await
             else {
                 return Ok(Gathered::Cancelled);
             };
-            let publish = next?;
-            messages.push(MqttSourceMessage::new(publish));
+            match next? {
+                GatherPublishOutcome::Message(publish) => {
+                    messages.push(MqttSourceMessage::new(*publish))
+                }
+                GatherPublishOutcome::Boundary => return Ok(Gathered::Ready),
+            }
         }
-        Ok(Gathered::Full)
+        Ok(Gathered::Ready)
     }
 
     fn replayed_batch(&mut self, max_messages: NonZeroUsize) -> Option<Vec<MqttSourceMessage>> {
@@ -922,7 +953,7 @@ impl SourceConnector for MqttSource {
             self.connection = Some(MqttConnection::start(
                 client,
                 eventloop,
-                self.plan.acknowledgement.read_ahead(),
+                self.plan.acknowledgement,
                 keep_alive,
             ));
         }
@@ -1104,7 +1135,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn every_connection_advertises_the_declared_packet_bound_as_its_maximum_packet_size() {
+    async fn every_connection_receives_protocol_sized_packets_before_source_admission() {
         let config = [entry("addr", "mqtt://127.0.0.1:1883")];
         for session in [MqttSession::Clean, MqttSession::Persistent] {
             nervix_primitives::task::consume_budget().await;
@@ -1120,9 +1151,10 @@ mod tests {
 
             assert_eq!(
                 eventloop.options.max_packet_size().map(u64::from),
-                Some(MQTT_SOURCE_MAXIMUM_PACKET_BYTES),
-                "a {session:?} session's CONNECT advertises the declared bound"
+                Some(268_435_460),
+                "a {session:?} session receives the full MQTT Remaining Length and fixed header"
             );
+            assert_eq!(eventloop.options.read_batch_size(), 1);
         }
     }
 

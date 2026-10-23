@@ -685,7 +685,11 @@ which keeps it beneath `MqttSourceError::Acknowledge`; a task that fails without
 publish for room in a full read-ahead fails as `MqttSourceError::ReadAheadFull`, naming the
 read-ahead's capacity, because nothing would write it before the host reads again, and one whose
 connection wrote nothing for a keep-alive interval fails as
-`MqttSourceError::AcknowledgementDeadline`, naming the keep-alive. A sink's event
+`MqttSourceError::AcknowledgementDeadline`, naming the keep-alive. The same causes apply when a
+source read acknowledges an oversized publish: they remain beneath `SourceError::Read`, and the
+source drops the connection. A successfully acknowledged oversized publish is an ordinary
+`SourceBatch::Oversized` outcome, counted by the host without a diagnostic or codec rejection.
+A sink's event
 loop records the connection error's message as the emitter's transient error, which
 `DESCRIBE EMITTER` shows, and reconnects on the emitter's retry policy. None rejects a record or
 acknowledges input. A QoS 1 or 2 publish keeps the driver's `ClientError` when the client refuses

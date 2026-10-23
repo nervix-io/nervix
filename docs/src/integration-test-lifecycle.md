@@ -511,7 +511,10 @@ must not be mistaken for a measurement including the final sync.
 
 Raw tool reports, wall time and process CPU time are retained separately. Sysbench invocations
 have three-second process-group guards and fio a four-second guard, all within a ten-second
-calibration allowance. Completed tool reports survive a later timeout; the supervisor kills the
+calibration allowance. The timeout-retention regression synchronizes on a child-ready signal
+after its measurement is flushed, then applies the same short timeout to the stalled child;
+it does not assume process startup finishes within that timeout. Completed tool reports survive
+a later timeout; the supervisor kills the
 tool's process group and removes its temporary directory. Missing tools and unsupported direct
 I/O retain their actual error, with no buffered-read substitute and no global cache drops.
 
@@ -1645,6 +1648,15 @@ HTTP admission by 60 seconds. Those failures quote the last 80 lines of the proc
 the fixture kills the process, so cleanup never waits for a graceful stop and a failed scenario
 never leaves a server running. What the process does between a signal and its exit is product
 behavior; see [Shutdown And Recovery](./shutdown.md#exit-status).
+
+A whole-cluster restart polls every persisted voter's launch and readiness concurrently, then
+checks convergence through the public status endpoints. Each voter retains its own 120-second
+startup deadline, including its executable read. Serial executable reads would spend an earlier
+voter's deadline preparing later voters before its first readiness probe, while that voter cannot
+recover its quorum alone. The retained 23 October 2026 scenario failure reached that state on all
+three attempts: the first voter completed no readiness probe, and its own executable read took
+37.46, 26.35 and 75.36 seconds. Concurrent restart lets that voter probe while the other voters
+prepare and spawn; it changes neither the deadlines nor the convergence requirement.
 
 **Reading the executable first.** A process does not read its executable when it starts. The kernel
 maps the file, and every page the process first touches is read when the process faults on it: one

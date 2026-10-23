@@ -5,7 +5,8 @@
 //! - **Owns.** The MQTT client a configuration declares, its event loop and reconnect backoff,
 //!   the connection it opens to the broker through the node resolver, the session, quality of
 //!   service and shared subscription a source reads through, the Maximum Packet Size a source
-//!   advertises, manual acknowledgement and local replay of publishes, the quality of service each
+//!   advertises, local admission of bounded publishes and acknowledgement of oversized ones,
+//!   manual acknowledgement and local replay of publishes, the quality of service each
 //!   record is published at, the Maximum Packet Size the broker declares and the rejection of a
 //!   record whose PUBLISH packet would exceed it, the QoS 0 publishes a sink's client still holds
 //!   until it sends them, and confirmation classification.
