@@ -244,6 +244,23 @@ drops one it already forwarded, so a repeated payment yields its summary exactly
 rows keep `MODE NO ACK`: a window acknowledges a row only when it steps past it, so an acknowledged
 post of one row would wait for the rows after it.
 
+The web console's busy relay tab outline and the CLI's high-volume subscription outline post their
+270 metrics through an acknowledged HTTP endpoint, `MODE ACK MAX 8 ACK TIMEOUT 60s` with `ON
+QUIESCE REJECT RETRY AFTER 1s`. They keep four posts in flight, half the window, through one
+client. Each post repeats a 503 until the endpoint answers 200 with a completed outcome, for at
+most 300 seconds per metric, and the step ends when every post is answered. The endpoint answers
+only after the relay owner has handed the row to the subscriber's node, so the 30-second wait for
+the final row then covers only the subscriber's node, the session and the client. Under `MODE NO
+ACK` the endpoint answered 202 as soon as the row was queued on the intake node. That node's branch
+runtime keeps queuing a branch's rows while one of them is in flight to the relay's owner, so
+posting does not wait for delivery at all. In a loaded three-node run both relay hops of each row
+were slow, and posting finished while most rows were still queued. The console held rows 1 to 135
+when its wait ended, and the outline failed on rows the relay was still delivering. `relay owner
+fan-out for domain ... waits ... before each batch` makes every owner fan-out of a domain wait
+first. The slow busy relay outline uses it to post 20 metrics one at a time while each fan-out
+waits three seconds, so the relay needs a minute to deliver them. An unacknowledged post of the
+same rows finishes within seconds and leaves most of them queued past the console's wait.
+
 The fixture of guest saves above the bulk budget feeds its WASM processor from a Kafka ingestor in
 `MODE ACK SEQUENTIAL`, and every input ends with a 40 MiB guest checkpoint that the processor's
 replica confirms before the ingestor reads the next input. Every wait that follows published input

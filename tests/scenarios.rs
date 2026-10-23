@@ -104,11 +104,12 @@ use crate::common::{
         SUBSCRIBED_LINE, corpus_report,
     },
     cluster::{
-        BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
-        HttpsPublishLoopOutcome, InterconnectCredentialFault, TEST_AUTH_PASSWORD,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
-        assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
-        command_connect_options, observe_kafka_through, publish_kafka_record_through,
+        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster,
+        DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
+        InterconnectCredentialFault, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig,
+        TestSession, WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
+        client_connect_options, client_domain, command_connect_options, observe_kafka_through,
+        publish_kafka_record_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
@@ -12466,6 +12467,19 @@ async fn when_node_releases_filled_relay_memory(world: &mut ScenarioWorld, node_
 async fn given_owner_relay_fanout_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
     world.fault_injection.pause_owner_relay_fanout(domain);
+}
+
+#[given(expr = "relay owner fan-out for domain {string} waits {string} before each batch")]
+async fn given_owner_relay_fanout_waits_before_each_batch(
+    world: &mut ScenarioWorld,
+    domain: String,
+    delay: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let delay = parse_duration_text(&delay).assured("the scenario duration is valid");
+    world
+        .fault_injection
+        .delay_owner_relay_fanout(domain, delay);
 }
 
 #[given(
@@ -26118,6 +26132,57 @@ async fn when_sequential_metric_http_payloads_are_posted(
             .await
             .unwrap_or_else(|error| panic!("failed to post http payload {value}: {error}"));
     }
+}
+
+/// How long one acknowledged metric may take to be acknowledged, its retries included. The endpoint
+/// answers each attempt within its ACK timeout, so this only bounds an endpoint that keeps refusing
+/// the metric.
+const METRIC_ACKNOWLEDGEMENT_WAIT: Duration = Duration::from_secs(300);
+
+/// Posts `{"value":1}` through `{"value":<count>}`, starting each in order once fewer than
+/// `window` posts are waiting for their graph acknowledgement, and returns once every post is
+/// answered. An acknowledged endpoint answers a post only after the relay owner handed the row to
+/// its consumers and to the nodes that subscribe to it, so the relay then holds none of the rows.
+/// An unacknowledged endpoint answers as soon as the row is queued on the node that took it.
+#[when(
+    expr = "{int} metric http payloads are posted with acknowledgement, {int} at a time, to host \
+            {string} path {string}"
+)]
+async fn when_metric_http_payloads_are_posted_with_acknowledgement(
+    world: &mut ScenarioWorld,
+    count: u64,
+    window: usize,
+    host: String,
+    path: String,
+) {
+    assert!(
+        window > 0,
+        "an acknowledged posting window holds at least one post"
+    );
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    append_cucumber_log_line(&format!(
+        "http publish acknowledged metrics: node=node-1 host={host} path={path} count={count} \
+         window={window}"
+    ));
+    let publisher = world.cluster().acknowledged_http_publisher(
+        "node-1",
+        &host,
+        &path,
+        METRIC_ACKNOWLEDGEMENT_WAIT,
+    );
+    futures_util::stream::iter(1..=count)
+        .for_each_concurrent(window, |value| post_acknowledged_metric(&publisher, value))
+        .await;
+}
+
+/// Posts `{"value":<value>}` through `publisher` and fails the step unless it is acknowledged.
+async fn post_acknowledged_metric(publisher: &AcknowledgedHttpPublisher, value: u64) {
+    let payload = format!(r#"{{"value":{value}}}"#);
+    publisher
+        .publish(&payload)
+        .await
+        .unwrap_or_else(|error| panic!("metric {value} was not acknowledged: {error}"));
 }
 
 #[when(expr = "http payload encoded as {string} is posted to host {string} path {string}")]

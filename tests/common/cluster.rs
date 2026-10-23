@@ -2343,6 +2343,27 @@ impl Cluster {
         publish_http(&handle.spec, host, path, payload).await
     }
 
+    /// A publisher to the acknowledged HTTP endpoint at `host` and `path` on `node_id`, which
+    /// waits at most `wait` for each payload's graph acknowledgement.
+    pub(crate) fn acknowledged_http_publisher(
+        &self,
+        node_id: &str,
+        host: &str,
+        path: &str,
+        wait: Duration,
+    ) -> AcknowledgedHttpPublisher {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        AcknowledgedHttpPublisher {
+            client: reqwest::Client::new(),
+            uri: handle.spec.http_uri(path),
+            host: host.to_owned(),
+            wait,
+        }
+    }
+
     pub(crate) fn spawn_http_publish(
         &self,
         node_id: &str,
@@ -4185,6 +4206,86 @@ async fn publish_http_bytes_with_headers(
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
     publish_http_uri_with_headers(spec.http_uri(path), host, payload, content_type, headers).await
+}
+
+/// The retry delay of an acknowledged endpoint's refusal that names none.
+const ACKNOWLEDGED_HTTP_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Posts payloads to one acknowledged HTTP endpoint through one client, so the posts a step keeps
+/// in flight together share its connections.
+pub(crate) struct AcknowledgedHttpPublisher {
+    client: reqwest::Client,
+    uri: String,
+    host: String,
+    /// How long one payload may take to be acknowledged, its retries included.
+    wait: Duration,
+}
+
+impl AcknowledgedHttpPublisher {
+    /// Posts `payload` until the endpoint answers 200 with a completed outcome.
+    ///
+    /// The sender owns the retry of a 503: a full ACK window, a downstream refusal, an expired ACK
+    /// timeout and a quiesced intake are all answered that way, with the delay to wait. A retried
+    /// payload may be delivered twice, because a timed-out attempt is not rolled back. The wait
+    /// bounds only an endpoint that keeps refusing the payload; every attempt is answered within
+    /// the endpoint's ACK timeout.
+    pub(crate) async fn publish(&self, payload: &str) -> io::Result<()> {
+        let deadline = Instant::now() + self.wait;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let response = self
+                .client
+                .post(&self.uri)
+                .header("Host", &self.host)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(payload.to_owned())
+                .send()
+                .await
+                .map_err(io::Error::other)?;
+            let status = response.status();
+            let retry_delay = match response.headers().get(reqwest::header::RETRY_AFTER) {
+                Some(value) => {
+                    let seconds = value
+                        .to_str()
+                        .map_err(io::Error::other)?
+                        .parse::<u64>()
+                        .map_err(io::Error::other)?;
+                    Duration::from_secs(seconds)
+                }
+                None => ACKNOWLEDGED_HTTP_RETRY_DELAY,
+            };
+            let body = response.bytes().await.map_err(io::Error::other)?;
+            let outcome: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
+                io::Error::other(format!(
+                    "the endpoint answered {status} outside its outcome vocabulary: {error}"
+                ))
+            })?;
+            if status == reqwest::StatusCode::OK {
+                if outcome != serde_json::json!({ "outcome": "completed", "cause": "none" }) {
+                    return Err(io::Error::other(format!(
+                        "the endpoint answered 200 without completing the payload: {outcome}"
+                    )));
+                }
+                return Ok(());
+            }
+            if status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                return Err(io::Error::other(format!(
+                    "the endpoint refused the payload for good: {status} {outcome}"
+                )));
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "the payload was not acknowledged within {:?}; the last answer was \
+                         {status} {outcome}",
+                        self.wait
+                    ),
+                ));
+            }
+            sleep(retry_delay).await;
+        }
+    }
 }
 
 pub(crate) async fn publish_http_uri_with_headers(
