@@ -470,7 +470,8 @@ No driver call that parks its thread runs on an asynchronous worker. A connector
 in the executor's storage class with a declared deadline as its bound, or as a declared owner of the
 runtime's blocking pool. Kafka source control calls use the connector storage class: metadata,
 watermark and timestamp lookups, seeks and assignments run off the async workers, and so does the
-destruction of a consumer, as [Kafka consumer retirement](#kafka-consumer-retirement) describes.
+destruction of a consumer or a producer, as [Kafka client retirement](#kafka-client-retirement)
+describes.
 
 Network control calls have their own bounded connector storage admission, separate from filesystem
 and consensus storage. A broker that does not answer therefore cannot consume those classes'
@@ -485,7 +486,8 @@ including when the waiting caller is cancelled or its thirty-second deadline exp
 refusals remain transient source failures; they never reject a record as invalid.
 
 librdkafka's producer flush still runs on the runtime's blocking pool as a declared owner outside
-the executor, bounded by the host's physical flush deadline.
+the executor, bounded by the host's physical flush deadline. The producer's destruction does not:
+it is a connector storage job like a consumer's.
 [Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor)
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
@@ -499,32 +501,45 @@ These annotations describe this chapter's existing lifecycle; they supply no run
 ownership proof. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns their
 syntax, inheritance, diagnostics and operation-specific repair expectations.
 
-#### Kafka consumer retirement
+#### Kafka client retirement
 
-Destroying a Kafka consumer is native work that waits. Every consumer Nervix creates has a group,
-a partition inspector's included, and rust-rdkafka closes such a consumer by polling it in steps of
-100 milliseconds until librdkafka reports it closed. A consumer that joined its group waits there
-for the coordinator to answer its LeaveGroup request, which librdkafka gives five seconds whatever
-`socket.timeout.ms` says, and librdkafka then joins its threads.
+Destroying a librdkafka client is native work that waits, so Nervix never destroys a Kafka consumer
+or producer on the thread that lets it go.
 
-A source or partition inspector shares its consumer with the driver jobs it admits, and any of them
-can hold the last handle. A source goes when its host's task ends after the source's loop, or when
-composing its ingestor's instances fails; an inspector goes when its watch ends; a control job keeps
-running after its caller is cancelled, and a job the connector queue refuses lets its handle go
-unrun; and a consumer-group commit can be answered after its source is gone. Whichever of them lets
-the last handle go hands the consumer to its retirement and carries on at once, on an async worker
-and on a connector worker alike. The retirement destroys the consumer in one connector storage job.
-A full queue holds that job until a place frees instead of refusing it, because nothing could
-present the consumer again, and the job runs under a commands charge the consumer took when it was
-created, so retiring a consumer asks the node for nothing it could refuse. A consumer that cannot
-take that charge is not created: the source's open or the inspector's start fails with the transient
-`KafkaSourceError::RetirementAdmission`. Nothing waits for a retirement and nothing cancels it,
-since a destruction cannot stop part way. It takes the native consumer alone, never the source's
-host or its intake, and Nervix never hands a consumer to another source, so a replacement source
-opens a consumer of its own.
+Every consumer Nervix creates has a group, a partition inspector's included, and rust-rdkafka closes
+such a consumer by polling it in steps of 100 milliseconds until librdkafka reports it closed. A
+consumer that joined its group waits there for the coordinator to answer its LeaveGroup request,
+which librdkafka gives five seconds whatever `socket.timeout.ms` says, and librdkafka then joins its
+threads. Destroying a producer first stops its polling thread, which finishes its current poll of up
+to 100 milliseconds and any delivery report it is serving. rust-rdkafka then purges the records the
+producer still queues or has in flight, flushes for up to 500 milliseconds so that their reports
+are served, and librdkafka joins its threads, a broker thread still resolving a name included.
+
+A source or partition inspector shares its consumer with the driver jobs it admits, a sink shares
+its producer with the flush its finish runs, and any of them can hold the last handle. A source goes
+when its host's task ends after the source's loop, or when composing its ingestor's instances fails;
+an inspector goes when its watch ends; a control job keeps running after its caller is cancelled,
+and a job the connector queue refuses lets its handle go unrun; and a consumer-group commit can be
+answered after its source is gone. A sink goes when its emitter's task ends after the sink's finish,
+when a swap or `ALTER` replaces it, or when composing its emitter fails after the sink started; and
+a flush keeps running on the runtime's blocking pool after its finish's caller stops waiting for it,
+until librdkafka's flush returns. Whichever of them lets the last handle go hands the client to its
+retirement and carries on at once, on an async worker, a connector worker or a blocking-pool thread
+alike. The retirement destroys the client in one connector storage job. A full queue holds that job
+until a place frees instead of refusing it, because nothing could present the client again, and the
+job runs under a commands charge the client took before it was created, so retiring a client asks
+the node for nothing it could refuse. A client that cannot take that charge is not created: the
+source's open or the inspector's start fails with the transient
+`KafkaSourceError::RetirementAdmission`, and the sink's start fails with
+`KafkaProducerStartError::RetirementAdmission` beneath `SinkStartError::Initialize`, which its
+emitter retries after its retry delay like any sink that could not start. Nothing waits for a
+retirement and nothing cancels it, since a destruction cannot stop part way. It takes the native
+client alone, never the source's or sink's host or its intake, and Nervix never hands a client to
+another source or sink, so a replacement opens a client of its own.
 
 A joined consumer whose coordinator does not answer holds a connector worker for those five
-seconds. A broker that stops answering while its consumers retire therefore delays the node's other
+seconds, and a producer holds one for its polling thread's last poll and up to half a second of
+flushing. A broker that stops answering while its clients retire therefore delays the node's other
 Kafka control calls queued behind them, never its async workers. The `connector_storage` class's
 `nervix_execution_jobs_running` and `nervix_execution_jobs_pending` count retirements with the other
 Kafka jobs. Node shutdown does not wait for a retirement: the process's runtime finishes or
@@ -1355,7 +1370,9 @@ thread checks that state when it next serves its partitions. rust-rdkafka's `flu
 librdkafka's flush without waiting and polls in between, so on a loaded node the broker threads miss
 that instant and the records linger past the deadline. The Kafka finish therefore waits inside
 librdkafka's flush itself, in steps of at most a second, while the producer's polling thread takes
-the delivery reports that end the flush.
+the delivery reports that end the flush. The flush holds a handle of its own, so a flush its finish's
+caller stopped waiting for keeps the producer until it returns, and then retires it if the sink is
+gone, as [Kafka client retirement](#kafka-client-retirement) describes.
 
 The Kafka sink counts the records its producer holds itself. librdkafka's out-queue length adds
 every event waiting in the producer's queue, its errors, statistics and unserved delivery reports

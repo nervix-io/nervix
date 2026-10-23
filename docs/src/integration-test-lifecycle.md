@@ -68,6 +68,12 @@ answer. It waits for a running connector-storage job before sending a record thr
 ingestor, then releases the replies and waits for the class's pending and running jobs to return to
 zero. The same oracle runs on one and three nodes.
 
+The Kafka producer-retirement scenario checks that the owner of a Kafka emitter has run no
+connector-storage job, holds the same broker's replies and drops the emitter. It then sends a record
+through an HTTP ingestor and waits for that class's completed jobs on the owner to reach one, the
+producer's destruction, before it releases the replies and waits for the class's pending and running
+jobs to return to zero. The same oracle runs on one and three nodes.
+
 The Pulsar fault forwarder decodes broker frames and advertises its own plain-text service URL
 in topic lookup responses, retaining every other command and payload field. The driver's discovered
 producer and consumer connections therefore stay behind the same pause gate as bootstrap traffic.

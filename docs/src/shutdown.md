@@ -960,14 +960,16 @@ serving their streams, so a peer's request the node has not answered fails inste
 A forced ending skips this entirely, so peers observe the connections ending exactly as they do
 when a process crashes.
 
-Runtime teardown stops a Kafka ingestor's instances like any other source's, and each stopped
-instance hands its consumer to its retirement on the connector storage workers; see
-[Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement). Teardown does not
-wait for those retirements. The process's runtime does, as it stops once the application has
-returned: a retirement already running finishes, within the five seconds a joined consumer's
-coordinator has to answer its LeaveGroup request, and a consumer still waiting for a worker is
-destroyed by the runtime's stop, once the runtime runs no async work. The shutdown deadline bounds
-both, and a forced ending skips them as it skips every other destructor.
+Runtime teardown stops a Kafka ingestor's instances like any other source's, and a Kafka emitter
+like any other emitter, and each stopped instance hands its consumer, and each emitter's sink its
+producer, to its retirement on the connector storage workers; see
+[Kafka client retirement](./connector-contract.md#kafka-client-retirement). Teardown does not wait
+for those retirements. The process's runtime does, as it stops once the application has returned: a
+retirement already running finishes, within the five seconds a joined consumer's coordinator has to
+answer its LeaveGroup request, or the half second a producer flushes after its purge, and a client
+still waiting for a worker is destroyed by the runtime's stop, once the runtime runs no async work.
+The shutdown deadline bounds both, and a forced ending skips them as it skips every other
+destructor.
 
 The node's own OTLP trace exporter is a process service. After the application returns, its tracing
 guard closes resolver installation and asks the SDK to flush before the process drops its Tokio

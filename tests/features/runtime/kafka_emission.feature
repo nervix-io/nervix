@@ -795,3 +795,90 @@ Feature: Kafka emission
       | cluster_size |
       | 1            |
       | 3            |
+
+  # The producer delivered its one record under ACK, so it holds nothing when its emitter is dropped
+  # and the finish returns at once. Destroying it while the broker holds every answer still runs as
+  # one job on a connector worker of the emitter's owner, which no Kafka ingestor shares here,
+  # while an HTTP ingestor goes on delivering.
+  @kafka_producer_retirement
+  Scenario Outline: A Kafka emitter dropped on <cluster_size> nodes retires its producer on a connector worker while another ingestor delivers
+    Given a mock Kafka broker serves topic "retired_out_{{test_id}}"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA retired_event ( seq I64 );
+      CREATE WIRE JSON SCHEMA retired_event_wire MODE STRICT ( seq integer );
+      CREATE CODEC retired_event_codec
+        FROM WIRE JSON SCHEMA retired_event_wire TO SCHEMA retired_event;
+      CREATE RELAY retired_events SCHEMA retired_event UNBRANCHED;
+      CREATE VHOST edge retire-out-{{test_id}}.example.com;
+      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR healthy_source
+        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retired_event_codec
+        TO retired_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE KAFKA CLIENT retiring_kafka CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}'
+      };
+      CREATE KAFKA TOPIC EMITTER retiring_output FROM retired_events
+        TO retiring_kafka TOPIC 'retired_out_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ENCODE USING retired_event_codec INHERIT ALL
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION retirement_subscription TO retired_events;
+      START;
+      """
+    And http payload is posted to host "retire-out-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":1}
+      """
+    Then within "60s" the relay subscription receives a payload
+      """
+      "seq":1
+      """
+    And within "30s" DESCRIBE EMITTER "retiring_output" on the leader node contains
+      """
+      messages_total sent relay=retired_events
+      """
+    And the last command output owner is saved as placeholder "kafka_owner"
+    And within "30s" DESCRIBE EMITTER "retiring_output" on the leader node contains
+      """
+      messages_total sent relay=retired_events physical_node={{kafka_owner}} total=1
+      """
+    And within "30s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_total" with labels eventually equals 0
+      """
+      class="connector_storage"
+      """
+    Given the mock Kafka broker holds every answer
+    When these Plexus statements are executed on the leader node
+      """
+      DROP EMITTER retiring_output;
+      """
+    And http payload is posted to host "retire-out-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":42}
+      """
+    Then within "120s" the relay subscription receives a payload
+      """
+      "seq":42
+      """
+    And within "120s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_completed_total" with labels eventually reaches at least 1
+      """
+      class="connector_storage"
+      """
+    When the mock Kafka broker releases its answers
+    Then within "60s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_pending" with labels eventually equals 0
+      """
+      class="connector_storage"
+      """
+    And within "60s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_running" with labels eventually equals 0
+      """
+      class="connector_storage"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
