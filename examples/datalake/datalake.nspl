@@ -955,9 +955,9 @@ CREATE ATTACHED JUNCTION distance_alert_junction
     FLUSH EACH 250ms MAX BATCH SIZE 256kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED EMITTER kafka_security_events
+CREATE ATTACHED KAFKA TOPIC EMITTER kafka_security_events
   FROM security_events
-  TO KAFKA kafka_auth TOPIC datalake_security_events
+  TO kafka_auth TOPIC 'datalake_security_events'
     MODE ACK PARALLEL MAX 1000 ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING security_event_json_codec
   INHERIT ALL
@@ -965,19 +965,20 @@ CREATE ATTACHED EMITTER kafka_security_events
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED EMITTER redis_distance_alerts
+CREATE ATTACHED REDIS PUBSUB EMITTER redis_distance_alerts
   FROM distance_alerts
-  TO REDIS PUBSUB redis_security_alerts CHANNEL datalake_distance_alerts
-    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  TO redis_security_alerts CHANNEL 'datalake_distance_alerts'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING distance_alert_json_codec
   INHERIT ALL
   FLUSH EACH 1s MAX BATCH SIZE 512kb
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED EMITTER iceberg_connected_sessions
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_connected_sessions
   FROM connected_sessions
-  TO ICEBERG ON S3 s3_lakehouse TABLE datalake_connected_sessions
+  TO s3_lakehouse TABLE 'datalake_connected_sessions' LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'event_id' = input.event_id,
       'tenant_id' = input.tenant_id,
@@ -1005,17 +1006,14 @@ CREATE DETACHED EMITTER iceberg_connected_sessions
       'distance_to_edge_km' = input.distance_to_edge_km,
       'risk_score' = input.risk_score
     }
-    LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions'
-    CATALOG lakehouse_catalog
-    COMMIT EACH 1m MAX SIZE 512MiB
-    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED EMITTER iceberg_device_locations
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_device_locations
   FROM device_location_checked_events
-  TO ICEBERG ON S3 s3_lakehouse TABLE datalake_device_locations
+  TO s3_lakehouse TABLE 'datalake_device_locations' LOCATION 's3://nervix-iceberg/tables/datalake_device_locations' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'event_id' = input.event_id,
       'tenant_id' = input.tenant_id,
@@ -1046,17 +1044,14 @@ CREATE DETACHED EMITTER iceberg_device_locations
       'edge_lon' = input.edge_lon,
       'distance_to_edge_km' = input.distance_to_edge_km
     }
-    LOCATION 's3://nervix-iceberg/tables/datalake_device_locations'
-    CATALOG lakehouse_catalog
-    COMMIT EACH 1m MAX SIZE 512MiB
-    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED EMITTER iceberg_disconnect_matched_events
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_matched_events
   FROM disconnect_events_matched
-  TO ICEBERG ON S3 s3_lakehouse TABLE datalake_disconnect_matched_events
+  TO s3_lakehouse TABLE 'datalake_disconnect_matched_events' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_matched_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'event_id' = input.event_id,
       'tenant_id' = input.tenant_id,
@@ -1080,17 +1075,14 @@ CREATE DETACHED EMITTER iceberg_disconnect_matched_events
       'edge_lat' = input.edge_lat,
       'edge_lon' = input.edge_lon
     }
-    LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_matched_events'
-    CATALOG lakehouse_catalog
-    COMMIT EACH 1m MAX SIZE 512MiB
-    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED EMITTER iceberg_disconnect_device_only_events
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_device_only_events
   FROM disconnect_events_device_only
-  TO ICEBERG ON S3 s3_lakehouse TABLE datalake_disconnect_device_only_events
+  TO s3_lakehouse TABLE 'datalake_disconnect_device_only_events' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_device_only_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'event_id' = input.event_id,
       'tenant_id' = input.tenant_id,
@@ -1114,17 +1106,14 @@ CREATE DETACHED EMITTER iceberg_disconnect_device_only_events
       'edge_lat' = input.edge_lat,
       'edge_lon' = input.edge_lon
     }
-    LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_device_only_events'
-    CATALOG lakehouse_catalog
-    COMMIT EACH 1m MAX SIZE 512MiB
-    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED EMITTER iceberg_disconnect_edge_only_events
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_edge_only_events
   FROM disconnect_events_edge_only
-  TO ICEBERG ON S3 s3_lakehouse TABLE datalake_disconnect_edge_only_events
+  TO s3_lakehouse TABLE 'datalake_disconnect_edge_only_events' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_edge_only_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'event_id' = input.event_id,
       'tenant_id' = input.tenant_id,
@@ -1148,17 +1137,14 @@ CREATE DETACHED EMITTER iceberg_disconnect_edge_only_events
       'edge_lat' = input.edge_lat,
       'edge_lon' = input.edge_lon
     }
-    LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_edge_only_events'
-    CATALOG lakehouse_catalog
-    COMMIT EACH 1m MAX SIZE 512MiB
-    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED EMITTER iceberg_security_events
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_security_events
   FROM security_events
-  TO ICEBERG ON S3 s3_lakehouse TABLE datalake_security_events
+  TO s3_lakehouse TABLE 'datalake_security_events' LOCATION 's3://nervix-iceberg/tables/datalake_security_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'event_id' = input.event_id,
       'tenant_id' = input.tenant_id,
@@ -1172,17 +1158,14 @@ CREATE DETACHED EMITTER iceberg_security_events
       'observed_at' = input.observed_at,
       'source_event_id' = input.source_event_id
     }
-    LOCATION 's3://nervix-iceberg/tables/datalake_security_events'
-    CATALOG lakehouse_catalog
-    COMMIT EACH 1m MAX SIZE 512MiB
-    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE DETACHED EMITTER iceberg_distance_alerts
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_distance_alerts
   FROM distance_alerts
-  TO ICEBERG ON S3 s3_lakehouse TABLE datalake_distance_alerts
+  TO s3_lakehouse TABLE 'datalake_distance_alerts' LOCATION 's3://nervix-iceberg/tables/datalake_distance_alerts' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
     VALUES {
       'alert_id' = input.alert_id,
       'alert_type' = input.alert_type,
@@ -1200,10 +1183,6 @@ CREATE DETACHED EMITTER iceberg_distance_alerts
       'edge_lat' = input.edge_lat,
       'edge_lon' = input.edge_lon
     }
-    LOCATION 's3://nervix-iceberg/tables/datalake_distance_alerts'
-    CATALOG lakehouse_catalog
-    COMMIT EACH 1m MAX SIZE 512MiB
-    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
   FLUSH EACH 10s MAX BATCH SIZE 8MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;

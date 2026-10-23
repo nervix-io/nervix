@@ -804,8 +804,8 @@ Feature: Placement policies
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER placement_timeout_emitter FROM placement_timeout_output
-        TO ZEROMQ placement_timeout_sink MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+      CREATE ZEROMQ PUSH EMITTER placement_timeout_emitter FROM placement_timeout_output
+        TO placement_timeout_sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING placement_timeout_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;

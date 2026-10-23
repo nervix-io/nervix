@@ -45,7 +45,7 @@ use nervix_connector::{
     SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
     optional_client_config_value,
 };
-use nervix_models::{ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, TableName};
+use nervix_models::{ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, MySqlTableName};
 use nervix_primitives::{sync::atomic::Ordering, time::Instant};
 use tracing::{debug, trace};
 
@@ -114,7 +114,7 @@ pub trait MySqlConnections: Send + Sync + 'static {
 
 /// What one MySQL emitter inserts with, from its typed sink plan.
 pub struct MySqlSinkConfig {
-    pub table: TableName,
+    pub table: MySqlTableName,
     pub conflict_action: MySqlConflictAction,
     /// The emitter's `BATCH` limits, which bound the rows and the measured bytes of every insert.
     pub batch: EmitterBatchPolicy,
@@ -131,7 +131,7 @@ pub enum MySqlConflictAction {
 /// The MySQL sink, which binds each mapped row as the parameters of one multi-row insert.
 pub struct MySqlSink {
     connections: Box<dyn MySqlConnections>,
-    table: TableName,
+    table: MySqlTableName,
     conflict_action: MySqlConflictAction,
     limits: RowRequestLimits,
 }
@@ -1112,7 +1112,7 @@ mod tests {
     fn test_sink(conflict_action: MySqlConflictAction) -> MySqlSink {
         MySqlSink {
             connections: Box::new(NoConnections),
-            table: TableName::parse("limit_a_t0192a1b2c3d4e5f60718293a4b5c6d7e")
+            table: MySqlTableName::parse("limit_a_t0192a1b2c3d4e5f60718293a4b5c6d7e")
                 .expect("the test table name is valid"),
             conflict_action,
             limits: RowRequestLimits::from(EmitterBatchPolicy {

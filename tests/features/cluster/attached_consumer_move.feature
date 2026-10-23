@@ -35,9 +35,9 @@ Feature: Attached acknowledgements across consumer moves
           BRANCHED BY moved_sink_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER moved_sink
+      CREATE ATTACHED KAFKA TOPIC EMITTER moved_sink
         FROM moved_sink_records
-        TO KAFKA moved_sink_kafka TOPIC moved_sink_out_{{test_id}}
+        TO moved_sink_kafka TOPIC 'moved_sink_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING moved_sink_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -132,15 +132,15 @@ Feature: Attached acknowledgements across consumer moves
         TO owner_move_records INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER owner_move_sibling
+      CREATE ATTACHED KAFKA TOPIC EMITTER owner_move_sibling
         FROM owner_move_records
-        TO KAFKA owner_move_kafka TOPIC owner_move_sibling_{{test_id}}
+        TO owner_move_kafka TOPIC 'owner_move_sibling_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING owner_move_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER owner_move_target
+      CREATE ATTACHED KAFKA TOPIC EMITTER owner_move_target
         FROM owner_move_records
-        TO KAFKA owner_move_kafka TOPIC owner_move_target_{{test_id}}
+        TO owner_move_kafka TOPIC 'owner_move_target_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING owner_move_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

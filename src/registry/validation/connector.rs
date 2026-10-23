@@ -153,27 +153,17 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         })
     };
 
-    if !emitter
-        .sink
-        .accepts_publishing_mode(&emitter.publishing_mode)
-    {
-        return Err(invalid(format!(
-            "{} emitter does not support MODE {}",
-            emitter.sink.transport_label(),
-            emitter.publishing_mode.kind_label()
-        )));
-    }
-
     match (emitter.sink.as_ref(), &emitter.body) {
         (EmitSink::Client(_), nervix_models::EmitterBody::Client) => {}
         (EmitSink::Client(_), _) => {
-            return Err(invalid(
-                "CLIENT emitter requires native Arrow output".to_string(),
-            ));
+            return Err(invalid(format!(
+                "{} emitter requires native Arrow output",
+                emitter.sink.kind()
+            )));
         }
         (_, nervix_models::EmitterBody::Client) => {
             return Err(invalid(
-                "native CLIENT output requires TO CLIENT SCHEMA".to_string(),
+                "native CLIENT output requires a CLIENT CONSUMER emitter".to_string(),
             ));
         }
         (
@@ -181,16 +171,18 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
             nervix_models::EmitterBody::Codec { .. } | nervix_models::EmitterBody::WithoutBody,
         ) => {}
         (EmitSink::Http(_), nervix_models::EmitterBody::Values) => {
-            return Err(invalid(
-                "HTTP emitter requires ENCODE USING or WITHOUT BODY".to_string(),
-            ));
+            return Err(invalid(format!(
+                "{} emitter requires ENCODE USING or WITHOUT BODY",
+                emitter.sink.kind()
+            )));
         }
         (_, nervix_models::EmitterBody::Codec { .. }) if emitter.sink.requires_codec() => {}
         (_, nervix_models::EmitterBody::Values) if !emitter.sink.requires_codec() => {}
         (_, nervix_models::EmitterBody::WithoutBody) => {
-            return Err(invalid(
-                "WITHOUT BODY is only supported by HTTP emitters".to_string(),
-            ));
+            return Err(invalid(format!(
+                "WITHOUT BODY is only supported by {} emitters",
+                <nervix_models::HttpRequestSink as nervix_models::EmitterEntityModel>::KIND
+            )));
         }
         (_, nervix_models::EmitterBody::Values) => {
             return Err(invalid(format!(
@@ -210,7 +202,7 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         .validate_batch()
         .map_err(|error| invalid(error.current_context().to_string()))?;
 
-    let retry = emitter.publishing_mode.retry_policy();
+    let retry = emitter.sink.publishing().retry_policy();
     let backoff = parse_duration_text(&retry.backoff).map_err(|error| {
         invalid(format!(
             "invalid MODE RETRY POLICY BACKOFF '{}': {error}",
@@ -235,7 +227,7 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         )));
     }
 
-    if let Some(timeout) = emitter.publishing_mode.ack_timeout() {
+    if let Some(timeout) = emitter.sink.publishing().ack_timeout() {
         let timeout = parse_duration_text(timeout)
             .map_err(|error| invalid(format!("invalid MODE ACK TIMEOUT '{timeout}': {error}")))?;
         if timeout.is_zero() {
@@ -249,7 +241,7 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
             queue, fifo_group, ..
         })) => {
-            let fifo_queue = queue.ends_with(".fifo");
+            let fifo_queue = queue.is_fifo();
             if fifo_queue && fifo_group.is_none() {
                 return Err(invalid(format!(
                     "SQS FIFO queue '{queue}' requires FIFO GROUP"
@@ -800,7 +792,7 @@ pub(in crate::registry) fn validate_http_emitter_client(
     identifier: &ModelName,
     client: &CreateClientHttp,
 ) -> Result<HttpOrigin, Report<RegistryError>> {
-    let invalid = |reason: &'static str| {
+    let invalid = |reason: &str| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -819,12 +811,13 @@ pub(in crate::registry) fn validate_http_emitter_client(
     let origin = HttpOrigin::parse(endpoint)
         .map_err(|_| invalid("HTTP client endpoint must be an http or https origin"))?;
 
-    let timeout =
-        entry("timeout_ms").ok_or_else(|| invalid("HTTP emitter client requires timeout_ms"))?;
+    let kind = <nervix_models::HttpRequestSink as nervix_models::EmitterEntityModel>::KIND;
+    let timeout = entry("timeout_ms")
+        .ok_or_else(|| invalid(&format!("{kind} emitter client requires timeout_ms")))?;
     ClientDeadline::parse(timeout).change_context(RegistryError::InvalidModel {
         domain: domain.as_str().to_string(),
         identifier: identifier.as_str().to_string(),
-        reason: "HTTP emitter client timeout_ms must be a positive schedulable integer".to_string(),
+        reason: format!("{kind} emitter client timeout_ms must be a positive schedulable integer"),
     })?;
 
     if entry("tls_cert_file").is_some() != entry("tls_key_file").is_some() {

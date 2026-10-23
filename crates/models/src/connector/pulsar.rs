@@ -30,12 +30,12 @@ use super::{
 };
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    KafkaIngestMode, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm,
-    OptionPresence, OptionValue, PositionClass, SinkBody, SinkClientReference, SinkEntity,
-    SinkReference, SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind, TopicName,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, HeaderLayout, HeaderModel,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, KafkaIngestMode,
+    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    OptionValue, PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind,
 };
 
 configured_client!(Pulsar: unpooled, config Nervix, CreateClientPulsar => PulsarConfigEntry);
@@ -325,8 +325,9 @@ connector_sources! {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct PulsarTopicSink {
+    pub mode: PulsarTopicPublishingMode,
     pub client: ClientName,
-    pub topic: TopicName,
+    pub topic: PulsarTopicName,
 }
 
 impl SinkEntity for PulsarTopicSink {
@@ -337,15 +338,10 @@ impl SinkEntity for PulsarTopicSink {
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[
-            EmitterPublishingModeKind::NoAck,
-            EmitterPublishingModeKind::BrokerAck,
-        ],
+        publishing_modes: PulsarTopicPublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
             keywords: "TOPIC",
-            name: LocatorName::Unquoted {
-                label: "topic_name",
-            },
+            name: LocatorName::External(PulsarTopicName::DECLARATION),
         }),
         options: &[],
         envelope: &[],
@@ -371,8 +367,17 @@ connector_sinks! {
     connector Pulsar = "PULSAR";
     /// What a Pulsar sink writes.
     pub enum PulsarSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum PulsarEmitterMode;
     /// The entities a Pulsar sink writes.
     pub enum PulsarSinkEntity {
-        Topic(PulsarTopicSink) = "TOPIC";
+        Topic(PulsarTopicSink, PulsarTopicPublishingMode) = "TOPIC";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum PulsarTopicPublishingMode {
+        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
     }
 }

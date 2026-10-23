@@ -26,10 +26,10 @@ use super::{
 };
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SinkBody,
-    SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity,
-    SourceMetadataScope, SourceReference, SourceReferenceKind,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, IngestAcknowledgement,
+    IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SinkBody, SinkClientReference,
+    SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope,
+    SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Syslog: unpooled, config Nervix, CreateClientSyslog => SyslogConfigEntry);
@@ -171,6 +171,7 @@ connector_sources! {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct SyslogCollectorSink {
+    pub mode: SyslogCollectorPublishingMode,
     pub client: ClientName,
 }
 
@@ -181,7 +182,7 @@ impl SinkEntity for SyslogCollectorSink {
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[EmitterPublishingModeKind::NoAck],
+        publishing_modes: SyslogCollectorPublishingMode::KINDS,
         locator: None,
         options: &[],
         envelope: &[],
@@ -207,8 +208,16 @@ connector_sinks! {
     connector Syslog = "SYSLOG";
     /// What a syslog sink writes.
     pub enum SyslogSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum SyslogEmitterMode;
     /// The entities a syslog sink writes.
     pub enum SyslogSinkEntity {
-        Collector(SyslogCollectorSink) = "COLLECTOR";
+        Collector(SyslogCollectorSink, SyslogCollectorPublishingMode) = "COLLECTOR";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum SyslogCollectorPublishingMode {
+        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
     }
 }

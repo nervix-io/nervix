@@ -59,7 +59,8 @@ use nervix_connector::{
     optional_client_config_value,
 };
 use nervix_models::{
-    ClientConfigEntry, ClientPoolBounds, CollectionName, EmitterBatchPolicy, FieldPath, Timestamp,
+    ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, FieldPath, MongoDbCollectionName,
+    Timestamp,
 };
 use nervix_primitives::time::Instant;
 use tracing::{debug, trace};
@@ -91,7 +92,7 @@ pub trait MongoDbClientSource: Send + Sync + 'static {
 /// What one MongoDB emitter writes with, from its typed sink plan.
 pub struct MongoDbSinkConfig {
     pub config: Vec<ClientConfigEntry>,
-    pub collection: CollectionName,
+    pub collection: MongoDbCollectionName,
     pub conflict_action: MongoDbConflictAction,
     /// The emitter's `BATCH` limits, which bound the documents and the measured bytes of every
     /// write.
@@ -110,7 +111,7 @@ pub enum MongoDbConflictAction {
 pub struct MongoDbSink {
     client: Box<dyn MongoDbClientSource>,
     database: String,
-    collection: CollectionName,
+    collection: MongoDbCollectionName,
     conflict_action: MongoDbConflictAction,
     limits: RowRequestLimits,
 }

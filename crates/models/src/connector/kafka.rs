@@ -30,12 +30,12 @@ use super::{
 };
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue, PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity,
-    SinkReference, SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind, TopicName,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, HeaderLayout, HeaderModel,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
+    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
+    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
+    SourceReferenceKind,
 };
 
 configured_client!(Kafka: unpooled, config Driver, CreateClientKafka => KafkaConfigEntry);
@@ -334,8 +334,9 @@ connector_sources! {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct KafkaTopicSink {
+    pub mode: KafkaTopicPublishingMode,
     pub client: ClientName,
-    pub topic: TopicName,
+    pub topic: KafkaTopicName,
 }
 
 impl SinkEntity for KafkaTopicSink {
@@ -346,15 +347,10 @@ impl SinkEntity for KafkaTopicSink {
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[
-            EmitterPublishingModeKind::NoAck,
-            EmitterPublishingModeKind::BrokerAck,
-        ],
+        publishing_modes: KafkaTopicPublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
             keywords: "TOPIC",
-            name: LocatorName::Unquoted {
-                label: "topic_name",
-            },
+            name: LocatorName::External(KafkaTopicName::DECLARATION),
         }),
         options: &[],
         envelope: &[],
@@ -380,8 +376,17 @@ connector_sinks! {
     connector Kafka = "KAFKA";
     /// What a Kafka sink writes.
     pub enum KafkaSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum KafkaEmitterMode;
     /// The entities a Kafka sink writes.
     pub enum KafkaSinkEntity {
-        Topic(KafkaTopicSink) = "TOPIC";
+        Topic(KafkaTopicSink, KafkaTopicPublishingMode) = "TOPIC";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum KafkaTopicPublishingMode {
+        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
     }
 }
