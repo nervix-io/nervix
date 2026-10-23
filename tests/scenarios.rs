@@ -15180,6 +15180,7 @@ async fn connect_named_client(
 }
 
 #[given(expr = "client {string} is connected to node {string}")]
+#[when(expr = "client {string} connects to node {string}")]
 async fn given_named_client_is_connected_to_node(
     world: &mut ScenarioWorld,
     name: String,
