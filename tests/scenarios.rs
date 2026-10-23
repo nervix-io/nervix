@@ -11297,6 +11297,46 @@ async fn given_health_responses_fail(world: &mut ScenarioWorld, responding_node_
         .fail_health_responses_from(&responding_node_id);
 }
 
+#[given(expr = "application revision responses from node {string} pause before responding")]
+async fn given_application_revision_responses_are_paused(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster()
+        .pause_application_revision_responses_from(&node_id);
+}
+
+#[then(expr = "the application revision response pause on node {string} is reached")]
+async fn then_application_revision_response_pause_is_reached(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        world
+            .cluster()
+            .wait_for_application_revision_response_pause(&node_id),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("application revision response pause on '{node_id}' was not reached: {error}")
+    });
+}
+
+#[when(expr = "application revision responses from node {string} are released")]
+async fn when_application_revision_responses_are_released(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster()
+        .release_application_revision_responses_from(&node_id);
+}
+
 #[when(expr = "application health probes from node {string} to node {string} fail")]
 async fn when_directed_health_probes_fail(
     world: &mut ScenarioWorld,

@@ -367,6 +367,7 @@ enum CommandPausePoint {
     RuntimeInstallation(ClusterNodeName),
     ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
+    ApplicationRevisionResponse(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
     Finalization(ClusterNodeName),
@@ -1214,6 +1215,42 @@ impl FaultInjection {
             },
             Arc::new(TestPause::default()),
         );
+    }
+
+    /// Holds every revision-query reply from this node until the scenario releases it. Local
+    /// revision publication and gossip continue while the replies retain their sampled values.
+    pub fn pause_application_revision_responses_from(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ApplicationRevisionResponse(node_id));
+    }
+
+    pub async fn wait_for_application_revision_response_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ApplicationRevisionResponse(
+            node_id.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_application_revision_responses_from(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::ApplicationRevisionResponse(
+            node_id.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_application_revision_response_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+    ) {
+        let point = CommandPausePoint::ApplicationRevisionResponse(node_id.clone());
+        let Some(pause) = self
+            .inner
+            .command_pauses
+            .get(&point)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        pause.reach();
+        pause.wait_until_released().await;
     }
 
     pub fn fail_health_responses_from(&self, responding_node: ClusterNodeName) {
