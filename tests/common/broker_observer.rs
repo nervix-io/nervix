@@ -117,8 +117,9 @@ impl BrokerObserver {
         }
     }
 
-    /// Checks every sequence number and header before the captured deadline, then checks for
-    /// a trailing duplicate and returns the observer with its final message.
+    /// Starts checking every sequence number and header on a runtime task, with the deadline
+    /// captured by the step before dispatch. A delayed caller learns the result later without
+    /// stopping the drain. Dropping the returned future aborts its observation.
     pub(crate) fn observe_sequence(
         mut self,
         deadline: Instant,
@@ -126,7 +127,7 @@ impl BrokerObserver {
         field: String,
         expected_headers: Vec<(String, String)>,
     ) -> impl Future<Output = SequenceObservation> + Send {
-        async move {
+        super::runner_observation::observe_off_the_runner(async move {
             let mut last_message = None;
             for expected_sequence in 1..=count {
                 nervix_primitives::task::consume_budget().await;
@@ -137,28 +138,27 @@ impl BrokerObserver {
                     expected_sequence - 1,
                     self.describe_client_receipts()
                 );
-                let message = self
+                let next = self
                     .try_next_message(deadline.saturating_duration_since(now))
                     .await
-                    .expect("failed while waiting for sequential broker message")
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "timed out waiting for broker message {expected_sequence} of {count}; \
-                             {}",
-                            self.describe_client_receipts()
-                        )
+                    .unwrap_or_else(|error| {
+                        panic!("failed while waiting for sequential broker message: {error}")
                     });
+                let Some(message) = next else {
+                    panic!(
+                        "timed out waiting for broker message {expected_sequence} of {count}; {}",
+                        self.describe_client_receipts()
+                    );
+                };
                 let payload = serde_json::from_str::<serde_json::Value>(&message.payload)
                     .unwrap_or_else(|error| panic!("broker payload is not valid JSON: {error}"));
-                let actual_sequence = payload
-                    .get(&field)
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "broker payload field '{field}' is not an unsigned integer: {}",
-                            message.payload
-                        )
-                    });
+                let Some(actual_sequence) = payload.get(&field).and_then(serde_json::Value::as_u64)
+                else {
+                    panic!(
+                        "broker payload field '{field}' is not an unsigned integer: {}",
+                        message.payload
+                    );
+                };
                 let expected_u64 = expected_sequence.arch_into();
                 assert_eq!(
                     actual_sequence,
@@ -180,7 +180,9 @@ impl BrokerObserver {
             let duplicate = self
                 .try_next_message(Duration::from_millis(500))
                 .await
-                .expect("failed while checking for a duplicate broker message");
+                .unwrap_or_else(|error| {
+                    panic!("failed while checking for a duplicate broker message: {error}")
+                });
             assert!(
                 duplicate.is_none(),
                 "observed a duplicate broker message after the expected sequence: {duplicate:?}"
@@ -189,7 +191,7 @@ impl BrokerObserver {
                 observer: self,
                 last_message,
             }
-        }
+        })
     }
 
     pub(crate) async fn next_message(&mut self) -> io::Result<BrokerMessage> {
