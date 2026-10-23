@@ -12,12 +12,17 @@ by its configured byte rate before forwarding, and forwards responses promptly. 
 task set retains and reaps connections. Cancellation or fixture drop closes the listener and aborts
 all its connections; the fixture cannot survive its node specification.
 
-The scenario starts the follower once without the harness's catch-up retries, records append
-stream opening baselines before that start, and waits for the applied NSPL domain backlog within
+The scenario starts the follower without the harness's catch-up retries, records append
+stream opening baselines before that start, and waits for the applied Plexus domain backlog within
 its explicit assertion bound. The opening count is a diagnostic observation because normal initial
 catch-up probes can also open streams. An atomic maximum of bytes forwarded on one connection proves
 that the paced path carried more than one production progress interval. This observation does not inspect TLS or frame bytes
 and establishes no ordering the product relies on.
+
+A focused startup scenario occupies the observability port to force the first launch to fail
+before runtime initialization.
+The harness joins that attempt and retries on a fresh observability port within the same readiness
+budget. The pacer's advertised endpoint, private target and retained connections stay in place.
 
 The Cucumber scenario suite runs Nervix the way an operator does. It starts clusters, drives them
 through the session API, brokers, and HTTP endpoints, and asserts on what they do. Many scenarios
@@ -760,6 +765,12 @@ The harness keeps these boundaries explicit.
   result later. The other peer must report connected, and the new relay's scheduled owner must be
   observed before the silent response is released. This is a harness measurement of isolation,
   not a different product deadline.
+  Its completion regression also holds every application-revision reply from the two followers
+  after sampling the reply. Local revision publication and gossip continue, so the same prepared
+  client's mutations must finish while those replies remain held. Reached observations prove both
+  pauses were exercised before explicit release. The shared pause registry retains these controls
+  through request cancellation; scenario cleanup releases and clears them even after an assertion
+  fails. The original health-only scenario remains an independent check.
 
   The large-resource control probe connects a named production client to the restarted node once
   it has started, then waits until that node's
@@ -1287,8 +1298,13 @@ nodes and builds it again with a fresh construction deadline. Adding a node, or 
 scenario stopped, spends one 84-second node startup and the catch-up that follows it; adding a node
 also repeats the convergence checks. A node started while its consensus connectivity is blocked
 spends the node startup without the catch-up. A scenario whose subject is a node that cannot apply
-what the leader committed starts it with one attempt's 36-second readiness and no retry, because a
-retry would restart a node that had already consumed the failure the scenario armed.
+what the leader committed uses one absolute 36-second budget for launch, readiness, failed-attempt
+cleanup and any retry pause. It may relaunch only after a typed `AddrInUse` error binding an early
+server listener, before runtime initialization could consume an armed fault. Every other failure,
+including a readiness timeout, remains terminal for this startup. The same three-launch limit
+applies, and the harness never restarts a node after it becomes ready. The interrupted snapshot
+installation scenario also occupies the first launch's observability port and then observes the
+armed interruption on the successful launch.
 
 ## Scenario Phases
 
@@ -1536,6 +1552,16 @@ reserves it in the pool. The operating system would let a second scenario bind a
 reservation is the only thing that keeps two scenarios apart. It cannot see sibling worktrees
 running the same suite, or any other socket on the runner, which is why a node startup and a server
 process startup both relaunch a lost bind on fresh ports.
+
+The constrained restart used for paced catch-up and an armed snapshot-installation fault also
+recovers a lost early listener bind. It requires the listener's typed application error and its
+`AddrInUse` I/O cause, joins that exact failed task, and moves only the affected listener family.
+Its launches, cleanup and one-second retry pauses share the original 36-second budget; it never
+uses the general startup's readiness-timeout retry. The early gRPC, HTTP, HTTPS, observability and
+web console bindings precede runtime initialization. Interconnect setup happens after stored
+runtime changes are applied, so its failure cannot establish that an armed fault is untouched
+and remains terminal on this constrained path. An attempt still stopping retains its task and
+ports and admits no replacement.
 
 | Holder | Ports | Returned |
 | --- | --- | --- |
@@ -2685,6 +2711,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | Node task outcomes are distinct, the task is joined once, and its owner never aborts it | `running_task_reports_the_last_failed_probe_at_the_deadline`, `clean_application_exit_before_readiness_is_terminal`, `application_error_before_readiness_is_retained`, `panic_and_cancellation_have_distinct_terminal_outcomes`, `stop_and_keeper_paths_use_the_task_inspected_for_diagnostics`, `a_wait_past_its_deadline_leaves_the_task_running_with_its_owner` |
 | One startup budget with classified retries | `repeated_readiness_failure_spends_one_budget_across_every_attempt`, `a_node_that_does_not_stop_ends_the_startup_instead_of_being_launched_over`, `exhaustion_reports_every_attempt_with_its_typed_cause`, `ports_that_cannot_be_reallocated_end_the_startup`, `a_bound_address_is_retried_until_a_launch_becomes_ready`, `a_last_attempt_still_becomes_ready_with_what_the_budget_left`, `an_application_error_ends_the_startup_without_another_launch`, `a_panicking_node_ends_the_startup_without_another_launch`, `a_launch_failure_ends_the_startup_before_anything_is_cleaned_up`, `sequential_cluster_construction_stays_inside_its_derived_budget` |
 | Failed-attempt cleanup spends the remaining startup budget and its joined result determines retry and listener selection | `a_failed_attempt_finishes_its_owned_cleanup_before_retrying_with_the_remaining_budget`, `an_initialization_failure_observed_during_cleanup_keeps_its_terminal_cause`, `a_bind_failure_observed_during_cleanup_moves_only_its_own_listeners` |
+| An armed-fault startup retries only a lost early listener bind inside its original readiness budget and launch limit | `armed_startup_retries_only_the_colliding_listener_before_initialization`, `armed_startup_retries_no_other_failure`, `armed_startup_keeps_one_readiness_budget`, `armed_startup_retains_every_collision_when_the_launch_limit_is_spent`; public scenarios `A paced follower recovers an occupied listener before its catch-up start` and `An interrupted snapshot installation finishes on the next start` |
 | Diagnostics are concurrent and never keep cleanup from starting | `status_snapshots_keep_a_healthy_node_while_another_node_stalls`, `failed_and_stalled_diagnostics_end_by_their_deadline_so_cleanup_starts`, `a_stalled_diagnostic_still_reaches_every_node_stop_in_a_cluster_of_one_and_of_three` |
 | One cleanup budget per cluster, and truthful phases | `stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three`, `a_node_left_stopping_keeps_what_it_holds_until_its_own_task_ends`, `a_single_node_cleanup_keeps_how_its_task_ended`, `a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports`, `the_finished_phase_is_published_only_once_cleanup_has_completed`, `an_active_scenario_publishes_its_phase_and_the_age_of_that_phase` |
 | A stop a scenario waits for is timed by the node's own ending, and a node that outlives a wait is named with its shutdown phase | `a_stop_is_timed_from_its_first_request_to_the_ending_of_the_node_task`, `a_node_that_had_ended_before_it_was_asked_to_stop_took_no_time_to_stop`, `a_stopping_node_is_read_with_its_shutdown_phase_and_its_own_deadline`, `a_stop_record_reads_as_the_transition_the_harness_prints`, `a_node_left_stopping_is_recorded_with_where_its_own_shutdown_stood` |
