@@ -16,8 +16,9 @@ use std::{
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    Array, BooleanArray, FixedSizeListArray, Int64Array, LargeListArray, LargeStringArray,
-    ListArray, RecordBatch, StringArray, StringViewArray, TimestampMicrosecondArray, UInt64Array,
+    Array, BooleanArray, FixedSizeListArray, Int32Array, Int64Array, LargeListArray,
+    LargeStringArray, ListArray, RecordBatch, StringArray, StringViewArray,
+    TimestampMicrosecondArray, UInt64Array,
 };
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{
@@ -190,6 +191,7 @@ mod pulsar_subscriptions;
 mod restarted_voter;
 mod session_protocol;
 mod standalone_transaction;
+mod web_console_connections;
 mod websocket_lifecycle;
 
 const SCENARIOS_PATH: &str = "tests/features";
@@ -401,6 +403,9 @@ struct ScenarioWorld {
     restore_step_pause: Option<backup::restore::ArmedRestorePause>,
     /// What the last measured CLI backup's memory sampler observed, until a step checks it.
     backup_memory: Option<backup::memory::SampledMemory>,
+    /// The download a scenario expects the web console to hand the browser, waited for from
+    /// before the action that starts it until a step saves it.
+    expected_console_download: Option<backup::console::ExpectedConsoleDownload>,
     /// The outcome of the last command a scenario sent through its own session.
     last_session_command: Option<nervix_client_wire::CommandOutcome>,
     /// Candidates collected by a public session completion paging scenario.
@@ -14921,6 +14926,9 @@ async fn open_web_console_page(world: &mut ScenarioWorld, url: &str) -> Result<(
         .await
         .map_err(|error| error.to_string())?;
     page.set_default_timeout(10_000.0).await;
+    web_console_connections::record_console_connections(&page)
+        .await
+        .map_err(|error| error.to_string())?;
     page.goto(url, None)
         .await
         .map_err(|error| error.to_string())?;
@@ -30521,6 +30529,8 @@ impl IcebergTableFixture {
             .collect()
     }
 
+    /// One column line, `<name> <type>` for an optional column or `<name> <type> REQUIRED` for a
+    /// column the table requires.
     fn parse_field(line: &str) -> arrow_schema::Field {
         let normalized = line.trim_end_matches(',');
         let mut parts = normalized.split_whitespace();
@@ -30530,11 +30540,16 @@ impl IcebergTableFixture {
         let column_type = parts
             .next()
             .unwrap_or_else(|| panic!("Iceberg column line is missing a type: {line}"));
+        let nullable = match parts.next() {
+            None => true,
+            Some("REQUIRED") => false,
+            Some(_) => panic!("Iceberg column line must be '<name> <type> [REQUIRED]': {line}"),
+        };
         assert!(
             parts.next().is_none(),
-            "Iceberg column line must be '<name> <type>': {line}"
+            "Iceberg column line must be '<name> <type> [REQUIRED]': {line}"
         );
-        arrow_schema::Field::new(name, Self::parse_data_type(column_type), true)
+        arrow_schema::Field::new(name, Self::parse_data_type(column_type), nullable)
     }
 
     fn parse_data_type(column_type: &str) -> ArrowDataType {
@@ -30549,6 +30564,7 @@ impl IcebergTableFixture {
         }
         match column_type {
             "STRING" => ArrowDataType::Utf8,
+            "I32" => ArrowDataType::Int32,
             "I64" => ArrowDataType::Int64,
             "F64" => ArrowDataType::Float64,
             "BOOLEAN" => ArrowDataType::Boolean,
@@ -30596,6 +30612,9 @@ fn iceberg_array_value(
         return Ok(serde_json::Value::Null);
     }
     match array.data_type() {
+        ArrowDataType::Int32 => Ok(serde_json::Value::from(
+            iceberg_array::<Int32Array>(array, field_name)?.value(row_index),
+        )),
         ArrowDataType::Int64 => Ok(serde_json::Value::from(
             iceberg_array::<Int64Array>(array, field_name)?.value(row_index),
         )),
