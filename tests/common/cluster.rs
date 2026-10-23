@@ -126,7 +126,7 @@ use super::{
     },
     node_startup::{
         ATTEMPT_READINESS_BUDGET, AttemptCleanup, NODE_STARTUP_BUDGET, NodeStartup, StartableNode,
-        StartupPorts, cluster_startup_budget,
+        StartupPorts, StartupRetryPolicy, cluster_startup_budget,
     },
     node_stop::{NodeStopClock, NodeStopEnding, NodeStopProgress, NodeStopRecord},
     peer_addressing::{
@@ -1027,20 +1027,23 @@ impl Cluster {
     /// Start a node without waiting for it to catch up with the leader.
     ///
     /// A scenario whose subject is a node that cannot apply what the leader committed waits for
-    /// its own condition instead, and the retry [`Cluster::start_node`] performs would restart a
-    /// node that had already consumed the failure the scenario armed. Its budget is therefore one
-    /// attempt's readiness rather than the whole per-node startup budget, which exists for the
-    /// retries this path must not perform.
+    /// its own condition. Only a lost early listener bind permits another launch, before runtime
+    /// initialization could consume the failure it armed. Every launch, failed-task cleanup and
+    /// pause shares one readiness attempt's budget; a readiness timeout is terminal here.
     pub(crate) async fn start_node_without_catching_up(&mut self, node_id: &str) -> io::Result<()> {
         let handle = self
             .nodes
             .get_mut(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        handle.launch()?;
-        handle
-            .readiness(1, PhaseDeadline::after(ATTEMPT_READINESS_BUDGET))
-            .await
-            .map_err(io::Error::other)
+        let node = node_name(&handle.spec.node_id);
+        NodeStartup::start(
+            &node,
+            handle,
+            PhaseDeadline::after(ATTEMPT_READINESS_BUDGET),
+            StartupRetryPolicy::BindBeforeRuntime,
+        )
+        .await
+        .map_err(io::Error::other)
     }
 
     /// Names a setting `node_id` starts with from its next launch on, over the cluster's own.
@@ -1136,7 +1139,7 @@ impl Cluster {
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         let node = node_name(&handle.spec.node_id);
         let budget = construction.nested(NODE_STARTUP_BUDGET);
-        NodeStartup::start(&node, handle, budget)
+        NodeStartup::start(&node, handle, budget, StartupRetryPolicy::Transient)
             .await
             .map_err(io::Error::other)
     }
