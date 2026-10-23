@@ -3172,3 +3172,18 @@ random_iterations = 256
 source = "crates/jaq/src/string_properties.rs"
 test = "string_properties::bolero_yaml_objects_preserve_complete_string_values"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/application/cli/__fuzz__/application__cli__properties__bolero_node_settings_survive_their_command_line/corpus"
+domain_version = 1
+features = []
+id = "node-settings-command-line"
+invariant = "Current valid node settings of every group, with the Raft timings ordered in whole milliseconds, the drain shorter than the shutdown and the memory watermarks paired and ordered, render as the server's options and read back through the same options and validation unchanged; every duration and byte quantity help prints reads back as the same value."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 256
+source = "src/application/cli/properties.rs"
+test = "application::cli::properties::bolero_node_settings_survive_their_command_line"
+test_target = "lib"

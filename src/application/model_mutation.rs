@@ -39,6 +39,7 @@ use super::{
     command_result::{CommandDiagnostic, CommandDisposition, CommandResult},
     completion::CompletionError,
     domain_lifecycle::DomainAlterError,
+    entity_gate::{ClusterEntityGateScope, EntityGateParticipants},
     ownership_handoff::{mark_complete_ownership_transitions, planned_ownership_moves},
     schedule_planning::DomainSchedulePlanningSnapshot,
     scheduling::ScheduleTransition,
@@ -1417,10 +1418,13 @@ impl SessionServiceImpl {
                 let deadline = nervix_primitives::time::Instant::now()
                     + self.inner.runtime.entity_gate_deadline();
                 let gate = match Box::pin(self.engage_cluster_entity_gates(
-                    &domain,
-                    relays,
-                    affected_entities,
-                    EntityGatePurpose::ModelAlteration,
+                    ClusterEntityGateScope {
+                        domain: &domain,
+                        relays,
+                        affected_entities,
+                        purpose: EntityGatePurpose::ModelAlteration,
+                        participants: EntityGateParticipants::EveryAvailableNode,
+                    },
                     deadline,
                     transaction_step.as_ref().map(|step| {
                         (

@@ -19,3 +19,15 @@ Feature: Server command-line values
     And the server process log contains "invalid value '18446744073709551615s 1000000000ns' for '--transaction-idle-timeout"
     And the server process log contains "invalid duration: it is longer than a duration can be"
     And the server process log does not contain "panicked"
+
+  Scenario Outline: A node refuses <option> when it breaks the setting's relationship with another and names both
+    When a nervix-server process is started with command-line option "<option>" set to "<value>"
+    Then the server process exits with status 1
+    And the server process log contains "<refusal>"
+    And the server process log does not contain "panicked"
+
+    Examples:
+      | option                      | value | refusal                                                                       |
+      | --drain-timeout             | 1m    | drain-timeout (60s) must not exceed shutdown-timeout (50s)                    |
+      | --raft-election-timeout-min | 250ms | raft-election-timeout-min (250ms) must exceed raft-heartbeat-interval (250ms) |
+      | --raft-election-timeout-max | 1s    | raft-election-timeout-max (1s) must exceed raft-election-timeout-min (1.5s)   |

@@ -197,12 +197,21 @@ const KAFKA_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
             wait: "delivery under ACK",
             bound: WaitBound::Clause("ACK TIMEOUT"),
         },
+        DeclaredWait {
+            wait: "destroying a producer, for its polling thread and the reports of the records \
+                   its purge failed",
+            bound: WaitBound::Driver("100 ms poll, then a 500 ms flush"),
+        },
     ],
     driver_limits: &[
         "Every librdkafka key passes through, so a client can change each driver default above.",
         "message.max.bytes 1000000",
         "A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through \
          ON MESSAGE ERROR.",
+        "A producer whose last handle is gone is destroyed by one connector control job, which \
+         waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms \
+         poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still \
+         resolving a name included.",
     ],
 };
 

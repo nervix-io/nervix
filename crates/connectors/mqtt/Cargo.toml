@@ -30,6 +30,7 @@ nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
+nonzero_ext = { workspace = true }
 rumqttc = { workspace = true }
 rumqttc-core = { workspace = true }
 shuttle = { workspace = true, optional = true }
@@ -47,6 +48,5 @@ nervix-model-harness = { workspace = true }
 # The read checks pass a batch timeout on a paused clock.
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-test-environment = { workspace = true }
-nonzero_ext = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util"] }

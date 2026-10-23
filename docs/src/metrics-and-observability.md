@@ -297,11 +297,12 @@ Relay admission:
 Execution admission:
 
 Worker series include the `connector_storage` class. Its running and pending jobs show Kafka
-source control calls, consumer-group commits and the destruction of retired consumers waiting on
-their broker, independently of `filesystem_storage` and `consensus_storage`. A commit may keep its
-worker after its caller's thirty-second deadline; the next commit from that instance waits for the
-same job. A retired consumer whose group coordinator does not answer keeps its worker for up to
-five seconds; see [Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement).
+source control calls, consumer-group commits and the destruction of retired consumers and producers
+waiting on their broker, independently of `filesystem_storage` and `consensus_storage`. A commit may
+keep its worker after its caller's thirty-second deadline; the next commit from that instance waits
+for the same job. A retired consumer whose group coordinator does not answer keeps its worker for up
+to five seconds, and a retired producer keeps one for its polling thread's last poll and up to half
+a second of flushing; see [Kafka client retirement](./connector-contract.md#kafka-client-retirement).
 
 - `nervix_execution_memory_capacity_bytes` and `nervix_execution_memory_reserved_bytes`: the
   transient memory reserved for one class, and what it is currently holding

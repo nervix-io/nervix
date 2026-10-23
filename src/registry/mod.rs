@@ -52,7 +52,8 @@ pub(crate) use domain_activation_plan::{
 };
 pub(crate) use entity_gate::{
     EntityGatePlan, entity_pause_relays_for_schedule, gate_boundary,
-    ownership_handoff_relays_for_schedule, scheduled_impact_coverage,
+    ownership_handoff_gate_participants, ownership_handoff_relays_for_schedule,
+    scheduled_impact_coverage,
 };
 #[cfg(test)]
 pub(crate) use entrypoint_plan::EntrypointPlanError;

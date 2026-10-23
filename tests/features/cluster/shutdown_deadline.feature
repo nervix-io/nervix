@@ -21,7 +21,7 @@ Feature: Process shutdown deadline
       | sending chunks slowly         |
 
   Scenario Outline: The shutdown deadline ends a process whose drain cannot finish in a <pace> domain
-    Given a nervix-server process is started with drain timeout "10m" and shutdown timeout "5s"
+    Given a nervix-server process is started with drain timeout "5s" and shutdown timeout "5s"
     And the server process is configured with these NSPL commands
       """
       <domain>
