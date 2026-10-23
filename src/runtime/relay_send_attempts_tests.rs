@@ -63,7 +63,7 @@ fn the_capacity_refusals_are_the_room_a_grant_needs_now() {
 }
 
 #[test]
-fn a_capacity_refusal_holds_the_delivery_and_restarts_the_stall_bound() {
+fn a_capacity_refusal_holds_the_delivery_and_gives_its_next_ask_the_whole_stall_bound() {
     let start = Instant::now();
     for refusal in capacity_refusals() {
         let mut attempts = held(start);
@@ -72,14 +72,11 @@ fn a_capacity_refusal_holds_the_delivery_and_restarts_the_stall_bound() {
         let answered = after(start, Duration::from_secs(4));
         let step = attempts.after_failure(RelaySendFailure::Refused(refusal), answered);
 
-        assert_eq!(
-            step,
-            RelaySendStep::RetryAt(after(answered, RETRY)),
-            "{refusal}"
-        );
+        let asks_again = after(answered, RETRY);
+        assert_eq!(step, RelaySendStep::RetryAt(asks_again), "{refusal}");
         assert_eq!(
             attempts.attempt_deadline(),
-            after(answered, STALL),
+            after(asks_again, STALL),
             "{refusal}"
         );
     }
@@ -101,9 +98,10 @@ fn a_held_delivery_waits_twice_as_long_after_each_refusal_up_to_half_the_stall_b
             panic!("a delivery refused for capacity within its bound is held: {step:?}");
         };
         assert_eq!(retry_at.duration_since(now), expected_wait);
-        assert!(
-            retry_at < attempts.attempt_deadline(),
-            "a held delivery asks again before its restarted stall bound passes"
+        assert_eq!(
+            attempts.attempt_deadline(),
+            after(retry_at, STALL),
+            "the wait takes nothing from the stall bound of the ask that follows it"
         );
         now = retry_at;
     }

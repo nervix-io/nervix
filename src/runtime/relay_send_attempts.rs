@@ -4,8 +4,8 @@
 //! Layer: data plane.
 //!
 //! - **Owns.** The stall bound one delivery's attempts run within, how a capacity refusal of its
-//!   grant holds the delivery back and restarts that bound, how long a held delivery waits before
-//!   it asks again, and the delivery's admission bound.
+//!   grant holds the delivery back and starts that bound again when the delivery asks again, how
+//!   long a held delivery waits before it asks again, and the delivery's admission bound.
 //! - **Depends on.** The typed grant refusal and the dispatch bounds of the remote dispatcher.
 //! - **Must not know.** The transport, payloads, relays, branches or acknowledgements.
 
@@ -63,12 +63,13 @@ pub(super) enum RelaySendEnd {
 
 /// The bounds one delivery's attempts to send it run within.
 ///
-/// Every attempt must end before the stall bound, five seconds after the delivery started or after
-/// the receiver last answered, whichever is later. A capacity refusal is such an answer: under
-/// [`GrantCapacityRefusals::Hold`] it restarts the stall bound and holds the delivery back for a
-/// wait that starts at the dispatch retry interval and doubles after each further capacity refusal
-/// up to [`RelaySendAttempts::capacity_wait_ceiling`]. Nothing outlasts the admission bound the
-/// delivery was given.
+/// Every attempt must end before the stall bound: five seconds after the delivery started, or after
+/// it last asked again following a capacity refusal. A capacity refusal is the receiver answering,
+/// so under [`GrantCapacityRefusals::Hold`] it does not count toward the stall bound: it holds the
+/// delivery back for a wait that starts at the dispatch retry interval and doubles after each
+/// further capacity refusal up to [`RelaySendAttempts::capacity_wait_ceiling`], and the stall bound
+/// starts again when the delivery asks, so each ask has the whole bound for its grant and its body,
+/// as the delivery's first ask has. Nothing outlasts the admission bound the delivery was given.
 #[derive(Debug, Clone)]
 pub(super) struct RelaySendAttempts {
     capacity_refusals: GrantCapacityRefusals,
@@ -96,8 +97,8 @@ impl RelaySendAttempts {
     }
 
     /// The longest a held delivery waits before it asks for its grant again: half the stall
-    /// bound, so a held delivery always asks again within that bound, with room left to retry an
-    /// ask that failed in transport.
+    /// bound, so a held delivery notices that room returned at most that late, and asks at most
+    /// once in that time while it waits.
     pub(super) fn capacity_wait_ceiling() -> Duration {
         RemoteDispatcher::DISPATCH_TIMEOUT / 2
     }
@@ -143,12 +144,13 @@ impl RelaySendAttempts {
         if now >= self.admission_deadline {
             return RelaySendStep::End(RelaySendEnd::AdmissionBound);
         }
-        self.stall_deadline = Self::stall_deadline_after(now, self.admission_deadline);
         let wait = self.capacity_waits.take_next_delay();
         let retry_at = now
             .checked_add(wait)
             .assured("a wait bounded by half the stall bound fits the monotonic clock")
             .min(self.admission_deadline);
+        // The wait is the sender's own, so the ask that follows it has the whole stall bound.
+        self.stall_deadline = Self::stall_deadline_after(retry_at, self.admission_deadline);
         RelaySendStep::RetryAt(retry_at)
     }
 

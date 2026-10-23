@@ -764,9 +764,9 @@ impl RemoteDispatcher {
     /// [`GrantCapacityRefusals::Hold`], while the receiver refuses its grant for capacity.
     ///
     /// [`RelaySendAttempts`] decides after every failed attempt whether and when to send again:
-    /// a capacity refusal is the receiver answering, so it restarts the stall bound, and a held
-    /// delivery asks again until it is granted or `deadline` passes. A permanent refusal ends the
-    /// delivery at once.
+    /// a capacity refusal is the receiver answering, so it does not count toward the stall bound,
+    /// and a held delivery asks again until it is granted or `deadline` passes. A permanent refusal
+    /// ends the delivery at once.
     async fn dispatch_relay_payload(
         &self,
         node_id: &ClusterNodeName,

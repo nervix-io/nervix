@@ -908,9 +908,10 @@ active. The refusal crosses the wire as a typed `RelayGrantRefusal`, never as an
 text, and the sender decides from its class alone. A permanent refusal fails the delivery at once.
 
 A capacity refusal holds a routed or owner-ingress delivery back. The receiver answered, so the
-refusal restarts the five-second stall bound, and the sender asks for a grant again after a wait
-that starts at 25 milliseconds and doubles after each further capacity refusal, up to 2.5 seconds,
-half the stall bound, so a held delivery always asks again within that bound. Each ask leases the
+refusal does not count toward the five-second stall bound: the sender asks for a grant again after
+a wait that starts at 25 milliseconds and doubles after each further capacity refusal, up to 2.5
+seconds, half the stall bound, and the stall bound starts again when it asks, so each ask has the
+whole bound for its grant and its body, as the delivery's first ask has. Each ask leases the
 delivery's streams again, encodes the grant's row metadata again, and has the receiver read and
 decode that metadata again; after its first few seconds a held delivery therefore asks at most once
 every 2.5 seconds, and each ask holds one of the four admission streams the management connection
