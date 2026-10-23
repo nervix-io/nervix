@@ -145,12 +145,12 @@ delivery the message unfolded into has completed, and it reports that progress o
 transport confirmed the acknowledgement as far as the entity can: an `SQS QUEUE` waits for the
 broker's answer to its deletion, a `KAFKA TOPIC` for the answer to its consumer-group commit, or
 under `OFFSET BY DOMAIN` for its offsets' state replicas, a `PULSAR TOPIC` for the broker's answer
-to its acknowledgement, a `RABBITMQ QUEUE` for its acknowledgement to be written to the connection,
-and an `MQTT TOPIC` only for its client to queue the acknowledgement. An acknowledgement the
-transport fails to confirm, or a rejection it fails to take back, is a source error that
-`DESCRIBE INGESTOR` shows as the transient error until a later acknowledgement is confirmed, and the
-messages are delivered again. A node that stops gracefully waits for its ingestors' outstanding
-confirmations before it closes them; see [Shutdown And Recovery](shutdown.md#connector-contracts).
+to its acknowledgement, and a `RABBITMQ QUEUE` and an `MQTT TOPIC` for their acknowledgements to be
+written to the connection, which neither broker answers. An acknowledgement the transport fails to
+confirm, or a rejection it fails to take back, is a source error that `DESCRIBE INGESTOR` shows as
+the transient error until a later acknowledgement is confirmed, and the messages are delivered
+again. A node that stops gracefully waits for its ingestors' outstanding confirmations before it
+closes them; see [Shutdown And Recovery](shutdown.md#connector-contracts).
 
 ## Altering Ingestors
 
@@ -377,7 +377,7 @@ is full, what happens to a payload depends on whether its sender can present it 
 | `NATS SUBJECT` | Waits | The client keeps its connection and reads the subscription while the loop waits, holding up to 65,536 messages before it drops the newest as a slow consumer. |
 | `ZEROMQ PULL` | Waits | Unread messages stay in the socket's kernel buffers, and then the pushing peers wait. Nothing is dropped. |
 | `SYSLOG LISTENER` | Waits | The listener stays bound. The kernel drops UDP datagrams beyond the socket's receive buffer, and TCP and TLS senders wait once the listener's 64-frame queue is full. |
-| `MQTT TOPIC` | Refused and counted | The client sends its keep-alive only while the loop reads, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from it, and what is published until the source reconnects is lost. |
+| `MQTT TOPIC` | Refused and counted | The connection keeps sending its keep-alive while the loop is held, but reads only 64 publishes ahead of it and then stops reading, and its keep-alive with it, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from it, and what is published until the source reconnects is lost. |
 | `REDIS PUBSUB` | Refused and counted | The subscription reader holds at most `subscription_buffer_messages` messages. The host keeps polling it so its same-connection idle probes can continue instead of waiting for extension-worker admission. |
 | `WEBSOCKETS CONNECTION` | Refused and counted | The client answers the server's pings only while the loop reads, so a server that pings would close the connection and lose what it sent until the source reconnects. |
 | `KAFKA TOPIC` in `MODE NO ACK` | Refused and counted | A consumer-group member that stops polling for `max.poll.interval.ms` leaves its group, and an instance reading domain offsets would keep its partitions assigned through an ownership handoff. |
@@ -1037,7 +1037,7 @@ partitions through the domain schedule and waits for no group session.
 Stopping or dropping a Kafka ingestor returns without waiting for its consumers to be destroyed.
 The node destroys each one on its connector control workers, where a consumer that joined its group
 waits up to five seconds for the coordinator to answer its LeaveGroup request; see
-[Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement).
+[Kafka client retirement](./connector-contract.md#kafka-client-retirement).
 
 Under `OFFSET BY CONSUMER GROUP`, `MODE NO ACK` is the consumer's auto-commit: the consumer
 commits the positions it has read on its own schedule, `auto.commit.interval.ms`, without waiting
@@ -1351,9 +1351,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Metadata | Not offered: The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace. |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
-| Acknowledgement confirmation | queued |
-| Buffers | each incoming packet, whose bound every CONNECT advertises as its Maximum Packet Size: at most 10240 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>SUBSCRIBE and PUBACK requests for the connection: driver default, 1024 requests; when full, holds back what fills it |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
+| Acknowledgement confirmation | written |
+| Buffers | each incoming packet, whose bound every CONNECT advertises as its Maximum Packet Size: at most 10240 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>publishes the connection reads ahead of the host: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>an acknowledgement's PUBACKs written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
 | Driver limits | A packet above the advertised Maximum Packet Size that a broker sends anyway ends the connection with DISCONNECT Packet too large. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1371,7 +1371,26 @@ Delivery constraints:
 - `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait;
   a quiesce change or a stop that meets a partial batch takes in the publishes it gathered at once
   rather than after its batch timeout
+- every `CONNECT` in an `ACK` mode advertises the in-flight window and 64 more as its Receive
+  Maximum: 65 under `ACK SEQUENTIAL`, and `MAX` plus 64 under `ACK PARALLEL`, at most MQTT's
+  65,535, so the broker sends no further QoS 1 publish while that many wait on their
+  acknowledgements, and a batch above 65,535 gathers at most 65,535 of them before its
+  `BATCH TIMEOUT` ends it. The 64 leave the window room to fill around publishes the broker
+  discards above the ingestor's packet bound, which a broker such as EMQX keeps counting against
+  the Receive Maximum
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
+
+In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for
+is written to the connection, within one keep-alive interval; the broker answers none. Its
+connection keeps writing those acknowledgements and sending its keep-alive while the ingestor
+waits on a batch's acknowledgement trees, however long a downstream emitter holds them, so the
+broker keeps the session connected and delivers nothing again. The connection reads as many
+publishes as its Receive Maximum admits ahead of the ingestor, 64 under `NO ACK`. A QoS 0 publish,
+which a QoS 1 subscription receives from a publisher that sends at QoS 0, is not held back by the
+broker; once those fill the read-ahead while a batch waits, the connection stops reading, the
+batch's acknowledgement fails and the ingestor reconnects, and the broker delivers the
+unacknowledged QoS 1 publishes again. See
+[MQTT source connections](connector-contract.md#mqtt-source-connections).
 
 Every connection an MQTT ingestor opens advertises the incoming packet bound the table above
 declares as the Maximum Packet Size of its `CONNECT`. MQTT 5 requires the broker to discard a larger

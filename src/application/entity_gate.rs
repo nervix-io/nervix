@@ -238,6 +238,28 @@ struct EntityGateEngagement<'a> {
     reason: &'a str,
 }
 
+/// The nodes an entity gate asks to hold it. A node the cluster marks unavailable is never asked:
+/// it cannot answer, and asking it would only spend the gate's deadline.
+#[derive(Clone, Copy)]
+pub(in crate::application) enum EntityGateParticipants<'a> {
+    /// Every available node and the coordinator itself.
+    EveryAvailableNode,
+    /// The available nodes among these, which the coordinator itself is one of only when it is
+    /// named.
+    AvailableAmong(&'a BTreeSet<ClusterNodeName>),
+}
+
+/// What one cluster-wide entity gate holds: the relays and entities of a domain it fences, why,
+/// and which nodes it asks to hold them.
+#[derive(Clone, Copy)]
+pub(in crate::application) struct ClusterEntityGateScope<'a> {
+    pub(in crate::application) domain: &'a DomainName,
+    pub(in crate::application) relays: &'a [RelayName],
+    pub(in crate::application) affected_entities: &'a [NodeRef],
+    pub(in crate::application) purpose: EntityGatePurpose,
+    pub(in crate::application) participants: EntityGateParticipants<'a>,
+}
+
 #[derive(Clone, Copy)]
 struct EntityGateStatusQuery<'a> {
     coordination: &'a CoordinationIdentity,
@@ -445,6 +467,7 @@ impl SessionServiceImpl {
             let remaining =
                 deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
             let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
+            let reply_timeout = remaining.min(Duration::from_secs(2));
             #[cfg(feature = "testing")]
             let broken_stream = purpose == EntityGatePurpose::OwnershipHandoff
                 && self
@@ -453,12 +476,29 @@ impl SessionServiceImpl {
                     .take_handoff_engagement_transport_failure(domain);
             #[cfg(not(feature = "testing"))]
             let broken_stream = false;
+            #[cfg(feature = "testing")]
+            let lost_request = purpose == EntityGatePurpose::OwnershipHandoff
+                && self
+                    .inner
+                    .runtime
+                    .loses_handoff_gate_engagement(self.inner.consensus.local_node_id(), node_id);
+            #[cfg(not(feature = "testing"))]
+            let lost_request = false;
             let response = if broken_stream {
                 Err(Report::new(nervix_interconnect::RequestError::Transport {
                     node: node_id.clone(),
                     request:
                         <RemoteEntityGateRequest as nervix_interconnect::InterconnectRequest>::NAME,
                     reason: "injected broken interconnect stream".to_string(),
+                }))
+            } else if lost_request {
+                // A link that loses the request delivers nothing, so the reply times out.
+                sleep(reply_timeout).await;
+                Err(Report::new(nervix_interconnect::RequestError::Timeout {
+                    node: node_id.clone(),
+                    request:
+                        <RemoteEntityGateRequest as nervix_interconnect::InterconnectRequest>::NAME,
+                    timeout: reply_timeout,
                 }))
             } else {
                 self.inner
@@ -474,7 +514,7 @@ impl SessionServiceImpl {
                             deadline_millis,
                             reason: reason.to_string(),
                         },
-                        remaining.min(Duration::from_secs(2)),
+                        reply_timeout,
                     )
                     .await
             };
@@ -674,13 +714,17 @@ impl SessionServiceImpl {
 
     pub(in crate::application) async fn engage_cluster_entity_gates(
         &self,
-        domain: &DomainName,
-        relays: &[RelayName],
-        affected_entities: &[NodeRef],
-        purpose: EntityGatePurpose,
+        scope: ClusterEntityGateScope<'_>,
         deadline: nervix_primitives::time::Instant,
         impact: Option<(&TransactionStepImpactRecorder, PauseRequirement)>,
     ) -> Result<ClusterEntityGate, Report<DomainAlterError>> {
+        let ClusterEntityGateScope {
+            domain,
+            relays,
+            affected_entities,
+            purpose,
+            ..
+        } = scope;
         let ingestors = affected_entities
             .iter()
             .filter(|entity| entity.kind == ModelKind::Ingestor)
@@ -691,14 +735,7 @@ impl SessionServiceImpl {
             || ingestors.is_empty()
         {
             return self
-                .engage_cluster_entity_gate_scope(
-                    domain,
-                    relays,
-                    affected_entities,
-                    purpose,
-                    deadline,
-                    impact,
-                )
+                .engage_cluster_entity_gate_scope(scope, deadline, impact)
                 .await;
         }
 
@@ -723,15 +760,13 @@ impl SessionServiceImpl {
             _ => None,
         };
         let intake_recorder = intake_impact.as_ref().map(|(recorder, _)| *recorder);
+        let intake_scope = ClusterEntityGateScope {
+            relays: &[],
+            affected_entities: &ingestors,
+            ..scope
+        };
         let intake_gate = self
-            .engage_cluster_entity_gate_scope(
-                domain,
-                &[],
-                &ingestors,
-                purpose,
-                deadline,
-                intake_impact,
-            )
+            .engage_cluster_entity_gate_scope(intake_scope, deadline, intake_impact)
             .await?;
         if let Err(error) = self
             .wait_for_cluster_entity_drain(&intake_gate, &[], &ingestors, purpose, &[], deadline)
@@ -752,14 +787,7 @@ impl SessionServiceImpl {
 
         let recorder = impact.as_ref().map(|(recorder, _)| *recorder);
         let gate = match self
-            .engage_cluster_entity_gate_scope(
-                domain,
-                relays,
-                affected_entities,
-                purpose,
-                deadline,
-                impact,
-            )
+            .engage_cluster_entity_gate_scope(scope, deadline, impact)
             .await
         {
             Ok(gate) => gate,
@@ -786,27 +814,41 @@ impl SessionServiceImpl {
         Ok(gate)
     }
 
+    /// The nodes a gate engages, in name order: the available nodes and the coordinator itself,
+    /// kept only where `participants` names them.
+    async fn entity_gate_nodes(
+        &self,
+        participants: EntityGateParticipants<'_>,
+    ) -> BTreeSet<ClusterNodeName> {
+        let mut nodes = self
+            .available_node_ids()
+            .await
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        nodes.insert(self.inner.consensus.local_node_id().clone());
+        if let EntityGateParticipants::AvailableAmong(participants) = participants {
+            nodes.retain(|node| participants.contains(node));
+        }
+        nodes
+    }
+
     async fn engage_cluster_entity_gate_scope(
         &self,
-        domain: &DomainName,
-        relays: &[RelayName],
-        affected_entities: &[NodeRef],
-        purpose: EntityGatePurpose,
+        scope: ClusterEntityGateScope<'_>,
         deadline: nervix_primitives::time::Instant,
         impact: Option<(
             &TransactionStepImpactRecorder,
             nervix_models::PauseRequirement,
         )>,
     ) -> Result<ClusterEntityGate, Report<DomainAlterError>> {
-        let mut nodes = self.available_node_ids().await;
-        if !nodes
-            .iter()
-            .any(|node| node == self.inner.consensus.local_node_id())
-        {
-            nodes.push(self.inner.consensus.local_node_id().clone());
-        }
-        nodes.sort();
-        nodes.dedup();
+        let ClusterEntityGateScope {
+            domain,
+            relays,
+            affected_entities,
+            purpose,
+            participants,
+        } = scope;
+        let nodes = self.entity_gate_nodes(participants).await;
         let coordination = self
             .inner
             .interconnect
@@ -1410,5 +1452,79 @@ mod tests {
             .deadline();
         service.inner.service_tasks.shut_down(deadline).await;
         std::fs::remove_dir_all(path).assured("the test database is removed after cleanup");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_gate_that_names_its_participants_asks_no_other_node_to_hold_it() {
+        use meticulous::ResultExt as _;
+
+        use super::super::test_fixtures::named;
+
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        let domain: DomainName = named("default");
+        let coordinator = service.inner.consensus.local_node_id().clone();
+        let unavailable_peer: ClusterNodeName = named("unavailable_peer");
+        let deadline = nervix_primitives::time::Instant::now() + Duration::from_secs(30);
+
+        // The coordinator is not a participant, and the participant it names is not available.
+        let elsewhere = BTreeSet::from([unavailable_peer.clone()]);
+        let gate = service
+            .engage_cluster_entity_gates(
+                ClusterEntityGateScope {
+                    domain: &domain,
+                    relays: &[],
+                    affected_entities: &[],
+                    purpose: EntityGatePurpose::OwnershipHandoff,
+                    participants: EntityGateParticipants::AvailableAmong(&elsewhere),
+                },
+                deadline,
+                None,
+            )
+            .await
+            .assured("a gate with no available participant engages nothing that can refuse it");
+        assert!(gate.nodes().is_empty());
+        assert!(
+            !service
+                .inner
+                .runtime
+                .entity_gate_operation_is_held(&gate.coordination)
+        );
+
+        let coordinator_and_elsewhere = BTreeSet::from([coordinator.clone(), unavailable_peer]);
+        let gate = service
+            .engage_cluster_entity_gates(
+                ClusterEntityGateScope {
+                    domain: &domain,
+                    relays: &[],
+                    affected_entities: &[],
+                    purpose: EntityGatePurpose::OwnershipHandoff,
+                    participants: EntityGateParticipants::AvailableAmong(
+                        &coordinator_and_elsewhere,
+                    ),
+                },
+                deadline,
+                None,
+            )
+            .await
+            .assured("the coordinator engages the empty scope on itself");
+        assert_eq!(gate.nodes(), vec![coordinator]);
+        assert!(
+            service
+                .inner
+                .runtime
+                .entity_gate_operation_is_held(&gate.coordination)
+        );
+        service
+            .release_cluster_entity_gates_and_wait_recording(gate, None)
+            .await
+            .assured("the coordinator releases the gate it holds on itself");
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).assured("the test database is removed after the test");
     }
 }

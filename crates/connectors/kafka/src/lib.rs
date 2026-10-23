@@ -3,12 +3,12 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Kafka consumer and producer configuration, source polling and offset handling,
-//!   consumer retirement off the async workers, record and header publication, native queue
-//!   capacity and admission backpressure, delivery-report classification, the records the producer
-//!   holds until their delivery reports are served, the delivery bound a confirmed publish gives
-//!   the producer, and producer queue shutdown.
-//! - **Depends on.** The connector contract and its confirmation window, vocabulary values,
-//!   `error-stack`, Tokio, and `rust-rdkafka`.
+//!   consumer and producer retirement off the async workers, record and header publication, native
+//!   queue capacity and admission backpressure, delivery-report classification, the records the
+//!   producer holds until their delivery reports are served, the delivery bound a confirmed publish
+//!   gives the producer, and producer queue shutdown.
+//! - **Depends on.** The connector contract and its confirmation window, vocabulary values, the
+//!   bounded executor, `error-stack`, Tokio, and `rust-rdkafka`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
@@ -29,6 +29,7 @@
 pub use rdkafka as testing_rdkafka;
 
 mod delivery;
+mod retirement;
 mod source;
 
 use std::{
@@ -51,7 +52,8 @@ use nervix_connector::{
     SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord,
     SinkRecordId, SinkStartError, SinkStartResult,
 };
-use nervix_models::{ClientConfigEntry, KafkaTopicName};
+use nervix_execution::Executor;
+use nervix_models::{ClientConfigEntry, ConnectorKind, KafkaTopicName};
 use nervix_primitives::{
     sync::oneshot,
     time::{Instant, sleep, timeout_at},
@@ -62,6 +64,7 @@ use rdkafka::{
     message::{Header as KafkaHeader, OwnedHeaders},
     producer::{BaseRecord, Producer, ThreadedProducer},
 };
+use retirement::{NativeClient, RetirementCharge, Retiring};
 pub use source::{
     KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
     KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit,
@@ -110,8 +113,22 @@ pub struct KafkaSinkConfig {
     pub mode: BrokerPublishingMode,
 }
 
+/// The librdkafka producer a Kafka sink publishes through.
+type KafkaProducer = ThreadedProducer<KafkaProducerContext>;
+
+/// Destroying a producer is native work that waits. rust-rdkafka first stops the producer's
+/// polling thread, which finishes its current poll of up to 100 milliseconds and any delivery
+/// callback it is serving. It then purges the records the producer still queues or has in flight
+/// and flushes for up to 500 milliseconds so their reports are served, and librdkafka joins its
+/// threads last.
+impl NativeClient for KafkaProducer {
+    const DESTRUCTION: &'static str = "destroying a retired Kafka producer";
+}
+
 pub struct KafkaSink {
-    producer: ThreadedProducer<KafkaProducerContext>,
+    /// Shared with the flush a finish runs on the runtime's blocking pool, which keeps the producer
+    /// until librdkafka's flush returns, and whichever lets it go last retires it.
+    producer: Retiring<KafkaProducer>,
     topic: KafkaTopicName,
     mode: BrokerPublishingMode,
     /// librdkafka's validated payload-byte capacity, resolved once with the producer's config.
@@ -123,6 +140,19 @@ pub struct KafkaSink {
         )
     )]
     queue_capacity_bytes: NonZeroU64,
+}
+
+/// Why a Kafka sink could not create its producer, beneath the sink's start failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+enum KafkaProducerStartError {
+    /// The node's commands budget has no room for the charge of the job that will destroy the
+    /// producer, so the producer is not created. The refusal judged nothing, so the host starts the
+    /// sink again after its retry delay.
+    #[error(
+        "the {connector} producer cannot reserve the job that will destroy it",
+        connector = ConnectorKind::Kafka
+    )]
+    RetirementAdmission,
 }
 
 /// Why a full native queue could not provide a place after every current-window answer settled.
@@ -214,10 +244,10 @@ impl Future for KafkaAnswer {
 }
 
 impl KafkaSink {
-    pub fn new(config: KafkaSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
+    pub fn new(config: KafkaSinkConfig, host: SinkHost) -> SinkStartResult<Self> {
         let producer_config = Self::producer_config(&config.config, config.mode)?;
         let queue_capacity_bytes = Self::producer_queue_capacity(&producer_config)?;
-        let producer = Self::create_producer(&producer_config)?;
+        let producer = Self::create_producer(&producer_config, host.executor())?;
         Ok(Self {
             producer,
             topic: config.topic,
@@ -304,11 +334,24 @@ impl KafkaSink {
         Ok(config)
     }
 
+    /// Creates the producer `config` describes, taking the charge of the job that will destroy it
+    /// on `executor` first.
     fn create_producer(
         config: &ClientConfig,
-    ) -> SinkStartResult<ThreadedProducer<KafkaProducerContext>> {
+        executor: Executor,
+    ) -> SinkStartResult<Retiring<KafkaProducer>> {
+        let retirement = match RetirementCharge::reserve(executor) {
+            Ok(retirement) => retirement,
+            Err(refused) => {
+                let refused = refused.change_context(KafkaProducerStartError::RetirementAdmission);
+                let description = format!("{refused:#}");
+                return Err(refused
+                    .change_context(SinkStartError::Initialize { sink: KAFKA })
+                    .attach_printable(description));
+            }
+        };
         match config.create_with_context(KafkaProducerContext::new()) {
-            Ok(producer) => Ok(producer),
+            Ok(producer) => Ok(retirement.hold(producer)),
             Err(error) => {
                 let description = error.to_string();
                 Err(Report::new(error)
@@ -530,10 +573,7 @@ impl KafkaSink {
     /// that instant keeps lingering, and a loaded node reaches the deadline with every record still
     /// queued. This waits inside librdkafka's flush instead, one step at a time, while the
     /// producer's polling thread takes the delivery reports that let the flush end.
-    fn flush_until(
-        producer: &ThreadedProducer<KafkaProducerContext>,
-        deadline: Instant,
-    ) -> Result<(), KafkaError> {
+    fn flush_until(producer: &KafkaProducer, deadline: Instant) -> Result<(), KafkaError> {
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
@@ -586,6 +626,9 @@ impl SinkLifecycle for KafkaSink {
     ///
     /// The outcome counts records alone, each until librdkafka serves its delivery report, and never
     /// the events waiting in the producer's queue beside them.
+    ///
+    /// The flush holds a handle of its own, so a flush that outlives this finish keeps the producer
+    /// until librdkafka's flush returns, and retires it if the sink is gone by then.
     async fn finish(&mut self, deadline: Instant) -> SinkFinishResult {
         if self.retained_records() == 0 {
             return Ok(SinkFinish::NothingHeld);
@@ -951,3 +994,18 @@ mod tests {
 )]
 #[path = "publish_tests.rs"]
 mod publish_tests;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod retirement_tests;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "sink_retirement_tests.rs"]
+mod sink_retirement_tests;

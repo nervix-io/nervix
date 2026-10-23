@@ -60,6 +60,9 @@ use crate::{
     runtime::LocalGraphDrainOutcome,
 };
 
+mod settings;
+pub use settings::{ReplicaCount, SchedulingSettings};
+
 /// How long automatic scheduling waits, after this process's reconciliation starts, to observe
 /// every voter live before treating an unobserved voter as failed.
 ///
