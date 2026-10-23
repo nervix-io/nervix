@@ -96,8 +96,8 @@ pub(in crate::application) fn parse_human_bytes(
 /// it exactly, such as `250ms`, `1500ms` or `15m`.
 ///
 /// Help output prints a default through this rendering, and [`parse_human_duration`] reads every
-/// rendering back to the same duration. A duration whose count of its unit does not fit a 64-bit
-/// number is written as its whole seconds and its remaining nanoseconds.
+/// rendering back to the same duration. A fractional duration whose subsecond span exceeds the
+/// parser's 64-bit nanosecond accumulator is written as whole seconds and remaining nanoseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HumanDuration(pub Duration);
 
@@ -121,6 +121,11 @@ impl fmt::Display for HumanDuration {
         for (suffix, unit) in DURATION_UNITS {
             if !nanos.is_multiple_of(unit) {
                 continue;
+            }
+            // An exact unit of a fractional duration is subsecond. The parser multiplies its
+            // count into u64 nanoseconds before carrying whole seconds.
+            if self.0.subsec_nanos() != 0 && u64::try_from(nanos).is_err() {
+                break;
             }
             let Ok(count) = u64::try_from(nanos / unit) else {
                 break;

@@ -774,8 +774,9 @@ pub trait SinkGeneralErrorHandler: Send + Sync + 'static {
     fn handle_general_error(&self, acks: &SinkAcknowledgements, reason: String);
 }
 
-/// The node's bounded executor, through which a connector admits the synchronous filesystem work
-/// it does itself, such as writing and reading the files it stages.
+/// The node's bounded executor, through which a connector admits the synchronous work it does
+/// itself, such as writing and reading the files it stages or destroying a native client whose
+/// destruction waits.
 #[cfg_attr(
     nervix_lint,
     nervix::context(

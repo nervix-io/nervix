@@ -91,15 +91,17 @@ pre-engagement failure or higher after recorded recovery expansion.
 | `DOMAIN_PAUSE` | The owning domain | Stop domain intake and generators and drain all attached execution work before publication. |
 
 The pause requirement is a typed `NO_PAUSE`, `SUBGRAPH`, or `DOMAIN` value. The displayed level is
-derived from that value, so a domain level cannot carry an entity-only scope. An entity gate is
-installed on every live node for the affected relay and branch coverage. The planner includes
-downstream consumers and every member of an affected hard placement group. Engaging any entity
-gate also requests a force flush of the full current execution graph; **force-flushed work is not
-the set of paused entities**. A domain pause covers all execution nodes on both sides of the
-change. [Data Plane](./data-plane.md) explains the runtime work these gates protect;
-[Control Plane](./control-plane.md#alter-lock-and-quiesce-classification) lists the model changes
-that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its external-source
-behavior under a hold; it is distinct from the step's quiesce level.
+derived from that value, so a domain level cannot carry an entity-only scope. A model change's
+entity gate is installed on every live node for the affected relay and branch coverage. An
+ownership-handoff gate is installed on the live nodes that run part of the moved unit's boundary,
+as [Control Plane](./control-plane.md#planned-ownership-handoffs-and-failover) defines them. The
+planner includes downstream consumers and every member of an affected hard placement group.
+Engaging any entity gate also requests a force flush of the full current execution graph;
+**force-flushed work is not the set of paused entities**. A domain pause covers all execution nodes
+on both sides of the change. [Data Plane](./data-plane.md) explains the runtime work these gates
+protect; [Control Plane](./control-plane.md#alter-lock-and-quiesce-classification) lists the model
+changes that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its
+external-source behavior under a hold; it is distinct from the step's quiesce level.
 
 A [client ingestor](./ingestors.md#client-ingestors) under a hold suspends admission: its producers
 are told admission is suspended, batches that were queued but not admitted are refused as

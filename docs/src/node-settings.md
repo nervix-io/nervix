@@ -147,6 +147,11 @@ settings involved and their values, such as
 `drain-timeout (60s) must not exceed shutdown-timeout (50s)`. The defaults satisfy every
 relationship, and the assertions that keep them doing so remain beside them.
 
+Rendered duration options preserve every nanosecond. Compact values use the largest exact unit,
+such as `250ms` or `15m`; a large fractional value uses whole seconds and remaining nanoseconds,
+such as `169112806400s 601538000ns`. These values read back unchanged when settings are reapplied
+or another option is overridden.
+
 ## Rolling Changes
 
 A cluster remains correct while two setting values coexist during a rolling restart in any
