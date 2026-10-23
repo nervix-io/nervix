@@ -8,10 +8,10 @@
 //! - **Must not know.** What a step asserts about a message, or how another broker is observed.
 //!
 //! The NATS client reads what the server delivers into the subscription's own buffer on a task of
-//! its own, so a step takes its messages straight from that buffer: one poll of the runner task
-//! takes as many buffered messages as that poll's budget allows. Every running scenario shares the
-//! runner task, so a step that waited on another task for each message would wait once per message
-//! for the runner task to come back to it.
+//! its own, so the observer takes messages straight from that buffer: one poll of its caller
+//! takes as many buffered messages as that poll's budget allows. Bounded broker sequence
+//! assertions own an independent observation task, so their drain does not wait for Cucumber to
+//! finish polling its other scenarios. There is no second forwarding task or channel per message.
 
 use std::io;
 
