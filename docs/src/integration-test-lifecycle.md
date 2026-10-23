@@ -645,6 +645,14 @@ into one input batch. Each route sorts the rows buffered at its own flush; separ
 do not establish a single sorting window. The one-node and three-node examples retain their exact
 ordered payloads, tenant keys, and existing flush and receive deadlines.
 
+Redis burst fixtures observe subscriber readiness and then submit all publications as one driver
+pipeline. Every reply must report a subscriber; a partially accepted burst fails without replay.
+This keeps the bounded-intake scenario's 256 publications inside its held entity gate without
+requiring 256 separately scheduled request/reply round trips. The scenario retains its 30-second
+gate deadline, exact BUFFER and DROP counters, and observation budgets. The scripted harness peer
+withholds every publication reply until it has received the complete burst, checking the same
+pipeline owner used by the public step.
+
 The combined message/duration window outline publishes each message-threshold group as one
 decoded batch, interleaving two branches and checking their exact counts, sums and keys. After
 observing both outputs, it publishes one row per branch and measures each duration output from
@@ -2191,7 +2199,7 @@ scenarios in one process, their nodes contended on it and missed startup and req
 that a plain diagnostic build of the same scenarios met.
 [Two Stressed Scenarios In One Process](#two-stressed-scenarios-in-one-process) records what made
 them miss. `deloxide-stress` runs the active-only selection's probes, conformance checks and
-owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 102
+owner tests with the disturbance, the probe that proves it, the `stress-scenarios` invocation of 110
 lifecycle scenario runs tagged `@deloxide_stress`, bounded at 45 minutes, and the
 `stress-paced-simulation` invocation of the 36 paced-driver runs with the stressed Rust driver,
 bounded at 40. The six transaction-retention and ten endpoint ACK examples run in separate serial
