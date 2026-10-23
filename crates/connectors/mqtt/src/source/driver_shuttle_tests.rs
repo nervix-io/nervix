@@ -6,8 +6,8 @@
 //!   the connection's end and the source's acknowledgement: an acknowledgement returns only once
 //!   the event loop wrote every acknowledgement it requested, it never waits on a driver that
 //!   stopped polling and fails only when the driver cannot poll before the source reads again, and
-//!   every publish the broker delivered reaches the source exactly once and in order until the
-//!   connection ends.
+//!   admitted publishes retain packet order, and a discarded publish's acknowledgement and size
+//!   outcome survive cancellation exactly once without losing its ordinary neighbours.
 //! - **Depends on.** The connection and its driver, a fake event loop that writes the
 //!   acknowledgements the source requested ahead of what it reads, as the client's does, and the
 //!   model harness's Shuttle runner.
@@ -18,17 +18,31 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use std::{io, num::NonZeroUsize};
+use std::{
+    io,
+    num::{NonZeroU16, NonZeroUsize},
+    time::Duration,
+};
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_connector::{
+    SourceBatch, SourceBatchRequest, SourceMessage as _, SourceReadCancellation,
+};
 use nervix_model_harness::shuttle::check_interleavings;
-use nervix_primitives::{sync::mpsc, task::JoinHandle};
+use nervix_primitives::{
+    sync::{Arc, mpsc},
+    task::JoinHandle,
+};
 use rumqttc::{
-    ClientError, ConnectionError, Event, Incoming, Outgoing, PubAck, Publish, QoS, Request,
+    ClientError, ConnectionError, Event, Incoming, ManualAck, Outgoing, PubAck, Publish, QoS,
+    Request,
 };
 
 use super::{AcknowledgementRequests, ConnectionEvents, MqttConnection};
-use crate::source::{MqttSourceError, MqttSourcePosition, PublishRead as _};
+use crate::source::{
+    MqttSource, MqttSourceError, MqttSourcePosition, PublishRead as _, PublishReadOutcome,
+    SourceAcknowledgement,
+};
 
 const CHECK_TASK_JOINS: &str =
     "a check task that panics fails the execution before its join returns";
@@ -77,11 +91,14 @@ struct FakeClient {
 }
 
 impl AcknowledgementRequests for FakeClient {
-    async fn request(&self, publish: &Publish) -> Result<(), ClientError> {
-        self.requests.send(publish.pkid).map_err(|_| {
+    async fn request(&self, acknowledgement: &ManualAck) -> Result<(), ClientError> {
+        let packet_id = match acknowledgement {
+            ManualAck::PubAck(ack) => ack.pkid,
+            ManualAck::PubRec(rec) => rec.pkid,
+        };
+        self.requests.send(packet_id).map_err(|_| {
             ClientError::RequestChannelDisconnected(Box::new(Request::PubAck(PubAck::new(
-                publish.pkid,
-                None,
+                packet_id, None,
             ))))
         })
     }
@@ -121,10 +138,19 @@ fn connection(
         deliveries: delivered,
         written,
     };
-    let read_ahead = NonZeroUsize::new(read_ahead).assured("a check's read-ahead holds a publish");
+    let read_ahead =
+        u16::try_from(read_ahead).assured("a check's read-ahead fits MQTT's Receive Maximum");
+    let read_ahead = NonZeroU16::new(read_ahead).assured("a check's read-ahead holds a publish");
     // The checks explore the driver's interleavings rather than its deadline, so the connection
     // keeps no keep-alive.
-    let connection = MqttConnection::start(FakeClient { requests }, events, read_ahead, None);
+    let connection = MqttConnection::start(
+        FakeClient { requests },
+        events,
+        SourceAcknowledgement::Manual {
+            receive_maximum: read_ahead,
+        },
+        None,
+    );
     (connection, deliveries, record)
 }
 
@@ -172,6 +198,10 @@ fn an_acknowledgement_returns_once_the_loop_wrote_every_acknowledgement_it_reque
                 .next_publish()
                 .await
                 .assured("a connection the broker keeps open fails no read");
+            let PublishReadOutcome::Message(publish) = publish else {
+                panic!("the ordinary fixture yields an admitted publish");
+            };
+            let publish = *publish;
             read.push(MqttSourcePosition { publish });
         }
         connection
@@ -194,6 +224,10 @@ fn an_acknowledgement_returns_once_the_loop_wrote_every_acknowledgement_it_reque
                 .next_publish()
                 .await
                 .assured("a connection the broker keeps open fails no read");
+            let PublishReadOutcome::Message(publish) = publish else {
+                panic!("the ordinary fixture yields an admitted publish");
+            };
+            let publish = *publish;
             ids.push(id(&publish));
         }
         assert_eq!(
@@ -219,6 +253,10 @@ fn an_acknowledgement_never_waits_on_a_driver_that_holds_a_publish_for_room() {
             .next_publish()
             .await
             .assured("a connection the broker keeps open fails no read");
+        let PublishReadOutcome::Message(first) = first else {
+            panic!("the ordinary fixture yields an admitted publish");
+        };
+        let first = *first;
 
         let acknowledged = connection
             .acknowledge(&[MqttSourcePosition { publish: first }])
@@ -270,6 +308,10 @@ fn an_acknowledgement_waits_on_a_driver_whose_held_publish_the_source_made_room_
                 .next_publish()
                 .await
                 .assured("a connection the broker keeps open fails no read");
+            let PublishReadOutcome::Message(publish) = publish else {
+                panic!("the ordinary fixture yields an admitted publish");
+            };
+            let publish = *publish;
             read.push(MqttSourcePosition { publish });
         }
 
@@ -288,6 +330,10 @@ fn an_acknowledgement_waits_on_a_driver_whose_held_publish_the_source_made_room_
             .next_publish()
             .await
             .assured("a connection the broker keeps open fails no read");
+        let PublishReadOutcome::Message(last) = last else {
+            panic!("the ordinary fixture yields an admitted publish");
+        };
+        let last = *last;
         let mut ids = Vec::new();
         for position in &read {
             ids.push(id(position.publish()));
@@ -311,6 +357,10 @@ fn an_acknowledgement_whose_connection_ends_fails_with_the_loss() {
             .next_publish()
             .await
             .assured("the broker delivered the publish before it closed the connection");
+        let PublishReadOutcome::Message(first) = first else {
+            panic!("the ordinary fixture yields an admitted publish");
+        };
+        let first = *first;
         // The broker's end closes once the delivery task returns it, at any point of the
         // acknowledgement.
         let closing = nervix_primitives::task::spawn(async move {
@@ -357,6 +407,120 @@ fn an_acknowledgement_whose_connection_ends_fails_with_the_loss() {
         }
         closing.await.assured(CHECK_TASK_JOINS);
     });
+}
+
+/// An ordinary prefix is acknowledged before its intervening discard starts. Cancellation of
+/// either read must preserve packet order, one discard ACK and one size outcome.
+fn a_cancelled_discard_preserves_acknowledgement_and_batch_order() {
+    shuttle::future::block_on(async {
+        let (mut connection, deliveries, mut record) = connection(8);
+        let mut oversized = publish(2, QoS::AtLeastOnce);
+        oversized.payload = vec![2; 20_480].into();
+        let broker = deliver(
+            deliveries,
+            vec![
+                publish(1, QoS::AtLeastOnce),
+                oversized,
+                publish(3, QoS::AtLeastOnce),
+            ],
+        );
+        let cancellation = Arc::new(SourceReadCancellation::new());
+        let host = nervix_primitives::task::spawn({
+            let cancellation = Arc::clone(&cancellation);
+            async move {
+                cancellation.cancel();
+            }
+        });
+        let request = SourceBatchRequest {
+            max_messages: NonZeroUsize::new(3)
+                .assured("the batch can gather the ordinary neighbours"),
+            batch_timeout: Some(Duration::from_secs(3_600)),
+        };
+        let first = MqttSource::read_batch(&mut connection, request, &cancellation)
+            .await
+            .assured("the broker keeps the connection open");
+        host.await.assured(CHECK_TASK_JOINS);
+        let prefix = match first {
+            SourceBatch::Messages(messages) | SourceBatch::Interrupted { gathered: messages } => {
+                messages
+            }
+            _ => panic!("the first packet is an ordinary publish"),
+        };
+        let prefix = if prefix.is_empty() {
+            match MqttSource::read_batch(&mut connection, request, &SourceReadCancellation::new())
+                .await
+                .assured("the uncancelled read takes the prefix")
+            {
+                SourceBatch::Messages(messages) => messages,
+                _ => panic!("the uncancelled batch ends at the discard"),
+            }
+        } else {
+            prefix
+        };
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(prefix[0].payload(), &[1]);
+        let positions = prefix
+            .iter()
+            .map(|message| message.position().clone())
+            .collect::<Vec<_>>();
+        connection
+            .acknowledge(&positions)
+            .await
+            .assured("both queued acknowledgements can be written");
+
+        let single = SourceBatchRequest {
+            max_messages: NonZeroUsize::MIN,
+            batch_timeout: None,
+        };
+        let discard_cancellation = Arc::new(SourceReadCancellation::new());
+        let host = nervix_primitives::task::spawn({
+            let cancellation = Arc::clone(&discard_cancellation);
+            async move {
+                cancellation.cancel();
+            }
+        });
+        let size = MqttSource::read_batch(&mut connection, single, &discard_cancellation)
+            .await
+            .assured("a discard read survives cancellation");
+        host.await.assured(CHECK_TASK_JOINS);
+        let size = match size {
+            SourceBatch::Interrupted { gathered } => {
+                assert!(gathered.is_empty());
+                MqttSource::read_batch(&mut connection, single, &SourceReadCancellation::new())
+                    .await
+                    .assured("the next read completes the retained discard")
+            }
+            size => size,
+        };
+        assert!(matches!(size, SourceBatch::Oversized { payloads } if payloads.get() == 1));
+        let mut writes = written(&mut record);
+        assert_eq!(
+            writes,
+            [1, 2],
+            "the ordinary prefix is acknowledged before the discard, which is counted only after \
+             its ACK is written"
+        );
+        let next = MqttSource::read_batch(&mut connection, single, &SourceReadCancellation::new())
+            .await
+            .assured("the following publish is retained");
+        let SourceBatch::Messages(messages) = next else {
+            panic!("the discard notification is delivered once");
+        };
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].payload(), &[3]);
+        connection
+            .acknowledge(&[messages[0].position().clone()])
+            .await
+            .assured("the following publish is acknowledged");
+        writes.extend(written(&mut record));
+        assert_eq!(writes, [1, 2, 3]);
+        drop(broker.await.assured(CHECK_TASK_JOINS));
+    });
+}
+
+#[test]
+fn shuttle_a_cancelled_discard_preserves_acknowledgement_and_batch_order() {
+    check_interleavings(a_cancelled_discard_preserves_acknowledgement_and_batch_order);
 }
 
 /// An acknowledgement returns only once the connection's event loop wrote every acknowledgement it

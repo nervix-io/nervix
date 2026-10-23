@@ -316,7 +316,8 @@ relay. Do not use them to scan across branches.
 - MQTT source client identities default to the domain and ingestor, with an instance suffix for
   multiple instances. Account for the broker state that input replacement and `DROP INGESTOR`
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
-  session lifetime and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
+  session lifetime, the separate raw-frame and admitted-publish bounds, oversized-payload counts
+  and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
 - Redis Pub/Sub separates message read-ahead from the byte-bound quiesce buffer. Check the client
   required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
   `BUFFER` or `DROP` policy in generated Plexus.

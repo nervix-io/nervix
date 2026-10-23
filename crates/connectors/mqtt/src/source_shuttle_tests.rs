@@ -31,7 +31,10 @@ use nervix_primitives::{
 };
 use rumqttc::{Publish, QoS};
 
-use super::{MqttSource, MqttSourceError, MqttSourceMessage, MqttSourceResult, PublishRead};
+use super::{
+    GatherPublishOutcome, MqttSource, MqttSourceError, MqttSourceMessage, MqttSourceResult,
+    PublishRead, PublishReadOutcome,
+};
 
 const CHECK_TASK_JOINS: &str =
     "a check task that panics fails the execution before its join returns";
@@ -50,12 +53,24 @@ struct DeliveredPublishes {
     publishes: mpsc::UnboundedReceiver<Publish>,
 }
 
-impl PublishRead for DeliveredPublishes {
-    async fn next_publish(&mut self) -> MqttSourceResult<Publish> {
+impl DeliveredPublishes {
+    async fn receive(&mut self) -> MqttSourceResult<Publish> {
         match self.publishes.recv().await {
             Some(publish) => Ok(publish),
             None => Err(Report::new(MqttSourceError::Receive)),
         }
+    }
+}
+
+impl PublishRead for DeliveredPublishes {
+    async fn next_publish(&mut self) -> MqttSourceResult<PublishReadOutcome> {
+        Ok(PublishReadOutcome::Message(Box::new(self.receive().await?)))
+    }
+
+    async fn gather_publish(&mut self) -> MqttSourceResult<GatherPublishOutcome> {
+        Ok(GatherPublishOutcome::Message(Box::new(
+            self.receive().await?,
+        )))
     }
 }
 
@@ -140,7 +155,7 @@ fn a_cancelled_read_hands_over_every_publish_the_broker_delivered(
             SourceBatch::Messages(messages) => (ids(&messages), false),
             SourceBatch::Interrupted { gathered } => (ids(&gathered), true),
             SourceBatch::Oversized { payloads } => {
-                panic!("an MQTT read drops no publish for its size, yet it dropped {payloads}")
+                panic!("this ordinary-publish fixture unexpectedly dropped {payloads}")
             }
             SourceBatch::ResumeRequired | SourceBatch::Closed => {
                 panic!("a read from a connection neither resumes nor closes")

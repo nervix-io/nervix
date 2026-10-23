@@ -23,8 +23,8 @@ use nervix_primitives::{
 use rumqttc::{Publish, QoS};
 
 use super::{
-    MqttSource, MqttSourceError, MqttSourceMessage, MqttSourcePlan, MqttSourceResult,
-    MqttSourceSettings, PublishRead,
+    GatherPublishOutcome, MqttSource, MqttSourceError, MqttSourceMessage, MqttSourcePlan,
+    MqttSourceResult, MqttSourceSettings, PublishRead, PublishReadOutcome,
 };
 use crate::{
     scripted_broker::{ScriptedBroker, ScriptedConnection},
@@ -48,13 +48,24 @@ struct DeliveredPublishes {
     publishes: mpsc::UnboundedReceiver<Publish>,
 }
 
-impl PublishRead for DeliveredPublishes {
-    async fn next_publish(&mut self) -> MqttSourceResult<Publish> {
+impl DeliveredPublishes {
+    async fn receive(&mut self) -> MqttSourceResult<Publish> {
         match self.publishes.recv().await {
             Some(publish) => Ok(publish),
-            // The check dropped its end: the connection is lost.
             None => Err(Report::new(MqttSourceError::Receive)),
         }
+    }
+}
+
+impl PublishRead for DeliveredPublishes {
+    async fn next_publish(&mut self) -> MqttSourceResult<PublishReadOutcome> {
+        Ok(PublishReadOutcome::Message(Box::new(self.receive().await?)))
+    }
+
+    async fn gather_publish(&mut self) -> MqttSourceResult<GatherPublishOutcome> {
+        Ok(GatherPublishOutcome::Message(Box::new(
+            self.receive().await?,
+        )))
     }
 }
 
@@ -94,7 +105,7 @@ impl Read {
             SourceBatch::Messages(messages) => Self::Completed(Self::ids(&messages)),
             SourceBatch::Interrupted { gathered } => Self::Interrupted(Self::ids(&gathered)),
             SourceBatch::Oversized { payloads } => {
-                panic!("an MQTT read drops no publish for its size, yet it dropped {payloads}")
+                panic!("this ordinary-publish fixture unexpectedly dropped {payloads}")
             }
             SourceBatch::ResumeRequired | SourceBatch::Closed => {
                 panic!("a read from a connection neither resumes nor closes")
@@ -379,65 +390,113 @@ async fn cancelled_reads_through_the_client_hand_over_every_publish_the_broker_s
     );
 }
 
-/// The control packet type of DISCONNECT.
-const DISCONNECT: u8 = 14;
+#[nervix_primitives::test]
+async fn oversized_publishes_are_counted_and_acknowledged_before_the_next_publish() {
+    for manual in [false, true] {
+        nervix_primitives::task::consume_budget().await;
+        let fixture = DnsFixture::start().await;
+        let broker = ScriptedBroker::start().await;
+        let mut plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+        if !manual {
+            plan.acknowledgement = super::SourceAcknowledgement::OnReceipt;
+        }
+        let (mut source, mut connection) = subscribed(&plan, &broker).await;
+        let maximum = usize::try_from(MQTT_SOURCE_MAXIMUM_PACKET_BYTES)
+            .assured("the declared admission bound fits the address space");
+        // The payload fills the admission bound, so its complete packet exceeds it.
+        connection.write_publish(1, &vec![b'x'; maximum]).await;
+        connection.write_publish(2, b"2").await;
 
-/// The reason code of a DISCONNECT that refuses a packet above the advertised maximum.
-const PACKET_TOO_LARGE: u8 = 0x95;
+        let cancellation = SourceReadCancellation::new();
+        let read = source.next_batch(request(8, Some(LONG_BATCH_TIMEOUT)), &cancellation);
+        let Ok(result) = timeout(OBSERVATION_BUDGET, read).await else {
+            panic!("the oversized publish was not consumed within {OBSERVATION_BUDGET:?}");
+        };
+        let batch = result.assured("a bounded oversized publish keeps its broker connection");
+        let SourceBatch::Oversized { payloads } = batch else {
+            panic!("the source reports the consumed oversized payload before ordinary messages");
+        };
+        assert_eq!(payloads.get(), 1);
+        let Ok(packet_id) = timeout(OBSERVATION_BUDGET, connection.read_puback()).await else {
+            panic!("the oversized publish's PUBACK was not written within {OBSERVATION_BUDGET:?}");
+        };
+        assert_eq!(packet_id, 1);
+
+        let messages = read_whole_batch(&mut source, 1).await;
+        assert_eq!(messages[0].payload(), b"2");
+        if manual {
+            source
+                .acknowledge(&positions(&messages))
+                .await
+                .assured("the connected source writes the ordinary publish's acknowledgement");
+        }
+        let Ok(packet_id) = timeout(OBSERVATION_BUDGET, connection.read_puback()).await else {
+            panic!("the ordinary publish's PUBACK was not written within {OBSERVATION_BUDGET:?}");
+        };
+        assert_eq!(packet_id, 2);
+    }
+}
 
 #[nervix_primitives::test]
-async fn a_packet_above_the_advertised_bound_ends_the_read_and_tells_the_broker() {
+async fn an_oversized_publish_splits_a_parallel_batch_without_losing_its_neighbours() {
     let fixture = DnsFixture::start().await;
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+    let plan = acknowledged_plan(
+        &broker.addr(),
+        fixture.dns.clone(),
+        nonzero_ext::nonzero!(3_u64),
+    );
     let (mut source, mut connection) = subscribed(&plan, &broker).await;
     let maximum = usize::try_from(MQTT_SOURCE_MAXIMUM_PACKET_BYTES)
-        .assured("the declared bound fits the address space");
-    // The payload alone fills the bound, so the packet around it exceeds it.
-    let oversize = ScriptedConnection::publish_packet(1, &vec![b'x'; maximum]);
-    connection.write(&oversize).await;
+        .assured("the declared admission bound fits the address space");
+    connection.write_publish(1, b"1").await;
+    connection.write_publish(2, &vec![b'x'; maximum]).await;
+    connection.write_publish(3, b"3").await;
 
     let cancellation = SourceReadCancellation::new();
-    let reading = source.next_batch(request(8, Some(LONG_BATCH_TIMEOUT)), &cancellation);
-    let Ok(read) = timeout(OBSERVATION_BUDGET, reading).await else {
-        panic!(
-            "a read that met a packet above the bound was still waiting after \
-             {OBSERVATION_BUDGET:?}"
-        );
+    let reading = source.next_batch(request(3, Some(LONG_BATCH_TIMEOUT)), &cancellation);
+    let Ok(result) = timeout(OBSERVATION_BUDGET, reading).await else {
+        panic!("the partial batch was not returned within {OBSERVATION_BUDGET:?}");
     };
+    let batch = result.assured("an oversized publish does not fail a partial batch");
+    let SourceBatch::Messages(first) = batch else {
+        panic!("the ordinary publish before the oversized one completes its partial batch");
+    };
+    assert_eq!(Read::ids(&first), vec![b'1']);
+    source
+        .acknowledge(&positions(&first))
+        .await
+        .assured("the first ordinary publish's acknowledgement is written");
+    let Ok(packet_id) = timeout(OBSERVATION_BUDGET, connection.read_puback()).await else {
+        panic!("the first ordinary acknowledgement did not reach the broker");
+    };
+    assert_eq!(packet_id, 1);
 
-    let Err(error) = read else {
-        panic!("a read that met a packet above the bound fails");
+    let batch = source
+        .next_batch(
+            request(3, Some(LONG_BATCH_TIMEOUT)),
+            &SourceReadCancellation::new(),
+        )
+        .await
+        .assured("the consumed oversized notification is retained");
+    let SourceBatch::Oversized { payloads } = batch else {
+        panic!("the next read reports the oversized publish exactly once");
     };
-    assert!(matches!(
-        error.current_context(),
-        SourceError::Read { connector: "mqtt" }
-    ));
-    let refused = error.downcast_ref::<MqttSourceError>();
-    let Some(MqttSourceError::PacketTooLarge {
-        packet_bytes,
-        maximum: advertised,
-    }) = refused
-    else {
-        panic!("the read names the packet above the bound: {refused:?}");
+    assert_eq!(payloads.get(), 1);
+    let Ok(packet_id) = timeout(OBSERVATION_BUDGET, connection.read_puback()).await else {
+        panic!("the oversized acknowledgement did not reach the broker");
     };
-    assert_eq!(*packet_bytes, oversize.len());
-    assert_eq!(u64::from(*advertised), MQTT_SOURCE_MAXIMUM_PACKET_BYTES);
-    assert!(
-        source.needs_resume(),
-        "a read whose packet ended its connection drops it, so the source resumes before it reads \
-         again"
-    );
-    let Ok((packet_type, body)) = timeout(OBSERVATION_BUDGET, connection.read_packet()).await
-    else {
-        panic!("the client told the broker nothing within {OBSERVATION_BUDGET:?}");
+    assert_eq!(packet_id, 2);
+    let last = read_whole_batch(&mut source, 1).await;
+    assert_eq!(Read::ids(&last), vec![b'3']);
+    source
+        .acknowledge(&positions(&last))
+        .await
+        .assured("the final ordinary publish's acknowledgement is written");
+    let Ok(packet_id) = timeout(OBSERVATION_BUDGET, connection.read_puback()).await else {
+        panic!("the final ordinary acknowledgement did not reach the broker");
     };
-    assert_eq!(packet_type, DISCONNECT);
-    assert_eq!(
-        body.first(),
-        Some(&PACKET_TOO_LARGE),
-        "the DISCONNECT tells the broker the packet was too large"
-    );
+    assert_eq!(packet_id, 3);
 }
 
 #[nervix_primitives::test]
