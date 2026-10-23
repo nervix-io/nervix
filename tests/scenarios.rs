@@ -31229,65 +31229,16 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
     let deadline = Instant::now() + duration;
     let observer = world
         .broker_observer
-        .as_mut()
+        .take()
         .expect("a broker observer must exist before assertion");
-    for expected_sequence in 1..=count {
-        nervix_primitives::task::consume_budget().await;
-        let now = Instant::now();
-        assert!(
-            now < deadline,
-            "timed out after receiving {} of {count} sequential broker messages; {}",
-            expected_sequence - 1,
-            observer.describe_client_receipts()
-        );
-        let message = observer
-            .try_next_message(deadline.saturating_duration_since(now))
-            .await
-            .expect("failed while waiting for sequential broker message")
-            .unwrap_or_else(|| {
-                panic!(
-                    "timed out waiting for broker message {expected_sequence} of {count}; {}",
-                    observer.describe_client_receipts()
-                )
-            });
-        let payload = serde_json::from_str::<serde_json::Value>(&message.payload)
-            .unwrap_or_else(|error| panic!("broker payload is not valid JSON: {error}"));
-        let actual_sequence = payload
-            .get(&field)
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or_else(|| {
-                panic!(
-                    "broker payload field '{field}' is not an unsigned integer: {}",
-                    message.payload
-                )
-            });
-        let expected_u64 = expected_sequence.arch_into();
-        assert_eq!(
-            actual_sequence,
-            expected_u64,
-            "broker messages were duplicated, lost, or reordered: expected sequence \
-             {expected_u64} but observed {actual_sequence} ({} messages behind, {} of {} consumed \
-             so far)",
-            actual_sequence.abs_diff(expected_u64),
-            expected_sequence,
-            count
-        );
-        assert_eq!(
-            message.headers, expected_headers,
-            "broker message {expected_sequence} headers changed"
-        );
-        world.last_broker_payload = Some(message.payload);
-        world.last_broker_headers = message.headers;
+    let observed = observer
+        .observe_sequence(deadline, count, field, expected_headers)
+        .await;
+    world.broker_observer = Some(observed.observer);
+    if let Some(last) = observed.last_message {
+        world.last_broker_payload = Some(last.payload);
+        world.last_broker_headers = last.headers;
     }
-
-    let duplicate = observer
-        .try_next_message(Duration::from_millis(500))
-        .await
-        .expect("failed while checking for a duplicate broker message");
-    assert!(
-        duplicate.is_none(),
-        "observed a duplicate broker message after the expected sequence: {duplicate:?}"
-    );
 }
 
 #[then(expr = "the observed broker does not receive a payload within {string}")]
