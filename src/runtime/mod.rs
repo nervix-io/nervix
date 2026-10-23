@@ -92,8 +92,8 @@ use nervix_models::{
 mod fixture_vocabulary {
     pub(super) use nervix_models::{
         ClusterSchedule, CreateClientHttp, CreateClientPrometheus, CreateClientRabbitMq,
-        CreateEmitter, CreateIngestor, CreateReingestor, CreateRelay, DomainSchedule,
-        EmitterPublishingMode, IngestSource, Model, OutputBranch, ScheduledNode, ScheduledNodes,
+        CreateEmitter, CreateIngestor, CreateReingestor, CreateRelay, DomainSchedule, IngestSource,
+        Model, OutputBranch, ScheduledNode, ScheduledNodes,
     };
 }
 #[cfg(test)]

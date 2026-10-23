@@ -103,7 +103,7 @@ branch fingerprint.
   to the registry's own validation.
 - A payload refused while a nested list value is being appended closes that list value inside the
   abandoned row, so its elements never become the first elements of the next row's list. The
-  payload-group property and the scenario outline **Kafka NO_ACK keeps the nested lists of a
+  payload-group property and the scenario outline **Kafka NO ACK keeps the nested lists of a
   collected ingest group exact when a `<wire_format>` message is refused inside one** retain that
   case.
 - `WIRE AVRO` preserves every float bit pattern. A top-level field holds a type an Avro wire type

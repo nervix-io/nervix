@@ -33,8 +33,8 @@ Feature: Fixed-format emitter batch envelopes
       CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = '{{sentry_dns_dsn}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER batched_sentry FROM errors
-        TO SENTRY sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      CREATE SENTRY EVENT EMITTER batched_sentry FROM errors
+        TO sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING sentry_batch_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 64KiB
@@ -97,8 +97,8 @@ Feature: Fixed-format emitter batch envelopes
       CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = '{{sentry_dns_dsn}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER batched_sentry FROM errors
-        TO SENTRY sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      CREATE SENTRY EVENT EMITTER batched_sentry FROM errors
+        TO sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING sentry_batch_codec
         INHERIT ALL
         BATCH MAX MESSAGES 2 MAX SIZE 2MiB
@@ -151,8 +151,8 @@ Feature: Fixed-format emitter batch envelopes
       CREATE SYSLOG CLIENT syslog_main CONFIG {
         'protocol' = 'udp', 'addr' = '{{syslog_emit_addr}}'
       };
-      CREATE EMITTER batched_syslog FROM events
-        TO SYSLOG syslog_main MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s
+      CREATE SYSLOG COLLECTOR EMITTER batched_syslog FROM events
+        TO syslog_main MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING syslog_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 64KiB
@@ -216,8 +216,8 @@ Feature: Fixed-format emitter batch envelopes
       CREATE SYSLOG CLIENT syslog_main CONFIG {
         'protocol' = 'udp', 'addr' = '{{syslog_emit_addr}}'
       };
-      CREATE EMITTER batched_syslog FROM events
-        TO SYSLOG syslog_main MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s
+      CREATE SYSLOG COLLECTOR EMITTER batched_syslog FROM events
+        TO syslog_main MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING syslog_codec
         INHERIT ALL
         BATCH MAX MESSAGES 2 MAX SIZE 128KiB
@@ -280,8 +280,8 @@ Feature: Fixed-format emitter batch envelopes
         'protocol' = 'tcp', 'addr' = '{{syslog_ingest_addr}}',
         'framing' = '<framing>'
       };
-      CREATE EMITTER batched_syslog FROM events
-        TO SYSLOG syslog_main MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s
+      CREATE SYSLOG COLLECTOR EMITTER batched_syslog FROM events
+        TO syslog_main MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING syslog_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 64KiB
@@ -364,8 +364,8 @@ Feature: Fixed-format emitter batch envelopes
           'tls_key_file' = '{{ syslog_tls }}/tls.key',
           'tls_ca_file' = '{{ syslog_tls }}/ca.crt'
         };
-      CREATE EMITTER batched_syslog FROM events
-        TO SYSLOG syslog_main MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s
+      CREATE SYSLOG COLLECTOR EMITTER batched_syslog FROM events
+        TO syslog_main MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING syslog_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 64KiB
@@ -420,19 +420,17 @@ Feature: Fixed-format emitter batch envelopes
         'protocol' = '<protocol>',
         'timeout_ms' = 5000
       };
-      CREATE EMITTER accepted_otel FROM events
-        TO OTEL otel_main LOGS
-          VALUES { 'time' = now(), 'body' = input.body }
+      CREATE OTEL LOGS EMITTER accepted_otel FROM events
+        TO otel_main
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'time' = now(), 'body' = input.body }
           ATTRIBUTES { 'event.seq' = input.seq }
           RESOURCE { 'service.name' = 'nervix-cucumber' }
-          SCOPE 'batch-test' VERSION '1.0'
-          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1KiB
+          SCOPE 'batch-test' VERSION '1.0' BATCH MAX MESSAGES 2 MAX SIZE 1KiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER accepted_otel_traces FROM events
-        TO OTEL otel_main TRACES
-          VALUES {
+      CREATE OTEL TRACES EMITTER accepted_otel_traces FROM events
+        TO otel_main
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
             'trace_id' = '00112233445566778899aabbccddeeff',
             'span_id' = '0011223344556677',
             'name' = input.body,
@@ -443,31 +441,25 @@ Feature: Fixed-format emitter batch envelopes
           }
           ATTRIBUTES { 'event.marker' = input.body }
           RESOURCE { 'service.name' = 'nervix-cucumber' }
-          SCOPE 'batch-test' VERSION '1.0'
-          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1KiB
+          SCOPE 'batch-test' VERSION '1.0' BATCH MAX MESSAGES 2 MAX SIZE 1KiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER accepted_otel_metrics FROM events
-        TO OTEL otel_main
+      CREATE OTEL METRICS EMITTER accepted_otel_metrics FROM events
+        TO otel_main
           METRIC 'nervix.test.batch.count' UNIT '1' DESCRIPTION 'Cucumber batch count'
           SUM MONOTONIC DELTA
-          VALUES { 'time' = now(), 'start_time' = now(), 'value' = input.seq }
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'time' = now(), 'start_time' = now(), 'value' = input.seq }
           ATTRIBUTES { 'event.marker' = input.body }
           RESOURCE { 'service.name' = 'nervix-cucumber' }
-          SCOPE 'batch-test' VERSION '1.0'
-          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1KiB
+          SCOPE 'batch-test' VERSION '1.0' BATCH MAX MESSAGES 2 MAX SIZE 1KiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER limited_otel FROM events
-        TO OTEL otel_main LOGS
-          VALUES { 'time' = now(), 'body' = input.body }
+      CREATE OTEL LOGS EMITTER limited_otel FROM events
+        TO otel_main
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'time' = now(), 'body' = input.body }
           ATTRIBUTES { 'event.seq' = input.seq }
           RESOURCE { 'service.name' = 'nervix-cucumber' }
-          SCOPE 'batch-test' VERSION '1.0'
-          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1B
+          SCOPE 'batch-test' VERSION '1.0' BATCH MAX MESSAGES 2 MAX SIZE 1B
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq, error_message = error.message

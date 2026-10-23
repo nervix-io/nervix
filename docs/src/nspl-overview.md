@@ -140,12 +140,12 @@ ALTER REORDERER <name>
   ADD|DROP|REPLACE ROUTE ...
   [, ...];
 
-ALTER EMITTER <name>
+ALTER <CONNECTOR> <ENTITY> EMITTER <name>
   ADD FROM <relay> [WHERE <expr>] |
   DROP FROM <relay> |
   ALTER FROM <relay> SET WHERE <expr> |
   ALTER FROM <relay> DROP WHERE |
-  SET TO <full sink clause including MODE> |
+  SET TO <complete entity body including MODE and payload> |
   SET MODE <transport-specific publishing mode body> |
   SET CLIENT <client> |
   SET ENCODE USING <codec> | DROP ENCODE |
@@ -208,7 +208,7 @@ ALTER WIRE JSON|CBOR|AVRO SCHEMA <name>
 ```
 
 Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`, `ALTER REORDERER`,
-`ALTER EMITTER`, `ALTER <CONNECTOR> <ENTITY> INGESTOR`, `ALTER REINGESTOR`, `ALTER GENERATOR`, or
+`ALTER <CONNECTOR> <ENTITY> EMITTER`, `ALTER <CONNECTOR> <ENTITY> INGESTOR`, `ALTER REINGESTOR`, `ALTER GENERATOR`, or
 `ALTER PLACEMENT` execute in written order. An ingestor's `ALTER` repeats the connector and entity
 the ingestor reads, such as `ALTER KAFKA TOPIC INGESTOR`, and never changes them. See
 [Streams And State](relay.md#altering-relays) for relay operations,
@@ -237,7 +237,7 @@ The rest of the graph is built with:
 - `CREATE JUNCTION`
 - `CREATE DEDUPLICATOR`
 - `CREATE REINGESTOR`
-- `CREATE EMITTER`
+- `CREATE <CONNECTOR> <ENTITY> EMITTER`
 - `CREATE PLACEMENT`
 - `CREATE HASH MAP`
 
@@ -405,7 +405,7 @@ This surface is available on:
 - `CREATE REINGESTOR`
 - `CREATE WASM PROCESSOR`
 - `CREATE WINDOW PROCESSOR`
-- `CREATE EMITTER`
+- `CREATE <CONNECTOR> <ENTITY> EMITTER`
 
 Every `TO` destination on a flush-based node requires `FLUSH EACH <duration> MAX BATCH SIZE
 <bytes>` or `FLUSH IMMEDIATE`; there are no hidden defaults. Each concrete output branch owns its
@@ -585,9 +585,9 @@ CREATE HTTP ENDPOINT INGESTOR notifications_in
 Another example showing nested conditions and chained calls:
 
 ```nspl
-CREATE EMITTER outbound
+CREATE KAFKA TOPIC EMITTER outbound
   FROM notifications
-  TO KAFKA kafka_main TOPIC notifications_out
+  TO kafka_main TOPIC 'notifications_out'
     MODE ACK PARALLEL MAX 1000 ACK TIMEOUT 30s
       RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING notification_codec

@@ -4,12 +4,11 @@ use std::{fmt::Debug, num::NonZeroU64, str::FromStr};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    BranchName, BuiltinFunctionName, ChannelName, ClientName, ClusterNodeName, CodecName,
-    CollectionName, CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainClockSkew,
-    DomainName, DotPolicy, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName,
-    IngestorName, JunctionName, LookupName, ModelName, PlacementName, QueueName, ReingestorName,
-    RelayName, ReordererName, RequestedResourceVersion, ResourceName, SchemaName,
-    SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName, UdfName, UserName,
+    BranchName, BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, CorrelatorName,
+    DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainName, DotPolicy, EmitterName,
+    EndpointName, FieldName, GeneratorName, InferencerName, IngestorName, JunctionName, LookupName,
+    ModelName, PlacementName, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
+    ResourceName, SchemaName, SignalingProtocolName, SubscriptionName, UdfName, UserName,
     VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 
@@ -48,7 +47,7 @@ const DELIMITER_NAMES: [&str; 12] = [
 /// Every keyword NSPL reads, statement and expression keywords alike, spelled as a name spells it:
 /// in lower case. `nervix-nspl` checks this list against the one lexer's keyword set, so a keyword
 /// the language adds is generated as a name as soon as it exists.
-pub const KEYWORDS: [&str; 366] = [
+pub const KEYWORDS: [&str; 368] = [
     "create",
     "delete",
     "add",
@@ -239,6 +238,10 @@ pub const KEYWORDS: [&str; 366] = [
     "delta",
     "cumulative",
     "collect",
+    "collector",
+    "event",
+    "metrics",
+    "push",
     "collection",
     "broker",
     "capacity",
@@ -274,7 +277,6 @@ pub const KEYWORDS: [&str; 366] = [
     "after",
     "ack",
     "no",
-    "no_ack",
     "jetstream",
     "parallel",
     "sequential",
@@ -359,7 +361,6 @@ pub const KEYWORDS: [&str; 366] = [
     "emitter",
     "encode",
     "emit",
-    "insert",
     "to",
     "do",
     "update",
@@ -443,11 +444,9 @@ macro_rules! spelled_like_any_word {
 spelled_like_any_word!(
     BranchName,
     BuiltinFunctionName,
-    ChannelName,
     ClientName,
     ClusterNodeName,
     CodecName,
-    CollectionName,
     CorrelatorName,
     DeduplicatorName,
     DomainName,
@@ -461,16 +460,12 @@ spelled_like_any_word!(
     LookupName,
     ModelName,
     PlacementName,
-    QueueName,
     ReingestorName,
     ReordererName,
     ResourceName,
     SchemaName,
     SignalingProtocolName,
-    SubjectName,
     SubscriptionName,
-    TableName,
-    TopicName,
     UdfName,
     UserName,
     VhostName,

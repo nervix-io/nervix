@@ -331,6 +331,7 @@ class InventoryTests(unittest.TestCase):
             "emitter-retained-payloads",
             "sqs-batch-requests",
             "iceberg-nested-datetime-staging",
+            "iceberg-table-projection",
             "sentry-prepared-envelopes",
             "http-request-heads",
             "mqtt-publish-packets",

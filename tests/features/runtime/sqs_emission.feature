@@ -1,5 +1,5 @@
 Feature: SQS emission
-  Scenario Outline: SQS emitter publishes JSON payloads from a relay
+  Scenario Outline: SQS QUEUE emitter publishes JSON payloads from a relay
     Given MQTT is running
     And SQS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -43,7 +43,7 @@ Feature: SQS emission
           'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
         };
-        CREATE EMITTER sqs_notifications FROM notifications TO SQS sqs_main QUEUE notifications_out_{{test_id}} MODE <publishing_mode> RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE SQS QUEUE EMITTER sqs_notifications FROM notifications TO sqs_main QUEUE 'notifications_out_{{test_id}}' MODE <publishing_mode> RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -123,9 +123,9 @@ Feature: SQS emission
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_notifications
+      CREATE SQS QUEUE EMITTER sqs_notifications
       FROM notifications
-      TO SQS sqs_main QUEUE sqs_batch_poison_{{test_id}}
+      TO sqs_main QUEUE 'sqs_batch_poison_{{test_id}}'
       MODE BATCH RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
@@ -208,9 +208,9 @@ Feature: SQS emission
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_notes
+      CREATE SQS QUEUE EMITTER sqs_notes
       FROM notes
-      TO SQS sqs_main QUEUE sqs_noncharacter_{{test_id}}
+      TO sqs_main QUEUE 'sqs_noncharacter_{{test_id}}'
       MODE <publishing_mode> RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING note_codec
       INHERIT ALL
@@ -292,9 +292,9 @@ Feature: SQS emission
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_orders
+      CREATE SQS QUEUE EMITTER sqs_orders
       FROM orders
-      TO SQS sqs_main QUEUE fifo_orders_{{test_id}}.fifo
+      TO sqs_main QUEUE 'fifo_orders_{{test_id}}.fifo'
       FIFO GROUP CASE
         WHEN now() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN input.tenant
         ELSE ''
@@ -379,9 +379,9 @@ Feature: SQS emission
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_orders
+      CREATE SQS QUEUE EMITTER sqs_orders
       FROM orders
-      TO SQS sqs_main QUEUE fifo_kept_{{test_id}}.fifo
+      TO sqs_main QUEUE 'fifo_kept_{{test_id}}.fifo'
       FIFO GROUP FROM BRANCH
       MODE BATCH RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING order_codec
@@ -467,9 +467,9 @@ Feature: SQS emission
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_orders
+      CREATE SQS QUEUE EMITTER sqs_orders
       FROM orders
-      TO SQS sqs_main QUEUE fifo_failed_{{test_id}}.fifo
+      TO sqs_main QUEUE 'fifo_failed_{{test_id}}.fifo'
       FIFO GROUP CASE
         WHEN input.sequence = (2 AS I64) THEN (input.sequence / (input.sequence - (2 AS I64))) AS STRING
         ELSE input.tenant

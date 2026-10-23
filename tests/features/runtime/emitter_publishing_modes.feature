@@ -75,134 +75,123 @@ Feature: Emitter publishing modes
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
 
-      CREATE EMITTER kafka_no_ack FROM outgoing
-        TO KAFKA kafka_main TOPIC kafka_no_ack
-          MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s
+      CREATE KAFKA TOPIC EMITTER kafka_no_ack FROM outgoing
+        TO kafka_main TOPIC 'kafka_no_ack'
+          MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER kafka_ack_sequential FROM outgoing
-        TO KAFKA kafka_main TOPIC kafka_ack_sequential
+      CREATE KAFKA TOPIC EMITTER kafka_ack_sequential FROM outgoing
+        TO kafka_main TOPIC 'kafka_ack_sequential'
           MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 20ms MAX 2s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER kafka_ack_parallel FROM outgoing
-        TO KAFKA kafka_main TOPIC kafka_ack_parallel
+      CREATE KAFKA TOPIC EMITTER kafka_ack_parallel FROM outgoing
+        TO kafka_main TOPIC 'kafka_ack_parallel'
           MODE ACK PARALLEL MAX 3 ACK TIMEOUT 3s RETRY POLICY BACKOFF 30ms MAX 3s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE EMITTER pulsar_no_ack FROM outgoing
-        TO PULSAR pulsar_main TOPIC pulsar_no_ack
-          MODE NO_ACK RETRY POLICY BACKOFF 40ms MAX 4s
+      CREATE PULSAR TOPIC EMITTER pulsar_no_ack FROM outgoing
+        TO pulsar_main TOPIC 'pulsar_no_ack'
+          MODE NO ACK RETRY POLICY BACKOFF 40ms MAX 4s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER pulsar_ack_parallel FROM outgoing
-        TO PULSAR pulsar_main TOPIC pulsar_ack_parallel
+      CREATE PULSAR TOPIC EMITTER pulsar_ack_parallel FROM outgoing
+        TO pulsar_main TOPIC 'pulsar_ack_parallel'
           MODE ACK PARALLEL MAX 5 ACK TIMEOUT 5s RETRY POLICY BACKOFF 50ms MAX 5s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE EMITTER rabbit_no_ack FROM outgoing
-        TO RABBITMQ rabbit_main QUEUE rabbit_no_ack
-          MODE NO_ACK RETRY POLICY BACKOFF 60ms MAX 6s
+      CREATE RABBITMQ QUEUE EMITTER rabbit_no_ack FROM outgoing
+        TO rabbit_main QUEUE 'rabbit_no_ack'
+          MODE NO ACK RETRY POLICY BACKOFF 60ms MAX 6s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER rabbit_ack_sequential FROM outgoing
-        TO RABBITMQ rabbit_main QUEUE rabbit_ack_sequential
+      CREATE RABBITMQ QUEUE EMITTER rabbit_ack_sequential FROM outgoing
+        TO rabbit_main QUEUE 'rabbit_ack_sequential'
           MODE ACK SEQUENTIAL ACK TIMEOUT 7s RETRY POLICY BACKOFF 70ms MAX 7s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE EMITTER mqtt_qos_zero FROM outgoing
-        TO MQTT mqtt_main TOPIC mqtt_qos_zero
+      CREATE MQTT TOPIC EMITTER mqtt_qos_zero FROM outgoing
+        TO mqtt_main TOPIC 'mqtt_qos_zero'
           MODE QOS 0 RETRY POLICY BACKOFF 80ms MAX 8s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER mqtt_qos_one FROM outgoing
-        TO MQTT mqtt_main TOPIC mqtt_qos_one
+      CREATE MQTT TOPIC EMITTER mqtt_qos_one FROM outgoing
+        TO mqtt_main TOPIC 'mqtt_qos_one'
           MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 9s RETRY POLICY BACKOFF 90ms MAX 9s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER mqtt_qos_two FROM outgoing
-        TO MQTT mqtt_main TOPIC mqtt_qos_two
+      CREATE MQTT TOPIC EMITTER mqtt_qos_two FROM outgoing
+        TO mqtt_main TOPIC 'mqtt_qos_two'
           MODE QOS 2 ACK PARALLEL MAX 10 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 10s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE EMITTER nats_no_ack FROM outgoing
-        TO NATS nats_main SUBJECT nats_no_ack
-          MODE NO_ACK RETRY POLICY BACKOFF 110ms MAX 11s
+      CREATE NATS SUBJECT EMITTER nats_no_ack FROM outgoing
+        TO nats_main SUBJECT 'nats_no_ack'
+          MODE NO ACK RETRY POLICY BACKOFF 110ms MAX 11s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER nats_jetstream FROM outgoing
-        TO NATS nats_main SUBJECT nats_jetstream
+      CREATE NATS SUBJECT EMITTER nats_jetstream FROM outgoing
+        TO nats_main SUBJECT 'nats_jetstream'
           MODE JETSTREAM ACK PARALLEL MAX 12 ACK TIMEOUT 12s RETRY POLICY BACKOFF 120ms MAX 12s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE EMITTER redis_no_ack FROM outgoing
-        TO REDIS PUBSUB redis_main CHANNEL redis_no_ack
-          MODE NO_ACK RETRY POLICY BACKOFF 130ms MAX 13s
+      CREATE REDIS PUBSUB EMITTER redis_no_ack FROM outgoing
+        TO redis_main CHANNEL 'redis_no_ack'
+          MODE NO ACK RETRY POLICY BACKOFF 130ms MAX 13s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER zeromq_no_ack FROM outgoing
-        TO ZEROMQ zeromq_main
-          MODE NO_ACK RETRY POLICY BACKOFF 140ms MAX 14s
+      CREATE ZEROMQ PUSH EMITTER zeromq_no_ack FROM outgoing
+        TO zeromq_main
+          MODE NO ACK RETRY POLICY BACKOFF 140ms MAX 14s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE EMITTER sqs_single FROM outgoing
-        TO SQS sqs_main QUEUE sqs_single
+      CREATE SQS QUEUE EMITTER sqs_single FROM outgoing
+        TO sqs_main QUEUE 'sqs_single'
           MODE SINGLE RETRY POLICY BACKOFF 150ms MAX 15s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER sqs_batch FROM outgoing
-        TO SQS sqs_main QUEUE sqs_batch
+      CREATE SQS QUEUE EMITTER sqs_batch FROM outgoing
+        TO sqs_main QUEUE 'sqs_batch'
           MODE BATCH RETRY POLICY BACKOFF 160ms MAX 16s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER sqs_fifo FROM tenant_outgoing
-        TO SQS sqs_main QUEUE sqs_fifo.fifo FIFO GROUP FROM BRANCH
+      CREATE SQS QUEUE EMITTER sqs_fifo FROM tenant_outgoing
+        TO sqs_main QUEUE 'sqs_fifo.fifo' FIFO GROUP FROM BRANCH
           MODE SINGLE RETRY POLICY BACKOFF 165ms MAX 16s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER sentry_ack FROM outgoing
-        TO SENTRY sentry_main
+      CREATE SENTRY EVENT EMITTER sentry_ack FROM outgoing
+        TO sentry_main
           MODE ACK RETRY POLICY BACKOFF 170ms MAX 17s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      CREATE EMITTER clickhouse_ack FROM outgoing
-        TO CLICKHOUSE clickhouse_main INSERT TO TABLE clickhouse_events
-          VALUES { 'seq' = input.seq }
-          MODE ACK RETRY POLICY BACKOFF 180ms MAX 18s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE CLICKHOUSE TABLE EMITTER clickhouse_ack FROM outgoing
+        TO clickhouse_main TABLE 'clickhouse_events'
+          MODE ACK RETRY POLICY BACKOFF 180ms MAX 18s VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER postgres_ack FROM outgoing
-        TO POSTGRES postgres_main INSERT TO TABLE postgres_events
-          VALUES { 'seq' = input.seq }
-          MODE ACK RETRY POLICY BACKOFF 190ms MAX 19s
-        BATCH MAX MESSAGES 3 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER postgres_ack FROM outgoing
+        TO postgres_main TABLE 'postgres_events'
+          MODE ACK RETRY POLICY BACKOFF 190ms MAX 19s VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 3 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER mysql_ack FROM outgoing
-        TO MYSQL mysql_main INSERT TO TABLE mysql_events
-          VALUES { 'seq' = input.seq }
-          MODE ACK RETRY POLICY BACKOFF 200ms MAX 20s
-        BATCH MAX MESSAGES 4 MAX SIZE 1MiB
+      CREATE MYSQL TABLE EMITTER mysql_ack FROM outgoing
+        TO mysql_main TABLE 'mysql_events'
+          MODE ACK RETRY POLICY BACKOFF 200ms MAX 20s VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 4 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER mongodb_ack FROM outgoing
-        TO MONGODB mongodb_main INSERT TO COLLECTION mongodb_events
-          VALUES { 'seq' = input.seq }
-          MODE ACK RETRY POLICY BACKOFF 210ms MAX 21s
-        BATCH MAX MESSAGES 5 MAX SIZE 1MiB
+      CREATE MONGODB COLLECTION EMITTER mongodb_ack FROM outgoing
+        TO mongodb_main COLLECTION 'mongodb_events'
+          MODE ACK RETRY POLICY BACKOFF 210ms MAX 21s VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 5 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER iceberg_ack FROM outgoing
-        TO ICEBERG ON S3 object_store TABLE iceberg_events
-          VALUES { 'seq' = input.seq }
+      CREATE ICEBERG TABLE EMITTER iceberg_ack FROM outgoing
+        TO object_store TABLE 'iceberg_events'
           LOCATION 's3://nervix-iceberg/tables/publishing-modes-{{test_id}}'
-          CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 64MiB
-          MODE ACK RETRY POLICY BACKOFF 220ms MAX 22s
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+          CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY POLICY BACKOFF 220ms MAX 22s VALUES { 'seq' = input.seq } FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 
     When these NSPL commands are executed on the leader node
@@ -211,7 +200,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s
+      MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s
       """
     When these NSPL commands are executed on the leader node
       """
@@ -243,7 +232,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE NO_ACK RETRY POLICY BACKOFF 40ms MAX 4s
+      MODE NO ACK RETRY POLICY BACKOFF 40ms MAX 4s
       """
     When these NSPL commands are executed on the leader node
       """
@@ -259,7 +248,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE NO_ACK RETRY POLICY BACKOFF 60ms MAX 6s
+      MODE NO ACK RETRY POLICY BACKOFF 60ms MAX 6s
       """
     When these NSPL commands are executed on the leader node
       """
@@ -299,7 +288,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE NO_ACK RETRY POLICY BACKOFF 110ms MAX 11s
+      MODE NO ACK RETRY POLICY BACKOFF 110ms MAX 11s
       """
     When these NSPL commands are executed on the leader node
       """
@@ -315,7 +304,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE NO_ACK RETRY POLICY BACKOFF 130ms MAX 13s
+      MODE NO ACK RETRY POLICY BACKOFF 130ms MAX 13s
       """
     When these NSPL commands are executed on the leader node
       """
@@ -323,7 +312,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE NO_ACK RETRY POLICY BACKOFF 140ms MAX 14s
+      MODE NO ACK RETRY POLICY BACKOFF 140ms MAX 14s
       """
     When these NSPL commands are executed on the leader node
       """
@@ -347,7 +336,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      sink: SQS client=sqs_main queue=sqs_fifo.fifo fifo_group=FROM BRANCH
+      to: SQS QUEUE sqs_main QUEUE 'sqs_fifo.fifo' FIFO GROUP FROM BRANCH
       """
     When these NSPL commands are executed on the leader node
       """
@@ -375,7 +364,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      sink: CLICKHOUSE client=clickhouse_main table=clickhouse_events
+      to: CLICKHOUSE TABLE clickhouse_main TABLE 'clickhouse_events'
       batch: MAX MESSAGES 2 MAX SIZE 1MiB
       flush: FLUSH IMMEDIATE
       """
@@ -466,8 +455,8 @@ Feature: Emitter publishing modes
         'user' = 'default',
         'password' = 'nervix'
       };
-      CREATE EMITTER alter_fifo_group FROM tenant_outgoing
-        TO SQS sqs_main QUEUE alter_orders.fifo FIFO GROUP FROM BRANCH
+      CREATE SQS QUEUE EMITTER alter_fifo_group FROM tenant_outgoing
+        TO sqs_main QUEUE 'alter_orders.fifo' FIFO GROUP FROM BRANCH
           MODE SINGLE RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -475,114 +464,112 @@ Feature: Emitter publishing modes
 
     When these NSPL commands fail with "MODE"
       """
-      CREATE EMITTER missing_mode FROM outgoing
-        TO KAFKA kafka_main TOPIC missing_mode ENCODE USING event_codec
+      CREATE KAFKA TOPIC EMITTER missing_mode FROM outgoing
+        TO kafka_main TOPIC 'missing_mode' ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these NSPL commands fail with "RETRY POLICY"
       """
-      CREATE EMITTER missing_retry_policy FROM outgoing
-        TO KAFKA kafka_main TOPIC missing_retry_policy MODE NO_ACK ENCODE USING event_codec
+      CREATE KAFKA TOPIC EMITTER missing_retry_policy FROM outgoing
+        TO kafka_main TOPIC 'missing_retry_policy' MODE NO ACK ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these NSPL commands fail with "SEQUENTIAL"
       """
-      CREATE EMITTER missing_ack_window FROM outgoing
-        TO KAFKA kafka_main TOPIC missing_ack_window
+      CREATE KAFKA TOPIC EMITTER missing_ack_window FROM outgoing
+        TO kafka_main TOPIC 'missing_ack_window'
           MODE ACK ACK TIMEOUT 1s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these NSPL commands fail with "ACK TIMEOUT"
       """
-      CREATE EMITTER missing_ack_timeout FROM outgoing
-        TO KAFKA kafka_main TOPIC missing_ack_timeout
+      CREATE KAFKA TOPIC EMITTER missing_ack_timeout FROM outgoing
+        TO kafka_main TOPIC 'missing_ack_timeout'
           MODE ACK SEQUENTIAL RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these NSPL commands fail with "MAX"
       """
-      CREATE EMITTER incomplete_retry_policy FROM outgoing
-        TO KAFKA kafka_main TOPIC incomplete_retry_policy
-          MODE NO_ACK RETRY POLICY BACKOFF 10ms ENCODE USING event_codec
+      CREATE KAFKA TOPIC EMITTER incomplete_retry_policy FROM outgoing
+        TO kafka_main TOPIC 'incomplete_retry_policy'
+          MODE NO ACK RETRY POLICY BACKOFF 10ms ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these NSPL commands fail with "QOS"
       """
-      CREATE EMITTER foreign_mode FROM outgoing
-        TO KAFKA kafka_main TOPIC foreign_mode
+      CREATE KAFKA TOPIC EMITTER foreign_mode FROM outgoing
+        TO kafka_main TOPIC 'foreign_mode'
           MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these NSPL commands fail with "greater than zero"
       """
-      CREATE EMITTER empty_ack_window FROM outgoing
-        TO KAFKA kafka_main TOPIC empty_ack_window
+      CREATE KAFKA TOPIC EMITTER empty_ack_window FROM outgoing
+        TO kafka_main TOPIC 'empty_ack_window'
           MODE ACK PARALLEL MAX 0 ACK TIMEOUT 1s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these NSPL commands fail with "requires FIFO GROUP"
       """
-      CREATE EMITTER fifo_without_group FROM tenant_outgoing
-        TO SQS sqs_main QUEUE orders.fifo
+      CREATE SQS QUEUE EMITTER fifo_without_group FROM tenant_outgoing
+        TO sqs_main QUEUE 'orders.fifo'
           MODE SINGLE RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these NSPL commands fail with "ending in .fifo"
       """
-      CREATE EMITTER group_on_standard_queue FROM tenant_outgoing
-        TO SQS sqs_main QUEUE orders FIFO GROUP FROM BRANCH
+      CREATE SQS QUEUE EMITTER group_on_standard_queue FROM tenant_outgoing
+        TO sqs_main QUEUE 'orders' FIFO GROUP FROM BRANCH
           MODE SINGLE RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these NSPL commands fail with "requires branched input"
       """
-      CREATE EMITTER unbranched_fifo_group FROM outgoing
-        TO SQS sqs_main QUEUE orders.fifo FIFO GROUP FROM BRANCH
+      CREATE SQS QUEUE EMITTER unbranched_fifo_group FROM outgoing
+        TO sqs_main QUEUE 'orders.fifo' FIFO GROUP FROM BRANCH
           MODE SINGLE RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these NSPL commands fail with "requires branched input"
       """
-      CREATE EMITTER mixed_fifo_group FROM tenant_outgoing, outgoing
-        TO SQS sqs_main QUEUE mixed_orders.fifo FIFO GROUP FROM BRANCH
+      CREATE SQS QUEUE EMITTER mixed_fifo_group FROM tenant_outgoing, outgoing
+        TO sqs_main QUEUE 'mixed_orders.fifo' FIFO GROUP FROM BRANCH
           MODE SINGLE RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these NSPL commands fail with "requires branched input"
       """
-      ALTER EMITTER alter_fifo_group ADD FROM outgoing;
+      ALTER SQS QUEUE EMITTER alter_fifo_group ADD FROM outgoing;
       """
     When these NSPL commands fail with "exact non-sensitive STRING"
       """
-      CREATE EMITTER invalid_fifo_expression FROM tenant_outgoing
-        TO SQS sqs_main QUEUE orders.fifo FIFO GROUP input.seq
+      CREATE SQS QUEUE EMITTER invalid_fifo_expression FROM tenant_outgoing
+        TO sqs_main QUEUE 'orders.fifo' FIFO GROUP input.seq
           MODE BATCH RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these NSPL commands fail with "MODE"
       """
-      CREATE EMITTER fifo_on_kafka FROM outgoing
-        TO KAFKA kafka_main TOPIC fifo_on_kafka FIFO GROUP FROM BRANCH
-          MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s
+      CREATE KAFKA TOPIC EMITTER fifo_on_kafka FROM outgoing
+        TO kafka_main TOPIC 'fifo_on_kafka' FIFO GROUP FROM BRANCH
+          MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these NSPL commands fail with "BATCH MAX MESSAGES"
       """
-      CREATE EMITTER clickhouse_without_batch FROM outgoing
-        TO CLICKHOUSE clickhouse_main INSERT TO TABLE clickhouse_events
-          VALUES { 'seq' = input.seq }
-          MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
-        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE CLICKHOUSE TABLE EMITTER clickhouse_without_batch FROM outgoing
+        TO clickhouse_main TABLE 'clickhouse_events'
+          MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq } FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 
     Examples:
@@ -591,7 +578,7 @@ Feature: Emitter publishing modes
       | 3            |
 
   @emitter_set_publishing_mode
-  Scenario Outline: SET MODE replaces an emitter with ENTITY_PAUSE and rejects a foreign mode
+  Scenario Outline: SET MODE replaces the publishing policy with ENTITY_PAUSE
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -610,16 +597,16 @@ Feature: Emitter publishing modes
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER event_sink FROM outgoing
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+      CREATE ZEROMQ PUSH EMITTER event_sink FROM outgoing
+        TO sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     When these NSPL commands are executed on the leader node
       """
-      ALTER EMITTER event_sink
-        SET MODE NO_ACK RETRY POLICY BACKOFF 20ms MAX 200ms;
+      ALTER ZEROMQ PUSH EMITTER event_sink
+        SET MODE NO ACK RETRY POLICY BACKOFF 20ms MAX 200ms;
       """
     Then the last command output contains
       """
@@ -631,14 +618,8 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE NO_ACK RETRY POLICY BACKOFF 20ms MAX 200ms
+      MODE NO ACK RETRY POLICY BACKOFF 20ms MAX 200ms
       """
-    When these NSPL commands fail with "ZEROMQ"
-      """
-      ALTER EMITTER event_sink
-        SET MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 20ms MAX 200ms;
-      """
-
     Examples:
       | cluster_size |
       | 1            |
@@ -671,8 +652,8 @@ Feature: Emitter publishing modes
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER event_sink FROM outgoing
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+      CREATE ZEROMQ PUSH EMITTER event_sink FROM outgoing
+        TO sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -689,8 +670,8 @@ Feature: Emitter publishing modes
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
     When these NSPL commands fail with "timed out draining domain"
       """
-      ALTER EMITTER event_sink
-        SET MODE NO_ACK RETRY POLICY BACKOFF 20ms MAX 200ms;
+      ALTER ZEROMQ PUSH EMITTER event_sink
+        SET MODE NO ACK RETRY POLICY BACKOFF 20ms MAX 200ms;
       """
     Then the last command error contains
       """
@@ -702,7 +683,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+      MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
       """
     When emitter "event_sink" leaves stall mode
     Then within "5s" the observed broker receives payloads
@@ -711,8 +692,8 @@ Feature: Emitter publishing modes
       """
     When these NSPL commands are executed on the leader node
       """
-      ALTER EMITTER event_sink
-        SET MODE NO_ACK RETRY POLICY BACKOFF 20ms MAX 200ms;
+      ALTER ZEROMQ PUSH EMITTER event_sink
+        SET MODE NO ACK RETRY POLICY BACKOFF 20ms MAX 200ms;
       """
     Then the last command output contains
       """
@@ -724,7 +705,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE NO_ACK RETRY POLICY BACKOFF 20ms MAX 200ms
+      MODE NO ACK RETRY POLICY BACKOFF 20ms MAX 200ms
       """
 
     Examples:

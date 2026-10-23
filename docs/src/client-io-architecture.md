@@ -150,9 +150,9 @@ CREATE CLIENT PRODUCER INGESTOR submit_events
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED EMITTER receive_events
+CREATE ATTACHED CLIENT CONSUMER EMITTER receive_events
   FROM application_events
-  TO CLIENT SCHEMA application_output
+  TO SCHEMA application_output
     MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s
       RETRY POLICY BACKOFF 100ms MAX 2s
   INHERIT event_id, tenant, value
@@ -230,10 +230,10 @@ CREATE SCHEMA tenant_limit (maximum I64);
 CREATE RELAY tenant_limits
   SCHEMA tenant_limit BRANCHED BY by_tenant
   WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-CREATE ATTACHED EMITTER receive_bounded_events
+CREATE ATTACHED CLIENT CONSUMER EMITTER receive_bounded_events
   FROM application_events
   USING MATERIALIZED STATE tenant_limits DEFAULT { maximum = 1000 }
-  TO CLIENT SCHEMA application_output
+  TO SCHEMA application_output
     MODE ACK SEQUENTIAL ACK TIMEOUT 30s
       RETRY POLICY BACKOFF 100ms MAX 2s
   INHERIT event_id, tenant, value
