@@ -56,8 +56,8 @@ impl RedisPubSubIngestorStartPlan {
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,
             flush_each_intake: false,
-            // The client reads every published message into an unbounded queue of its own, so a
-            // held loop would grow the node's memory without limit.
+            // The bounded reader applies TCP backpressure when full. Keep polling so idle
+            // probes remain active instead of holding this loop at executor admission.
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
         }

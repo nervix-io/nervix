@@ -6325,7 +6325,75 @@ mod redis_client_tests {
     use redis::{AsyncCommands as _, Value};
     use tokio::io::AsyncWriteExt as _;
 
-    use crate::redis_client::{REDIS_REQUEST_BUDGET, TestRedisClient};
+    use crate::redis_client::{REDIS_REQUEST_BUDGET, TestRedisClient, publish_burst};
+
+    #[nervix_primitives::test]
+    async fn redis_bursts_send_every_publication_before_waiting_for_replies() {
+        for subscriber_disappears in [false, true] {
+            nervix_primitives::task::consume_budget().await;
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .assured("the regression can bind an ephemeral loopback port");
+            let address = listener.local_addr().assured("the listener has an address");
+            let server = nervix_primitives::task::spawn(async move {
+                let (mut stream, _) = listener.accept().await.assured("the client connects");
+                let mut decoder = Default::default();
+                for _ in 0..2 {
+                    nervix_primitives::task::consume_budget().await;
+                    redis::parse_redis_value_async(&mut decoder, &mut stream)
+                        .await
+                        .assured("the client sends its setup command");
+                    stream
+                        .write_all(b"+OK\r\n")
+                        .await
+                        .assured("the client is waiting for setup");
+                }
+                timeout(REDIS_REQUEST_BUDGET, async {
+                    for _ in 0..256 {
+                        nervix_primitives::task::consume_budget().await;
+                        let command = redis::parse_redis_value_async(&mut decoder, &mut stream)
+                            .await
+                            .assured("every publish arrives before the first reply");
+                        assert_eq!(
+                            command,
+                            Value::Array(vec![
+                                Value::BulkString(b"PUBLISH".to_vec()),
+                                Value::BulkString(b"notifications".to_vec()),
+                                Value::BulkString(b"payload".to_vec()),
+                            ])
+                        );
+                    }
+                })
+                .await
+                .assured("the entire burst arrives without needing individual replies");
+                let replies = (0..256).fold(Vec::new(), |mut replies, index| {
+                    replies.extend_from_slice(if subscriber_disappears && index == 1 {
+                        b":0\r\n"
+                    } else {
+                        b":1\r\n"
+                    });
+                    replies
+                });
+                stream
+                    .write_all(&replies)
+                    .await
+                    .assured("the publisher reads every reply");
+            });
+            let client = TestRedisClient::open(&format!("redis://{address}/"))
+                .assured("the loopback address is a valid Redis URL");
+            let mut connection = client.connect().await.assured("the peer answers setup");
+            let result = publish_burst(&mut connection, "notifications", "payload", 256).await;
+            if subscriber_disappears {
+                let error = result.expect_err("a publication without a subscriber fails the burst");
+                assert!(error.to_string().contains("every publication"), "{error}");
+            } else {
+                result.assured("every publication reached a subscriber");
+            }
+            server
+                .await
+                .assured("the scripted Redis endpoint completed");
+        }
+    }
 
     #[nervix_primitives::test]
     async fn redis_harness_connections_fail_when_the_broker_never_answers() {

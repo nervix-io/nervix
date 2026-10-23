@@ -1,6 +1,6 @@
 //! Outside the layer order: the Redis client used by the scenario harness.
 //!
-//! - **Owns.** Connection and response budgets for harness Redis requests.
+//! - **Owns.** Connection and response budgets and pipelined bursts for harness Redis requests.
 //! - **Depends on.** The Redis driver and standard I/O errors.
 //! - **Must not know.** Product connector configuration or scenario state.
 
@@ -28,4 +28,30 @@ impl TestRedisClient {
             .await
             .map_err(io::Error::other)
     }
+}
+
+/// Submit the whole burst before reading replies, without replaying any accepted publication.
+pub(crate) async fn publish_burst(
+    connection: &mut redis::aio::MultiplexedConnection,
+    channel: &str,
+    payload: &str,
+    count: usize,
+) -> io::Result<()> {
+    if count == 0 {
+        return Ok(());
+    }
+    let pipeline = (0..count).fold(redis::pipe(), |mut pipeline, _| {
+        pipeline.cmd("PUBLISH").arg(channel).arg(payload);
+        pipeline
+    });
+    let subscribers: Vec<usize> = pipeline
+        .query_async(connection)
+        .await
+        .map_err(io::Error::other)?;
+    if subscribers.len() != count || subscribers.contains(&0) {
+        return Err(io::Error::other(format!(
+            "Redis burst on channel '{channel}' did not reach a subscriber for every publication"
+        )));
+    }
+    Ok(())
 }

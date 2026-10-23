@@ -14108,6 +14108,7 @@ async fn when_these_nspl_commands_are_attempted_on_node(
 }
 
 #[when("these NSPL commands begin executing in the background")]
+#[when("these Plexus statements begin executing in the background")]
 async fn when_these_nspl_commands_begin_executing_in_the_background(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
@@ -14675,6 +14676,7 @@ async fn when_background_resource_upload_connection_is_dropped(world: &mut Scena
 }
 
 #[then("the background NSPL execution succeeds")]
+#[then("the background Plexus execution succeeds")]
 async fn then_the_background_nspl_execution_succeeds(world: &mut ScenarioWorld) {
     let task = world
         .background_nspl
@@ -17686,7 +17688,9 @@ impl UnacknowledgedSourceFixture {
             Self::RedisPubSub => {
                 r#"
       CREATE REDIS CLIENT unacknowledged_client POOL SIZE MIN 1 MAX 4 CONFIG {
-        'addr' = '{{redis_addr}}'
+        'addr' = '{{redis_addr}}',
+        'subscription_buffer_messages' = '1024',
+        'idle_timeout_ms' = '30000'
       };"#
             }
             Self::Syslog => {
@@ -24642,6 +24646,24 @@ async fn when_redis_message_is_published(
         .publish_redis(&channel, &payload)
         .await
         .expect("failed to publish redis message");
+}
+
+#[when(expr = "{int} Redis messages are published to channel {string}")]
+async fn when_redis_messages_are_published(
+    world: &mut ScenarioWorld,
+    count: usize,
+    channel: String,
+    #[step] step: &Step,
+) {
+    let channel = expand_placeholders(world, &channel);
+    let payload = expand_placeholders(world, docstring(step));
+    if let Err(error) = world
+        .cluster()
+        .publish_redis_burst(&channel, &payload, count)
+        .await
+    {
+        panic!("failed to publish the Redis burst: {error}");
+    }
 }
 
 #[when(expr = "Kafka message is published to topic {string}")]

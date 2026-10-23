@@ -185,10 +185,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | messages the driver reads ahead of the host: unbounded |  |
-| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>reading the next message: unbounded |  |
+| Buffers | messages read ahead of intake: set by subscription_buffer_messages; when full, holds back what fills it |  |
+| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |  |
 | Driver limits | None declared. |  |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |
 
 ### PROMETHEUS QUERY ingest
 

@@ -48,6 +48,12 @@ typed validation report on failure, and provides no mutable access around that b
 class is a compile-time error. [Node Settings](node-settings.md) owns their operational meaning,
 carriers, defaults, change procedures and source ratchet.
 
+Redis subscription plans carry a nonzero bounded message capacity and a validated idle deadline.
+The source's absent subscription means it needs a resume. An installed subscription owns its
+bounded receiver and exact reader task; close and suspend join that task before replacing it.
+Queued messages precede its terminal read failure. These handles, queued payloads and parsing
+state remain volatile and are never part of a persisted Model.
+
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,
 and planning produces an execution plan. Each stage passes forward a value whose type expresses
 what has already been established. Runtime code executes the plan; it does not reinterpret a Model
