@@ -10,7 +10,7 @@ use std::{
 };
 
 use arch_into::ArchInto as _;
-use async_nats::{Client as NatsClient, Message as NatsMessage};
+use async_nats::Client as NatsClient;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::{
@@ -105,8 +105,8 @@ use tokio_tungstenite::{
 use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 
-pub(crate) use super::raw_session::{TestSession, open_raw_session};
 use super::{
+    broker_observer::BROKER_TIMEOUT,
     cluster_teardown::{CLUSTER_TEARDOWN_BUDGET, ClusterTeardown, TeardownNode},
     command_recovery::LeaderRoutes,
     dependencies::{
@@ -140,6 +140,10 @@ use super::{
     },
     suite_watchdog::{LiveClusterRegistration, NodeStop, SUITE_BUDGET},
 };
+pub(crate) use super::{
+    broker_observer::{BrokerMessage, BrokerObserver},
+    raw_session::{TestSession, open_raw_session},
+};
 
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const TEST_NODE_UNAVAILABILITY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -152,7 +156,6 @@ pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
              in Duration"
         ),
     };
-const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long provisioning a Pulsar subscription repeats a request the broker refuses as a
 /// conflict while an ingestor's check holds a non-durable cursor of the same name.
 const PULSAR_PROVISION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -4288,152 +4291,6 @@ struct ClusterStatus {
     last_applied: Option<u64>,
     membership: BTreeMap<String, String>,
     interconnect: BTreeMap<String, String>,
-}
-
-#[derive(Debug)]
-pub(crate) struct BrokerMessage {
-    /// The payload as text, with any byte that is not valid UTF-8 replaced.
-    pub(crate) payload: String,
-    /// The payload exactly as the broker delivered it.
-    pub(crate) bytes: Vec<u8>,
-    /// The headers the broker delivered with the payload: Kafka and NATS headers in their written
-    /// order, and Pulsar properties, RabbitMQ headers and SQS message attributes sorted by name,
-    /// because those brokers keep no order of their own.
-    pub(crate) headers: Vec<(String, String)>,
-    /// The key the broker delivered with the payload: a Kafka record key or a Pulsar partition key.
-    pub(crate) key: Option<String>,
-    /// The ordering group the broker delivered the payload in: an SQS FIFO message group.
-    pub(crate) group: Option<String>,
-}
-
-impl BrokerMessage {
-    fn from_bytes(bytes: &[u8], headers: Vec<(String, String)>) -> Self {
-        Self {
-            payload: String::from_utf8_lossy(bytes).to_string(),
-            bytes: bytes.to_vec(),
-            headers,
-            key: None,
-            group: None,
-        }
-    }
-
-    fn with_key(mut self, key: Option<String>) -> Self {
-        self.key = key;
-        self
-    }
-
-    fn with_group(mut self, group: Option<String>) -> Self {
-        self.group = group;
-        self
-    }
-
-    /// A message a core NATS subscription delivered, with every header value under its name in the
-    /// order the message carries them.
-    fn from_nats(message: &NatsMessage) -> Self {
-        let mut headers = Vec::new();
-        if let Some(delivered) = message.headers.as_ref() {
-            for (name, values) in delivered.iter() {
-                for value in values {
-                    headers.push((name.to_string(), value.as_str().to_string()));
-                }
-            }
-        }
-        Self::from_bytes(message.payload.as_ref(), headers)
-    }
-}
-
-/// What a scenario observes on one broker destination, in the order the broker delivered it.
-#[derive(Debug)]
-pub(crate) struct BrokerObserver {
-    deliveries: ObservedDeliveries,
-}
-
-/// Where an observer takes the messages its broker delivered from.
-#[derive(Debug)]
-enum ObservedDeliveries {
-    /// A task that reads the broker's client hands each message over this channel, and is aborted
-    /// with the observer.
-    Forwarded {
-        messages: mpsc::Receiver<BrokerMessage>,
-        _reader: AbortOnDropHandle<()>,
-    },
-    /// A core NATS subscription. Its client buffers what the server delivers on a task of its own,
-    /// so a step takes each message straight from that buffer.
-    Nats(NatsObserver),
-}
-
-impl BrokerObserver {
-    fn forwarded(messages: mpsc::Receiver<BrokerMessage>, reader: JoinHandle<()>) -> Self {
-        Self {
-            deliveries: ObservedDeliveries::Forwarded {
-                messages,
-                _reader: AbortOnDropHandle::new(reader),
-            },
-        }
-    }
-
-    fn nats(observer: NatsObserver) -> Self {
-        Self {
-            deliveries: ObservedDeliveries::Nats(observer),
-        }
-    }
-
-    pub(crate) async fn next_message(&mut self) -> io::Result<BrokerMessage> {
-        timeout(BROKER_TIMEOUT, self.deliveries.next())
-            .await
-            .map_err(|_| io::Error::other("timed out waiting for broker payload"))?
-            .ok_or_else(|| io::Error::other("broker observer closed before delivering payload"))
-    }
-
-    pub(crate) async fn try_next_payload(
-        &mut self,
-        duration: Duration,
-    ) -> io::Result<Option<String>> {
-        self.try_next_message(duration)
-            .await
-            .map(|message| message.map(|message| message.payload))
-    }
-
-    pub(crate) async fn try_next_message(
-        &mut self,
-        duration: Duration,
-    ) -> io::Result<Option<BrokerMessage>> {
-        match timeout(duration, self.deliveries.next()).await {
-            Ok(Some(message)) => Ok(Some(message)),
-            Ok(None) => Err(io::Error::other(
-                "broker observer closed before delivering payload",
-            )),
-            Err(_) => Ok(None),
-        }
-    }
-
-    /// What the observing client had received from its broker, for a failure message: the count of
-    /// a client that keeps one, so a message that never reached the observer reads differently from
-    /// one a step had not yet taken.
-    pub(crate) fn describe_client_receipts(&self) -> String {
-        match &self.deliveries {
-            ObservedDeliveries::Forwarded { .. } => {
-                "the observing client keeps no count of what its broker delivered".to_string()
-            }
-            ObservedDeliveries::Nats(observer) => format!(
-                "the observing NATS client had received {} messages from the server",
-                observer.received()
-            ),
-        }
-    }
-}
-
-impl ObservedDeliveries {
-    /// The next message the broker delivered, or `None` once the observer can deliver no more.
-    async fn next(&mut self) -> Option<BrokerMessage> {
-        match self {
-            Self::Forwarded { messages, .. } => messages.recv().await,
-            Self::Nats(observer) => {
-                let message = observer.next().await?;
-                Some(BrokerMessage::from_nats(&message))
-            }
-        }
-    }
 }
 
 impl ClusterStatus {
