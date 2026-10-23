@@ -145,7 +145,8 @@ to discard a record.
 | SQS | `SINGLE`; `BATCH` | Successful per-record or per-entry service response |
 | Sentry | `ACK` | Successful one-event envelope response |
 | OTEL | `ACK` | Successful OTLP Export response; `partial_success` is acknowledged with a warning |
-| ClickHouse, Postgres, MySQL, MongoDB | `ACK` | Successful insert/write result |
+| ClickHouse, Postgres, MySQL | `ACK` | Successful insert/write result |
+| MongoDB | `ACK` | The server's answer that it applied the document, from a successful write or from a failed one, such as a write whose write concern the deployment could not satisfy |
 | Iceberg | `ACK` | Successful catalog commit |
 | HTTP | `ACK` | Complete successful response headers |
 | Client | `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | A current consumer attempt's explicit application ACK |
@@ -800,7 +801,9 @@ A write whose outcome is unknown — the connection failed or the destination st
 retried with its rows unresolved. The rows before it stay delivered, so the retry packs the same
 rows into the same writes again, and a write the destination already took is taken twice; use a
 conflict policy where duplicates matter. Where MongoDB answered for some documents of a write, the
-retry carries only the documents it left unresolved.
+retry carries only the documents it left unresolved. That includes a write whose write concern the
+deployment could not satisfy: the documents the server applied stay applied, so they are delivered
+and never written again, as [MongoDB](#mongodb) describes.
 
 Each sink writes a `BYTES` value in its native binary form: the octets themselves in a ClickHouse
 `String`, the `bytea` hex format Postgres reads back as the same octets, the octets bound to a MySQL
@@ -2291,11 +2294,39 @@ CREATE EMITTER to_mongodb
 
 MongoDB emitters use `VALUES` expressions and bulk writes. The [batching clause](#batching) is
 required: each write carries at most `MAX MESSAGES` documents, which measure at most `MAX SIZE`
-bytes, as [Database writes](#database-writes) describes. MongoDB reports per-document outcomes, so
-healthy documents acknowledge and poison documents follow `ON MESSAGE ERROR` without a separate
-isolation pass. Transient or infrastructure failures retry only the undelivered documents. A
-document larger than MongoDB's 16 MiB document limit is rejected before the write that would carry
-it.
+bytes, as [Database writes](#database-writes) describes. A document larger than MongoDB's 16 MiB
+document limit is rejected before the write that would carry it.
+
+Every write is unordered, and MongoDB's answer to a write says what became of its documents even
+when the write fails, so no separate isolation pass is needed. A document the server applied is
+delivered. A document the server refuses for good — one the collection's validator refuses
+(code 121), one too large to store (code 10334) or one that repeats a unique key (code 11000) —
+follows `ON MESSAGE ERROR` as an `external` `publish` error naming the code, such as
+`MongoDB rejected document with code 11000`. Every other document stays unresolved and is written
+again on the emitter's `RETRY POLICY` backoff, so a retry never carries a document the server
+applied or refused for good. A write the server never answered, such as one whose connection
+failed, leaves every document it carried unresolved, so its retry can store a document twice, as
+[Database writes](#database-writes) describes.
+
+A write concern the deployment cannot satisfy, such as `w=2` on a single-member replica set or a
+`w=majority` write whose `wtimeoutMS` ran out, does not undo the documents the server applied. The
+server reports the write concern failure beside its answer for each document, so the write's
+documents are delivered, rejected or left unresolved exactly as above, and the documents it applied
+complete their acknowledgements although the write failed. The write still fails as an
+infrastructure failure: `DESCRIBE EMITTER` shows it as the emitter's `transient error`, naming the
+request and the server's code, such as
+`MongoDB insert_many write concern failed with code 100 (UnsatisfiableWriteConcern)`, with
+`bulk_write` in place of `insert_many` for an `ON CONFLICT` write. The attempt ends with that
+write, and the retry carries only the documents it left unresolved together with the rows the
+attempt had not written yet. While the write concern keeps failing, each attempt therefore writes
+one insert or bulk write and then waits out the backoff, so a lasting failure slows the emitter
+instead of writing any document twice.
+
+The write concern is the one the client's `addr` URL asks for, such as `w=majority`, or otherwise
+the deployment's default. A document the server applied under a failed write concern is delivered
+on that server's answer alone: if the deployment later rolls the write back, for example because
+the primary that applied it stepped down before a majority of the replica set held it, the
+document is lost, and the emitter can neither see nor repair that.
 
 Every mapped integer is written as a BSON 64-bit signed integer, and a `U64` value above that range
 has no BSON integer at all. Such a record is rejected before its document is written: it follows
@@ -2690,7 +2721,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | ClickHouse | Retry after an ambiguous insert result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a crash after insert but before acknowledgement can also leave an inserted batch that later retries | None |
 | Postgres | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
 | MySQL | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
-| MongoDB | Retry after an ambiguous write result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed write can survive a crash before Nervix observes success | `ON CONFLICT` |
+| MongoDB | Retry after a write the server never answered, lost ACK, or attached sibling failure; a failed write concern adds none, since its retry carries only the documents the write left unresolved | Any failure after detached relay acceptance; a committed write can survive a crash before Nervix observes success; a document the server applied under a write concern it could not satisfy is delivered, and lost if the deployment later rolls the write back | `ON CONFLICT` |
 | Iceberg | Redelivery after a lost ACK, an attached sibling failure, or an emitter that ended before a retry learned whether the catalog applied its commit; appends repeat rows | Crash before catalog commit loses staged work unless the attached source redelivers; detached mode accepts that loss | None; appends are not idempotent |
 
 The [publishing-mode table](#publishing-modes) names each transport's exact completion point.
