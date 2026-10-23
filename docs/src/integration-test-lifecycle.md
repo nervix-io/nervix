@@ -201,6 +201,12 @@ checks.
 
 The `@restarted_voter_observation` scenario runs in both selections, reaching whole-cluster teardown, reopening each node's store, and automatic scheduling after the first relayed voter heartbeat. Its watch-channel barrier and concurrent fault map are untracked; the diagnostic evidence covers blocking locks reached by restart and scheduling. The native metadata restore scenario also runs in both selections after its Kafka replication stream and acknowledgement boundaries are repaired, retaining complete primary and replica metadata comparisons and distributed placement checks.
 
+The WASM/Kafka restore outline checks Commands-memory headroom on the restored leader after its
+source becomes ready. The cluster fixture reads the public capacity and reserved-byte metrics,
+then polls within the step's single deadline until the class can admit the 176-byte source control
+call. It reports both last observations on timeout and allows the retirement reservation of a live
+Kafka consumer. This assertion preserves the source's existing readiness and error deadlines.
+
 The measured restore and backup steps sample each node's public bulk and restore-metadata
 executor gauges every 20 milliseconds while the ordinary CLI runs. They also record the harness
 process's jemalloc allocated and resident bytes. The executor measurements separate the fixed

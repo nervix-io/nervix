@@ -17,7 +17,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass};
 use nervix_model_harness::shuttle::check_random_and_pct;
 use nervix_models::ClusterNodeName;
-use openraft::{entry::RaftEntry as _, type_config::alias::CommittedLeaderIdOf};
+use openraft::{
+    entry::RaftEntry as _, type_config::alias::CommittedLeaderIdOf, vote::RaftLeaderId as _,
+};
 
 use super::{LogChunkState, LogEntryChunk};
 use crate::{LogIdOf, TypeConfig};
