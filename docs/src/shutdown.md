@@ -538,11 +538,17 @@ The ownership move at the start of drain support is the same planned handoff use
 owns the general contract; this section states what shutdown adds.
 
 The complete target schedule is computed before anything is held. The coordinator then fences
-dispatch at the affected subgraph boundary on every live node, stops intake for each moved ingestor,
-and drains the work already admitted to the moved unit, including moved-ingestor acknowledgement
-roots, emitter buffers and active publishing, and an Iceberg emitter's staged commit. The new
-schedule is written only after that drain succeeds, and the fence opens only after the destination
-activates the published revision.
+dispatch at the affected subgraph boundary on every live node that runs part of it, stops intake for
+each moved ingestor, and drains the work already admitted to the moved unit, including
+moved-ingestor acknowledgement roots, emitter buffers and active publishing, and an Iceberg
+emitter's staged commit. The new schedule is written only after that drain succeeds, and the fence
+opens only after the destination activates the published revision.
+
+Only the hold's participants, which
+[Control Plane](./control-plane.md#planned-ownership-handoffs-and-failover) defines, are asked to
+hold anything. A live node that runs none of the moved unit is not one of them, so its link to the
+coordinator cannot spend the preparation deadline that the stopping node's drain budget sets, even
+when that link loses most of its packets.
 
 Each participant closes intake and boundary gates, requests a force flush and confirms its
 admission hold. The coordinator polls the exact operation's drain status while installed routes

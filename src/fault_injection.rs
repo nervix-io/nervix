@@ -50,6 +50,7 @@ mod consensus;
 mod domain_clock;
 mod domain_resume;
 mod execution;
+mod handoff_gate_link;
 mod model_publication;
 mod pause;
 mod relocation_commit;
@@ -61,6 +62,7 @@ pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use execution::NodeExecution;
+use handoff_gate_link::HandoffGateLink;
 use model_publication::ModelPublicationRefusal;
 pub use model_publication::ModelPublicationRefusalKind;
 use pause::TestPause;
@@ -130,6 +132,9 @@ struct FaultInjectionState {
     /// scenario proves the failure happened instead of assuming it.
     handoff_engagement_transport_failures:
         DashMap<DomainName, HandoffEngagementTransportFailure, RandomState>,
+    /// Coordinator-to-node links that lose every ownership-handoff gate engagement request sent
+    /// over them, each with how many requests it lost.
+    lost_handoff_gate_engagements: DashMap<HandoffGateLink, usize, RandomState>,
     /// One-shot, domain-scoped leader refusals of the next relocation commit, each keeping whether
     /// it was delivered.
     refused_relocation_commits: DashMap<DomainName, RelocationCommitRefusal, RandomState>,
@@ -438,6 +443,7 @@ impl Default for FaultInjection {
                 failed_schedule_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
                 handoff_engagement_transport_failures: DashMap::default(),
+                lost_handoff_gate_engagements: DashMap::default(),
                 refused_relocation_commits: DashMap::default(),
                 refused_model_publications: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
