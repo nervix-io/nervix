@@ -69,26 +69,22 @@ macro_rules! dependency_starters {
 }
 
 impl TestDependencies {
-    pub(crate) fn postgres_client(&self, tls: bool) -> io::Result<sqlx::PgPool> {
-        let clients = self.postgres_clients.as_ref().ok_or_else(|| {
+    fn running_postgres_clients(&self) -> io::Result<&PostgresClients> {
+        self.postgres_clients.as_ref().ok_or_else(|| {
             io::Error::other("Postgres clients are unavailable; add 'Given Postgres is running'")
-        })?;
-        Ok(clients.client(tls))
+        })
     }
 
-    /// A lock controller owns its socket while it waits, leaving observer permits available.
+    pub(crate) fn postgres_client(&self, tls: bool) -> io::Result<sqlx::PgPool> {
+        Ok(self.running_postgres_clients()?.client(tls))
+    }
+
+    /// A lock controller connects on its own, so a held lock takes no observation connection.
     pub(crate) async fn postgres_lock_connection(
         &self,
         tls: bool,
     ) -> io::Result<sqlx::PgConnection> {
-        let pool = self.postgres_client(tls)?;
-        let connection = pool.acquire().await.map_err(io::Error::other)?;
-        let mut connection = connection.detach();
-        sqlx::query("SET application_name = 'nervix_test_lock'")
-            .execute(&mut connection)
-            .await
-            .map_err(io::Error::other)?;
-        Ok(connection)
+        self.running_postgres_clients()?.lock_connection(tls).await
     }
 
     pub(crate) fn configure_process_lifecycle() {
