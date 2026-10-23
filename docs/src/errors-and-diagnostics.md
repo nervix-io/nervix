@@ -546,7 +546,9 @@ The connector helper errors for OTEL, Syslog, WebSocket signaling, Postgres, MyS
 carry `error_stack::Report` from the failing operation. A caller adds context at a connector or
 host ownership transition; it does not recreate the top-level error from its formatted text.
 Syslog TLS material reports keep the file, certificate or rustls cause, and stream frame reports
-remain beneath the connection failure. WebSocket signaling compilation and execution retain jaq,
+remain beneath the connection failure. Its configured accept capability maps socket failures into
+`SyslogListenerError::StreamAccept` before the listener returns them to the source owner; the test
+injector follows the same typed path. WebSocket signaling compilation and execution retain jaq,
 frame encoding and transport causes. The runtime's Syslog source-plan and signaling compilation
 errors keep those reports as typed fields while preserving their startup messages.
 
@@ -2193,6 +2195,11 @@ and retry waits, then joins them before withdrawing their routes. This cancellat
 terminal task ending; replica synchronization supplies any missed checkpoint availability hint.
 
 ### Panic Classes And Guarded Dependencies
+
+Application-revision probe batches run on tasks owned by their completion barriers. Transport
+failures leave the affected incarnation pending. A probe task's unexpected panic resumes on its
+barrier with the original panic payload. The barrier owns the task's only abort handle, and ending
+the barrier cancels that task without reporting intentional cancellation as a command failure.
 
 Broken internal guarantees take the explicit panic classes `assured` for a construction or platform
 guarantee, `verified` for a condition checked on the current path, and `todo` for a deliberately
