@@ -35,9 +35,9 @@ Feature: Syslog name resolution
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER syslog_forward
+      CREATE SYSLOG COLLECTOR EMITTER syslog_forward
         FROM syslog_events
-        TO SYSLOG syslog_forwarder MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s
+        TO syslog_forwarder MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
         ENCODE USING syslog_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -95,8 +95,8 @@ Feature: Syslog name resolution
         DECODE USING syslog_codec TO delivered_events
         INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER syslog_forward FROM input_events
-        TO SYSLOG syslog_forwarder MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s
+      CREATE SYSLOG COLLECTOR EMITTER syslog_forward FROM input_events
+        TO syslog_forwarder MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
         ENCODE USING syslog_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION delivered_subscription TO delivered_events;
@@ -158,8 +158,8 @@ Feature: Syslog name resolution
         DECODE USING syslog_codec TO delivered_events
         INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER syslog_forward FROM input_events
-        TO SYSLOG syslog_forwarder MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s
+      CREATE SYSLOG COLLECTOR EMITTER syslog_forward FROM input_events
+        TO syslog_forwarder MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
         ENCODE USING syslog_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION delivered_subscription TO delivered_events;
@@ -230,8 +230,8 @@ Feature: Syslog name resolution
         DECODE USING syslog_codec TO delivered_events
         INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER syslog_forward FROM input_events
-        TO SYSLOG syslog_forwarder MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s
+      CREATE SYSLOG COLLECTOR EMITTER syslog_forward FROM input_events
+        TO syslog_forwarder MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
         ENCODE USING syslog_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION delivered_subscription TO delivered_events;

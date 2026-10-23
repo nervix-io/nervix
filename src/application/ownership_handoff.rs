@@ -44,14 +44,17 @@ use tracing::{debug, info, warn};
 
 use super::{
     domain_lifecycle::DomainAlterError,
-    entity_gate::{ClusterEntityGate, ENTITY_GATE_RELEASE_RETRY_INTERVAL},
+    entity_gate::{
+        ClusterEntityGate, ClusterEntityGateScope, ENTITY_GATE_RELEASE_RETRY_INTERVAL,
+        EntityGateParticipants,
+    },
     session_service::SessionServiceImpl,
     transaction::TransactionStepImpactRecorder,
 };
 use crate::{
     registry::{
         EntityGatePlan, ExecutionRevision, PlannedClusterRevision,
-        ownership_handoff_relays_for_schedule,
+        ownership_handoff_gate_participants, ownership_handoff_relays_for_schedule,
     },
     runtime::{OwnershipHandoffError, OwnershipHandoffResult, Runtime},
 };
@@ -945,6 +948,8 @@ impl SessionServiceImpl {
                 computed_relays.as_slice()
             }
         };
+        let participants =
+            ownership_handoff_gate_participants(current, planned, affected_entities, relays);
         let former_owners = moves
             .iter()
             .map(|moved| moved.former_owner.clone())
@@ -982,10 +987,13 @@ impl SessionServiceImpl {
         let gate = nervix_primitives::time::timeout_at(
             preparation_deadline,
             self.engage_cluster_entity_gates(
-                domain,
-                relays,
-                affected_entities,
-                EntityGatePurpose::OwnershipHandoff,
+                ClusterEntityGateScope {
+                    domain,
+                    relays,
+                    affected_entities,
+                    purpose: EntityGatePurpose::OwnershipHandoff,
+                    participants: EntityGateParticipants::AvailableAmong(&participants),
+                },
                 activation_deadline,
                 impact.clone(),
             ),

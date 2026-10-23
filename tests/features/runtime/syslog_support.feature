@@ -42,10 +42,10 @@ Feature: Syslog support
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER syslog_forward
+      CREATE SYSLOG COLLECTOR EMITTER syslog_forward
         FROM syslog_events
-        TO SYSLOG syslog_forwarder
-          MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s
+        TO syslog_forwarder
+          MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING syslog_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -76,7 +76,7 @@ Feature: Syslog support
       from: syslog_events
       codec: syslog_codec
       body: codec
-      sink: SYSLOG client=syslog_forwarder
+      to: SYSLOG COLLECTOR syslog_forwarder
       """
     When Syslog UDP message is published to "{{syslog_ingest_addr}}"
       """
@@ -143,10 +143,10 @@ Feature: Syslog support
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER syslog_forward
+      CREATE SYSLOG COLLECTOR EMITTER syslog_forward
         FROM syslog_events
-        TO SYSLOG syslog_forwarder
-          MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s
+        TO syslog_forwarder
+          MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING syslog_codec
         INHERIT ALL
         FLUSH IMMEDIATE

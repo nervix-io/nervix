@@ -20,7 +20,7 @@ use nervix_connector::{
     SinkEventReporter, SinkFinish, SinkFinishError, SinkGeneralErrorHandler, SinkHost,
     SinkLifecycle, SinkRecord, SinkRecordId, SinkStagingDirectory, SinkTransientErrorStatus,
 };
-use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
+use nervix_models::{ClientConfigEntry, KafkaTopicName, Timestamp};
 use nervix_primitives::{
     sync::{
         StdArc,
@@ -38,11 +38,11 @@ use rdkafka::{
 
 use super::{KafkaAnswer, KafkaQueueWaitError, KafkaSink, KafkaSinkConfig};
 
-const TOPIC: &str = "orders";
+pub(super) const TOPIC: &str = "orders";
 
 /// Keys librdkafka's default partitioner sends to partition 0 of a two-partition topic: the CRC-32
 /// of each key is even.
-const PARTITION_ZERO_KEYS: [&str; 2] = ["answered-1", "answered-2"];
+pub(super) const PARTITION_ZERO_KEYS: [&str; 2] = ["answered-1", "answered-2"];
 
 /// A key librdkafka's default partitioner sends to partition 1 of a two-partition topic: its CRC-32
 /// is odd.
@@ -60,7 +60,7 @@ const TWO_MINUTE_LINGER: (&str, &str) = ("linger.ms", "120000");
 const THOUSAND_BYTE_MESSAGES: (&str, &str) = ("message.max.bytes", "1000");
 
 /// A producer that reconnects to a broker within a tenth of a second of its return.
-const FAST_RECONNECT: [(&str, &str); 2] = [
+pub(super) const FAST_RECONNECT: [(&str, &str); 2] = [
     ("reconnect.backoff.ms", "10"),
     ("reconnect.backoff.max.ms", "100"),
 ];
@@ -69,8 +69,17 @@ const FAST_RECONNECT: [(&str, &str); 2] = [
 /// it into that queue, and larger than a [`THOUSAND_BYTE_MESSAGES`] message.
 const OVERSIZED_PAYLOAD_BYTES: usize = 2048;
 
-/// A host that records nothing, for a sink whose publishes report everything in their outcome.
-struct SilentHost;
+/// A host that records nothing, for a sink whose publishes report everything in their outcome. It
+/// hands the sink `executor`.
+pub(super) struct SilentHost {
+    executor: nervix_execution::Executor,
+}
+
+impl SilentHost {
+    pub(super) fn on(executor: nervix_execution::Executor) -> Self {
+        Self { executor }
+    }
+}
 
 impl SinkTransientErrorStatus for SilentHost {
     fn record_transient_error(&self, _reason: String, _retry_after: Duration) {}
@@ -90,7 +99,7 @@ impl SinkStagingDirectory for SilentHost {
 
 impl SinkBoundedExecution for SilentHost {
     fn executor(&self) -> nervix_execution::Executor {
-        nervix_execution::Executor::default()
+        self.executor.clone()
     }
 }
 
@@ -103,7 +112,7 @@ impl SinkGeneralErrorHandler for SilentHost {
 /// A record's answer polled once with this waker is woken by librdkafka's polling thread while it
 /// serves that record's delivery report. The wake keeps the thread there: the report's event is not
 /// destroyed yet, and every event the producer queues after it waits to be served.
-struct PollingThreadHold {
+pub(super) struct PollingThreadHold {
     /// Tells the test that the waker holds a thread, the first time it is woken.
     held: Mutex<Option<oneshot::Sender<()>>>,
     /// Ends once the test drops its end, which lets the held thread go.
@@ -111,16 +120,16 @@ struct PollingThreadHold {
 }
 
 /// A [`PollingThreadHold`]'s waker and the test's two ends of the hold.
-struct HeldWaker {
-    waker: Waker,
+pub(super) struct HeldWaker {
+    pub(super) waker: Waker,
     /// Resolves once the waker holds a thread.
-    held: oneshot::Receiver<()>,
+    pub(super) held: oneshot::Receiver<()>,
     /// Lets the held thread go when dropped. Nothing is ever sent through it.
-    release: mpsc::Sender<()>,
+    pub(super) release: mpsc::Sender<()>,
 }
 
 impl PollingThreadHold {
-    fn waker() -> HeldWaker {
+    pub(super) fn waker() -> HeldWaker {
         let (held_sender, held) = oneshot::channel();
         let (release, released) = mpsc::channel();
         let hold = StdArc::new(Self {
@@ -154,7 +163,10 @@ impl Wake for PollingThreadHold {
 }
 
 /// A mock cluster of `brokers` brokers holding the test topic with `partitions` partitions.
-fn cluster(brokers: i32, partitions: i32) -> MockCluster<'static, DefaultProducerContext> {
+pub(super) fn cluster(
+    brokers: i32,
+    partitions: i32,
+) -> MockCluster<'static, DefaultProducerContext> {
     let cluster = MockCluster::new(brokers).expect("librdkafka builds an in-process mock cluster");
     cluster
         .create_topic(TOPIC, partitions, 1)
@@ -169,6 +181,35 @@ fn sink(
     entries: &[(&str, &str)],
     mode: BrokerPublishingMode,
 ) -> KafkaSink {
+    sink_on(
+        cluster,
+        entries,
+        mode,
+        nervix_execution::Executor::default(),
+    )
+}
+
+/// A sink like [`sink`]'s, whose host hands it `executor`.
+pub(super) fn sink_on(
+    cluster: &MockCluster<'static, DefaultProducerContext>,
+    entries: &[(&str, &str)],
+    mode: BrokerPublishingMode,
+    executor: nervix_execution::Executor,
+) -> KafkaSink {
+    KafkaSink::new(
+        sink_config(cluster, entries, mode),
+        SinkHost::new(SilentHost::on(executor)),
+    )
+    .expect("librdkafka accepts the test producer configuration")
+}
+
+/// The configuration of a sink publishing in `mode` to the test topic of `cluster`, through a
+/// client whose entries add `entries` to the cluster's bootstrap servers.
+pub(super) fn sink_config(
+    cluster: &MockCluster<'static, DefaultProducerContext>,
+    entries: &[(&str, &str)],
+    mode: BrokerPublishingMode,
+) -> KafkaSinkConfig {
     let mut config = vec![ClientConfigEntry {
         key: "bootstrap.servers".to_string(),
         value: cluster.bootstrap_servers(),
@@ -179,16 +220,14 @@ fn sink(
             value: (*value).to_string(),
         });
     }
-    let config = KafkaSinkConfig {
+    KafkaSinkConfig {
         config,
-        topic: TopicName::parse(TOPIC).expect("the test topic is a valid topic name"),
+        topic: KafkaTopicName::parse(TOPIC).expect("the test topic is a valid topic name"),
         mode,
-    };
-    KafkaSink::new(config, SinkHost::new(SilentHost))
-        .expect("librdkafka accepts the test producer configuration")
+    }
 }
 
-fn confirmed(max_in_flight: usize, timeout: Duration) -> BrokerPublishingMode {
+pub(super) fn confirmed(max_in_flight: usize, timeout: Duration) -> BrokerPublishingMode {
     BrokerPublishingMode::Ack(AckConfirmation {
         max_in_flight: NonZeroUsize::new(max_in_flight)
             .expect("the test window holds at least one record"),
@@ -196,7 +235,7 @@ fn confirmed(max_in_flight: usize, timeout: Duration) -> BrokerPublishingMode {
     })
 }
 
-fn record(index: usize, key: &str, payload: Vec<u8>) -> SinkRecord {
+pub(super) fn record(index: usize, key: &str, payload: Vec<u8>) -> SinkRecord {
     SinkRecord::new(
         SinkRecordId::new(index),
         Some(key.to_string()),
@@ -206,7 +245,7 @@ fn record(index: usize, key: &str, payload: Vec<u8>) -> SinkRecord {
     )
 }
 
-fn small_payload(index: usize) -> Vec<u8> {
+pub(super) fn small_payload(index: usize) -> Vec<u8> {
     format!("{{\"user_id\":{index}}}").into_bytes()
 }
 
@@ -216,7 +255,7 @@ fn ids(indexes: impl IntoIterator<Item = usize>) -> BTreeSet<SinkRecordId> {
 
 /// Hands `record` to `sink`'s producer as a confirmed publish does, and returns the answer that
 /// publish would await for it.
-fn awaited_hand_over(sink: &KafkaSink, record: SinkRecord) -> KafkaAnswer {
+pub(super) fn awaited_hand_over(sink: &KafkaSink, record: SinkRecord) -> KafkaAnswer {
     let (answer, report) = oneshot::channel();
     sink.hand_over(&record, Some(answer))
         .expect("the producer takes the record");

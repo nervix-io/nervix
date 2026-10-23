@@ -54,7 +54,7 @@ use nervix_connector::{
     SinkStartError, SinkStartResult, client_config_value, optional_client_config_value,
 };
 use nervix_dns::{DnsLookupError, DnsResolver};
-use nervix_models::{ClientConfigEntry, EmitterBatchPolicy, TableName};
+use nervix_models::{ClickHouseTableName, ClientConfigEntry, EmitterBatchPolicy};
 use nervix_primitives::time::Instant;
 use tracing::{debug, trace};
 
@@ -70,7 +70,7 @@ const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 /// What one ClickHouse emitter inserts through, from its typed sink plan.
 pub struct ClickHouseSinkConfig {
     pub config: Vec<ClientConfigEntry>,
-    pub table: TableName,
+    pub table: ClickHouseTableName,
     /// The node resolver every connection of the client resolves the host of `addr` through.
     pub dns: DnsResolver,
     /// The emitter's `BATCH` limits, which bound the rows and the body bytes of every insert.
@@ -81,7 +81,7 @@ pub struct ClickHouseSinkConfig {
 pub struct ClickHouseSink {
     client: ClickHouseClient,
     request_timeout: Option<Duration>,
-    table: TableName,
+    table: ClickHouseTableName,
     limits: RowRequestLimits,
 }
 

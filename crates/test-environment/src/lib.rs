@@ -156,6 +156,14 @@ pub const REDIS_ADDR: &str = "redis_addr";
 pub const REDIS_TLS_ADDR: &str = "redis_tls_addr";
 pub const MQTT_ADDR: &str = "mqtt_addr";
 pub const MQTT_TLS_ADDR: &str = "mqtt_tls_addr";
+/// A listener of the same MQTT broker that holds a client to a keep-alive of
+/// [`MQTT_SHORT_KEEPALIVE`]: it announces that keep-alive in every CONNACK, checks it every second,
+/// and lets a subscriber hold as many unacknowledged publishes as its own Receive Maximum asks
+/// for, where the default listener holds it to 32.
+pub const MQTT_SHORT_KEEPALIVE_ADDR: &str = "mqtt_short_keepalive_addr";
+/// The keep-alive the listener at [`MQTT_SHORT_KEEPALIVE_ADDR`] holds its clients to. The broker
+/// closes a connection that sends nothing for one and a half of it.
+pub const MQTT_SHORT_KEEPALIVE: Duration = Duration::from_secs(10);
 pub const NATS_ADDR: &str = "nats_addr";
 pub const NATS_TLS_ADDR: &str = "nats_tls_addr";
 pub const SQS_ENDPOINT: &str = "sqs_endpoint";
@@ -599,13 +607,32 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             return Ok(());
         }
         let tls = self.ensure_tls()?.clone();
+        let short_keepalive = MQTT_SHORT_KEEPALIVE.as_secs().to_string();
         let container = self
             .start_container("mqtt", 1883.tcp(), "MQTT", || {
                 GenericImage::new("emqx/emqx", "5.8.4")
                     .with_exposed_port(1883.tcp())
+                    .with_exposed_port(1884.tcp())
                     .with_exposed_port(8883.tcp())
                     .with_wait_for(WaitFor::message_on_either_std("EMQX 5.8.4 is running now"))
                     .with_env_var("EMQX_LISTENERS__TCP__DEFAULT__BIND", "0.0.0.0:1883")
+                    // The broker announces this keep-alive in every CONNACK of the zone's listener
+                    // and checks every second whether a client sent anything within one and a half
+                    // of it, where its own default check runs every 30 seconds.
+                    .with_env_var(
+                        "EMQX_ZONES__SHORT_KEEPALIVE__MQTT__SERVER_KEEPALIVE",
+                        short_keepalive.as_str(),
+                    )
+                    .with_env_var(
+                        "EMQX_ZONES__SHORT_KEEPALIVE__MQTT__KEEPALIVE_CHECK_INTERVAL",
+                        "1s",
+                    )
+                    .with_env_var("EMQX_ZONES__SHORT_KEEPALIVE__MQTT__MAX_INFLIGHT", "65535")
+                    .with_env_var("EMQX_LISTENERS__TCP__SHORT_KEEPALIVE__BIND", "0.0.0.0:1884")
+                    .with_env_var(
+                        "EMQX_LISTENERS__TCP__SHORT_KEEPALIVE__ZONE",
+                        "short_keepalive",
+                    )
                     .with_env_var("EMQX_LISTENERS__SSL__DEFAULT__BIND", "0.0.0.0:8883")
                     .with_env_var(
                         "EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CACERTFILE",
@@ -637,9 +664,14 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             })
             .await?;
         let port = mapped_port(&container, 1883, "MQTT").await?;
+        let short_keepalive_port = mapped_port(&container, 1884, "MQTT short keep-alive").await?;
         let tls_port = mapped_port(&container, 8883, "MQTT TLS").await?;
         self.endpoints
             .insert(MQTT_ADDR, format!("mqtt://127.0.0.1:{port}"));
+        self.endpoints.insert(
+            MQTT_SHORT_KEEPALIVE_ADDR,
+            format!("mqtt://127.0.0.1:{short_keepalive_port}"),
+        );
         self.endpoints
             .insert(MQTT_TLS_ADDR, format!("mqtts://127.0.0.1:{tls_port}"));
         self.containers.push(RunningContainer::Generic(container));
@@ -720,6 +752,13 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                     .with_env_var("POSTGRES_USER", "postgres")
                     .with_env_var("POSTGRES_PASSWORD", "nervix")
                     .with_env_var("POSTGRES_DB", "postgres")
+                    // SQLx derives a SCRAM-SHA-256 key in as many rounds as the server's verifier
+                    // names and yields to the scheduler after every fifth, so the image's 4096
+                    // rounds poll an establishing connection more than 800 times. On the busy
+                    // scenario runtime each poll waits for a worker's whole run queue, and one
+                    // connection took longer to establish than the 30-second pool wait. One round
+                    // keeps SCRAM authentication and establishes in a few polls.
+                    .with_env_var("POSTGRES_INITDB_ARGS", "--set scram_iterations=1")
                     .with_copy_to("/certs/ca.pem", tls.ca_pem.clone())
                     .with_copy_to("/certs/node.pem", tls.node_pem.clone())
                     .with_copy_to(

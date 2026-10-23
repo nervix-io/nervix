@@ -124,10 +124,10 @@ A statement is rejected, naming the emitter and the offending value, when:
 
 ### Altering
 
-`ALTER EMITTER` gains two operations:
+`ALTER <CONNECTOR> <ENTITY> EMITTER` gains two operations:
 
 ```nspl,ignore
-ALTER EMITTER <emitter>
+ALTER <CONNECTOR> <ENTITY> EMITTER <emitter>
     SET BATCH MAX MESSAGES <n> MAX SIZE <bytes>
   | DROP BATCH
   [, ...];
@@ -419,13 +419,13 @@ record rather than assumed.
 
 | Sink | Variants | Batch container | Receiver interpretation |
 | --- | --- | --- | --- |
-| Kafka | `NO_ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One Kafka record whose value is the batch payload, with the members' common key and headers | One record; the consumer decodes the container and sees the members |
-| Pulsar | `NO_ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One Pulsar message whose payload is the batch payload | One message carrying the members |
-| RabbitMQ | `NO_ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One AMQP message whose body is the batch payload | One message carrying the members |
-| Redis Pub/Sub | `NO_ACK` | One `PUBLISH` message whose payload is the batch payload | One channel message carrying the members |
+| Kafka | `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One Kafka record whose value is the batch payload, with the members' common key and headers | One record; the consumer decodes the container and sees the members |
+| Pulsar | `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One Pulsar message whose payload is the batch payload | One message carrying the members |
+| RabbitMQ | `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One AMQP message whose body is the batch payload | One message carrying the members |
+| Redis Pub/Sub | `NO ACK` | One `PUBLISH` message whose payload is the batch payload | One channel message carrying the members |
 | MQTT | `QOS 0`, `QOS 1`, `QOS 2` | One PUBLISH packet whose payload is the batch payload | One message on the topic carrying the members |
-| NATS | `NO_ACK` (core), `JETSTREAM ACK SEQUENTIAL`, `JETSTREAM ACK PARALLEL` | One message on the subject whose payload is the batch payload | One core message or one stream message carrying the members |
-| ZeroMQ | `NO_ACK` | One single-frame PUSH message whose frame is the batch payload | One message; the puller reads the first frame and decodes the members |
+| NATS | `NO ACK` (core), `JETSTREAM ACK SEQUENTIAL`, `JETSTREAM ACK PARALLEL` | One message on the subject whose payload is the batch payload | One core message or one stream message carrying the members |
+| ZeroMQ | `NO ACK` | One single-frame PUSH message whose frame is the batch payload | One message; the puller reads the first frame and decodes the members |
 | SQS | `SINGLE`, `BATCH`; standard and FIFO queues | One SQS message whose body is the batch payload, with the members' common attributes and FIFO group | One queue message carrying the members; `MODE BATCH` still packs up to ten such messages per request, and each stays an independent message |
 | Sentry | `ACK` | One envelope with one `event` item, whose event is the single value the codec's batch transformation produced | One Sentry event carrying the members in the field the transformation placed them in, typically `extra` |
 | Syslog | `udp`, `tcp` octet-counting, `tcp` non-transparent, `tls` | One transport frame whose content is the batch payload | One syslog message; with a `SYSLOG` codec its `MSG` is the array of the members' own RFC 5424 messages |
@@ -471,7 +471,7 @@ announced, with the message headers; the `maxMessageSize` the Pulsar broker anno
 producer's connection opened, with the message metadata and properties, as the Java client counts
 them; and the 256 KiB SQS message with its attributes and FIFO group. A Pulsar topic's own
 `maxMessageSize` policy is applied only by the broker, which answers a larger message with
-`NotAllowedError`; a confirming `MODE ACK` rejects the batch with that answer, while `NO_ACK` has
+`NotAllowedError`; a confirming `MODE ACK` rejects the batch with that answer, while `NO ACK` has
 already completed at producer acceptance. RabbitMQ's `max_message_size` is a broker setting a client
 cannot read, so a larger message reaches the broker, which closes the channel it arrived on with a
 refusal that names the limit and discards every message written on that channel after it. The
@@ -480,7 +480,7 @@ attempt the broker had not answered whose body exceeds the limit, so every membe
 follows `ON MESSAGE ERROR`, and it writes the discarded messages again on a new channel of the same
 connection. A message written ahead of the refused one that the broker had not confirmed may already
 be in its queue, so the attempt then fails as an infrastructure failure and its unresolved payloads
-are retried. In `NO_ACK` a RabbitMQ write completes with one round trip on its channel, which the
+are retried. In `NO ACK` a RabbitMQ write completes with one round trip on its channel, which the
 broker answers only after it has taken every message written before it, so a refused message is
 found before any member is acknowledged. Redis answers a value above `proto-max-bulk-len` with a
 rejection, and ZeroMQ fixes no limit of its own.
@@ -506,9 +506,9 @@ second is valid and simply means every commit publishes one data file.
 
 | Sink | One batch succeeds when | Partial outcomes |
 | --- | --- | --- |
-| Kafka | The producer queue accepts the record (`NO_ACK`), or its delivery report arrives (`ACK`) | None: the record is the unit, so the batch is delivered or it is not |
-| Pulsar | The producer accepts the message (`NO_ACK`), or the broker receipt arrives (`ACK`) | None |
-| RabbitMQ | The channel answers the round trip that follows the write (`NO_ACK`), or the publisher confirm arrives (`ACK`) | None |
+| Kafka | The producer queue accepts the record (`NO ACK`), or its delivery report arrives (`ACK`) | None: the record is the unit, so the batch is delivered or it is not |
+| Pulsar | The producer accepts the message (`NO ACK`), or the broker receipt arrives (`ACK`) | None |
+| RabbitMQ | The channel answers the round trip that follows the write (`NO ACK`), or the publisher confirm arrives (`ACK`) | None |
 | Redis Pub/Sub | The server answers `PUBLISH` | None |
 | MQTT | The client accepts the packet (QoS 0), `PUBACK` arrives (QoS 1), or the QoS 2 handshake completes | None |
 | NATS | The connection flush completes (core), or the `PubAck` arrives (JetStream) | None |
@@ -641,9 +641,9 @@ or `trace` detail and carry no payload values.
 ### A broker emitter, with and without the clause
 
 ```nspl
-CREATE IF NOT EXISTS EMITTER kafka_notifications
+CREATE IF NOT EXISTS KAFKA TOPIC EMITTER kafka_notifications
   FROM notifications
-  TO KAFKA kafka_main TOPIC notifications_out
+  TO kafka_main TOPIC 'notifications_out'
     MODE ACK PARALLEL MAX 100 ACK TIMEOUT 30s
       RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING notification_codec
@@ -769,10 +769,11 @@ per record declares no batching clause, which is the default.
 ### A database emitter
 
 ```nspl,ignore
-  TO POSTGRES postgres_client INSERT TO TABLE my_table
+CREATE POSTGRES TABLE EMITTER to_pg FROM notifications
+  TO postgres_client TABLE 'my_table'
+  MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
   VALUES { "user_id" = input.user_id, "action" = LOWER(input.action) }
   ON CONFLICT ("user_id") DO UPDATE
-  MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
   BATCH MAX MESSAGES 500 MAX SIZE 8MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
 ```
@@ -819,7 +820,7 @@ existing emission scenarios already provision.
 | Syslog, Sentry and OTEL | The syslog frame and its compatibility rule over UDP, TCP and TLS; a Sentry envelope accepted with the batch event; bounded OTLP export requests for logs, traces and metrics over both transports | A Nervix syslog ingestor, Bugsink, Quickwit and Jaeger |
 | SQL and MongoDB | Bounded inserts and bulk writes, the encoded-size bound, existing conflict policies, and record-specific isolation after a failed batch | ClickHouse, Postgres, MySQL, MongoDB |
 | Iceberg staging and commit | Data files bounded by rows and written bytes, several files in one commit, and the commit cadence unchanged | An Iceberg REST catalog over object storage |
-| ALTER, drain and shutdown | `SET BATCH` and `DROP BATCH` as entity-pause changes, pending output drained under the old limits, force flush and drain publishing partial batches, and branch eviction dropping a prepared payload | `ALTER EMITTER` with a live emitter, and node drain |
+| ALTER, drain and shutdown | `SET BATCH` and `DROP BATCH` as entity-pause changes, pending output drained under the old limits, force flush and drain publishing partial batches, and branch eviction dropping a prepared payload | `ALTER <CONNECTOR> <ENTITY> EMITTER` with a live emitter, and node drain |
 | Configuration, size bounds and metrics | The `batch:` line, the four payload metric families with and without the clause, and the subdivision counter rising when the two limits disagree | `DESCRIBE EMITTER` and the metrics endpoint |
 | Qualification | Every sink kind and variant in the [sink matrix](#sink-matrix) against its receiver, every limit in the [limits table](#limits), every failure in [failure semantics](#failure-semantics), and no throughput regression for an emitter without the clause | All of the above, plus the repository's benchmark comparison |
 

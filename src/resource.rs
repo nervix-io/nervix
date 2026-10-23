@@ -47,9 +47,10 @@ use tar::{
 use tokio::io::AsyncReadExt;
 use tracing::warn;
 
-const DEFAULT_MAX_RESOURCE_ARCHIVE_BYTES: u64 = 4_294_967_296;
-const DEFAULT_MAX_RESOURCE_EXTRACTED_BYTES: u64 = 17_179_869_184;
-const DEFAULT_MAX_RESOURCE_FILE_COUNT: u64 = 1_000_000;
+mod settings;
+pub use settings::{
+    ResourceMaxArchiveBytes, ResourceMaxExtractedBytes, ResourceMaxFileCount, ResourceSettings,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceManifest {
@@ -75,12 +76,9 @@ pub struct ResourceStoreLimits {
 }
 
 impl Default for ResourceStoreLimits {
+    /// The limits of the resource settings' defaults.
     fn default() -> Self {
-        Self {
-            max_archive_bytes: DEFAULT_MAX_RESOURCE_ARCHIVE_BYTES,
-            max_extracted_bytes: DEFAULT_MAX_RESOURCE_EXTRACTED_BYTES,
-            max_file_count: DEFAULT_MAX_RESOURCE_FILE_COUNT,
-        }
+        ResourceSettings::default().limits()
     }
 }
 

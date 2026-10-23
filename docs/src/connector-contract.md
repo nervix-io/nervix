@@ -276,8 +276,8 @@ resolves the configured `redis://` or `rediss://` hostname through the node reso
 initial subscribe and resume, and opens a dedicated TCP or TLS stream. It tries the returned
 addresses in order inside the client's `connect_timeout_ms`, 30 seconds by default, shared by DNS,
 TCP, TLS, Redis setup, and subscribe.
-It hands the stream and the original client's settings to Redis's `PubSub::new`, so the driver
-still performs its authentication, database selection and protocol setup before `SUBSCRIBE`. A Unix socket remains
+The source uses Redis's command encoder and asynchronous RESP parser for authentication,
+database selection, protocol negotiation and `SUBSCRIBE` on that stream. A Unix socket remains
 a direct Unix connection with no DNS query. The dedicated subscription never occupies a pooled
 command connection.
 
@@ -296,6 +296,22 @@ reject a record or confirm a publish; the host resumes the source and retries fa
 according to its existing policy. A Pub/Sub connection broken by the broker or network is dropped
 and reopened with a new lookup, while an established connection is not interrupted solely because
 its answer expires.
+
+One subscription reader owns that socket and a bounded handoff to intake. The client key
+`subscription_buffer_messages` is required for a source and declares a positive whole message
+capacity that fits the bounded channel. The reader
+reserves a handoff slot before decoding another frame; a full handoff stops transport reads and
+TCP applies backpressure. The message bound is separate from the host's byte-bounded quiesce
+buffer and from wire-parser and kernel byte buffers. `BUFFER` and `DROP` retain their host-owned
+retention and drop counters. Redis Pub/Sub supplies no replay after a disconnect.
+
+The source client's required `idle_timeout_ms` bounds a silent active read. After half the
+interval the reader sends `PING` on the subscription connection; activity must arrive within the
+remaining half. Activity means a complete Redis message or probe reply. Both RESP2 and RESP3 are
+supported. Waiting for handoff room precedes the read and
+does not spend its idle interval. A failed probe closes the connection and reaches the host's
+existing reconnect policy. Source suspend and close abort and join the exact reader before a
+replacement can open; queued messages are otherwise delivered before a terminal read failure.
 
 ### DNS for MQTT
 
@@ -453,9 +469,9 @@ accepted.
 No driver call that parks its thread runs on an asynchronous worker. A connector runs such a call
 in the executor's storage class with a declared deadline as its bound, or as a declared owner of the
 runtime's blocking pool. Kafka source control calls use the connector storage class: metadata,
-watermark and timestamp lookups, seeks and assignments run off the async workers. Consumer
-destruction remains an exception: it can wait for librdkafka's threads on the thread that drops
-the last consumer handle.
+watermark and timestamp lookups, seeks and assignments run off the async workers, and so does the
+destruction of a consumer or a producer, as [Kafka client retirement](#kafka-client-retirement)
+describes.
 
 Network control calls have their own bounded connector storage admission, separate from filesystem
 and consensus storage. A broker that does not answer therefore cannot consume those classes'
@@ -470,7 +486,8 @@ including when the waiting caller is cancelled or its thirty-second deadline exp
 refusals remain transient source failures; they never reject a record as invalid.
 
 librdkafka's producer flush still runs on the runtime's blocking pool as a declared owner outside
-the executor, bounded by the host's physical flush deadline.
+the executor, bounded by the host's physical flush deadline. The producer's destruction does not:
+it is a connector storage job like a consumer's.
 [Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor)
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
@@ -483,6 +500,51 @@ callback dispatch is documented at its owning callable, and local callback bodie
 These annotations describe this chapter's existing lifecycle; they supply no runtime admission or
 ownership proof. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns their
 syntax, inheritance, diagnostics and operation-specific repair expectations.
+
+#### Kafka client retirement
+
+Destroying a librdkafka client is native work that waits, so Nervix never destroys a Kafka consumer
+or producer on the thread that lets it go.
+
+Every consumer Nervix creates has a group, a partition inspector's included, and rust-rdkafka closes
+such a consumer by polling it in steps of 100 milliseconds until librdkafka reports it closed. A
+consumer that joined its group waits there for the coordinator to answer its LeaveGroup request,
+which librdkafka gives five seconds whatever `socket.timeout.ms` says, and librdkafka then joins its
+threads. Destroying a producer first stops its polling thread, which finishes its current poll of up
+to 100 milliseconds and any delivery report it is serving. rust-rdkafka then purges the records the
+producer still queues or has in flight, flushes for up to 500 milliseconds so that their reports
+are served, and librdkafka joins its threads, a broker thread still resolving a name included.
+
+A source or partition inspector shares its consumer with the driver jobs it admits, a sink shares
+its producer with the flush its finish runs, and any of them can hold the last handle. A source goes
+when its host's task ends after the source's loop, or when composing its ingestor's instances fails;
+an inspector goes when its watch ends; a control job keeps running after its caller is cancelled,
+and a job the connector queue refuses lets its handle go unrun; and a consumer-group commit can be
+answered after its source is gone. A sink goes when its emitter's task ends after the sink's finish,
+when a swap or `ALTER` replaces it, or when composing its emitter fails after the sink started; and
+a flush keeps running on the runtime's blocking pool after its finish's caller stops waiting for it,
+until librdkafka's flush returns. Whichever of them lets the last handle go hands the client to its
+retirement and carries on at once, on an async worker, a connector worker or a blocking-pool thread
+alike. The retirement destroys the client in one connector storage job. A full queue holds that job
+until a place frees instead of refusing it, because nothing could present the client again, and the
+job runs under a commands charge the client took before it was created, so retiring a client asks
+the node for nothing it could refuse. A client that cannot take that charge is not created: the
+source's open or the inspector's start fails with the transient
+`KafkaSourceError::RetirementAdmission`, and the sink's start fails with
+`KafkaProducerStartError::RetirementAdmission` beneath `SinkStartError::Initialize`, which its
+emitter retries after its retry delay like any sink that could not start. Nothing waits for a
+retirement and nothing cancels it, since a destruction cannot stop part way. It takes the native
+client alone, never the source's or sink's host or its intake, and Nervix never hands a client to
+another source or sink, so a replacement opens a client of its own.
+
+A joined consumer whose coordinator does not answer holds a connector worker for those five
+seconds, and a producer holds one for its polling thread's last poll and up to half a second of
+flushing. A broker that stops answering while its clients retire therefore delays the node's other
+Kafka control calls queued behind them, never its async workers. The `connector_storage` class's
+`nervix_execution_jobs_running` and `nervix_execution_jobs_pending` count retirements with the other
+Kafka jobs. Node shutdown does not wait for a retirement: the process's runtime finishes or
+performs it as it stops after terminal teardown, as
+[Terminal Teardown](./shutdown.md#terminal-teardown) describes.
 
 ### Bounds and deadlines
 
@@ -498,9 +560,10 @@ reading, and the transport's own window or prefetch keeps the peer from sending 
 waits for the buffer to drain. A protocol without flow control drops what does not fit and counts
 it. A buffer that drops without counting, or whose overflow fails the publish for the host to retry,
 is declared as it behaves, and a buffer that nothing bounds yet is declared unbounded, so the matrix
-shows each gap until its connector closes it. A polled source's response is bounded by its
+shows each gap until its connector closes it. A `PROMETHEUS QUERY` response is bounded by its
 statement's `MAX BODY SIZE`: a response that exceeds it fails the poll, which the ingestor reports
-as its transient error, and the next poll reads again.
+as its transient error, and the next poll reads again. An `HTTP REQUEST` poll's response body has
+no such bound yet and is declared unbounded.
 
 A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a fixed bound Nervix
 sets, or the driver's own default. A wait that only the host's stop ends is declared unbounded. The
@@ -510,7 +573,7 @@ deadline keys mean the same thing for every connector:
 | --- | --- |
 | `timeout_ms` | The whole of one request or operation: name resolution, connection setup, TLS and the answer. |
 | `connect_timeout_ms` | Establishing a connection: name resolution, the address attempts, TLS and the protocol's own handshake. |
-| `idle_timeout_ms` | How long a connection may carry nothing while its connector waits to read from it, after which the connector closes it. |
+| `idle_timeout_ms` | Silence while actively reading an established connection, including its liveness probe; expiry closes the connection. Transport backpressure is outside an active read. |
 
 A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or by
 `idle_timeout_ms`, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
@@ -605,9 +668,19 @@ fails them. They cover the three statement families:
 - Clients. `POOL SIZE` is written exactly where the client declares a pool, and only the declared
   options parse.
 
-An emitter's head does not name its entity yet, so the words that open its destination after `TO`
-come from the test generator; the locator, the options and everything after them come from the
-declaration.
+Emitter conformance derives each connector/entity head, reference, quoted locator, required
+options, policy and payload from the declaration. Each concrete destination Model owns a closed
+publishing-policy enum; that enum supplies its capability kinds. There is no separately stored
+publishing policy or registry/planner admission table. Grammar modules construct only that entity's
+policies, and planning matches its enum exhaustively when delivery has alternatives. Shared
+rendering and duration validation borrow the policy without retaining another representation.
+External names retain their entity-specific validated types through the plan and connector
+configuration. SQS uses one queue-name type on both ingest and emit boundaries.
+
+Iceberg retains a storage-client reference in its destination Model. Validation admits the declared
+object-store client kinds; planning resolves the actual S3, GCS or Azure Blob client into the
+connector's storage-backend setting. The destination statement does not select that backend.
+The host receives the completed plan and performs no Model lookup to choose it.
 
 ### Capability inventory
 
@@ -823,8 +896,8 @@ when its transport stays connected with bounded memory while nothing reads it:
 | NATS | Waits for a place | The client's connection task keeps reading and answering the server, and holds at most the subscription's 65,536 messages before it drops the newest as a slow consumer. |
 | ZeroMQ | Waits for a place | `PULL` messages stay in the kernel buffers, and then the pushing peers' sends wait. |
 | Syslog | Waits for a place | The kernel drops UDP datagrams beyond the socket's receive buffer; TCP and TLS connections fill the listener's 64-frame queue and then push back on their senders. |
-| MQTT | Refused and counted | The event loop, which sends the keep-alive, runs only while the loop reads, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
-| Redis Pub/Sub | Refused and counted | The client's connection task reads every message into an unbounded queue. |
+| MQTT | Refused and counted | The connection's driver task keeps the event loop, and with it the keep-alive, running while the loop is held, but under `NO ACK` reads only 64 publishes ahead of it. Once those fill, the driver stops reading, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
+| Redis Pub/Sub | Refused and counted | The dedicated reader holds at most `subscription_buffer_messages` messages and applies TCP backpressure when full. Keeping the host polling also keeps idle probes active. |
 | WebSocket client | Refused and counted | Server pings go unanswered while frames are unread, and a server that pings closes the connection. |
 | `KAFKA TOPIC` in `MODE NO ACK` | Refused and counted | A consumer-group member that does not poll for `max.poll.interval.ms` leaves its group, and a domain-offset instance would keep its partitions through an ownership handoff. |
 | `PULSAR TOPIC` in `MODE NO ACK` | Refused and counted | The consumer engine blocks on a full receive queue, and the consumer's close, which suspension and stop perform, then waits on it. |
@@ -934,16 +1007,63 @@ in one of these ways:
 | Entities | A cancelled read |
 | --- | --- |
 | `KAFKA TOPIC`, `PULSAR TOPIC` | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
-| `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the client had already read when the read stopped waiting stays with the client, which hands it to the next read first. |
+| `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the connection had already read when the read stopped waiting stays in the connection's read-ahead, which hands it to the next read first. |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `RABBITMQ QUEUE`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
 | `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
 
-An MQTT read stops waiting by dropping its client's poll in flight, as its batch timeout ends a
-gathering. The client queues every packet it reads before it writes a reply, and its next poll
-returns a queued publish first, so a dropped poll loses no publish it read. It can cut short only an
-acknowledgement still waiting for room in a send buffer the broker has stopped draining; a
-persistent session then delivers that publish again when it resumes, as it does any publish whose
-acknowledgement never reached the broker.
+An MQTT read takes its publishes from its connection's read-ahead, which the connection's driver
+task fills while it polls the client's event loop; see
+[MQTT source connections](#mqtt-source-connections). A read that stops waiting, because the host
+cancelled it or its batch timeout passed, drops only its wait on the read-ahead, so it loses no
+publish, and the driver's poll never stops for it.
+
+### MQTT source connections
+
+Once an MQTT source instance has established its subscription, a task the connector owns drives
+its connection until the connection ends or the source drops it. The task is the only owner of the
+client's event loop and polls it without pause, so the client writes the acknowledgements the
+source requests and the keep-alive pings its broker expects whatever the host does meanwhile,
+including waiting on a batch's acknowledgement trees for as long as a downstream emitter holds
+them. The task hands every publish the event loop reads to the source through a bounded
+read-ahead, in the order it read them.
+
+In an `ACK` mode every `CONNECT` advertises the mode's acknowledgement window and 64 more as its
+Receive Maximum: 65 under `ACK SEQUENTIAL`, and `ACK PARALLEL MAX` plus 64 up to MQTT's largest
+Receive Maximum, 65,535. The broker then sends no further publish at QoS 1 while that many wait on
+their acknowledgements, so a batch holds at most that many, and an `ACK PARALLEL MAX` above 65,535
+gathers at most 65,535 of them before its `BATCH TIMEOUT` ends it. A broker that discards a
+publish above the advertised Maximum Packet Size may keep counting it against the Receive Maximum,
+waiting for an acknowledgement the source never sends, as EMQX does; the 64 let the window fill
+around that many such publishes instead of one of them holding back every later publish. The
+broker holds back no publish at QoS 0, which a subscription at QoS 1 receives from a publisher
+that sends at QoS 0, and under `NO ACK`, where the client acknowledges every publish on receipt,
+it holds back none. The read-ahead holds as many publishes as the Receive Maximum admits, or 64
+under `NO ACK`. Once it is full, the task holds the next publish and polls nothing until the
+source reads one, so the connection's flow control holds the broker back, and the client sends no
+keep-alive until the host reads again.
+
+Acknowledging a batch requests a `PUBACK` for each of its publishes at QoS 1 and returns once the
+event loop has written all of them to the connection and flushed them. The broker answers none, so
+that is everything the source can confirm. A batch never asks for more acknowledgements than the
+client's request queue holds, so no request waits for room. The acknowledgement never waits on a
+task that stopped polling. While the task holds a publish for room in a full read-ahead, only the
+host's next read, which follows the acknowledgement, could let it write, so the acknowledgement
+fails with `MqttSourceError::ReadAheadFull`. When the connection ended first, it fails with the
+lost connection beneath `MqttSourceError::Acknowledge`. A connection whose broker stopped reading
+it holds the writes, and the client's flush has no deadline of its own, so the acknowledgement
+waits at most one keep-alive interval, 60 seconds unless the broker's `CONNACK` announced its own,
+and then fails with `MqttSourceError::AcknowledgementDeadline`; a broker that announces a
+keep-alive of zero leaves it unbounded, as it leaves a silent connection. Every such failure drops
+the connection and the acknowledgements it never wrote: the host shows the failure as the ingestor's transient status and
+rejects the positions, a rejection fails once its publishes' connection is gone, and the broker
+delivers again every publish the lost connection did not acknowledge once the source resumes; see
+[Confirmed acknowledgements](#confirmed-acknowledgements).
+
+A failed poll ends the connection. The task has handed over every publish it read, so the source
+reads the read-ahead empty, and its next read then reports the lost connection: beneath
+`MqttSourceError::Receive`, or as `MqttSourceError::PacketTooLarge` for a packet above the
+advertised Maximum Packet Size. Suspension, close and every failure drop the connection, which
+aborts its task and closes the broker connection.
 
 ### Oversized payloads
 
@@ -1046,8 +1166,7 @@ it did not get:
 | --- | --- | --- |
 | `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `SQS QUEUE` | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
 | `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | The source acknowledges nothing on its transport. |
-| `queued` | `MQTT TOPIC` | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. An MQTT `PUBACK` is written when the client's event loop is next polled. |
-| `written` | `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
+| `written` | `MQTT TOPIC`, `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT does not answer a `PUBACK`, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` the batch asks for to the connection. |
 <!-- connector-matrix:confirmation:end -->
 
 `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` and `CLIENT PRODUCER` declare `none` as both their position
@@ -1115,7 +1234,7 @@ consumer edges from the new plan; it does not reconstruct the emitter from a Mod
 The host resolves resource mounts and binds the lowered VM programs to installed schemas and UDFs
 when it starts the task. A retry reopens the sink with the same typed configuration.
 
-A `TO CLIENT SCHEMA` emitter is a native sink plan, not an external connector plan. Its typed
+A `CLIENT CONSUMER EMITTER ... TO SCHEMA` is a native sink plan, not an external connector plan. Its typed
 plan carries the exact output schema, declared `BATCH` limit and required ACK window, timeout and
 retry pacing, with no client object or codec. The host constructs Arrow IPC from the projected
 columns, retains each payload's bytes and source member positions through the common prepared
@@ -1197,12 +1316,14 @@ transient failure its pending work is still waiting out.
 ### Finishing a sink
 
 Every sink implements `finish`, and no sink inherits a default. A publish reports a record
-delivered at the completion point its mode declares, and for `NO_ACK` on Kafka, Pulsar and MQTT
+delivered at the completion point its mode declares, and for `NO ACK` on Kafka, Pulsar and MQTT
 QoS 0 that point is the client taking the record, so the client can still hold delivered records
-when the emitter stops. A Core NATS write delivers its records once the client flushed them to its
-socket, so its client holds records only after a write ran out of the client's `timeout_ms`: they
-stay unresolved for the host's retry, and the client still sends them. `finish` sends what the
-client still holds by the deadline the host gives it and answers with one of two outcomes:
+when the emitter stops. A Core NATS write delivers its records once the client reports them flushed
+to its socket, so its client holds records only after a write ran out of the client's `timeout_ms`:
+they stay unresolved for the host's retry, and the client still sends them unless its connection
+fails first, which discards those the client had taken for that connection but not yet written.
+`finish` sends what the client still holds by the deadline the host gives it and answers with one
+of two outcomes:
 
 - **Nothing held.** The client holds no record once a publish returns, so there is nothing to send.
 - **Flushed.** The client held records and sent every one of them before the deadline.
@@ -1236,10 +1357,10 @@ the emitter's transient error that `DESCRIBE EMITTER` shows and as an error even
 
 | Sink | What the client holds once a publish returns | What finishing does with it |
 | --- | --- | --- |
-| Kafka | `NO_ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
-| Pulsar | `NO_ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
+| Kafka | `NO ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
+| Pulsar | `NO ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
 | MQTT | `QOS 0`: publishes the client took and its event loop has not yet written and flushed to the broker connection, which a client cut off from its broker holds until it connects again. `QOS 1` and `QOS 2`: nothing | Waits until the event loop has flushed every publish the client took or the deadline passes; reports a failed flush or the count still unflushed at that deadline |
-| NATS | Core `NO_ACK`: nothing after a write whose flush completed; after a write that ran out of `timeout_ms`, the records it handed the client, which the next write flushes before it hands the client more. JetStream: nothing, because JetStream answers each record | Flushes the Core NATS client by the deadline, which sends what it holds; reports the count still held when the deadline passes, or the client's failure with the driver's cause beneath |
+| NATS | Core `NO ACK`: nothing after a write whose flush completed; after a write that ran out of `timeout_ms`, the records it handed the client, which the next write flushes before it hands the client more. JetStream: nothing, because JetStream answers each record | Flushes the Core NATS client by the deadline, which sends what it holds; reports the count still held when the deadline passes, or the client's failure with the driver's cause beneath. A flush that completes after the client lost its connection and connected again answers Flushed, though the failed connection discarded the records it had taken but not yet written |
 | ZeroMQ | Nothing a publish reported delivered: a completed send has flushed its frame to a peer's socket, and a send that ran out of `timeout_ms` failed its record | Nothing to send |
 | RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
 | Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#sinks) describes |
@@ -1249,7 +1370,9 @@ thread checks that state when it next serves its partitions. rust-rdkafka's `flu
 librdkafka's flush without waiting and polls in between, so on a loaded node the broker threads miss
 that instant and the records linger past the deadline. The Kafka finish therefore waits inside
 librdkafka's flush itself, in steps of at most a second, while the producer's polling thread takes
-the delivery reports that end the flush.
+the delivery reports that end the flush. The flush holds a handle of its own, so a flush its finish's
+caller stopped waiting for keeps the producer until it returns, and then retires it if the sink is
+gone, as [Kafka client retirement](#kafka-client-retirement) describes.
 
 The Kafka sink counts the records its producer holds itself. librdkafka's out-queue length adds
 every event waiting in the producer's queue, its errors, statistics and unserved delivery reports
@@ -1359,7 +1482,7 @@ declared `ACK TIMEOUT`, so the driver's thirty-second default cannot end a longe
 Driver retries remain disabled; the host's declared retry policy owns another attempt. RabbitMQ
 settles its records when it loses a channel instead.
 
-Under Pulsar `NO_ACK`, accepting a record still delivers it. The sink retains its receipt until
+Under Pulsar `NO ACK`, accepting a record still delivers it. The sink retains its receipt until
 it resolves, without retaining the payload or its upstream acknowledgement. Completed receipts
 are collected during subsequent publishes, and the first driver failure is retained for finish.
 The receipt set and the driver's outbound channel each hold at most 100 entries, from one shared
@@ -1757,20 +1880,25 @@ sequenceDiagram
   `otel-hex-ids` property compares all bytes and acceptance with an independent per-digit scalar
   decoder for trace, span and parent-span keys, including lowercase, uppercase, mixed case,
   arbitrary UTF-8 text and the exact key and reason of every refusal.
-- **Iceberg sink.** It stages Arrow data locally on the node's filesystem storage workers,
-  prepares data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the
-  host measures from staging, ends or its staged files reach the maximum commit size. Open checks
-  mapped column names and Iceberg types against the loaded table, after recursively narrowing UTC
-  nanosecond datetimes to microseconds in the staged schema. Staging does not complete an ACK;
-  successful catalog commit does. The sink retains ACKs and its client while a failed commit is
+- **Iceberg sink.** It stages Arrow data locally on the node's filesystem storage workers, prepares
+  data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the host measures
+  from staging, ends or its staged files reach the maximum commit size. Open plans how its commits
+  write the mapped columns into the loaded table, matching them to the table's columns by name and
+  Iceberg type after recursively narrowing UTC nanosecond datetimes to microseconds in the staged
+  schema, and refuses a table whose required column `VALUES` leaves out or maps from an expression
+  that can produce a null. Every commit plans again against the table's current schema and lays each
+  staged batch out as the table's columns, in the table's order, before the Parquet writer, which
+  pairs a batch's columns with a data file's by position: a mapped column lands in the column of its
+  name and an optional column `VALUES` leaves out is written as null. Staging does not complete an
+  ACK; successful catalog commit does. The sink retains ACKs and its client while a failed commit is
   retried. A commit reads its staged files back in groups the bulk memory class can hold at once,
-  and a single file larger than the class alone, charged with the whole class. It charges each
-  group before reading it, returns the charge once the group's rows are in data files, and appends
-  the data files of every group in one catalog commit. It covers the staged files it found when it
+  and a single file larger than the class alone, charged with the whole class. It charges each group
+  before reading it, returns the charge once the group's rows are in data files, and appends the
+  data files of every group in one catalog commit. It covers the staged files it found when it
   began, so the retry of a failed append commits files staged since then in a commit of their own
   instead of acknowledging them unwritten.
   [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate limits.
-- **RabbitMQ sink.** The broker answers no `NO_ACK` message itself, so the sink ends a `NO_ACK`
+- **RabbitMQ sink.** The broker answers no `NO ACK` message itself, so the sink ends a `NO ACK`
   write with one round trip on its channel, which the broker answers only after it has taken every
   message written before it, and the answer delivers the write; a write costs that one round trip,
   not one per message. When the client sets `timeout_ms`, a round trip the broker does not answer

@@ -1,7 +1,7 @@
 Feature: HTTP receiver fixture
   The HTTP receiver stands in for an operator-provisioned endpoint. These scenarios qualify it
   against the HTTP client Nervix already has, the polling ingestor's, so the receiver's capture,
-  scripted status sequences and TLS identity are proven before an HTTP emitter depends on them.
+  scripted status sequences and TLS identity are proven before an HTTP REQUEST emitter depends on them.
 
   Scenario Outline: The HTTP receiver captures a polling client's requests and answers from its script
     Given HTTP receiver "api" is running

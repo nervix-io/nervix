@@ -143,9 +143,9 @@ mod tests {
                     let emitter = arbitrary.create_emitter_to(kind);
                     assert_eq!(emitter.sink.kind(), kind, "{domain:?}");
                     assert!(
-                        emitter
-                            .sink
-                            .accepts_publishing_mode(&emitter.publishing_mode),
+                        kind.capabilities()
+                            .publishing_modes
+                            .contains(&emitter.sink.publishing().kind()),
                         "{domain:?} {kind:?}"
                     );
                 }

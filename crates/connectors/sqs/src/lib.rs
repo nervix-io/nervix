@@ -73,7 +73,7 @@ pub enum SqsPublishingMode {
 /// What one SQS sink sends to: its client entries, queue name and request shape.
 pub struct SqsSinkConfig {
     pub config: Vec<ClientConfigEntry>,
-    pub queue: String,
+    pub queue: nervix_models::SqsQueueName,
     pub mode: SqsPublishingMode,
     /// The node resolver every connection of the client resolves the endpoint host through.
     pub dns: DnsResolver,
@@ -236,7 +236,7 @@ impl SqsSink {
             dns,
         } = config;
         let client = Self::client_from_config(&config, dns).await?;
-        let queue_url = Self::queue_url(&client, &queue).await?;
+        let queue_url = Self::queue_url(&client, queue.as_str()).await?;
         Ok(Self {
             client,
             queue_url,

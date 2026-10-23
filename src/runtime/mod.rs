@@ -92,8 +92,8 @@ use nervix_models::{
 mod fixture_vocabulary {
     pub(super) use nervix_models::{
         ClusterSchedule, CreateClientHttp, CreateClientPrometheus, CreateClientRabbitMq,
-        CreateEmitter, CreateIngestor, CreateReingestor, CreateRelay, DomainSchedule,
-        EmitterPublishingMode, IngestSource, Model, OutputBranch, ScheduledNode, ScheduledNodes,
+        CreateEmitter, CreateIngestor, CreateReingestor, CreateRelay, DomainSchedule, IngestSource,
+        Model, OutputBranch, ScheduledNode, ScheduledNodes,
     };
 }
 #[cfg(test)]
@@ -307,6 +307,7 @@ mod remote_dispatch;
 mod reorderer;
 mod resources;
 mod runtime_lifecycle;
+mod runtime_settings;
 mod schedule_apply;
 mod snapshot_staging;
 #[cfg(feature = "benchmarks")]
@@ -528,8 +529,9 @@ use planning::{
 use processor_branch_restore::PendingProcessorBranchRestore;
 use processor_branch_task::{
     PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, PreparedProcessorBranch, ProcessorBranchHandoff,
-    ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError, ProcessorNodeCommand,
-    ProcessorSnapshotRequest, SpawnedSnapshotTask,
+    ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,
+    ProcessorCheckpointPurpose, ProcessorNodeCommand, ProcessorSnapshotRequest,
+    SpawnedSnapshotTask,
 };
 pub(in crate::runtime) use processor_branch_task::{
     ProcessorRuntimeContext, spawn_processor_node_runtime,
@@ -971,6 +973,8 @@ pub(crate) use relay_batch::{RelayMessage, RelayRecordBatch};
 pub(crate) use relay_channel::{RelayBroadcast, RelayReceiver as RelaySubscriptionReceiver};
 pub(crate) use relay_subscription::RelaySubscriptionDefinition;
 use relay_subscription::{RelaySubscriptionRefusal, RelaySubscriptions};
+pub(crate) use runtime_settings::RuntimeEnvironment;
+pub use runtime_settings::{RestoreStagingMaxBytes, RuntimeSettings, StateSnapshotInterval};
 use state_assignment::{CheckpointOwners, ScheduledStateAssignment, SharedStateAssignment};
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};

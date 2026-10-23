@@ -150,6 +150,8 @@ tags = [
   "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
   "@kept_ingestor_offsets",
+  "@redis_subscription_backpressure",
+  "@redis_idle_subscription",
 ]
 target = "test:scenarios"
 
@@ -737,7 +739,7 @@ feature = "tests/features/runtime/mqtt_emission.feature"
 id = "scenario.mqtt-finish-at-stop"
 invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
 invocation = "scenarios"
-scenario = "STOP waits for the publish a QOS 0 MQTT emitter's client holds"
+scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1903,7 +1905,7 @@ feature = "tests/features/runtime/mqtt_emission.feature"
 id = "stress.mqtt-finish-at-stop"
 invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
 invocation = "stress-scenarios"
-scenario = "STOP waits for the publish a QOS 0 MQTT emitter's client holds"
+scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -2234,6 +2236,46 @@ id = "stress.transaction-pause-release"
 invariant = "A refused domain resume remains applying until the same mutation owner releases its pause; exact command retries retain one committed outcome and the next mutation can proceed."
 invocation = "stress-scenarios"
 scenario = "A refused pause release remains recoverable when its coordinator regains leadership"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Redis intake quiesce and source teardown reach tracked host controls on one and three nodes. The dedicated RESP reader, bounded asynchronous channel and socket waits are untracked."
+examples = 4
+feature = "tests/features/runtime/redis_ingestion.feature"
+id = "scenario.redis-subscription-quiesce"
+invariant = "BUFFER retains exactly its declared bytes and DROP counts every paused input; resuming delivers new input and empties retained work."
+invocation = "scenarios"
+scenario = "Redis subscription intake stays bounded under <handling>"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "An idle Redis subscription is replaced after its same-socket probe expires, exercising tracked source controls and terminal teardown. Protocol parsing, asynchronous handoff and network waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/redis_ingestion.feature"
+id = "scenario.redis-idle-subscription"
+invariant = "An established subscription reports the declared idle timeout while its peer is silent and delivers after the peer resumes, on one and three nodes."
+invocation = "scenarios"
+scenario = "An idle Redis subscription detects a silent connection and resubscribes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Redis intake quiesce and source teardown reach tracked host controls on one and three nodes. The dedicated RESP reader, bounded asynchronous channel and socket waits are untracked."
+examples = 4
+feature = "tests/features/runtime/redis_ingestion.feature"
+id = "stress.redis-subscription-quiesce"
+invariant = "BUFFER retains exactly its declared bytes and DROP counts every paused input; resuming delivers new input and empties retained work."
+invocation = "stress-scenarios"
+scenario = "Redis subscription intake stays bounded under <handling>"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: an idle Redis subscription is replaced after its same-socket probe expires, exercising tracked source controls and terminal teardown. Protocol parsing, asynchronous handoff and network waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/redis_ingestion.feature"
+id = "stress.redis-idle-subscription"
+invariant = "An established subscription reports the declared idle timeout while its peer is silent and delivers after the peer resumes, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "An idle Redis subscription detects a silent connection and resubscribes"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -2779,6 +2821,10 @@ path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
   "scenario.syslog-suspend-handoff",
   "stress.syslog-suspend-handoff",
+  "scenario.redis-subscription-quiesce",
+  "stress.redis-subscription-quiesce",
+  "scenario.redis-idle-subscription",
+  "stress.redis-idle-subscription",
   "scenario.endpoint-ack-decision",
   "stress.endpoint-ack-decision",
   "scenario.endpoint-ack-ending",
