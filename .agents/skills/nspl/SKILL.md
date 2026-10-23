@@ -20,6 +20,10 @@ literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, response-header reads, frame metadata and the closed client CONFIG key set.
 
+For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
+direct-value sections. Nervix validates the entity's declared limits and exact mapping types at
+`CREATE` and `ALTER`; correct a refused declaration before starting the domain.
+
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and

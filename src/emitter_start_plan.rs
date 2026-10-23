@@ -128,8 +128,6 @@ pub(super) enum EmitterStartPlanError {
     RetryMaxBackoffBelowBackoff,
     #[error("ack timeout must be greater than zero")]
     ZeroAckTimeout,
-    #[error("{sink} emitter declares no BATCH MAX MESSAGES <n> MAX SIZE <bytes>")]
-    BatchRequired { sink: &'static str },
     #[error("{} emitter batch maximum {bytes} bytes exceeds the 32 MiB consumer window", <ClientConsumerSink as nervix_models::EmitterEntityModel>::KIND)]
     ClientBatchTooLarge { bytes: u64 },
     #[error("{} emitter client '{client}' declares no http or https origin endpoint", <HttpRequestSink as nervix_models::EmitterEntityModel>::KIND)]
@@ -881,7 +879,9 @@ impl EmitterStartPlan<DeclaredClientConfig> {
             if ack_timeout.is_zero() {
                 return Err(Report::new(EmitterStartPlanError::ZeroAckTimeout));
             }
-            let batch = Self::require_batch(sink, emitter.batch)?;
+            let batch = emitter
+                .batch
+                .verified("the registry checked this entity's required BATCH declaration");
             if batch.max_size.bytes().get() > CLIENT_CONSUMER_SESSION_BYTES {
                 return Err(Report::new(EmitterStartPlanError::ClientBatchTooLarge {
                     bytes: batch.max_size.bytes().get(),
@@ -1139,7 +1139,9 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 })),
                 Model::ClientClickHouse(client),
             ) => EmitterSinkPlan::ClickHouse(ClickHouseSinkPlan {
-                batch: Self::require_batch(sink, emitter.batch)?,
+                batch: emitter
+                    .batch
+                    .verified("the registry checked this entity's required BATCH declaration"),
                 client: EmitterClientSpec::declared(
                     expected,
                     &client.name,
@@ -1164,7 +1166,9 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 })),
                 Model::ClientPostgres(client),
             ) => EmitterSinkPlan::Postgres(PostgresSinkPlan {
-                batch: Self::require_batch(sink, emitter.batch)?,
+                batch: emitter
+                    .batch
+                    .verified("the registry checked this entity's required BATCH declaration"),
                 client: EmitterClientSpec::declared(
                     expected,
                     &client.name,
@@ -1186,7 +1190,9 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 })),
                 Model::ClientMySql(client),
             ) => EmitterSinkPlan::MySql(MySqlSinkPlan {
-                batch: Self::require_batch(sink, emitter.batch)?,
+                batch: emitter
+                    .batch
+                    .verified("the registry checked this entity's required BATCH declaration"),
                 client: EmitterClientSpec::declared(
                     expected,
                     &client.name,
@@ -1208,7 +1214,9 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 })),
                 Model::ClientMongoDb(client),
             ) => EmitterSinkPlan::MongoDb(MongoDbSinkPlan {
-                batch: Self::require_batch(sink, emitter.batch)?,
+                batch: emitter
+                    .batch
+                    .verified("the registry checked this entity's required BATCH declaration"),
                 client: EmitterClientSpec::declared(
                     expected,
                     &client.name,
@@ -1272,18 +1280,6 @@ impl EmitterStartPlan<DeclaredClientConfig> {
         Ok(EmitterStartPlan {
             retry_policy: self.retry_policy,
             sink,
-        })
-    }
-
-    /// The batching clause of a sink that has no unbounded write, which the registry requires.
-    fn require_batch(
-        sink: &EmitSink,
-        batch: Option<EmitterBatchPolicy>,
-    ) -> Result<EmitterBatchPolicy, Report<EmitterStartPlanError>> {
-        batch.ok_or_else(|| {
-            Report::new(EmitterStartPlanError::BatchRequired {
-                sink: sink.transport_label(),
-            })
         })
     }
 
@@ -2324,24 +2320,18 @@ mod tests {
     }
 
     #[test]
-    fn a_database_sink_without_its_batch_clause_is_not_planned() {
+    fn a_database_emitter_requires_the_batch_its_entity_declares() {
         let case = SinkKind::MongoDb.case();
         let mut emitter = case.emitter();
         emitter.batch = None;
-
-        let error = EmitterStartPlan::decide(
-            &emitter,
-            EmitterClientModels {
-                client: Some(&case.client),
-                catalog_client: None,
-            },
-        )
-        .expect_err("a MongoDB sink has no unbounded write");
+        let error = emitter
+            .validate_batch()
+            .expect_err("this entity requires a batch");
         assert_eq!(
-            *error.current_context(),
-            EmitterStartPlanError::BatchRequired {
-                sink: "MONGODB COLLECTION"
-            }
+            error.current_context(),
+            &nervix_models::EmitterBatchContractError::Required {
+                sink: emitter.sink.kind().phrase()
+            },
         );
     }
 

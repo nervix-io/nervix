@@ -231,8 +231,10 @@ impl CreateEmitter {
                 };
             }
             AlterEmitterOperation::DropEncode => {
-                if let EmitSink::Http(_) = self.sink.as_ref() {
-                    return Err(Report::new(AlterEmitterError::HttpDropEncode));
+                if self.sink.capabilities().body == crate::EmitterBodyForm::CodecOrWithoutBody {
+                    return Err(Report::new(AlterEmitterError::BodySelectionRequired {
+                        entity: self.sink.kind(),
+                    }));
                 }
                 if self.body.codec().is_none() {
                     return Err(Report::new(AlterEmitterError::EncodeNotConfigured));
@@ -390,8 +392,8 @@ pub enum AlterEmitterError {
     EncodeNotConfigured,
     #[error("CLIENT CONSUMER emitters do not name an external client")]
     ClientUnsupported,
-    #[error("HTTP REQUEST emitters select an absent body with SET TO ... WITHOUT BODY")]
-    HttpDropEncode,
+    #[error("{entity} emitters select an absent body with SET TO ... WITHOUT BODY")]
+    BodySelectionRequired { entity: crate::EmitSinkKind },
     #[error("COMMIT policy is only supported by ICEBERG TABLE emitters")]
     CommitPolicyUnsupported,
     #[error("emitter batching is not configured")]

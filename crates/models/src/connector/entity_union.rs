@@ -427,6 +427,12 @@ macro_rules! connector_sinks {
                 }
             }
 
+            fn mapped_value_types(&self) -> Option<$crate::MappedValueTypes> {
+                match self {
+                    $(Self::$Variant(sink) => $crate::SinkBody::mapped_value_types(sink),)+
+                }
+            }
+
             fn commit_policy(&self) -> Option<(&str, &str)> {
                 match self {
                     $(Self::$Variant(sink) => $crate::SinkBody::commit_policy(sink),)+

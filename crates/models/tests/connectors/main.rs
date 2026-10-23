@@ -693,6 +693,11 @@ fn a_sink_states_what_its_pair_declares() {
             assert_eq!(sink.requires_codec(), declared.body.requires_codec());
             assert_eq!(sink.batch_legality(), declared.batch);
             assert_eq!(
+                sink.mapped_value_types().is_some(),
+                declared.body == nervix_models::EmitterBodyForm::Values,
+                "{kind} declares direct mapping types exactly when it has a VALUES body",
+            );
+            assert_eq!(
                 sink.requires_batch_transformation(),
                 declared.requires_batch_transformation
             );
