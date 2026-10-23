@@ -302,6 +302,11 @@ relay. Do not use them to scan across branches.
   Every source body declares `MODE`, with `MODE NO ACK` where nothing waits on an acknowledgement,
   and only a mode its entity accepts. Every ingestor `ALTER` repeats the stored ingestor's head;
   reading another connector or entity takes `DROP INGESTOR` and a new `CREATE`.
+- Delivery-policy durations and direct-value keys and types are checked at `CREATE` and `ALTER`.
+  Follow `Ingestors` → `Delivery Modes` for duration bounds and retry ordering, and `Emitters` →
+  `Direct-emitter values` for exact types and literal-only OTEL resources. For example, supply an
+  I32 expression for OTEL `severity_number`; an integer literal is I64. A refused alteration
+  preserves the accepted graph.
 - For acknowledged HTTP or WebSocket endpoint intake in Plexus, read `Ingestors` → `HTTP ENDPOINT
   And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
   shared client outcome labels, and sender retry semantics. Check that a WebSocket endpoint's

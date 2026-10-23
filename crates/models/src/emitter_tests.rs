@@ -174,7 +174,9 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
         error
             .expect_err("the alteration is rejected")
             .current_context(),
-        &AlterEmitterError::HttpDropEncode
+        &AlterEmitterError::BodySelectionRequired {
+            entity: crate::EmitSinkKind::Http(crate::HttpSinkEntity::Request),
+        }
     );
     assert_eq!(emitter, before);
 

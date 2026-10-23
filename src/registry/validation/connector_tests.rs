@@ -45,6 +45,87 @@ use crate::registry::{
     },
 };
 
+#[test]
+fn transport_policy_errors_keep_the_node_and_duration_reader_cause() {
+    let domain: DomainName = named("validation");
+    let identifier: ModelName = named("incoming");
+    let retry = RetryPolicy {
+        backoff: "10ms".to_string(),
+        max_backoff: "1s".to_string(),
+    };
+    let Err(error) = validate_transport_delivery(
+        &domain,
+        &identifier,
+        nervix_models::IngestAcknowledgement::Sequential {
+            timeout: "nonsense",
+            retry: &retry,
+        },
+    ) else {
+        panic!("an unreadable ACK TIMEOUT must be refused before execution");
+    };
+    let RegistryError::InvalidConnectorDeclaration {
+        domain: actual_domain,
+        node,
+        issue,
+    } = error.current_context()
+    else {
+        panic!("the policy reader must identify its owning node: {error:#}");
+    };
+    assert_eq!(actual_domain, &domain);
+    assert_eq!(
+        node,
+        &nervix_models::NodeRef::new(nervix_models::ModelKind::Ingestor, identifier)
+    );
+    assert_eq!(
+        issue,
+        &ConnectorDeclarationIssue::InvalidDuration {
+            setting: ConnectorDurationSetting::AckTimeout,
+            value: "nonsense".to_string(),
+        }
+    );
+    assert!(error.contains::<nervix_models::DurationTextError>());
+    assert!(format!("{error:#}").contains("expected number at 0"));
+}
+
+#[test]
+fn transport_policy_deadlines_obey_the_shared_schedulable_bound() {
+    let domain: DomainName = named("validation");
+    let node = nervix_models::NodeRef::new(
+        nervix_models::ModelKind::Ingestor,
+        named::<ModelName>("incoming"),
+    );
+    let maximum = format!("{}ns", ClientDeadline::LONGEST.as_nanos());
+    let beyond = ClientDeadline::LONGEST
+        .as_nanos()
+        .checked_add(1)
+        .assured("half a u64 nanosecond count plus one is below u128::MAX");
+    for setting in [
+        ConnectorDurationSetting::AckTimeout,
+        ConnectorDurationSetting::BatchTimeout,
+        ConnectorDurationSetting::RetryBackoff,
+        ConnectorDurationSetting::RetryMaximum,
+    ] {
+        let result = setting.parse(&maximum, &domain, &node);
+        assert!(
+            matches!(result, Ok(duration) if duration == ClientDeadline::LONGEST),
+            "the declared maximum fits: {result:?}",
+        );
+        let Err(error) = setting.parse(&format!("{beyond}ns"), &domain, &node) else {
+            panic!("a policy above the shared deadline bound cannot be scheduled");
+        };
+        assert!(
+            matches!(error.current_context(), RegistryError::InvalidConnectorDeclaration {
+            issue: ConnectorDeclarationIssue::UnschedulableDuration { setting: refused }, ..
+        } if *refused == setting)
+        );
+    }
+    let result = ConnectorDurationSetting::BatchTimeout.parse("0s", &domain, &node);
+    assert!(
+        matches!(result, Ok(duration) if duration.is_zero()),
+        "zero batch timeout gathers without waiting: {result:?}",
+    );
+}
+
 fn validate_signaling_protocol(
     protocol: &CreateSignalingProtocol,
 ) -> Result<(), Report<RegistryError>> {
@@ -265,7 +346,7 @@ fn publishing_contract_checks_the_batch_clause_against_its_sink() {
         },
         client: named("postgres_main"),
         table: named("events"),
-        values: Vec::new(),
+        values: vec![otel_mapping("seq")],
         conflict_action: nervix_models::PostgresConflictAction::None,
     }));
 
@@ -409,7 +490,7 @@ fn direct_values_sensitivity_reports_the_typed_external_target() {
     }));
     let models = ModelIndex::new();
     let error =
-        validate_direct_values_sensitivity(&domain, &identifier, &models, &emitter, &input_schema)
+        validate_direct_value_mappings(&domain, &identifier, &models, &emitter, &input_schema)
             .expect_err("a sensitive VALUES expression must be rejected");
     assert!(matches!(
         error.current_context(),
@@ -430,7 +511,7 @@ fn direct_values_sensitivity_reports_the_typed_external_target() {
     };
     values[0].expression = nervix_nspl::parse_expression("leak_sensitive(input.secret)")
         .assured("leak_sensitive(input.secret) is a valid expression");
-    validate_direct_values_sensitivity(&domain, &identifier, &models, &emitter, &input_schema)
+    validate_direct_value_mappings(&domain, &identifier, &models, &emitter, &input_schema)
         .assured("explicit leakage permits the direct VALUES mapping");
 }
 
@@ -467,7 +548,7 @@ fn direct_values_type_failure_keeps_the_vm_compile_cause() {
         values: vec![mapping],
         conflict_action: nervix_models::PostgresConflictAction::None,
     }));
-    let error = validate_direct_values_sensitivity(
+    let error = validate_direct_value_mappings(
         &domain,
         &identifier,
         &ModelIndex::new(),

@@ -18,6 +18,10 @@ differ. Read headers the way the source's model records them, such as lowercase 
 and on a sink that keeps one value per header name write each literal header name once: a repeated
 literal name is refused when the statement is validated.
 
+For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
+direct-value sections. Nervix validates the entity's declared limits and exact mapping types at
+`CREATE` and `ALTER`; correct a refused declaration before starting the domain.
+
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and

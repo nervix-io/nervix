@@ -283,6 +283,13 @@ configures as a typed kind, so a source or a sink is matched with its client by 
 rather than labels. A session producer's source is no transport, so the transport union holds no
 Model of it; the kind union still names it, because capability decisions ask about every source.
 
+Direct-value entities declare their mapped field types in the same vocabulary. Codec and native
+bodies have no direct-mapping contract; column mappings and named protocol fields have distinct
+contracts. The registry infers each mapping's type and checks it without coercion before accepting
+the candidate graph. It also establishes required batching and schedulable transport delivery
+durations there. Planning consumes those guarantees, including the presence of a required batch,
+and an invalid alteration leaves the accepted configuration intact.
+
 Each emitter destination also owns its closed publishing enum: a Kafka topic can hold its own
 `NO ACK` or acknowledged policy, while an HTTP request can hold only its request acknowledgement
 policy. Capability metadata comes from those enum declarations. Shared inspection borrows the

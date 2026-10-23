@@ -929,6 +929,14 @@ sequenceDiagram
 
 ### Registry Validation And Planning
 
+Connector declaration failures carry `RegistryError::InvalidConnectorDeclaration` with the domain,
+typed node identity, and a `ConnectorDeclarationIssue` naming the refused clause or mapping key.
+Duration failures retain the duration reader's typed cause; an unschedulable duration and an
+inverted retry range are distinct issues. A mapped-value type failure reports the declared type
+and the expression's inferred Arrow type, such as `VALUES key 'severity_number' requires I32,
+found Int64`. These are command refusals before publication, including during `ALTER`, rather
+than retried source or sink initialization failures. They never include a record's values.
+
 Registry validation and planning refuse invalid models before graph activation. Validation names the
 owning node, the route when the rule is route-local, the operation, and relevant fields or
 references. A branch mismatch in an error route, for example, identifies the source route, error

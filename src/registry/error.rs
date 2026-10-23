@@ -22,6 +22,58 @@ use nervix_models::{
 };
 use thiserror::Error;
 
+/// A duration clause whose declared value must fit a scheduled connector wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(crate) enum ConnectorDurationSetting {
+    #[strum(serialize = "ACK TIMEOUT")]
+    AckTimeout,
+    #[strum(serialize = "BATCH TIMEOUT")]
+    BatchTimeout,
+    #[strum(serialize = "RETRY POLICY BACKOFF")]
+    RetryBackoff,
+    #[strum(serialize = "RETRY POLICY MAX")]
+    RetryMaximum,
+}
+
+/// A declaration that cannot produce a valid connector execution policy.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub(crate) enum ConnectorDeclarationIssue {
+    #[error("invalid {setting} duration '{value}'")]
+    InvalidDuration {
+        setting: ConnectorDurationSetting,
+        value: String,
+    },
+    #[error("{setting} must be greater than zero")]
+    ZeroDuration { setting: ConnectorDurationSetting },
+    #[error("{setting} is longer than the longest schedulable duration")]
+    UnschedulableDuration { setting: ConnectorDurationSetting },
+    #[error("RETRY POLICY MAX is shorter than its BACKOFF")]
+    InvertedRetry,
+    #[error("{entity} emitter requires {expected}")]
+    Body {
+        entity: EmitSinkKind,
+        expected: nervix_models::EmitterBodyForm,
+    },
+    #[error("duplicate VALUES key '{key}'")]
+    DuplicateValue { key: String },
+    #[error("VALUES requires at least one mapping")]
+    EmptyValues,
+    #[error("{entity} declares no direct value type contract")]
+    MissingMappedValueContract { entity: EmitSinkKind },
+    #[error("{section} does not support key '{key}'")]
+    UnsupportedMappedKey {
+        section: nervix_models::MappedValueSection,
+        key: String,
+    },
+    #[error("{section} key '{key}' requires {expected}, found {actual}")]
+    MappedType {
+        section: nervix_models::MappedValueSection,
+        key: String,
+        expected: nervix_models::MappedValueType,
+        actual: arrow_schema::DataType,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 pub(crate) enum OtelMappingSignal {
     #[strum(serialize = "LOGS")]
@@ -373,6 +425,22 @@ pub(crate) enum RegistryError {
         domain: DomainName,
         identifier: ModelName,
         issue: OtelMappingIssue,
+    },
+    #[error(
+        "{} '{}' in domain '{domain}' is invalid: {issue}",
+        .node.kind.as_str(), .node.identifier
+    )]
+    InvalidConnectorDeclaration {
+        domain: DomainName,
+        #[cfg_attr(
+            nervix_lint,
+            nervix::identity(
+                node,
+                reason = "names the entity whose connector declaration is refused"
+            )
+        )]
+        node: nervix_models::NodeRef,
+        issue: ConnectorDeclarationIssue,
     },
     #[error(
         "cannot delete model '{identifier}' in domain '{domain}' because it is used by {blockers}"

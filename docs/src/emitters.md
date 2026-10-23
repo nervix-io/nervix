@@ -954,6 +954,14 @@ external keys are invalid, `output` is unavailable, and sensitive values require
 Bare fields, `message.field`, and `input.field` read the source row. Direct emitters reject
 `INHERIT` and all current direct sinks reject `INVOKE`.
 
+Nervix checks these mappings against the source schema during `CREATE` and `ALTER`, before opening
+the destination. Database and Iceberg columns accept Plexus scalar, array and vector types; OTEL
+fields require their documented exact types. For example, an I32 source field can supply
+`severity_number`, while the integer literal `9` is inferred as I64 and is refused for that field.
+OTEL attributes accept supported scalar values and arrays or vectors of those values; `RESOURCE`
+entries must be literal expressions. Mapping types are never implicitly coerced. A refused
+alteration preserves the emitter's accepted configuration.
+
 ## Header invocations
 
 `write_header` is a side-effect function. It accepts statically non-null `STRING` name and value

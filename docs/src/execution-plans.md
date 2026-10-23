@@ -84,6 +84,12 @@ plan into connector configuration without normalization. Iceberg resolves its co
 client into the S3, GCS or Azure Blob backend while constructing this plan; the runtime receives
 that resolved backend and never infers it from the statement or location.
 
+The registry establishes batching legality and direct-mapping key and type contracts from each
+entity's vocabulary declaration before planning. A sink that requires `BATCH` therefore receives
+the already-validated batch configuration; planning does not maintain another required-batching
+table. Transport-ingestor ACK, batch and retry durations are likewise validated before admission,
+including the shared schedulable bound, so an unusable policy cannot reach source installation.
+
 Kafka source installation also binds the node-owned executor into the connector plan. Partition
 inspectors used by scheduling and the host's partition watch use that same node executor. The
 connector interprets the effective native client deadline and admits its synchronous driver calls;
