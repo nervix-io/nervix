@@ -377,7 +377,14 @@ impl IngestorQuiescePublication {
 /// buffer owns these values and appends them into the group's builders on replay.
 #[derive(Debug, Clone)]
 pub(in crate::runtime) enum BufferedIngestMetadata {
-    Syslog { peer_addr: std::net::SocketAddr },
+    Websockets {
+        frame_type: nervix_models::WebsocketsFrameType,
+        // Retains the message's exact connection header snapshot without copying it per frame.
+        headers: Arc<RetainedIngestHeaders>,
+    },
+    Syslog {
+        peer_addr: std::net::SocketAddr,
+    },
     Headers(RetainedIngestHeaders),
 }
 
@@ -390,6 +397,13 @@ impl BufferedIngestMetadata {
 
     pub(super) fn row(&self) -> IngestMetadataRow<'_> {
         match self {
+            Self::Websockets {
+                frame_type,
+                headers,
+            } => IngestMetadataRow::Websockets {
+                frame_type: *frame_type,
+                headers,
+            },
             Self::Syslog { peer_addr } => IngestMetadataRow::Syslog {
                 peer_addr: *peer_addr,
             },

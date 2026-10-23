@@ -1700,6 +1700,16 @@ health is asymmetric: a connected follower may still probe an unreachable peer s
 the leader has retired that peer. Revision and HTTPS listener progress requests remain bound to the
 reported incarnation.
 
+An `application_revision` progress query samples the answering incarnation's authoritative,
+runtime-prepared and runtime-ready revisions. These direct observations supplement gossip. A
+completion barrier keeps observing published progress and availability while its query batch is
+pending; a reply is unnecessary once valid publications satisfy the barrier. The batch is retained
+across state changes, rather than restarted on each publication. Its owned runtime task keeps
+polling queries while the barrier reads the leader's participant view, so a probe granted an
+executor permit keeps progressing while that view request waits. Ending the barrier aborts its
+probe task. Queries retain their transport deadlines, and the barrier retains its command deadline
+and leader-tenure and incarnation checks.
+
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application
 probe is healthy, rather than merely that a transport pool exists.
