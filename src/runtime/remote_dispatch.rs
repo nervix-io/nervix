@@ -902,6 +902,13 @@ impl Runtime {
 
     /// Publishes how this node reaches its cluster, and with it the node's identity, once the node
     /// has joined the cluster. `interconnect` is the transport bound under this node's name.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a node attaches its remote dispatcher once, as it joins its cluster"
+        )
+    )]
     pub(crate) fn attach_remote_dispatcher(
         &self,
         cluster: Arc<cluster::ClusterHandle>,

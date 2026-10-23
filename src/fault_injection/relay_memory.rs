@@ -41,6 +41,13 @@ pub(super) enum RelayMemoryFillPoint {
 impl FaultInjection {
     /// Lets the scenario fill the relay memory of `node_id` at once. A node registers the
     /// execution budgets its relay work charges when it joins its cluster.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a node registers its relay memory once, as it joins its cluster"
+        )
+    )]
     pub(crate) fn register_relay_memory_owner(
         &self,
         node_id: &ClusterNodeName,
@@ -157,6 +164,16 @@ impl FaultInjection {
         self.fill_relay_memory_at(node_id, executor, RelayMemoryFillPoint::RecordStorage);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario fills a node's relay memory only at the first point of its \
+                      relay work it armed the fill for",
+            key = "one test node's armed relay memory fill",
+            bound = "one keyed entry and one charge of the free room; no guard across await"
+        )
+    )]
     fn fill_relay_memory_at(
         &self,
         node_id: &ClusterNodeName,
@@ -188,8 +205,12 @@ fn take_free_relay_memory(executor: &Executor, left: u64) -> Reservation {
             .checked_sub(memory.reserved_bytes)
             .assured("a budget never reserves more than its capacity");
         // Less free room than the fill leaves is taken as none: leaving that room is the fill's
-        // whole meaning, so the difference saturates at zero rather than failing.
-        let taken = room.saturating_sub(left);
+        // whole meaning.
+        let taken = nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "a fill takes no room when less is free than the room it leaves",
+            room.saturating_sub(left)
+        );
         if let Ok(reservation) = executor.try_reserve(MemoryClass::Relay, taken) {
             return reservation;
         }
