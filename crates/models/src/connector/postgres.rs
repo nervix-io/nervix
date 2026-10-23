@@ -27,9 +27,9 @@ use super::{
 };
 use crate::{
     ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
-    OptionForm, OptionPresence, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkReferenceKind, SinkValueMapping, SinkValueMappings, TableName,
+    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SinkValueMapping,
+    SinkValueMappings,
 };
 
 configured_client!(Postgres: pooled, config NervixWithAddressQuery, CreateClientPostgres => PostgresConfigEntry);
@@ -41,8 +41,9 @@ pub type PostgresValueMapping = SinkValueMapping;
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct PostgresTableSink {
+    pub mode: PostgresTablePublishingMode,
     pub client: ClientName,
-    pub table: TableName,
+    pub table: PostgresTableName,
     pub values: Vec<PostgresValueMapping>,
     pub conflict_action: PostgresConflictAction,
 }
@@ -85,12 +86,10 @@ impl SinkEntity for PostgresTableSink {
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        publishing_modes: PostgresTablePublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
-            keywords: "INSERT TO TABLE",
-            name: LocatorName::Unquoted {
-                label: "table_name",
-            },
+            keywords: "TABLE",
+            name: LocatorName::External(PostgresTableName::DECLARATION),
         }),
         options: &[OptionDeclaration {
             keywords: "ON CONFLICT",
@@ -135,8 +134,22 @@ connector_sinks! {
     connector Postgres = "POSTGRES";
     /// What a PostgreSQL sink writes.
     pub enum PostgresSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum PostgresEmitterMode;
     /// The entities a PostgreSQL sink writes.
     pub enum PostgresSinkEntity {
-        Table(PostgresTableSink) = "TABLE";
+        Table(PostgresTableSink, PostgresTablePublishingMode) = "TABLE";
     }
+}
+
+super::publishing::emitter_modes! {
+    pub enum PostgresTablePublishingMode {
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+    }
+}
+
+super::external_name::external_names! {
+    /// The case-preserving external table identifier this connector publishes to.
+    pub struct PostgresTableName => super::external_name::external_identifier,
+        label "postgres_table", example "Orders";
 }

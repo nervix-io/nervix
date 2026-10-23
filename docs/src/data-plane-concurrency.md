@@ -595,8 +595,17 @@ answer and survives cancellation of that await; another commit first consumes th
 This uses the existing semaphore adapter and makes no new memory-ordering claim. The registered
 `shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched` check holds a
 production connector worker while filesystem and consensus jobs complete, then verifies permit
-and byte-reservation return. Native broker waits are outside Shuttle and Deloxide's lock detector;
-the ordinary connector regressions and one-/three-node stalled-broker scenarios own that evidence.
+and byte-reservation return.
+
+The consumer a source or inspector shares with its jobs is destroyed by one more connector storage
+job, which its retirement submits once the last handle is dropped and which waits for a place
+rather than being refused; see
+[Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement). The retirement
+takes no control turn, since no job holds the consumer any more, and adds no synchronization of
+its own: the shared pointer's own count decides which drop is the last, and the job enters the
+executor through its existing wait for a place. Native broker waits, the destruction's included,
+are outside Shuttle and Deloxide's lock detector; the ordinary connector and retirement
+regressions and the one-/three-node stalled-broker and retirement scenarios own that evidence.
 
 ### Kafka producer retention
 
@@ -2139,7 +2148,7 @@ verdicts stay the scenarios' own, with the product's deadlines and the suite's b
 ## Deterministic Concurrency Verification
 
 The Pulsar sink uses the shared `ConfirmationWindow` and its registered property and Shuttle
-checks for concurrent broker answers, timeout and enqueue failure. Under `NO_ACK`, one sink task
+checks for concurrent broker answers, timeout and enqueue failure. Under `NO ACK`, one sink task
 owns its retained send receipts and the first failed receipt; it collects completed receipts
 while publishing and awaits the rest at finish under the host's deadline. No receipt or outcome
 is persisted or published through a shared map. The driver and its asynchronous channels remain

@@ -27,12 +27,11 @@ use super::{
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    AcknowledgementConfirmation, ChannelName, ClientName, ConnectorKind, DeclaredDelivery,
-    DeclaredQuiesce, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    EmitterPublishingModeKind, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    LocatorDeclaration, LocatorName, PositionClass, SinkBody, SinkClientReference, SinkEntity,
-    SinkReference, SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind,
+    AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, IngestAcknowledgement,
+    IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration, LocatorName, PositionClass,
+    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody,
+    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Redis: pooled, config NervixWithAddressQuery, CreateClientRedis => RedisConfigEntry);
@@ -184,8 +183,9 @@ connector_sources! {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct RedisPubSubSink {
+    pub mode: RedisPubSubPublishingMode,
     pub client: ClientName,
-    pub channel: ChannelName,
+    pub channel: RedisChannelName,
 }
 
 impl SinkEntity for RedisPubSubSink {
@@ -195,12 +195,10 @@ impl SinkEntity for RedisPubSubSink {
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[EmitterPublishingModeKind::NoAck],
+        publishing_modes: RedisPubSubPublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
             keywords: "CHANNEL",
-            name: LocatorName::Unquoted {
-                label: "channel_name",
-            },
+            name: LocatorName::External(RedisChannelName::DECLARATION),
         }),
         options: &[],
         envelope: &[],
@@ -226,8 +224,16 @@ connector_sinks! {
     connector Redis = "REDIS";
     /// What a Redis sink writes.
     pub enum RedisSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum RedisEmitterMode;
     /// The entities a Redis sink writes.
     pub enum RedisSinkEntity {
-        PubSub(RedisPubSubSink) = "PUBSUB";
+        PubSub(RedisPubSubSink, RedisPubSubPublishingMode) = "PUBSUB";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum RedisPubSubPublishingMode {
+        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
     }
 }

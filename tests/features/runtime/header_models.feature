@@ -27,9 +27,9 @@ Feature: Header models
       """
     When these Plexus statements fail with "emitter 'repeated' in domain '{{domain}}' writes header 'route' at INVOKE #1 and again at #3, but PULSAR TOPIC emitters keep one value per header name, so the later write would replace the earlier one on every record"
       """
-      CREATE EMITTER repeated FROM outgoing
-        TO PULSAR pulsar_main TOPIC events_out
-          MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      CREATE PULSAR TOPIC EMITTER repeated FROM outgoing
+        TO pulsar_main TOPIC 'events_out'
+          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING event_codec
         INHERIT ALL
         INVOKE write_header('route', 'a'),
@@ -39,8 +39,8 @@ Feature: Header models
       """
     When these Plexus statements fail with "writes header 'x-route' at INVOKE #1 and again at #2, but HTTP REQUEST emitters keep one value per header name"
       """
-      CREATE EMITTER repeated FROM outgoing
-        TO HTTP api METHOD 'POST' PATH '/events'
+      CREATE HTTP REQUEST EMITTER repeated FROM outgoing
+        TO api METHOD 'POST' PATH '/events'
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           WITHOUT BODY
         INVOKE write_header('X-Route', 'a'),
@@ -49,9 +49,9 @@ Feature: Header models
       """
     When these Plexus statements are executed on the leader node
       """
-      CREATE EMITTER repeated FROM outgoing
-        TO KAFKA kafka_main TOPIC events_out
-          MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      CREATE KAFKA TOPIC EMITTER repeated FROM outgoing
+        TO kafka_main TOPIC 'events_out'
+          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING event_codec
         INHERIT ALL
         INVOKE write_header('route', 'a'),
@@ -65,14 +65,22 @@ Feature: Header models
       """
     When these Plexus statements fail with "writes header 'route' at INVOKE #1 and again at #2, but PULSAR TOPIC emitters keep one value per header name"
       """
-      ALTER EMITTER repeated
-        SET TO PULSAR pulsar_main TOPIC events_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s;
+      BEGIN;
+      DROP EMITTER repeated;
+      CREATE PULSAR TOPIC EMITTER repeated FROM outgoing
+        TO pulsar_main TOPIC 'events_out'
+          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          ENCODE USING event_codec
+        INHERIT ALL
+        INVOKE write_header('route', 'a'), write_header('route', 'b')
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      COMMIT;
       """
     When these Plexus statements are executed on the leader node
       """
-      CREATE EMITTER computed FROM outgoing
-        TO PULSAR pulsar_main TOPIC events_out
-          MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      CREATE PULSAR TOPIC EMITTER computed FROM outgoing
+        TO pulsar_main TOPIC 'events_out'
+          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING event_codec
         INHERIT ALL
         INVOKE write_header(input.tenant, 'a'),
@@ -118,8 +126,8 @@ Feature: Header models
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://127.0.0.1:19080', 'timeout_ms' = 5000
       };
-      CREATE EMITTER requests FROM outgoing
-        TO HTTP api METHOD 'POST' PATH '/events'
+      CREATE HTTP REQUEST EMITTER requests FROM outgoing
+        TO api METHOD 'POST' PATH '/events'
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           WITHOUT BODY
         INVOKE write_header('X-Tenant', input.tenant)
@@ -127,9 +135,9 @@ Feature: Header models
       CREATE ZEROMQ CLIENT pushes CONFIG {
         'addr' = 'tcp://127.0.0.1:63001', 'bind' = 'false'
       };
-      CREATE EMITTER broadcasts FROM outgoing
-        TO ZEROMQ pushes
-          MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      CREATE ZEROMQ PUSH EMITTER broadcasts FROM outgoing
+        TO pushes
+          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING event_codec
         INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

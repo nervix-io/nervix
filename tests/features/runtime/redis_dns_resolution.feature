@@ -38,9 +38,9 @@ Feature: Redis name resolution
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER redis_out FROM notifications
-        TO REDIS PUBSUB redis_main CHANNEL dns_out_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE REDIS PUBSUB EMITTER redis_out FROM notifications
+        TO redis_main CHANNEL 'dns_out_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -143,9 +143,9 @@ Feature: Redis name resolution
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER redis_out FROM notifications
-        TO REDIS PUBSUB redis_main CHANNEL dns_out_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_codec
+      CREATE REDIS PUBSUB EMITTER redis_out FROM notifications
+        TO redis_main CHANNEL 'dns_out_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

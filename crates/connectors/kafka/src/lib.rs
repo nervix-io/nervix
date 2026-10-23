@@ -3,8 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Kafka consumer and producer configuration, source polling and offset handling,
-//!   record and header publication, native queue capacity and admission backpressure,
-//!   delivery-report classification, the records the producer
+//!   consumer retirement off the async workers, record and header publication, native queue
+//!   capacity and admission backpressure, delivery-report classification, the records the producer
 //!   holds until their delivery reports are served, the delivery bound a confirmed publish gives
 //!   the producer, and producer queue shutdown.
 //! - **Depends on.** The connector contract and its confirmation window, vocabulary values,
@@ -51,7 +51,7 @@ use nervix_connector::{
     SinkFinishResult, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord,
     SinkRecordId, SinkStartError, SinkStartResult,
 };
-use nervix_models::{ClientConfigEntry, TopicName};
+use nervix_models::{ClientConfigEntry, KafkaTopicName};
 use nervix_primitives::{
     sync::oneshot,
     time::{Instant, sleep, timeout_at},
@@ -106,13 +106,13 @@ const QUEUE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
 
 pub struct KafkaSinkConfig {
     pub config: Vec<ClientConfigEntry>,
-    pub topic: TopicName,
+    pub topic: KafkaTopicName,
     pub mode: BrokerPublishingMode,
 }
 
 pub struct KafkaSink {
     producer: ThreadedProducer<KafkaProducerContext>,
-    topic: TopicName,
+    topic: KafkaTopicName,
     mode: BrokerPublishingMode,
     /// librdkafka's validated payload-byte capacity, resolved once with the producer's config.
     #[cfg_attr(
