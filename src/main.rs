@@ -14,10 +14,13 @@ fn main() -> Result<(), Report<AppError>> {
     // exists, and after the signals, so the detector's threads never see one by its default action.
     #[cfg(feature = "deloxide")]
     nervix_deadlock::DiagnosticRun::start_selected(
-        args.deadlock_evidence
+        args.diagnostics
+            .deadlock_evidence
             .clone()
             .map(nervix_deadlock::EvidenceDirectory::new),
-        nervix_primitives::deadlock::DiagnosticSelection::for_build(args.deadlock_active_only),
+        nervix_primitives::deadlock::DiagnosticSelection::for_build(
+            args.diagnostics.deadlock_active_only,
+        ),
     )
     .change_context(AppError::StartDeadlockDiagnostics)?;
     let runtime = Builder::new_multi_thread()
@@ -28,7 +31,7 @@ fn main() -> Result<(), Report<AppError>> {
 
     let tracing_guard = {
         let _entered = runtime.enter();
-        init_tracing(&args)?
+        init_tracing(&args.tracing)?
     };
     runtime.block_on(run_cli(args, termination_signals, &tracing_guard))
 }

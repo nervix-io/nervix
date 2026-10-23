@@ -20,7 +20,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{CommandRequest, SuggestRequest};
 #[cfg(feature = "testing")]
 use nervix_consensus::ConsensusTestProbe;
-use nervix_consensus::{Consensus, ConsensusSettings, Proposer, RaftRetentionPolicy};
+use nervix_consensus::{
+    Consensus, ConsensusSettings, Proposer, RaftRetentionSettings, RaftTimings,
+};
 use nervix_interconnect::{TlsConfigBundle, Transport, TransportClock};
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CommandExecutionReference, CreateDeduplicator,
@@ -51,11 +53,7 @@ use super::{
     session_service::{SessionEvents, SessionServiceImpl, SessionServiceInner},
     subscription::{SessionSubscriptions, SubscriptionInterests, SubscriptionSampler},
     tls::HttpsListenerCertificates,
-    transaction::{
-        DEFAULT_TRANSACTION_IDLE_TIMEOUT, DEFAULT_TRANSACTION_MAX_OPEN,
-        DEFAULT_TRANSACTION_MAX_SOURCE_BYTES, DEFAULT_TRANSACTION_MAX_STATEMENTS,
-        DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-    },
+    transaction::TransactionLimits,
 };
 use crate::{
     ConfiguredFaultInjection, cluster, registry::Registry, resource::ResourceStore,
@@ -269,6 +267,7 @@ fn test_session_service(
         &cluster,
     );
     let subscription_interests = SubscriptionInterests::new(cluster.clone(), runtime.metrics());
+    let transaction_limits = TransactionLimits::default();
     let client_producers = super::client_producers::ClientProducerRouter::new(
         runtime.clone(),
         interconnect.clone(),
@@ -301,11 +300,11 @@ fn test_session_service(
             service_tasks: super::service_tasks::ServiceTasks::default(),
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
             failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
-            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
-            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
-            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
-            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
+            transaction_idle_timeout: transaction_limits.idle_timeout(),
+            transaction_tombstone_retention: transaction_limits.tombstone_retention(),
+            transaction_max_statements: transaction_limits.max_statements(),
+            transaction_max_source_bytes: transaction_limits.max_source_bytes(),
+            transaction_max_open: transaction_limits.max_open(),
             transaction_bindings: DashMap::with_hasher(RandomState::new()),
             command_execution_policy: super::command_execution::CommandExecutionPolicy::default(),
             command_executions: super::command_execution::CommandExecutionOwners::default(),
@@ -631,10 +630,13 @@ pub(in crate::application) async fn build_test_service_inner(
         interconnect_advertise_addr: interconnect.local_addr().into(),
         interconnect: interconnect.clone(),
         executor: executor.clone(),
-        raft_heartbeat_interval: Duration::from_millis(50),
-        raft_election_timeout_min: Duration::from_millis(150),
-        raft_election_timeout_max: Duration::from_millis(300),
-        raft_retention: RaftRetentionPolicy::default(),
+        raft_timings: RaftTimings::resolve(
+            Some(Duration::from_millis(50)),
+            Some(Duration::from_millis(150)),
+            Some(Duration::from_millis(300)),
+        )
+        .expect("the fixture's Raft timings are valid"),
+        raft_retention: RaftRetentionSettings::default(),
     };
     #[cfg(feature = "testing")]
     let consensus = match probe {

@@ -40,7 +40,7 @@ use nervix_connector_kafka::testing_rdkafka::{
     producer::{FutureProducer, FutureRecord},
     topic_partition_list::{Offset, TopicPartitionList},
 };
-use nervix_consensus::RaftRetentionPolicy;
+use nervix_consensus::{RaftRetentionSettings, RaftTimings};
 use nervix_dns::{DnsConfiguration, DnsResolver};
 use nervix_execution::Executor;
 use nervix_interconnect::{
@@ -73,11 +73,15 @@ use nervix_primitives::{
 use nervix_server::{
     FaultInjection, SchedulerMode,
     application::{
-        Application, CommandExecutionPolicy, InternalTransportMode, ShutdownCoordinator,
-        ShutdownOutcome, init_tracing_to_file,
+        Application, CommandExecutionPolicy, InternalTransportMode, NodeIdentity, NodeSettings,
+        SchedulingSettings, SettingOverride, ShutdownCoordinator, ShutdownOutcome,
+        ShutdownSettings, TransactionBounds, TransactionLimits, init_tracing_to_file,
     },
-    memory_pressure::MemoryPressureConfig,
-    runtime::{DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, branch_task_stop_timeout},
+    cluster::MembershipSettings,
+    memory_pressure::{MemoryPressureConfig, MemoryPressureSettings},
+    runtime::{
+        DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, RuntimeSettings, branch_task_stop_timeout,
+    },
 };
 use pulsar::{
     ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
@@ -753,8 +757,11 @@ pub(crate) struct TestClusterConfig {
     pub memory_pressure: Option<MemoryPressureConfig>,
     pub raft_election_timeout_min: Duration,
     pub raft_election_timeout_max: Duration,
-    pub raft_retention: RaftRetentionPolicy,
+    pub raft_retention: RaftRetentionSettings,
     pub temp_dir: Option<PathBuf>,
+    /// Settings a scenario names for one node, applied over the cluster's own when that node
+    /// next starts.
+    pub node_setting_overrides: BTreeMap<String, Vec<SettingOverride>>,
     pub dependencies: DependencyEndpoints,
     pub peer_addressing: PeerAddressing,
     /// What every node's name begins with: the n-th node is `<prefix>-<n>`. A scenario that runs a
@@ -785,13 +792,78 @@ impl Default for TestClusterConfig {
             memory_pressure: None,
             raft_election_timeout_min: TEST_RAFT_ELECTION_TIMEOUT_MIN,
             raft_election_timeout_max: TEST_RAFT_ELECTION_TIMEOUT_MAX,
-            raft_retention: RaftRetentionPolicy::default(),
+            raft_retention: RaftRetentionSettings::default(),
             temp_dir: None,
+            node_setting_overrides: BTreeMap::new(),
             dependencies: DependencyEndpoints::default(),
             peer_addressing: PeerAddressing::default(),
             node_name_prefix: "node".to_string(),
             default_user_password: DefaultUserPasswordSeed::default(),
         }
+    }
+}
+
+impl TestClusterConfig {
+    /// The settings `node_id` starts with: the cluster's own, with the settings a scenario named
+    /// for that node applied over them exactly as the server's command line reads them.
+    fn node_settings(&self, node_id: &str) -> io::Result<NodeSettings> {
+        let settings = NodeSettings {
+            raft: RaftTimings::resolve(
+                Some(TEST_RAFT_HEARTBEAT_INTERVAL),
+                Some(self.raft_election_timeout_min),
+                Some(self.raft_election_timeout_max),
+            )
+            .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            raft_retention: self.raft_retention,
+            membership: MembershipSettings::resolve(Some(TEST_NODE_UNAVAILABILITY_TIMEOUT))
+                .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            scheduling: SchedulingSettings::resolve(Some(self.replica_count))
+                .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            runtime: RuntimeSettings::resolve(
+                Some(self.state_snapshot_interval),
+                Some(ubyte::ByteUnit::Byte(self.restore_staging_max_bytes)),
+            )
+            .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            transactions: TransactionLimits::resolve(TransactionBounds {
+                idle_timeout: Some(self.transaction_idle_timeout),
+                tombstone_retention: Some(self.transaction_tombstone_retention),
+                max_statements: Some(self.transaction_max_statements),
+                max_source_bytes: Some(self.transaction_max_source_bytes),
+                max_open: Some(self.transaction_max_open),
+            })
+            .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            commands: CommandExecutionPolicy::resolve(
+                Some(self.command_retry_validity),
+                Some(self.command_execution_capacity),
+            )
+            .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            memory_pressure: self.memory_pressure_settings()?,
+            shutdown: ShutdownSettings::resolve(
+                Some(self.shutdown_timeout),
+                Some(self.drain_timeout),
+            )
+            .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            ..NodeSettings::default()
+        };
+        let Some(overrides) = self.node_setting_overrides.get(node_id) else {
+            return Ok(settings);
+        };
+        settings
+            .with_overrides(overrides)
+            .map_err(|report| io::Error::other(format!("{report:#}")))
+    }
+
+    fn memory_pressure_settings(&self) -> io::Result<MemoryPressureSettings> {
+        let Some(config) = self.memory_pressure else {
+            return Ok(MemoryPressureSettings::default());
+        };
+        MemoryPressureSettings::resolve(
+            Some(config.high_watermark),
+            Some(config.low_watermark),
+            Some(config.check_interval),
+            Some(config.resume_jitter),
+        )
+        .map_err(|report| io::Error::other(format!("{report:#}")))
     }
 }
 
@@ -969,6 +1041,20 @@ impl Cluster {
             .readiness(1, PhaseDeadline::after(ATTEMPT_READINESS_BUDGET))
             .await
             .map_err(io::Error::other)
+    }
+
+    /// Names a setting `node_id` starts with from its next launch on, over the cluster's own.
+    pub(crate) fn override_node_setting(&mut self, node_id: &str, setting: SettingOverride) {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        handle
+            .config
+            .node_setting_overrides
+            .entry(node_id.to_string())
+            .or_default()
+            .push(setting);
     }
 
     pub(crate) async fn start_node(&mut self, node_id: &str) -> io::Result<()> {
@@ -3218,6 +3304,9 @@ struct NodeHandle {
     /// The cluster's storage and watchdog registration, which a node left stopping keeps until its
     /// task has ended.
     roots: Arc<ClusterRoots>,
+    /// The settings of the current launch, which bound how long its stop may take. `None` until
+    /// the node has been launched.
+    launched_settings: Option<NodeSettings>,
 }
 
 impl NodeHandle {
@@ -3240,6 +3329,7 @@ impl NodeHandle {
             last_shutdown: None,
             stop_clock: None,
             roots,
+            launched_settings: None,
         }
     }
 
@@ -3260,9 +3350,9 @@ impl NodeHandle {
             ensure_dev_tls_assets()?;
         }
 
-        let shutdown = ShutdownCoordinator::new(self.config.shutdown_timeout);
+        let settings = self.config.node_settings(&self.spec.node_id)?;
         let db_path = self.spec.db_path()?;
-        let application_builder = Application::builder()
+        let identity = NodeIdentity::builder()
             .addr(parse_addr(&self.spec.grpc_addr())?)
             .grpc_mode(self.config.grpc_mode)
             .grpc_https_listen_addr(Some(parse_addr(&self.spec.grpc_https_addr())?))
@@ -3292,25 +3382,6 @@ impl NodeHandle {
                     .default_user_password
                     .initial_password(self.spec.allow_bootstrap),
             )
-            .node_unavailability_timeout(TEST_NODE_UNAVAILABILITY_TIMEOUT)
-            .raft_heartbeat_interval(TEST_RAFT_HEARTBEAT_INTERVAL)
-            .raft_election_timeout_min(self.config.raft_election_timeout_min)
-            .raft_election_timeout_max(self.config.raft_election_timeout_max)
-            .replica_count(self.config.replica_count);
-        let application = application_builder
-            .state_snapshot_interval(self.config.state_snapshot_interval)
-            .restore_staging_max_bytes(self.config.restore_staging_max_bytes)
-            .transaction_idle_timeout(self.config.transaction_idle_timeout)
-            .transaction_tombstone_retention(self.config.transaction_tombstone_retention)
-            .command_execution(CommandExecutionPolicy::new(
-                self.config.command_retry_validity,
-                self.config.command_execution_capacity,
-            ))
-            .transaction_max_statements(self.config.transaction_max_statements)
-            .transaction_max_source_bytes(self.config.transaction_max_source_bytes)
-            .transaction_max_open(self.config.transaction_max_open)
-            .memory_pressure(self.config.memory_pressure)
-            .raft_retention(self.config.raft_retention)
             .cluster_bootstrap_host(self.spec.bootstrap_host.clone())
             .dns(
                 self.spec
@@ -3325,11 +3396,15 @@ impl NodeHandle {
                     .clone()
                     .unwrap_or_else(|| PathBuf::from(DEFAULT_TEMP_DIR)),
             )
-            .fault_injection(self.fault_injection.clone())
-            .shutdown(shutdown.clone())
-            .graceful_shutdown_drain(self.config.graceful_shutdown_drain)
-            .drain_timeout(self.config.drain_timeout)
             .build();
+        let application = Application::builder()
+            .identity(identity)
+            .settings(settings)
+            .fault_injection(self.fault_injection.clone())
+            .graceful_shutdown_drain(self.config.graceful_shutdown_drain)
+            .build();
+        let shutdown = application.shutdown.clone();
+        self.launched_settings = Some(settings);
         // Published before the task is spawned and handed to that task, so the watchdog sees the
         // node for exactly as long as it runs: the registration leaves the registry when the task
         // ends, whether it returned, failed or panicked.
@@ -3356,8 +3431,12 @@ impl NodeHandle {
     }
 
     fn shutdown_watchdog_timeout(&self) -> io::Result<Duration> {
+        let shutdown_settings = match &self.launched_settings {
+            Some(settings) => settings.shutdown,
+            None => self.config.node_settings(&self.spec.node_id)?.shutdown,
+        };
         let application_drain_timeout = if self.config.graceful_shutdown_drain {
-            self.config.drain_timeout
+            shutdown_settings.drain_timeout()
         } else {
             Duration::ZERO
         };
@@ -3375,7 +3454,7 @@ impl NodeHandle {
             })?;
         Ok(NODE_SHUTDOWN_LIVENESS_WATCHDOG
             .max(configured_phase_floor)
-            .max(self.config.shutdown_timeout))
+            .max(shutdown_settings.shutdown_timeout()))
     }
 
     /// Waits for a node a scenario stopped itself, within the product shutdown deadlines that
@@ -4502,30 +4581,36 @@ pub(crate) async fn publish_mqtt_burst_to_address(
         }
     }));
 
-    let published = timeout(BROKER_TIMEOUT, async {
+    // The broker-operation timeout bounds each publication's queueing and completion rather than
+    // the whole burst, so a burst fails only once the broker answers none of its publications for
+    // that long. A broker the parallel suite loads answers a burst of 2,000 QoS 1 publications in
+    // more than one timeout while it answers each of them well within it.
+    let published = async {
         let mut notices = Vec::with_capacity(count);
         for _ in 0..count {
             nervix_primitives::task::consume_budget().await;
-            notices.push(
-                client
-                    .publish_tracked(topic, payload, PublishOptions::new(qos))
-                    .await
-                    .map_err(io::Error::other)?,
-            );
+            let queued = timeout(
+                BROKER_TIMEOUT,
+                client.publish_tracked(topic, payload, PublishOptions::new(qos)),
+            )
+            .await
+            .map_err(|elapsed| io::Error::new(io::ErrorKind::TimedOut, elapsed))?;
+            notices.push(queued.map_err(io::Error::other)?);
         }
         // Queue the complete burst before waiting so completion tracking preserves its demand.
         for notice in notices {
-            notice
-                .wait_completion_async()
+            nervix_primitives::task::consume_budget().await;
+            let completed = timeout(BROKER_TIMEOUT, notice.wait_completion_async())
                 .await
-                .map_err(io::Error::other)?;
+                .map_err(|elapsed| io::Error::new(io::ErrorKind::TimedOut, elapsed))?;
+            completed.map_err(io::Error::other)?;
         }
         Ok::<_, io::Error>(())
-    })
+    }
     .await;
     driver.abort();
     let _ = driver.await;
-    published.map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
+    published
 }
 
 async fn ensure_rabbitmq_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {

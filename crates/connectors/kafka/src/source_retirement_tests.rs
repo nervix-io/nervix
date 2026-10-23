@@ -10,34 +10,25 @@
 
 use std::{
     future::{Future as _, poll_fn},
-    num::NonZeroUsize,
     task::Poll,
     time::Duration,
 };
 
-use error_stack::Report;
 use meticulous::ResultExt as _;
 use nervix_connector::SourceConnector as _;
-use nervix_execution::{
-    AdmissionError, ConnectorStorageWorkers, ExecutionConfig, ExecutionError, Executor,
-    MemoryClass, StorageClass, WorkerClassSnapshot, WorkerCounts,
-};
+use nervix_execution::{AdmissionError, Executor, MemoryClass};
 use nervix_models::ClientConfigEntry;
-use nervix_primitives::{
-    sync::oneshot,
-    task::JoinHandle,
-    time::{sleep, timeout},
-};
+use nervix_primitives::sync::oneshot;
 use rdkafka::{consumer::StreamConsumer, mocking::MockCluster, producer::DefaultProducerContext};
 
 use super::{
     GroupCommitRequest, KafkaGroupCommit, KafkaOffsetPosition, KafkaSource, KafkaSourceError,
     KafkaSourcePlan, TopicPartitionInspector,
-    commit_tests::{GROUP, HELD_ROUND_TRIP, READ_DEADLINE, cluster, plan, publish, read_positions},
+    commit_tests::{GROUP, HELD_ROUND_TRIP, cluster, plan, publish, read_positions},
 };
-
-/// How often a test reads the connector workers' counters while it waits for a retirement.
-const COUNTER_POLL: Duration = Duration::from_millis(10);
+use crate::retirement_tests::{
+    FullConnectorQueue, connector_workers_reach, single_connector_worker,
+};
 
 /// The plan of a source in the test group that runs its driver jobs on `executor`.
 fn plan_on(
@@ -47,112 +38,6 @@ fn plan_on(
     let mut plan = plan(broker, KafkaGroupCommit::EachAcknowledgedBatch);
     plan.executor = executor.clone();
     plan
-}
-
-/// An executor with one connector worker and one place in the connector queue.
-fn single_connector_worker() -> Executor {
-    Executor::new(ExecutionConfig {
-        workers: WorkerCounts {
-            connector_storage: ConnectorStorageWorkers::resolve(Some(NonZeroUsize::MIN))
-                .assured("one worker fits the primitive permit bound"),
-            pending_jobs: NonZeroUsize::MIN,
-            ..WorkerCounts::default()
-        },
-        ..ExecutionConfig::default()
-    })
-    .assured("the test changes only worker counts")
-}
-
-/// Waits until the connector workers' counters show `reached`, and fails naming `awaited` once the
-/// test's read deadline passes.
-async fn connector_workers_reach(
-    executor: &Executor,
-    awaited: &str,
-    reached: impl Fn(&WorkerClassSnapshot) -> bool,
-) {
-    let waited = timeout(READ_DEADLINE, async {
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            if reached(&executor.snapshot().connector_storage) {
-                return;
-            }
-            sleep(COUNTER_POLL).await;
-        }
-    })
-    .await;
-    assert!(
-        waited.is_ok(),
-        "{awaited}; connector workers: {:?}",
-        executor.snapshot().connector_storage
-    );
-}
-
-type ConnectorJob = JoinHandle<Result<(), Report<ExecutionError>>>;
-
-/// The only connector worker, held by a job the test releases, and the only place in the queue,
-/// taken by a job waiting behind it.
-struct FullConnectorQueue {
-    release: oneshot::Sender<()>,
-    occupying: ConnectorJob,
-    queued: ConnectorJob,
-}
-
-impl FullConnectorQueue {
-    async fn fill(executor: &Executor) -> Self {
-        let (started, has_started) = oneshot::channel();
-        let (release, released) = oneshot::channel::<()>();
-        let occupier = executor.clone();
-        let charge = executor
-            .try_reserve(MemoryClass::Commands, 1)
-            .assured("the occupying job's envelope fits");
-        let occupying = nervix_primitives::task::spawn(async move {
-            occupier
-                .run_storage(StorageClass::Connector, charge, move |_, _| {
-                    started.send(()).assured("the test awaits worker admission");
-                    released
-                        .blocking_recv()
-                        .assured("the test releases the only connector worker");
-                })
-                .await
-        });
-        has_started
-            .await
-            .assured("the occupying job holds the only connector worker");
-        let waiter = executor.clone();
-        let charge = executor
-            .try_reserve(MemoryClass::Commands, 1)
-            .assured("the queued job's envelope fits");
-        let queued = nervix_primitives::task::spawn(async move {
-            waiter
-                .run_storage(StorageClass::Connector, charge, |_, _| ())
-                .await
-        });
-        connector_workers_reach(
-            executor,
-            "the second job takes the only queue place",
-            |workers| workers.pending == 1,
-        )
-        .await;
-        Self {
-            release,
-            occupying,
-            queued,
-        }
-    }
-
-    async fn release(self) {
-        self.release
-            .send(())
-            .assured("the occupying job waits for its release");
-        self.occupying
-            .await
-            .assured("the occupying job's supervisor is joined")
-            .assured("the occupying job exits");
-        self.queued
-            .await
-            .assured("the queued job's supervisor is joined")
-            .assured("the queued job runs once the worker is free");
-    }
 }
 
 /// A source's own drop, at the end of its host's loop, lets the last handle go. Its consumer joined

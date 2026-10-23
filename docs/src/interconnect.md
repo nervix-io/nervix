@@ -337,6 +337,10 @@ only while the original coordinator process and both bound participant incarnati
 the exact ownership-handoff gate is still held; every other preparation is discarded durably. A
 second pass after the gate deadline reclaims work that was active during the first pass.
 
+An ownership handoff sends engagement, drain status and release only to the hold's participants:
+the live nodes that run part of the moved unit's boundary, as
+[Control Plane](./control-plane.md#planned-ownership-handoffs-and-failover) defines them. A slow or
+lossy link to any other node therefore takes no part in the handoff's preparation deadline.
 Ownership-handoff engagement answers after admission is fenced and its force flush is requested.
 The coordinator then queries the exact operation's drain status. A participant publishes its capture
 freeze before returning a drained status, and capture requires that coordination identity's freeze
