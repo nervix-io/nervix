@@ -337,8 +337,9 @@ readiness, and gate release. A no-op reapplies the current required state before
 
 `START` waits until every listener and assigned source has completed its startup boundary. `STOP`
 waits for remote source and listener teardown, including when it stops the cluster's last running
-domain. Paced-domain clock authority is part of the same revision. TLS-changing model effects wait
-for every affected listener to install the configuration. Each node installs the TLS VHOSTs of a
+domain, and for the last state write of every deduplicator and window branch it ends.
+Paced-domain clock authority is part of the same revision. TLS-changing model effects wait for
+every affected listener to install the configuration. Each node installs the TLS VHOSTs of a
 runtime revision before it reports that revision prepared, and the command then confirms the
 installation on every live process incarnation. A failed installation fails the command. A batch
 that did not pause is rolled back by the same record that stores the failure, and the command waits

@@ -59,6 +59,15 @@ impl ConfiguredFaultInjection {
         None
     }
 
+    pub(in crate::runtime) fn stopped_branch_state_write_delay(
+        &self,
+        _domain: &DomainName,
+        _kind: ModelKind,
+        _entity: &ModelName,
+    ) -> Option<Duration> {
+        None
+    }
+
     pub(in crate::runtime) fn sink_client_is_unavailable(&self, _emitter: &EmitterName) -> bool {
         false
     }

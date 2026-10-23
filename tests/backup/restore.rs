@@ -442,19 +442,119 @@ async fn then_restored_checkpoints_match(world: &mut ScenarioWorld, before: Stri
     .await;
 }
 
+/// How one state section differs between two archives, named by its path and sizes rather than by
+/// its bytes, which can run to tens of megabytes.
+#[derive(Debug, PartialEq, Eq)]
+enum StateSectionDifference {
+    /// Only the first archive holds the section.
+    OnlyBefore { path: String, length: usize },
+    /// Only the second archive holds the section.
+    OnlyAfter { path: String, length: usize },
+    /// Both archives hold the section, and its bytes first differ at `offset`.
+    Changed {
+        path: String,
+        before_length: usize,
+        after_length: usize,
+        offset: usize,
+    },
+}
+
+impl std::fmt::Display for StateSectionDifference {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OnlyBefore { path, length } => {
+                write!(formatter, "only before: {path} ({length} bytes)")
+            }
+            Self::OnlyAfter { path, length } => {
+                write!(formatter, "only after: {path} ({length} bytes)")
+            }
+            Self::Changed {
+                path,
+                before_length,
+                after_length,
+                offset,
+            } => write!(
+                formatter,
+                "changed: {path} ({before_length} bytes before, {after_length} after, first \
+                 difference at byte {offset})"
+            ),
+        }
+    }
+}
+
+/// The offset of the first byte at which `before` and `after` differ, or the length of the
+/// shorter one when it is a prefix of the other.
+fn first_differing_byte(before: &[u8], after: &[u8]) -> usize {
+    for (offset, (left, right)) in before.iter().zip(after).enumerate() {
+        if left != right {
+            return offset;
+        }
+    }
+    before.len().min(after.len())
+}
+
+/// Every section that differs between `before` and `after`, in path order: first the sections
+/// `before` holds, then those only `after` holds.
+fn state_section_differences(
+    before: &BTreeMap<String, Vec<u8>>,
+    after: &BTreeMap<String, Vec<u8>>,
+) -> Vec<StateSectionDifference> {
+    let mut differences = Vec::new();
+    for (path, before_bytes) in before {
+        let Some(after_bytes) = after.get(path) else {
+            differences.push(StateSectionDifference::OnlyBefore {
+                path: path.clone(),
+                length: before_bytes.len(),
+            });
+            continue;
+        };
+        if before_bytes != after_bytes {
+            differences.push(StateSectionDifference::Changed {
+                path: path.clone(),
+                before_length: before_bytes.len(),
+                after_length: after_bytes.len(),
+                offset: first_differing_byte(before_bytes, after_bytes),
+            });
+        }
+    }
+    for (path, after_bytes) in after {
+        if !before.contains_key(path) {
+            differences.push(StateSectionDifference::OnlyAfter {
+                path: path.clone(),
+                length: after_bytes.len(),
+            });
+        }
+    }
+    differences
+}
+
 /// Asserts that archives `before` and `after` hold the same bytes in every section under one of
-/// `directories` of their domains' state, reading both on a blocking task.
+/// `directories` of their domains' state, reading both on a blocking task. A difference names each
+/// section that differs and where, never the bytes.
 async fn assert_same_state_sections(
     before: PathBuf,
     after: PathBuf,
     directories: &'static [&'static str],
-    message: &'static str,
+    state: &'static str,
 ) {
     off_the_runner(move || {
-        assert_eq!(
-            state_sections(&before, directories),
-            state_sections(&after, directories),
-            "{message}"
+        let before_sections = state_sections(&before, directories);
+        let after_sections = state_sections(&after, directories);
+        let differences = state_section_differences(&before_sections, &after_sections);
+        let mut report = String::new();
+        for difference in &differences {
+            std::fmt::Write::write_fmt(&mut report, format_args!("\n  {difference}"))
+                .assured("writing to a String cannot fail");
+        }
+        assert!(
+            differences.is_empty(),
+            "backup archives {} and {} hold different {state}: {} of {} and {} sections \
+             differ:{report}",
+            before.display(),
+            after.display(),
+            differences.len(),
+            before_sections.len(),
+            after_sections.len(),
         );
     })
     .await;
@@ -491,7 +591,7 @@ async fn then_restored_materialized_generations_match(
         archive_path(world, &before),
         archive_path(world, &after),
         &["materialized_relay"],
-        "a stale installer cannot replace the active materialized generation",
+        "materialized generations",
     )
     .await;
 }
@@ -506,7 +606,7 @@ async fn then_restored_branch_states_match(
         archive_path(world, &before),
         archive_path(world, &after),
         &["deduplicator", "window_processor"],
-        "a stale installer cannot replace the active deduplicator keys or windows",
+        "deduplicator keys or windows",
     )
     .await;
 }
@@ -521,7 +621,7 @@ async fn then_restored_deduplicator_states_match(
         archive_path(world, &before),
         archive_path(world, &after),
         &["deduplicator"],
-        "the running restore preserves each key and its original seen_at time",
+        "deduplicator keys",
     )
     .await;
 }
