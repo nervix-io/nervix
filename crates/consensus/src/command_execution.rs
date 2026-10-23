@@ -13,7 +13,11 @@
     )
 )]
 
-use std::{collections::BTreeMap, io, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    time::Duration,
+};
 
 use error_stack::Report;
 use imbl::OrdSet;
@@ -835,6 +839,21 @@ impl CommandExecutionRecords {
 
     pub(crate) fn get(&self, reference: &CommandExecutionReference) -> Option<&CommandExecution> {
         self.entries.get(reference)
+    }
+
+    /// Transaction identities that applying transaction requests still need for exact recovery.
+    pub(crate) fn applying_transaction_targets(&self) -> BTreeSet<&str> {
+        let mut targets = BTreeSet::new();
+        for reference in &self.applying {
+            let execution = self
+                .entries
+                .get(reference)
+                .verified("the applying index names a retained execution");
+            if let Some(CommandExecutionEffect::TransactionRequest(request)) = execution.effect() {
+                targets.insert(request.target.id());
+            }
+        }
+        targets
     }
 
     #[cfg(test)]

@@ -90,7 +90,7 @@ jobs:
           shards="$(just chaos suite shards "${CHAOS_SUITE}")"
           echo "shards=${shards}" >> "${GITHUB_OUTPUT}"
           echo "count=$(jq 'length' <<<"${shards}")" >> "${GITHUB_OUTPUT}"
-          jq -r '.[] | "shard \(.shard): \(.entries | join(", ")); \(.execution_minutes) min of runs, step \(.step_minutes) min, job \(.job_minutes) min"' \
+          jq -r '.[] | "shard \(.shard): \(.entries | join(", ")); \(.execution_minutes) min of runs, \(.preparation_minutes) min of preparation, step \(.step_minutes) min, job \(.job_minutes) min"' \
             <<<"${shards}"
 
       - name: Login to GHCR
@@ -221,8 +221,9 @@ jobs:
           export CHAOS_NETWORK_PREFLIGHT_NERVIX_IMAGE="${CHAOS_IMAGE}"
           exec timeout --foreground --kill-after=10s 600s just test-chaos-network-preflight
 
-      # The suite step ends at its budget: the runs' own bounds and one teardown reserve. exec hands
-      # a cancellation's TERM to just, which passes it to the suite and the run it executes.
+      # The suite step ends at its budget: the suite's one verifier self-check, the runs' own bounds
+      # and one teardown reserve. exec hands a cancellation's TERM to just, which passes it to the
+      # suite and the run or verifier self-check it executes.
       - name: Run the ${{ inputs.suite }} suite
         timeout-minutes: ${{ matrix.shard.step_minutes }}
         run: |

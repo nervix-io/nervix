@@ -35,6 +35,13 @@ found during replicated admission returns `ExecutionReferenceConflict` with the 
 Report retention is a separate contract: a transaction's report follows
 the transaction tombstone retention, so inspection can still read it after its command reference
 has expired, and a report that inspection no longer knows does not make its reference executable.
+Transaction tombstone retention is a minimum age: an applying request retains its finished target,
+and an applying ordinary command retains every internal transaction whose mutation owner names
+that command, including its planning refresh attempts. Their plans and reports follow the same
+lifetime. This protection ends when the last execution that needs the transaction finishes; an
+already aged tombstone can then be removed without another retention window. A command therefore
+keeps the recorded transaction outcomes it needs even when a leaderless interval exceeds the
+configured transaction retention.
 
 Finalization accepts a terminal command result. An `OutcomeUnknown`, leader redirect, or detached
 transaction leaves the execution applying and preserves the disposition and diagnostics for its
