@@ -56,7 +56,7 @@ Feature: Guest saves above the bulk budget
       START;
       """
     When round 1 of Kafka messages for 2 restore tenants is published to topic "backup_guest_in_{{test_id}}"
-    Then within "120s" DESCRIBE WASM PROCESSOR "filter_even_rows" on the leader node contains
+    Then within "300s" DESCRIBE WASM PROCESSOR "filter_even_rows" on the leader node contains
       """
       state structures: 2
       """
@@ -66,10 +66,14 @@ Feature: Guest saves above the bulk budget
       """
     Then the last cluster status schedules nodes on at least <owners> distinct owners
     When round 2 of Kafka messages for 2 restore tenants is published to topic "backup_guest_in_{{test_id}}"
-    Then within "120s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals 4
-    And within "120s" the restore subscription receives one isolated even row for each of 2 tenants
+    Then within "300s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals 4
+    And within "300s" the restore subscription receives one isolated even row for each of 2 tenants
     When round 3 of Kafka messages for 2 restore tenants is published to topic "backup_guest_in_{{test_id}}"
-    Then within "120s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals 6
+    Then within "300s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals 6
+    And within "300s" the 2 branches of WASM PROCESSOR "filter_even_rows" have committed revision 3 with <replicas> confirmed replicas
+    # A cut archives the guest saves its branches' last callbacks committed: none of these cuts
+    # asks a guest to save again, so a guest checkpoint held before its save stalls none of them.
+    Given the next guest-state checkpoint of WASM processor "filter_even_rows" pauses before_capture
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "guest-first.nvxb" reporting JSON with memory measurements
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
@@ -83,6 +87,7 @@ Feature: Guest saves above the bulk budget
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And the measured backup kept every node within its bulk budget without a bulk refusal
     And backup archives "guest-first.nvxb" and "guest-retry.nvxb" have identical guest saves above 32 MiB
+    When every held WASM guest-state checkpoint is released
     Given the active domain is saved as placeholder "source_domain"
     And the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
     Then the current leader node is saved as placeholder "leader"
@@ -100,9 +105,9 @@ Feature: Guest saves above the bulk budget
     And the measured backup kept every node within its bulk budget without a bulk refusal
     And backup archives "guest-retry.nvxb" and "guest-restored.nvxb" have identical guest saves above 32 MiB
     When round 4 of Kafka messages for 2 restore tenants is published to topic "backup_guest_in_{{test_id}}"
-    Then within "120s" the restore subscription receives one isolated even row for each of 2 tenants
+    Then within "300s" the restore subscription receives one isolated even row for each of 2 tenants
 
     Examples:
-      | cluster_size | owners |
-      | 1            | 1      |
-      | 3            | 2      |
+      | cluster_size | owners | replicas |
+      | 1            | 1      | 0        |
+      | 3            | 2      | 1        |

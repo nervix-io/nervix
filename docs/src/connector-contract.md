@@ -498,9 +498,10 @@ reading, and the transport's own window or prefetch keeps the peer from sending 
 waits for the buffer to drain. A protocol without flow control drops what does not fit and counts
 it. A buffer that drops without counting, or whose overflow fails the publish for the host to retry,
 is declared as it behaves, and a buffer that nothing bounds yet is declared unbounded, so the matrix
-shows each gap until its connector closes it. A polled source's response is bounded by its
+shows each gap until its connector closes it. A `PROMETHEUS QUERY` response is bounded by its
 statement's `MAX BODY SIZE`: a response that exceeds it fails the poll, which the ingestor reports
-as its transient error, and the next poll reads again.
+as its transient error, and the next poll reads again. An `HTTP REQUEST` poll's response body has
+no such bound yet and is declared unbounded.
 
 A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a fixed bound Nervix
 sets, or the driver's own default. A wait that only the host's stop ends is declared unbounded. The
@@ -1199,10 +1200,12 @@ transient failure its pending work is still waiting out.
 Every sink implements `finish`, and no sink inherits a default. A publish reports a record
 delivered at the completion point its mode declares, and for `NO_ACK` on Kafka, Pulsar and MQTT
 QoS 0 that point is the client taking the record, so the client can still hold delivered records
-when the emitter stops. A Core NATS write delivers its records once the client flushed them to its
-socket, so its client holds records only after a write ran out of the client's `timeout_ms`: they
-stay unresolved for the host's retry, and the client still sends them. `finish` sends what the
-client still holds by the deadline the host gives it and answers with one of two outcomes:
+when the emitter stops. A Core NATS write delivers its records once the client reports them flushed
+to its socket, so its client holds records only after a write ran out of the client's `timeout_ms`:
+they stay unresolved for the host's retry, and the client still sends them unless its connection
+fails first, which discards those the client had taken for that connection but not yet written.
+`finish` sends what the client still holds by the deadline the host gives it and answers with one
+of two outcomes:
 
 - **Nothing held.** The client holds no record once a publish returns, so there is nothing to send.
 - **Flushed.** The client held records and sent every one of them before the deadline.
@@ -1239,7 +1242,7 @@ the emitter's transient error that `DESCRIBE EMITTER` shows and as an error even
 | Kafka | `NO_ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
 | Pulsar | `NO_ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
 | MQTT | `QOS 0`: publishes the client took and its event loop has not yet written and flushed to the broker connection, which a client cut off from its broker holds until it connects again. `QOS 1` and `QOS 2`: nothing | Waits until the event loop has flushed every publish the client took or the deadline passes; reports a failed flush or the count still unflushed at that deadline |
-| NATS | Core `NO_ACK`: nothing after a write whose flush completed; after a write that ran out of `timeout_ms`, the records it handed the client, which the next write flushes before it hands the client more. JetStream: nothing, because JetStream answers each record | Flushes the Core NATS client by the deadline, which sends what it holds; reports the count still held when the deadline passes, or the client's failure with the driver's cause beneath |
+| NATS | Core `NO_ACK`: nothing after a write whose flush completed; after a write that ran out of `timeout_ms`, the records it handed the client, which the next write flushes before it hands the client more. JetStream: nothing, because JetStream answers each record | Flushes the Core NATS client by the deadline, which sends what it holds; reports the count still held when the deadline passes, or the client's failure with the driver's cause beneath. A flush that completes after the client lost its connection and connected again answers Flushed, though the failed connection discarded the records it had taken but not yet written |
 | ZeroMQ | Nothing a publish reported delivered: a completed send has flushed its frame to a peer's socket, and a send that ran out of `timeout_ms` failed its record | Nothing to send |
 | RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
 | Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#sinks) describes |
