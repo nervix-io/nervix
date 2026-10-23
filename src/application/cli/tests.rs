@@ -83,6 +83,58 @@ fn durations_render_in_the_largest_unit_that_holds_them_exactly() {
 }
 
 #[test]
+fn large_subsecond_durations_render_as_exact_parseable_spans() {
+    struct DurationCase {
+        duration: Duration,
+        text: &'static str,
+    }
+
+    let cases = [
+        DurationCase {
+            duration: Duration::from_micros(u64::MAX / 1_000),
+            text: "18446744073709551us",
+        },
+        DurationCase {
+            duration: Duration::from_micros(u64::MAX / 1_000 + 1),
+            text: "18446744073s 709552000ns",
+        },
+        DurationCase {
+            duration: Duration::from_millis(u64::MAX / 1_000_000),
+            text: "18446744073709ms",
+        },
+        DurationCase {
+            duration: Duration::from_millis(u64::MAX / 1_000_000 + 1),
+            text: "18446744073s 710000000ns",
+        },
+        DurationCase {
+            duration: Duration::new(169_112_806_400, 601_538_000),
+            text: "169112806400s 601538000ns",
+        },
+        DurationCase {
+            duration: Duration::new(169_112_806_400, 601_000_000),
+            text: "169112806400s 601000000ns",
+        },
+        DurationCase {
+            duration: Duration::from_nanos(u64::MAX),
+            text: "18446744073709551615ns",
+        },
+        DurationCase {
+            duration: Duration::from_secs(60_000_000_000),
+            text: "1000000000m",
+        },
+    ];
+
+    for case in cases {
+        let text = HumanDuration(case.duration).to_string();
+        assert_eq!(text, case.text);
+        let read = text
+            .parse::<HumanDuration>()
+            .assured("the rendered spans preserve every nanosecond");
+        assert_eq!(read.0, case.duration);
+    }
+}
+
+#[test]
 fn byte_quantities_render_in_the_largest_binary_unit_that_holds_them_exactly() {
     let rendered = |bytes: ByteUnit| HumanBytes(bytes).to_string();
 

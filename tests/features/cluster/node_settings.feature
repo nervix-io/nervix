@@ -4,6 +4,21 @@ Feature: Node settings
   store or binds a listener. A setting that breaks a relationship with another refuses the node's
   start with a typed message naming both, and leaves the rest of the cluster as it was.
 
+  Scenario Outline: A node restarts with a large fractional snapshot interval after another setting is applied on a cluster of <cluster_size>
+    Given runtime replication is configured with replica count 0 and snapshot interval "<snapshot_interval>"
+    And node-1 starts with command-execution-capacity = 64
+    And a <cluster_size> node nervix cluster is started
+    When node "node-1" is stopped
+    And node "node-1" is started
+    Then node "node-1" eventually observes a stable leader
+
+    Examples:
+      | cluster_size | snapshot_interval         |
+      | 1            | 169112806400s 601538000ns |
+      | 3            | 169112806400s 601538000ns |
+      | 1            | 169112806400s 601000000ns |
+      | 3            | 169112806400s 601000000ns |
+
   Scenario Outline: A node given a drain timeout its shutdown timeout cannot hold refuses to start on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
     And node "node-<cluster_size>" is stopped
