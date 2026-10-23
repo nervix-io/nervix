@@ -1776,8 +1776,17 @@ requirements:
   the first report's generation and mapping. No `START` follows the first, so the generation never
   changes.
 - **Ticks.** Every tick must lie on the mapping's period grid, with its boundary at
-  `logical origin + (id - 1) * period`, in that generation, and no later than the serving node's own
-  logical time. Tick IDs must increase within each attachment.
+  `logical origin + (id - 1) * period`, in that generation. The boundary must have been reached by
+  the mapping at the authority's UTC observation. The serving-node logical reading must not
+  precede the boundary and must lie between the mapping's projections at authority UTC and at the
+  independent observer's receipt timestamp, with a ten-logical-millisecond measurement tolerance.
+  The containers share the Docker host's UTC. Accepted progress and the serving reading are
+  sampled separately: a pause between those samples can pair an earlier boundary with a current
+  reading, and a delayed frame can carry an earlier reading. Every such tick is checked against
+  this observation interval; its age does not supply a freshness bound. The interval cannot
+  establish the exact snapshot time or distinguish projection errors that stay inside it. Tick
+  IDs must increase within each attachment; the stall and handover checks separately establish
+  progress and recovery.
 - **Stalls.** A tick stall longer than two physical seconds, on an observer whose node stayed up,
   must fall inside a fault and end within 60 physical seconds. That is the authority bound the
   result records beside the deployed `NERVIX_NODE_UNAVAILABILITY_TIMEOUT`.
