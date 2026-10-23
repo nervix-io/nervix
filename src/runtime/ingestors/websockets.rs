@@ -31,6 +31,7 @@ impl WebsocketsIngestorStartPlan {
     ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let WebsocketsIngestorStartPlan {
             client,
+            headers,
             mode,
             signaling_protocol,
         } = self;
@@ -52,8 +53,9 @@ impl WebsocketsIngestorStartPlan {
         let Some(dns) = runtime.dns() else {
             return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
         };
-        let connector = WebsocketSourcePlan::new(resolved.entries, signaling_protocol, dns.clone())
-            .change_context_lazy(|| ingestor.initialize_failure())?;
+        let connector =
+            WebsocketSourcePlan::new(resolved.entries, headers, signaling_protocol, dns.clone())
+                .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerSourceStart {
             connector,
             instances: NonZeroU64::MIN,

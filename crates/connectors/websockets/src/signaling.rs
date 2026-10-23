@@ -513,7 +513,7 @@ impl SessionState {
     /// Stream one payload frame, or drop it if the relay is not open yet.
     async fn stream<S, D>(
         &self,
-        frame: Vec<u8>,
+        frame: WebsocketDataFrame,
         sink: &D,
         websocket: &mut WebSocketStream<S>,
     ) -> error_stack::Result<(), WebsocketSignalingError>
@@ -545,15 +545,40 @@ impl SessionState {
     )
 )]
 pub trait SignalingDataSink {
-    fn accept(&self, payload: Vec<u8>) -> impl Future<Output = ()> + Send;
-
+    fn accept(&self, frame: WebsocketDataFrame) -> impl Future<Output = ()> + Send;
     /// A request-scoped intake can answer an accepted data frame during signaling. Other sinks
     /// keep their ordinary one-way delivery.
-    fn accept_and_reply(&self, payload: Vec<u8>) -> impl Future<Output = Option<Message>> + Send {
-        let accepted = self.accept(payload);
+    fn accept_and_reply(
+        &self,
+        frame: WebsocketDataFrame,
+    ) -> impl Future<Output = Option<Message>> + Send {
+        let accepted = self.accept(frame);
         async move {
             accepted.await;
             None
+        }
+    }
+}
+
+/// One accepted data frame. Text owns UTF-8 text by construction; binary retains arbitrary bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebsocketDataFrame {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+impl WebsocketDataFrame {
+    pub fn payload(&self) -> &[u8] {
+        match self {
+            Self::Text(text) => text.as_bytes(),
+            Self::Binary(bytes) => bytes,
+        }
+    }
+
+    pub fn frame_type(&self) -> nervix_models::WebsocketsFrameType {
+        match self {
+            Self::Text(_) => nervix_models::WebsocketsFrameType::Text,
+            Self::Binary(_) => nervix_models::WebsocketsFrameType::Binary,
         }
     }
 }
@@ -691,9 +716,9 @@ impl WebsocketSignalingSession {
             };
             let message = message
                 .map_err(|error| Report::new(WebsocketSignalingError::Receive(Box::new(error))))?;
-            let (frame, is_text) = match message {
-                Message::Text(text) => (text.into_bytes(), true),
-                Message::Binary(bytes) => (bytes, false),
+            let frame = match message {
+                Message::Text(text) => WebsocketDataFrame::Text(text),
+                Message::Binary(bytes) => WebsocketDataFrame::Binary(bytes),
                 Message::Ping(ping) => {
                     websocket.send(Message::Pong(ping)).await.map_err(|error| {
                         Report::new(WebsocketSignalingError::Send(Box::new(error)))
@@ -704,7 +729,8 @@ impl WebsocketSignalingSession {
                 Message::Pong(_) | Message::Frame(_) => continue,
             };
 
-            let Some(value) = self.protocol.decode_frame(&frame, is_text) else {
+            let is_text = frame.frame_type() == nervix_models::WebsocketsFrameType::Text;
+            let Some(value) = self.protocol.decode_frame(frame.payload(), is_text) else {
                 session.stream(frame, sink, websocket).await?;
                 continue;
             };
@@ -907,18 +933,22 @@ mod tests {
     /// Records what reached ingestion, and when relative to the handshake finishing.
     #[derive(Default)]
     struct RecordingSink {
-        accepted: StdArc<Mutex<Vec<Vec<u8>>>>,
+        accepted: StdArc<Mutex<Vec<WebsocketDataFrame>>>,
     }
 
     impl RecordingSink {
         fn accepted(&self) -> Vec<Vec<u8>> {
-            self.accepted.lock().clone()
+            self.accepted
+                .lock()
+                .iter()
+                .map(|frame| frame.payload().to_vec())
+                .collect()
         }
     }
 
     impl SignalingDataSink for RecordingSink {
-        async fn accept(&self, payload: Vec<u8>) {
-            self.accepted.lock().push(payload);
+        async fn accept(&self, frame: WebsocketDataFrame) {
+            self.accepted.lock().push(frame);
         }
     }
 
@@ -1608,6 +1638,10 @@ mod tests {
         );
         // Only the frame that arrived after the relay opened reached it.
         assert_eq!(sink.accepted(), vec![br#"{"seq":2}"#.to_vec()]);
+        assert_eq!(
+            *sink.accepted.lock(),
+            vec![WebsocketDataFrame::Text(r#"{"seq":2}"#.to_string())]
+        );
     }
 
     #[nervix_primitives::test]
@@ -1626,7 +1660,7 @@ mod tests {
             ),
             vec![
                 PeerStep::Expect(r#"{"op": "subscribe"}"#.to_string()),
-                PeerStep::Send(Message::Text(r#"{"seq":1}"#.to_string())),
+                PeerStep::Send(Message::Binary(br#"{"seq":1}"#.to_vec())),
             ],
             &sink,
         )
@@ -1641,6 +1675,10 @@ mod tests {
             "unexpected error: {error}"
         );
         assert_eq!(sink.accepted(), vec![br#"{"seq":1}"#.to_vec()]);
+        assert_eq!(
+            *sink.accepted.lock(),
+            vec![WebsocketDataFrame::Binary(br#"{"seq":1}"#.to_vec())]
+        );
     }
 
     #[nervix_primitives::test]
