@@ -197,6 +197,15 @@ This shared view lets a connected follower finish control commands even when its
 still see another follower that the leader has already retired. The retired process catches up on
 reconnection before it can participate again.
 
+While direct revision queries are outstanding, the barrier continues observing discovery and
+availability changes. A valid publication can satisfy the required phase without waiting for an
+earlier query to return its sampled revision. The query batch stays in flight across those changes,
+so frequent publications cannot starve queries by repeatedly cancelling them. An owned runtime
+task polls the batch while the barrier reads the leader's participant view: a probe can already
+hold the executor permit that the view request needs. Ending the barrier aborts that task. Every
+wake still checks the current leader tenure, required process incarnations, fixed revision and
+deadline.
+
 Runtime activation has two explicit phases. First, every required node applies the authoritative
 models, schedules, clocks, resource bindings, and stopped or running lifecycle state and reports
 `prepared` for that revision. Only after the preparation barrier may running-domain sources and

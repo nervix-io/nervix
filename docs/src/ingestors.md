@@ -1363,6 +1363,18 @@ See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#m
 The topic filter is a string literal; see [External Names](#external-names) for the levels and
 wildcards it may hold.
 
+Connections use the driver's 60-second keep-alive unless the broker supplies a Server Keep Alive
+in `CONNACK`. Plexus exposes no client setting for this interval. A broker-supplied zero disables
+the keep-alive and the acknowledgement-write deadline derived from it; it does not make a silent
+connection fail within a fixed time.
+
+`SESSION CLEAN` starts a fresh broker session on every connection and retains no session after
+disconnect. `SESSION PERSISTENT` resumes the broker session for the same client identity and
+requests the maximum Session Expiry Interval (`0xFFFFFFFF`). The broker's accepted expiry,
+offline-queue limits and eviction policy still govern retention. Plexus exposes no session-expiry
+setting. Nervix keeps delivery attempts and acknowledgements in memory; a persistent broker
+session does not persist that local state.
+
 Delivery constraints:
 
 - `NO ACK` defaults to `SESSION CLEAN QOS 0`; explicit `SESSION` and `QOS` may be supplied before `MODE`
@@ -1392,10 +1404,11 @@ batch's acknowledgement fails and the ingestor reconnects, and the broker delive
 unacknowledged QoS 1 publishes again. See
 [MQTT source connections](connector-contract.md#mqtt-source-connections).
 
-Every connection an MQTT ingestor opens advertises the incoming packet bound the table above
-declares as the Maximum Packet Size of its `CONNECT`. MQTT 5 requires the broker to discard a larger
-publish for this subscriber instead of sending it, so the publish never reaches the ingestor and a
-persistent session never presents it again; the broker's own metrics, not Nervix's, show that
+Every connection an MQTT ingestor opens advertises a 10,240-byte (10 KiB) incoming packet bound as
+the Maximum Packet Size of its `CONNECT`. This bounds the complete packet, including its headers
+and properties, so the payload must leave room for that overhead. MQTT 5 requires the broker to
+discard a larger publish for this subscriber instead of sending it. It never reaches the ingestor,
+and a persistent session never presents it again; the broker's own metrics, not Nervix's, show that
 discard. A broker that sends a larger packet anyway is answered with a `DISCONNECT` whose reason is
 Packet too large, and the ingestor reports the packet's size and the bound as its transient error
 and an error event before it reconnects.
@@ -1403,7 +1416,9 @@ and an error event before it reconnects.
 Without a `client_id` in the client configuration, one instance connects as
 `<domain>~<ingestor>`. Multiple instances connect as `<domain>~<ingestor>~<instance>`, with
 zero-based instance indices. An explicit identity shared by multiple instances must contain
-`{{instance}}`. Identities remain stable across node ownership changes.
+`{{instance}}`. An explicit identity replaces the whole default, including its domain prefix:
+choose identities unique to each live connection on the same broker, across domains too.
+Identities remain stable across node ownership changes.
 
 `DROP INGESTOR` releases the broker sessions, including after `STOP`. Nervix stops the source,
 opens a clean cleanup connection for each distinct identity, sends `UNSUBSCRIBE` for its filter,

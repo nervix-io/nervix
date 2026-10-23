@@ -4,9 +4,9 @@
 //!
 //! - **Owns.** The shared state used to arm deterministic server failures, pauses, timing
 //!   overrides, listener-address overrides, and test scheduling.
-//! - **Depends on.** Vocabulary identities, Tokio notification primitives, and the decision
-//!   layer's test scheduler mode.
-//! - **Must not know.** Product configuration, NSPL syntax, connector implementations, or runtime
+//! - **Depends on.** Vocabulary identities, connector test-control contracts, execution-sensitive
+//!   notification primitives, and the decision layer's test scheduler mode.
+//! - **Must not know.** Product configuration, Plexus syntax, connector drivers, or runtime
 //!   ownership beyond the typed values needed to select a seam.
 
 #![cfg_attr(
@@ -26,6 +26,7 @@ use std::{
 use ahash::RandomState;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_connector_syslog::SyslogListenerFault;
 use nervix_execution::{Executor, MemoryClass, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
@@ -57,6 +58,8 @@ mod relocation_commit;
 mod restarted_voter;
 mod shutdown_handoff;
 mod standalone_transaction;
+#[cfg(test)]
+mod syslog_tests;
 
 pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
@@ -238,6 +241,10 @@ struct FaultInjectionState {
     /// While set, every node refuses to install a runtime-state checkpoint it replicates.
     state_replica_installation_failing: AtomicBool,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
+    /// A scenario can fail one stream accept on a selected bound address, and observe that the
+    /// source consumed the fault before checking its established connections. The armed request
+    /// remains available until acknowledged; another request cannot overwrite it before then.
+    syslog_listener_faults: watch::Sender<Option<SyslogListenerFault>>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
     domain_drain_timeout: RwLock<Option<Duration>>,
     entity_gate_deadline: RwLock<Option<Duration>>,
@@ -367,6 +374,7 @@ enum CommandPausePoint {
     RuntimeInstallation(ClusterNodeName),
     ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
+    ApplicationRevisionResponse(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
     Finalization(ClusterNodeName),
@@ -434,6 +442,7 @@ pub(crate) struct LeadershipTransferRequest {
 impl Default for FaultInjection {
     fn default() -> Self {
         let (leadership_transfers, _) = broadcast::channel(16);
+        let (syslog_listener_faults, _) = watch::channel(None);
         Self {
             inner: Arc::new(FaultInjectionState {
                 emitter_faults: DashMap::default(),
@@ -489,6 +498,7 @@ impl Default for FaultInjection {
                 wasm_state_reset_fresh_initialization_failing: AtomicBool::new(false),
                 state_replica_installation_failing: AtomicBool::new(false),
                 syslog_ingestor_bind_ips: DashMap::default(),
+                syslog_listener_faults,
                 branch_instance_expiration_scan_interval: RwLock::new(None),
                 domain_drain_timeout: RwLock::new(None),
                 entity_gate_deadline: RwLock::new(None),
@@ -1214,6 +1224,42 @@ impl FaultInjection {
             },
             Arc::new(TestPause::default()),
         );
+    }
+
+    /// Holds every revision-query reply from this node until the scenario releases it. Local
+    /// revision publication and gossip continue while the replies retain their sampled values.
+    pub fn pause_application_revision_responses_from(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ApplicationRevisionResponse(node_id));
+    }
+
+    pub async fn wait_for_application_revision_response_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ApplicationRevisionResponse(
+            node_id.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_application_revision_responses_from(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::ApplicationRevisionResponse(
+            node_id.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_application_revision_response_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+    ) {
+        let point = CommandPausePoint::ApplicationRevisionResponse(node_id.clone());
+        let Some(pause) = self
+            .inner
+            .command_pauses
+            .get(&point)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        pause.reach();
+        pause.wait_until_released().await;
     }
 
     pub fn fail_health_responses_from(&self, responding_node: ClusterNodeName) {
@@ -1949,6 +1995,28 @@ impl FaultInjection {
 
     pub fn set_syslog_ingestor_bind_ip(&self, node_id: ClusterNodeName, host: IpAddr) {
         self.inner.syslog_ingestor_bind_ips.insert(node_id, host);
+    }
+
+    pub fn fail_next_syslog_stream_accept(&self, bind_addr: String) -> watch::Receiver<bool> {
+        let (fired, observed) = watch::channel(false);
+        assert!(
+            self.inner.syslog_listener_faults.receiver_count() > 0,
+            "a Syslog source must be subscribed before its listener fault is armed"
+        );
+        self.inner.syslog_listener_faults.send_modify(|pending| {
+            if let Some(fault) = pending {
+                assert!(
+                    *fault.fired.borrow(),
+                    "observe the armed Syslog listener fault before arming another"
+                );
+            }
+            *pending = Some(SyslogListenerFault { bind_addr, fired });
+        });
+        observed
+    }
+
+    pub(crate) fn syslog_listener_faults(&self) -> watch::Sender<Option<SyslogListenerFault>> {
+        self.inner.syslog_listener_faults.clone()
     }
 
     pub fn set_branch_instance_expiration_scan_interval(&self, interval: Duration) {
