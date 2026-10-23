@@ -300,6 +300,7 @@ class InventoryTests(unittest.TestCase):
             "codec-transforming-numbers",
             "jaq-native-numbers",
             "jaq-yaml-string-values",
+            "node-settings-command-line",
             "remote-relay-rows",
             "remote-relay-rows-malformed",
             "relay-wire-messages",

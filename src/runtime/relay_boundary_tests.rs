@@ -1684,16 +1684,13 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
 async fn relay_owner_expires_branch_presence_by_ttl() {
     let fault_injection = ConfiguredFaultInjection::default();
     fault_injection.set_branch_instance_expiration_scan_interval(Duration::from_millis(5));
-    let runtime = Runtime::with_persistence_and_temp_dir(
-        nervix_execution::Executor::default(),
-        None,
-        None,
-        Duration::from_secs(60),
+    let environment = RuntimeEnvironment {
         fault_injection,
-        PathBuf::from(DEFAULT_TEMP_DIR),
-        DEFAULT_RESTORE_STAGING_MAX_BYTES,
-    )
-    .expect("runtime should build");
+        ..RuntimeEnvironment::transient(nervix_execution::Executor::default())
+    };
+    let settings = RuntimeSettings::resolve(Some(Duration::from_secs(60)), None)
+        .expect("the runtime settings declare no validation");
+    let runtime = Runtime::with_environment(environment, settings).expect("runtime should build");
     let domain = domain("default");
     install_unpaced_test_domain(&runtime, &domain);
     let relay = named("orders");
@@ -1806,16 +1803,13 @@ impl BranchKeySiblingRelays {
 async fn relay_owner_expiry_retires_only_its_own_channels_for_the_branch_key() {
     let fault_injection = ConfiguredFaultInjection::default();
     fault_injection.set_branch_instance_expiration_scan_interval(Duration::from_millis(5));
-    let runtime = Runtime::with_persistence_and_temp_dir(
-        nervix_execution::Executor::default(),
-        None,
-        None,
-        Duration::from_secs(60),
+    let environment = RuntimeEnvironment {
         fault_injection,
-        PathBuf::from(DEFAULT_TEMP_DIR),
-        DEFAULT_RESTORE_STAGING_MAX_BYTES,
-    )
-    .expect("runtime should build");
+        ..RuntimeEnvironment::transient(nervix_execution::Executor::default())
+    };
+    let settings = RuntimeSettings::resolve(Some(Duration::from_secs(60)), None)
+        .expect("the runtime settings declare no validation");
+    let runtime = Runtime::with_environment(environment, settings).expect("runtime should build");
     let domain = domain("default");
     install_unpaced_test_domain(&runtime, &domain);
     let relays = BranchKeySiblingRelays::publish(&runtime, &domain);

@@ -2820,8 +2820,9 @@ test-docs: typed-ratchet-source-build install-cargo-crap
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
     node --test cloudflare/docs-worker/src/index.test.js
 
-# Screenshots are recaptured from the current console and the nervix-cli reference chapter is
-# rendered from the current binary, so a published book can never describe an older build.
+# Screenshots are recaptured from the current console and the nervix-cli and nervix-server
+# reference chapters are rendered from the current binaries, so a published book can never describe
+# an older build.
 book version="0.1.0-dev": test-docs docs-screenshots
     python scripts/build_book.py --version {{ version }}
 
