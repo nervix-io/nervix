@@ -17,7 +17,21 @@ Feature: Postgres observation fixtures
     Given Postgres is running
     And two other Postgres fixtures hold table locks over <transport>
     When another Postgres fixture observer queries over <transport>
-    Then every Postgres fixture observer received its complete query results
+    Then the Postgres fixture observer queried over a connection established before both lock holders connected
+    And every Postgres fixture observer received its complete query results
+
+    Examples:
+      | transport |
+      | plaintext |
+      | TLS       |
+
+  # Each poll after the first follows a return of Pending, after which the task waits behind its
+  # worker's run queue before it is polled again; on the parallel suite's busy runtime that wait,
+  # repeated for each poll, decides how long establishing a connection takes.
+  Scenario Outline: A new Postgres fixture connection is established in a few polls over <transport>
+    Given Postgres is running
+    When a new Postgres fixture connection is established over <transport>
+    Then the Postgres fixture connection was established within 32 polls
 
     Examples:
       | transport |

@@ -231,6 +231,22 @@ drops one it already forwarded, so a repeated payment yields its summary exactly
 rows keep `MODE NO ACK`: a window acknowledges a row only when it steps past it, so an acknowledged
 post of one row would wait for the rows after it.
 
+The fixture of guest saves above the bulk budget feeds its WASM processor from a Kafka ingestor in
+`MODE ACK SEQUENTIAL`, and every input ends with a 40 MiB guest checkpoint that the processor's
+replica confirms before the ingestor reads the next input. Every wait that follows published input
+covers at least one such checkpoint, and a wait for a sent-message total up to two in sequence. The
+product gives each checkpoint ninety seconds to reach its replica, so these waits are bounded at 300
+seconds. On a loaded runner, two checkpoints that each stayed within their budget outlasted the
+former 120-second bound of a sent-message total. A sent total counts the inputs the ingestor sent,
+not the ones the guest has saved, so before its first cut the fixture waits until both branches have
+committed the save of their third input, every replica has confirmed it and no checkpoint has
+failed. No cut then drains an input still on its way, whose checkpoint could fail under load and
+redeliver the input between the cuts the fixture compares. It then holds the next guest checkpoint
+before its save across the source domain's three cuts. A cut that asked a guest to save again would
+stall on that checkpoint, so the fixture shows that every cut archives the saves the branches
+committed. A checkpoint that misses its ninety seconds still ends the attempt, because the
+redelivered input would no longer match the exact sent totals and archives the fixture compares.
+
 The large materialized restore fixture prepares its rows through an acknowledged client producer.
 One round has a 120-second budget and one in-flight batch, including explicit replays of reported
 processing failures. Each replay replaces the same materialized keys with the same complete values,
@@ -270,20 +286,33 @@ reach the scenario directly.
 
 The Postgres image starts a temporary Unix-socket server to initialize its database, then starts
 the final TCP/TLS server. The fixture waits for both readiness messages before publishing either
-endpoint. Its plaintext and certificate-verified TLS observation clients belong to that same
-suite environment. Each transport shares one SQLx pool with a maximum of two connections for short
-setup and observation queries across all scenarios. A deliberate table-lock controller detaches
-its physical SQLx connection before waiting for release, returning the observation permit. Its
-scenario release handle owns that connection's lifetime, so concurrent lock holders cannot consume
-the permits their own observation queries need. The environment closes both observation pools before
-stopping their container, including when scenarios still retain client handles. The existing suite
-teardown budget bounds that cleanup.
+endpoint. Initialization stores the password's SCRAM-SHA-256 verifier with one key-derivation
+round instead of the image's 4096. A SQLx client derives its key in as many rounds as the verifier
+names and yields to the scheduler after every fifth, so 4096 rounds hand an establishing connection
+back to the scheduler more than 800 times. On the suite's busy runtime each of those returns waits
+for a worker's whole run queue. Establishing one connection that way took longer than the 30-second
+pool wait, while queries on connections already established were unaffected. With one round, every
+connection the suite establishes, the product's included, still authenticates with SCRAM-SHA-256
+and completes in a few polls.
+
+The fixture's plaintext and certificate-verified TLS observation clients belong to that same suite
+environment. Each transport shares one SQLx pool of two connections for short setup and observation
+queries across all scenarios. The pool establishes both connections when the environment opens it
+and keeps them until it closes, with no idle or lifetime retirement, so an observer waits only for
+another observer's query and never for a connection to be established. A deliberate table-lock
+controller connects on its own with the same transport's options, instead of taking one of the
+pool's connections. Its scenario release handle owns that connection's lifetime, so a held lock
+takes neither an observation permit nor an established observation connection. The environment
+closes both observation pools before stopping their container, including when scenarios still
+retain client handles. The existing suite teardown budget bounds that cleanup.
 
 The Postgres fixture scenarios exercise 48 concurrent observers retaining three client handles
 each over plaintext and TLS, and compare every returned text, byte sequence and observer number.
 Every query also checks its actual transport through Postgres's connection statistics. Two further
 examples hold locks through the existing fixture controller while another observer queries, once
-over each transport.
+over each transport, and require the observer's connection to have been established before both
+lock holders connected. Two more establish a connection with each transport's observation options
+and require it to complete within 32 polls of its future.
 The database batch scenarios retain their one- and three-node row, field, write-size, conflict,
 rejection and ambiguous-write assertions. Fixture concurrency adds no scenario admission limit.
 
@@ -949,6 +978,15 @@ observations establish retirement on both owners. Fresh-clock sampling has direc
 unit coverage; this public scenario proves initial-state retirement, branch isolation and exact fresh
 pairings without assuming the phase of an owner's next scan. Logical TTLs, domain clock rates,
 physical scan cadence and correlation policy retain their own contracts.
+
+The materialized-state expiration and recreation outline gives its fixture a 30-second branch TTL,
+allows 30 seconds to observe each complete row and 60 seconds to observe retirement, and posts both
+recreated branches concurrently. A short fixture lifetime can end while the shared scenario runner
+is delayed between an HTTP response and a state query; extending only the query's wait cannot make
+an expired row visible again. The outline still requires the initial row, an empty publication after
+expiration, and the exact recreated keys and payloads on one- and three-node clusters. These bounds
+belong to the fixture and its observations; product retention and deadline policies keep their own
+contracts.
 
 Collection and route-flush timing assertions measure observed row arrival from the HTTP publication
 instant. Concurrent branch posts retain one publication origin, and every expected row must match

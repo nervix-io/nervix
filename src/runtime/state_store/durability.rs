@@ -260,27 +260,140 @@ mod shuttle_tests;
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use super::{super::tests::open_store, *};
+    use std::num::NonZeroUsize;
 
-    /// Writers that ask for durability at the same time share synchronizations instead of each
-    /// queuing one behind the storage workers. A writer that asks while a synchronization runs is
-    /// covered by the next one at the latest.
-    #[nervix_primitives::test]
-    async fn concurrent_writers_share_synchronizations() {
-        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
-        let store = open_store(&dir);
-        let writers = (0..16).map(|_| store.synchronize()).collect::<Vec<_>>();
+    use nervix_execution::{ExecutionConfig, ExecutionError, Executor, WorkerCounts};
+    use nervix_primitives::{sync::oneshot, task::JoinHandle};
 
-        for outcome in futures_util::future::join_all(writers).await {
-            outcome.expect("every writer should be synchronized");
+    use super::{
+        super::tests::{open_store, open_store_on},
+        *,
+    };
+
+    /// How many writers ask for durability together.
+    const WRITERS: u64 = 16;
+
+    /// An executor that runs filesystem work on one storage worker, which a test can hold.
+    fn one_filesystem_worker() -> Executor {
+        Executor::new(ExecutionConfig {
+            workers: WorkerCounts {
+                filesystem_storage: NonZeroUsize::MIN,
+                ..WorkerCounts::default()
+            },
+            ..ExecutionConfig::default()
+        })
+        .expect("the test changes only the filesystem worker count")
+    }
+
+    /// The only filesystem worker of an executor, held by a job until the test releases it. A
+    /// synchronization claimed meanwhile waits for that worker, so it has not started.
+    struct HeldFilesystemWorker {
+        release: oneshot::Sender<()>,
+        holding: JoinHandle<Result<(), Report<ExecutionError>>>,
+    }
+
+    impl HeldFilesystemWorker {
+        async fn hold(executor: &Executor) -> Self {
+            let (started, has_started) = oneshot::channel();
+            let (release, released) = oneshot::channel::<()>();
+            let holder = executor.clone();
+            let charge = executor
+                .try_reserve(MemoryClass::Bulk, 1)
+                .expect("the holding job's charge fits the bulk budget");
+            let holding = nervix_primitives::task::spawn(async move {
+                holder
+                    .run_storage(StorageClass::Filesystem, charge, move |_, _| {
+                        started.send(()).expect("the test awaits the held worker");
+                        released
+                            .blocking_recv()
+                            .expect("the test releases the held worker");
+                    })
+                    .await
+            });
+            has_started
+                .await
+                .expect("the holding job takes the only filesystem worker");
+            Self { release, holding }
         }
 
-        let rounds = store.durability.rounds();
-        assert!(
-            (1..=2).contains(&rounds),
-            "sixteen concurrent writers needed {rounds} synchronizations"
+        async fn release(self) {
+            self.release
+                .send(())
+                .expect("the holding job waits for its release");
+            self.holding
+                .await
+                .expect("the holding job's task is joined")
+                .expect("the holding job ends");
+        }
+    }
+
+    /// Writers that ask for durability before a synchronization starts share it instead of each
+    /// queuing one behind the storage workers: it covers every ticket issued before it started.
+    #[nervix_primitives::test]
+    async fn writers_that_ask_before_a_synchronization_starts_share_it() {
+        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
+        let executor = one_filesystem_worker();
+        let store = open_store_on(&dir, executor.clone());
+        let held = HeldFilesystemWorker::hold(&executor).await;
+        let writers = futures_util::future::join_all((0..WRITERS).map(|_| store.synchronize()));
+        tokio::pin!(writers);
+
+        // Each writer takes its ticket when it is first polled. The first one claims the
+        // synchronization, which waits for the held worker, and the others wait for it.
+        assert!(futures_util::poll!(&mut writers).is_pending());
+        assert_eq!(store.durability.issued.load(Ordering::SeqCst), WRITERS);
+        assert_eq!(
+            store.durability.rounds(),
+            0,
+            "a synchronization started while the only filesystem worker was held"
         );
-        assert_eq!(store.durability.synchronized.load(Ordering::SeqCst), 16);
+        held.release().await;
+
+        for outcome in writers.await {
+            outcome.expect("every writer should be synchronized");
+        }
+        assert_eq!(
+            store.durability.rounds(),
+            1,
+            "writers that all asked before the synchronization started needed more than it"
+        );
+        assert_eq!(
+            store.durability.synchronized.load(Ordering::SeqCst),
+            WRITERS
+        );
+    }
+
+    /// Writers that ask while a synchronization runs are not covered by it, since it covers only
+    /// the tickets issued before it started. They share the next one, which the first of them to
+    /// wake starts once the running one has recorded its outcome.
+    #[nervix_primitives::test]
+    async fn writers_that_ask_while_a_synchronization_runs_share_the_next_one() {
+        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
+        let store = open_store(&dir);
+        let mut running = DurabilityBarrier::claim(&store.durability)
+            .expect("nothing else runs a synchronization");
+        running.start();
+        let writers = futures_util::future::join_all((0..WRITERS).map(|_| store.synchronize()));
+        tokio::pin!(writers);
+
+        // Each writer takes its ticket when it is first polled, after the running synchronization
+        // started, and waits for that synchronization to end.
+        assert!(futures_util::poll!(&mut writers).is_pending());
+        assert_eq!(store.durability.issued.load(Ordering::SeqCst), WRITERS);
+        running.succeeded();
+
+        for outcome in writers.await {
+            outcome.expect("every writer should be synchronized");
+        }
+        assert_eq!(
+            store.durability.rounds(),
+            2,
+            "writers that all asked while a synchronization ran needed more than the next one"
+        );
+        assert_eq!(
+            store.durability.synchronized.load(Ordering::SeqCst),
+            WRITERS
+        );
     }
 
     /// A synchronization that fails leaves every write it covered, and every later one, without a

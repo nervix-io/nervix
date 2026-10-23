@@ -720,6 +720,13 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                     .with_env_var("POSTGRES_USER", "postgres")
                     .with_env_var("POSTGRES_PASSWORD", "nervix")
                     .with_env_var("POSTGRES_DB", "postgres")
+                    // SQLx derives a SCRAM-SHA-256 key in as many rounds as the server's verifier
+                    // names and yields to the scheduler after every fifth, so the image's 4096
+                    // rounds poll an establishing connection more than 800 times. On the busy
+                    // scenario runtime each poll waits for a worker's whole run queue, and one
+                    // connection took longer to establish than the 30-second pool wait. One round
+                    // keeps SCRAM authentication and establishes in a few polls.
+                    .with_env_var("POSTGRES_INITDB_ARGS", "--set scram_iterations=1")
                     .with_copy_to("/certs/ca.pem", tls.ca_pem.clone())
                     .with_copy_to("/certs/node.pem", tls.node_pem.clone())
                     .with_copy_to(
