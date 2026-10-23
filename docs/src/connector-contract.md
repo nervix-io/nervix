@@ -1867,6 +1867,20 @@ sequenceDiagram
   octet count, at most eleven bytes with its space, is read whole again when a read splits it. A
   frame split anywhere across reads yields the same payload and the same typed framing failure as
   one read holding the whole stream. [Syslog ingestion](./syslog.md#tcp) defines the framing rules.
+  Once a connection decodes a frame, it completes the bounded intake-queue send even if SUSPEND
+  engages while that send waits for a place; suspension stops its next read. An accept failure
+  retires only the listening socket. The source retains established connection tasks, their
+  in-progress frames and its intake queue, reports the typed read failure through the host, and
+  rebinds the socket on resume. A later bind failure keeps those tasks and queued frames while the
+  host retries. Closing the source ends the retained connection tasks and queue together.
+  Plans, sources and stream listeners retain a configured accept capability. Ordinary builds keep
+  zero-sized fault markers; the testing module owns the harness channel and selected bound address.
+  The harness retains one named request carrying the bound address and its acknowledgement in a
+  watch channel until the selected listener claims it
+  and acknowledges it once. Cancelling an accept does not consume that request, and arming another
+  fault before acknowledgement is a harness error. The one- and three-node Cucumber checks hold a connection open
+  across that failure, observe the fault, and send through both the retained connection and a
+  freshly accepted connection after rebind.
 - **Syslog decoding, SQS bodies and OTEL identifiers.** The SYSLOG codec checks header fields and
   scans `STRUCTURED-DATA` through byte classes of `nervix-simd-kernels`: the first byte outside
   printable US-ASCII ends a header check, and two forward scans find the byte that ends each

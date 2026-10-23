@@ -174,7 +174,7 @@ mod tests {
         node_startup::{
             ATTEMPT_READINESS_BUDGET, AttemptCleanup, AttemptFailure, NODE_START_ATTEMPTS,
             NODE_STARTUP_BUDGET, NodeStartup, NodeStartupExhausted, StartableNode, StartupEnd,
-            StartupPorts, StartupRetry, cluster_startup_budget,
+            StartupPorts, StartupRetry, StartupRetryPolicy, cluster_startup_budget,
         },
         node_stop::{
             NodeStopClock, NodeStopEnding, NodeStopProgress, NodeStopRecord,
@@ -1346,6 +1346,11 @@ mod tests {
         NeverReadyThenFails { error: AppError },
         /// The node's task ends at once with this application error.
         ApplicationError(AppError),
+        /// A listener fails with its typed I/O cause before initialization starts.
+        ListenError {
+            application: AppError,
+            kind: io::ErrorKind,
+        },
         /// The node's task panics at once.
         Panics,
         /// The node answers its first readiness probe.
@@ -1391,8 +1396,17 @@ mod tests {
             &mut self,
             budget: PhaseDeadline,
         ) -> Result<(), Report<NodeStartupExhausted>> {
+            self.start_with_policy(budget, StartupRetryPolicy::Transient)
+                .await
+        }
+
+        async fn start_with_policy(
+            &mut self,
+            budget: PhaseDeadline,
+            policy: StartupRetryPolicy,
+        ) -> Result<(), Report<NodeStartupExhausted>> {
             let node = self.node.clone();
-            NodeStartup::start(&node, self, budget).await
+            NodeStartup::start(&node, self, budget, policy).await
         }
     }
 
@@ -1412,6 +1426,11 @@ mod tests {
                 }
                 LaunchBehavior::ApplicationError(error) => {
                     OwnedNodeTask::spawn(async move { Err(Report::new(error)) })
+                }
+                LaunchBehavior::ListenError { application, kind } => {
+                    OwnedNodeTask::spawn(async move {
+                        Err(Report::new(io::Error::from(kind)).change_context(application))
+                    })
                 }
                 LaunchBehavior::Panics => {
                     OwnedNodeTask::spawn(async { panic!("intentional stand-in node panic") })
@@ -4070,6 +4089,163 @@ mod tests {
             "retries must share one budget rather than restart it: {:?}",
             exhausted.elapsed
         );
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn armed_startup_retries_only_the_colliding_listener_before_initialization() {
+        for (application, ports) in [
+            (AppError::BindGrpcListenAddress, StartupPorts::Grpc),
+            (AppError::BindHttpListenAddress, StartupPorts::Http),
+            (AppError::BindHttpsListenAddress, StartupPorts::Https),
+            (
+                AppError::BindObservabilityListenAddress,
+                StartupPorts::Observability,
+            ),
+            (
+                AppError::BindWebConsoleListenAddress,
+                StartupPorts::WebConsole,
+            ),
+            (
+                AppError::BindWebConsoleHttpsListenAddress,
+                StartupPorts::WebConsole,
+            ),
+        ] {
+            nervix_primitives::task::consume_budget().await;
+            let mut node = StandInStartupNode::new(
+                "node-armed",
+                [
+                    LaunchBehavior::ListenError {
+                        application,
+                        kind: io::ErrorKind::AddrInUse,
+                    },
+                    LaunchBehavior::Ready,
+                ],
+            );
+            let budget = PhaseDeadline::after(ATTEMPT_READINESS_BUDGET);
+            node.start_with_policy(budget, StartupRetryPolicy::BindBeforeRuntime)
+                .await
+                .assured("an occupied early listener permits a fresh-port launch");
+            assert_eq!(node.launches, 2);
+            assert_eq!(node.port_moves, [ports]);
+            assert!(budget.elapsed() < ATTEMPT_READINESS_BUDGET);
+            assert!(matches!(
+                node.clean_up(PhaseDeadline::after(TEST_TIMEOUT)).await,
+                AttemptCleanup::Stopped(_)
+            ));
+        }
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn armed_startup_retries_no_other_failure() {
+        for behavior in [
+            LaunchBehavior::ListenError {
+                application: AppError::BindHttpListenAddress,
+                kind: io::ErrorKind::PermissionDenied,
+            },
+            LaunchBehavior::ApplicationError(AppError::BindHttpListenAddress),
+            LaunchBehavior::ListenError {
+                application: AppError::OpenRegistry,
+                kind: io::ErrorKind::AddrInUse,
+            },
+            LaunchBehavior::ListenError {
+                application: AppError::StartInterconnect,
+                kind: io::ErrorKind::AddrInUse,
+            },
+            LaunchBehavior::LaunchFails,
+            LaunchBehavior::Panics,
+        ] {
+            nervix_primitives::task::consume_budget().await;
+            let mut node = StandInStartupNode::new("node-armed-terminal", [behavior]);
+            let error = node
+                .start_with_policy(
+                    PhaseDeadline::after(ATTEMPT_READINESS_BUDGET),
+                    StartupRetryPolicy::BindBeforeRuntime,
+                )
+                .await
+                .expect_err("a failure that cannot prove an untouched fault must be terminal");
+            assert!(matches!(
+                error.current_context().end,
+                StartupEnd::TerminalFailure
+            ));
+            assert_eq!(node.launches, 1);
+            assert!(node.port_moves.is_empty());
+            assert_eq!(
+                attempt_retries(error.current_context()),
+                [StartupRetry::Terminal]
+            );
+        }
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn armed_startup_keeps_one_readiness_budget() {
+        let mut node = StandInStartupNode::new("node-armed-unready", [LaunchBehavior::NeverReady]);
+        let budget = PhaseDeadline::after(ATTEMPT_READINESS_BUDGET);
+        let error = node
+            .start_with_policy(budget, StartupRetryPolicy::BindBeforeRuntime)
+            .await
+            .expect_err("a running node may have consumed the fault and cannot be relaunched");
+        assert_eq!(error.current_context().budget, ATTEMPT_READINESS_BUDGET);
+        assert_eq!(node.launches, 1);
+        assert!(node.port_moves.is_empty());
+        assert_eq!(
+            attempt_retries(error.current_context()),
+            [StartupRetry::Terminal]
+        );
+        assert!(budget.elapsed() >= ATTEMPT_READINESS_BUDGET);
+        assert!(matches!(
+            node.clean_up(PhaseDeadline::after(TEST_TIMEOUT)).await,
+            AttemptCleanup::Stopped(_)
+        ));
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn armed_startup_retains_every_collision_when_the_launch_limit_is_spent() {
+        let behaviors = (0..NODE_START_ATTEMPTS).map(|_| LaunchBehavior::ListenError {
+            application: AppError::BindObservabilityListenAddress,
+            kind: io::ErrorKind::AddrInUse,
+        });
+        let mut node = StandInStartupNode::new("node-armed-collisions", behaviors);
+        let budget = PhaseDeadline::after(ATTEMPT_READINESS_BUDGET);
+        let error = node
+            .start_with_policy(budget, StartupRetryPolicy::BindBeforeRuntime)
+            .await
+            .expect_err("the launch limit also bounds fast listener collisions");
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::AttemptsSpent));
+        assert_eq!(exhausted.budget, ATTEMPT_READINESS_BUDGET);
+        assert_eq!(node.launches, NODE_START_ATTEMPTS);
+        assert_eq!(exhausted.attempts.spent.len(), attempt_limit());
+        assert_eq!(
+            node.port_moves,
+            vec![StartupPorts::Observability; attempt_limit() - 1]
+        );
+        assert!(budget.elapsed() < ATTEMPT_READINESS_BUDGET);
+        for attempt in &exhausted.attempts.spent {
+            let AttemptFailure::NotReady(failure) = &attempt.failure else {
+                panic!("each collision ended a launched node");
+            };
+            assert_eq!(
+                failure.current_context().failure,
+                NodeStartupFailure::TaskTerminated
+            );
+            let AttemptCleanup::Stopped(outcome) = &attempt.cleanup else {
+                panic!("each failed task must have ended before moving its port");
+            };
+            let NodeTaskTerminalOutcome::ApplicationError(cause) = outcome.as_ref() else {
+                panic!("the collision retains its typed application error");
+            };
+            assert!(matches!(
+                cause.current_context(),
+                AppError::BindObservabilityListenAddress
+            ));
+            assert_eq!(
+                cause
+                    .downcast_ref::<io::Error>()
+                    .assured("the bind report keeps its I/O cause")
+                    .kind(),
+                io::ErrorKind::AddrInUse
+            );
+        }
     }
 
     #[nervix_primitives::test(start_paused = true)]
