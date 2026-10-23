@@ -326,7 +326,8 @@ owns `task::block_in_place`, which blocks the runtime worker thread that calls i
 
 Connector network control calls use a storage class of their own, with two admitted workers by
 default and the same bounded queue policy as other classes. Kafka source metadata, watermarks,
-timestamp queries, seeks, assignments and consumer-group commits use it. A synchronous commit may
+timestamp queries, seeks, assignments and consumer-group commits use it, and so does the destruction
+of a Kafka consumer or producer whose last handle is gone. A synchronous commit may
 outlive its caller's thirty-second wait, so sharing filesystem or consensus worker permits would
 let an unavailable broker hold those operations behind it. The connector class bounds those jobs
 without taking another class's admission. All classes still use the process-wide blocking pool;

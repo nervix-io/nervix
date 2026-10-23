@@ -76,7 +76,7 @@ use nervix_primitives::{
 use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, ModelPublicationRefusalKind, SchedulerMode, WasmStateResetRequestError,
-    application::{InternalTransportMode, ShutdownPhaseOutcome},
+    application::{InternalTransportMode, SettingOverride, ShutdownPhaseOutcome},
     memory_pressure::MemoryPressureConfig,
 };
 use nervix_test_environment::{TestParallelism, TestParallelismArgs};
@@ -338,6 +338,14 @@ struct CliClockProcess {
     _reader: AbortOnDropHandle<()>,
 }
 
+/// How one node start that a scenario attempted, without requiring it to succeed, ended.
+#[derive(Debug)]
+struct NodeStartAttempt {
+    node: String,
+    /// The startup's failure rendered with its whole report, or nothing when the node started.
+    failure: Option<String>,
+}
+
 /// The next row and the subscription session returned by its independent receipt observer.
 struct SubscriptionReceipt {
     session: TestSession,
@@ -521,6 +529,8 @@ struct ScenarioWorld {
     /// Contents each NSPL file was given, so "is unchanged" has something to compare against.
     formatter_original_files: BTreeMap<String, String>,
     last_cluster_operation_elapsed: Option<Duration>,
+    /// The last node start a scenario attempted without requiring it to succeed.
+    node_start_attempt: Option<NodeStartAttempt>,
     browser_page: Option<playwright_rs::Page>,
     /// Canvas positions and routes captured before changing an inspector's presentation view.
     inspector_geometry: Option<String>,
@@ -627,6 +637,7 @@ impl fmt::Debug for ScenarioWorld {
                 "last_cluster_operation_elapsed",
                 &self.last_cluster_operation_elapsed,
             )
+            .field("node_start_attempt", &self.node_start_attempt)
             .field("clickhouse_table", &self.clickhouse_table)
             .field("clickhouse_tls", &self.clickhouse_tls)
             .field("postgres_table", &self.postgres_table)
@@ -6490,11 +6501,13 @@ async fn given_raft_retention_bounds(
         world.cluster.is_none(),
         "raft retention must be configured before the cluster starts"
     );
-    world.cluster_config.raft_retention = nervix_consensus::RaftRetentionPolicy {
-        snapshot_entry_threshold: snapshot_entries,
-        covered_entries_retained: covered_entries,
-        ..nervix_consensus::RaftRetentionPolicy::default()
-    };
+    world.cluster_config.raft_retention =
+        nervix_consensus::RaftRetentionSettings::resolve(nervix_consensus::RaftRetentionBounds {
+            snapshot_entry_threshold: Some(snapshot_entries),
+            covered_entries_retained: Some(covered_entries),
+            ..nervix_consensus::RaftRetentionBounds::default()
+        })
+        .assured("the retention bounds declare no validation");
 }
 
 #[given(expr = "consensus commits on node {string} take {string}")]
@@ -8886,6 +8899,30 @@ async fn given_memory_pressure_is_configured(
     world.cluster_config.memory_pressure = Some(config);
 }
 
+/// Names one setting a node starts with, by the option that sets it and the value written as the
+/// command line reads it. It applies over the cluster's own settings from the node's next start,
+/// read and validated exactly as `nervix-server` reads them, so a scenario needs no step per
+/// setting.
+#[given(regex = r"^(\S+) starts with (\S+) = (\S+)$")]
+fn given_node_starts_with_setting(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    name: String,
+    value: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let setting = SettingOverride { name, value };
+    match world.cluster.as_mut() {
+        Some(cluster) => cluster.override_node_setting(&node_id, setting),
+        None => world
+            .cluster_config
+            .node_setting_overrides
+            .entry(node_id)
+            .or_default()
+            .push(setting),
+    }
+}
+
 #[given(expr = "drain timeout is configured as {string}")]
 async fn given_drain_timeout_is_configured(world: &mut ScenarioWorld, timeout: String) {
     assert!(
@@ -8986,6 +9023,44 @@ async fn then_broken_handoff_engagement_request_was_delivered(
             .handoff_engagement_transport_failure_delivered(&domain),
         "no ownership handoff gate engagement request in domain {domain} met the armed transport \
          failure"
+    );
+}
+
+#[given(
+    expr = "the ownership handoff gate engagement requests node {string} sends to node {string} \
+            are lost"
+)]
+async fn given_handoff_gate_engagements_are_lost(
+    world: &mut ScenarioWorld,
+    coordinator: String,
+    participant: String,
+) {
+    let coordinator = expand_placeholders(world, &coordinator);
+    let participant = expand_placeholders(world, &participant);
+    world.fault_injection.lose_handoff_gate_engagements(
+        crate::common::cluster::node_name(&coordinator),
+        crate::common::cluster::node_name(&participant),
+    );
+}
+
+#[then(
+    expr = "the link from node {string} to node {string} lost no ownership handoff gate \
+            engagement request"
+)]
+async fn then_link_lost_no_handoff_gate_engagement(
+    world: &mut ScenarioWorld,
+    coordinator: String,
+    participant: String,
+) {
+    let coordinator = crate::common::cluster::node_name(&expand_placeholders(world, &coordinator));
+    let participant = crate::common::cluster::node_name(&expand_placeholders(world, &participant));
+    let lost = world
+        .fault_injection
+        .lost_handoff_gate_engagements(&coordinator, &participant);
+    assert_eq!(
+        lost, 0,
+        "node '{coordinator}' asked node '{participant}' to hold an ownership handoff gate {lost} \
+         time(s), and the link lost every request"
     );
 }
 
@@ -11531,6 +11606,42 @@ async fn when_node_is_started(world: &mut ScenarioWorld, node_id: String) {
         .start_node(&node_id)
         .await
         .expect("failed to start node");
+}
+
+/// Starts a node whose start the scenario expects may be refused, and records how it ended for a
+/// later step to assert instead of failing this one.
+#[when(expr = "node {string} attempts to start")]
+async fn when_node_attempts_to_start(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let started = world.cluster_mut().start_node(&node_id).await;
+    let failure = match started {
+        Ok(()) => None,
+        Err(error) => Some(format!("{error:#}")),
+    };
+    world.node_start_attempt = Some(NodeStartAttempt {
+        node: node_id,
+        failure,
+    });
+}
+
+#[then(expr = "node {string} refused to start because {string}")]
+fn then_node_refused_to_start(world: &mut ScenarioWorld, node_id: String, reason: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let attempt = world
+        .node_start_attempt
+        .as_ref()
+        .verified("the preceding step attempted to start a node");
+    assert_eq!(
+        attempt.node, node_id,
+        "the attempted start belongs to another node"
+    );
+    let Some(failure) = &attempt.failure else {
+        panic!("node '{node_id}' started although it was expected to refuse: {reason}");
+    };
+    assert!(
+        failure.contains(&reason),
+        "node '{node_id}' refused to start for another reason: {failure}"
+    );
 }
 
 #[when(expr = "node {string} is started while consensus connectivity is blocked")]
@@ -15107,6 +15218,7 @@ async fn connect_named_client(
 }
 
 #[given(expr = "client {string} is connected to node {string}")]
+#[when(expr = "client {string} connects to node {string}")]
 async fn given_named_client_is_connected_to_node(
     world: &mut ScenarioWorld,
     name: String,
@@ -31241,65 +31353,16 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
     let deadline = Instant::now() + duration;
     let observer = world
         .broker_observer
-        .as_mut()
+        .take()
         .expect("a broker observer must exist before assertion");
-    for expected_sequence in 1..=count {
-        nervix_primitives::task::consume_budget().await;
-        let now = Instant::now();
-        assert!(
-            now < deadline,
-            "timed out after receiving {} of {count} sequential broker messages; {}",
-            expected_sequence - 1,
-            observer.describe_client_receipts()
-        );
-        let message = observer
-            .try_next_message(deadline.saturating_duration_since(now))
-            .await
-            .expect("failed while waiting for sequential broker message")
-            .unwrap_or_else(|| {
-                panic!(
-                    "timed out waiting for broker message {expected_sequence} of {count}; {}",
-                    observer.describe_client_receipts()
-                )
-            });
-        let payload = serde_json::from_str::<serde_json::Value>(&message.payload)
-            .unwrap_or_else(|error| panic!("broker payload is not valid JSON: {error}"));
-        let actual_sequence = payload
-            .get(&field)
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or_else(|| {
-                panic!(
-                    "broker payload field '{field}' is not an unsigned integer: {}",
-                    message.payload
-                )
-            });
-        let expected_u64 = expected_sequence.arch_into();
-        assert_eq!(
-            actual_sequence,
-            expected_u64,
-            "broker messages were duplicated, lost, or reordered: expected sequence \
-             {expected_u64} but observed {actual_sequence} ({} messages behind, {} of {} consumed \
-             so far)",
-            actual_sequence.abs_diff(expected_u64),
-            expected_sequence,
-            count
-        );
-        assert_eq!(
-            message.headers, expected_headers,
-            "broker message {expected_sequence} headers changed"
-        );
-        world.last_broker_payload = Some(message.payload);
-        world.last_broker_headers = message.headers;
+    let observed = observer
+        .observe_sequence(deadline, count, field, expected_headers)
+        .await;
+    world.broker_observer = Some(observed.observer);
+    if let Some(last) = observed.last_message {
+        world.last_broker_payload = Some(last.payload);
+        world.last_broker_headers = last.headers;
     }
-
-    let duplicate = observer
-        .try_next_message(Duration::from_millis(500))
-        .await
-        .expect("failed while checking for a duplicate broker message");
-    assert!(
-        duplicate.is_none(),
-        "observed a duplicate broker message after the expected sequence: {duplicate:?}"
-    );
 }
 
 #[then(expr = "the observed broker does not receive a payload within {string}")]
