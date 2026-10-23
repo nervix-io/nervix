@@ -760,9 +760,11 @@ that failed.
 A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
 and a refused charge keeps `AdmissionError` beneath `KafkaSourceError::RetirementAdmission`. It
 fails the source's open or the partition inspector's start, as transiently as a refused control
-call; see [Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement). A
-retirement has no caller to fail, so its supervisor reports a destruction job that panicked at
-`debug`.
+call. A Kafka producer takes the same charge, and a refused one keeps `AdmissionError` beneath
+`KafkaProducerStartError::RetirementAdmission` beneath `SinkStartError::Initialize`, whose
+description names the refused charge; the emitter starts its sink again after its retry delay. See
+[Kafka client retirement](./connector-contract.md#kafka-client-retirement). A retirement has no
+caller to fail, so its supervisor reports a destruction job that panicked at `debug`.
 
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a

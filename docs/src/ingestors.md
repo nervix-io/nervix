@@ -1031,7 +1031,7 @@ partitions through the domain schedule and waits for no group session.
 Stopping or dropping a Kafka ingestor returns without waiting for its consumers to be destroyed.
 The node destroys each one on its connector control workers, where a consumer that joined its group
 waits up to five seconds for the coordinator to answer its LeaveGroup request; see
-[Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement).
+[Kafka client retirement](./connector-contract.md#kafka-client-retirement).
 
 Under `OFFSET BY CONSUMER GROUP`, `MODE NO ACK` is the consumer's auto-commit: the consumer
 commits the positions it has read on its own schedule, `auto.commit.interval.ms`, without waiting

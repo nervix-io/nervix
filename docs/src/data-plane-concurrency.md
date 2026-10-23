@@ -597,15 +597,15 @@ This uses the existing semaphore adapter and makes no new memory-ordering claim.
 production connector worker while filesystem and consensus jobs complete, then verifies permit
 and byte-reservation return.
 
-The consumer a source or inspector shares with its jobs is destroyed by one more connector storage
-job, which its retirement submits once the last handle is dropped and which waits for a place
-rather than being refused; see
-[Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement). The retirement
-takes no control turn, since no job holds the consumer any more, and adds no synchronization of
-its own: the shared pointer's own count decides which drop is the last, and the job enters the
-executor through its existing wait for a place. Native broker waits, the destruction's included,
-are outside Shuttle and Deloxide's lock detector; the ordinary connector and retirement
-regressions and the one-/three-node stalled-broker and retirement scenarios own that evidence.
+The consumer a source or inspector shares with its jobs, and the producer a sink shares with its
+finish's flush, are each destroyed by one more connector storage job, which their retirement
+submits once the last handle is dropped and which waits for a place rather than being refused; see
+[Kafka client retirement](./connector-contract.md#kafka-client-retirement). The retirement takes no
+control turn, since no job holds the client any more, and adds no synchronization of its own: the
+shared pointer's own count decides which drop is the last, and the job enters the executor through
+its existing wait for a place. Native broker waits, the destruction's included, are outside Shuttle
+and Deloxide's lock detector; the ordinary connector and retirement regressions and the
+one-/three-node stalled-broker and retirement scenarios own that evidence.
 
 ### Kafka producer retention
 
