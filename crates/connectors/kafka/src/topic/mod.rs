@@ -3,7 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Kafka consumer and producer configuration, ingestor polling and offset handling,
-//!   record and header publication, native queue capacity and admission backpressure,
+//!   consumer retirement off the async workers, record and header publication, native queue
+//!   capacity and admission backpressure,
 //!   delivery-report classification, the records the producer
 //!   holds until their delivery reports are served, the delivery bound a confirmed publish gives
 //!   the producer, and producer queue shutdown.

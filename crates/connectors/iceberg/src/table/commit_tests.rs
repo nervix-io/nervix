@@ -4,7 +4,7 @@
 use ::iceberg::{
     MemoryCatalog, Namespace, TableCommit, TableCreation,
     memory::{MEMORY_CATALOG_WAREHOUSE, MemoryCatalogBuilder},
-    spec::{NestedField, PrimitiveType, Schema},
+    spec::{NestedField, PrimitiveType, Schema, Type},
 };
 use arrow_array::{Int64Array, StringArray};
 use arrow_schema::Field;
@@ -159,7 +159,7 @@ impl Catalog for RefusingFirstAppend {
     }
 }
 
-async fn memory_catalog() -> MemoryCatalog {
+pub(super) async fn memory_catalog() -> MemoryCatalog {
     MemoryCatalogBuilder::default()
         .load(
             "memory",
@@ -358,7 +358,7 @@ fn executor_with_bulk_capacity(capacity: u64) -> Executor {
 }
 
 /// The description a failure gives itself, which an emitter shows as its transient error.
-fn description<C>(report: &Report<C>) -> Option<String> {
+pub(super) fn description<C>(report: &Report<C>) -> Option<String> {
     report.frames().find_map(|frame| match frame.kind() {
         FrameKind::Attachment(AttachmentKind::Printable(attachment)) => {
             Some(attachment.to_string())

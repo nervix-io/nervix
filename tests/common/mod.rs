@@ -5,6 +5,7 @@ pub(crate) mod client_wire_tls_cost;
 pub(crate) mod cluster;
 pub(crate) mod cluster_teardown;
 pub(crate) mod command_recovery;
+pub(crate) mod console_connections;
 pub(crate) mod dependencies;
 pub(crate) mod grpc_receiver;
 pub(crate) mod http_receiver;

@@ -137,6 +137,10 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             wait: "subscribe, assign and unsubscribe",
             bound: WaitBound::Unbounded,
         },
+        DeclaredWait {
+            wait: "destroying a consumer that joined its group, for its LeaveGroup answer",
+            bound: WaitBound::Driver("5 s per LeaveGroup request"),
+        },
     ],
     driver_limits: &[
         "Every librdkafka key passes through, so a client can change each driver default above.",
@@ -144,6 +148,9 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
          unanswered after its caller's 30 s deadline retains its worker and the source's one \
          in-flight commit until the native call ends. Native subscribe, assign and unsubscribe \
          have no cancellable deadline; their caller waits socket.timeout.ms at most.",
+        "A consumer whose last handle is gone is destroyed by one connector control job, which \
+         waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s \
+         LeaveGroup timeout.",
         "receive.message.max.bytes 100000000",
     ],
 };

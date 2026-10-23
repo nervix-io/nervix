@@ -171,10 +171,14 @@ async fn a_control_memory_refusal_preserves_its_typed_admission_cause() {
     let broker = cluster();
     let executor = Executor::default();
     let mut source = domain_source(&broker, executor.clone()).await;
-    let capacity = executor.snapshot().commands_memory.capacity_bytes;
+    // The open source already holds the charge of its consumer's retirement.
+    let commands = executor.snapshot().commands_memory;
     let _held = executor
-        .try_reserve(MemoryClass::Commands, capacity)
-        .assured("the test occupies the command budget before resuming");
+        .try_reserve(
+            MemoryClass::Commands,
+            commands.capacity_bytes - commands.reserved_bytes,
+        )
+        .assured("the test occupies the rest of the command budget before resuming");
     let report = source
         .resume()
         .await
@@ -209,6 +213,8 @@ async fn control_admission_preserves_refusals_and_uses_the_client_deadline_while
     })
     .assured("the test changes only worker counts");
     let source = domain_source(&broker, executor.clone()).await;
+    // The charge of its consumer's retirement, which the open source holds throughout.
+    let opened = executor.snapshot().commands_memory.reserved_bytes;
     let (started, has_started) = oneshot::channel();
     let (release, released) = oneshot::channel();
     let occupied = executor.clone();
@@ -267,7 +273,7 @@ async fn control_admission_preserves_refusals_and_uses_the_client_deadline_while
     let report = expired.expect_err("the configured deadline includes waiting for a worker");
     assert!(matches!(report.current_context(),
         KafkaTopicIngestorError::ControlTimeout { timeout } if *timeout == Duration::from_secs(1)));
-    assert_eq!(executor.snapshot().commands_memory.reserved_bytes, 0);
+    assert_eq!(executor.snapshot().commands_memory.reserved_bytes, opened);
 }
 
 #[nervix_primitives::test]

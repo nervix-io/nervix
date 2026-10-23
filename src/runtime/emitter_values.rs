@@ -544,6 +544,24 @@ impl MappedValuesProjection {
         &self.target_columns
     }
 
+    /// The mapped columns named by their target columns in mapping order, each nullable exactly
+    /// when its expression can produce a null for a row the mapping does not reject. A row whose
+    /// mapping fails holds a null in place of the value it could not produce, which is why the
+    /// mapped batch's own schema keeps every column nullable; a emitter that requires a value in a
+    /// column checks the mapping against these columns before its first batch arrives.
+    pub(in crate::runtime) fn value_schema(&self) -> StdArc<arrow_schema::Schema> {
+        let output_fields = self.program.program.output_schema.fields();
+        let mut fields = Vec::with_capacity(self.target_columns.len());
+        for (field, column) in output_fields.iter().zip(&self.target_columns) {
+            fields.push(arrow_schema::Field::new(
+                column,
+                field.data_type().clone(),
+                field.is_nullable(),
+            ));
+        }
+        StdArc::new(arrow_schema::Schema::new(fields))
+    }
+
     /// Evaluates the mapping once for `batch` and selects the rows the emitter still has to write.
     ///
     /// A row whose mapping failed carries a side error instead of a value, so it is rejected here
@@ -918,6 +936,48 @@ mod tests {
             .downcast_ref::<arrow_array::Int64Array>()
             .expect("the mapped column keeps its exact type");
         assert_eq!(doubled.values().as_ref(), [0, 2, 4]);
+    }
+
+    /// A column keeps the nullability its expression infers, while the mapped batch makes every
+    /// column nullable for the rows whose mapping fails.
+    #[test]
+    fn value_columns_are_nullable_exactly_where_their_expression_can_produce_a_null() {
+        let emitter: EmitterName = named("test_emitter");
+        let schema = test_schema(&[("value", ParseAsType::I64), ("name", ParseAsType::String)]);
+        let values = vec![
+            mapping("label", "input.name"),
+            mapping("nonzero", "nullif(input.value, 0)"),
+            mapping("doubled", "input.value * 2"),
+        ];
+        let mapping = MappedValuesPlan::decide(&emitter, "Iceberg", "iceberg", &values)
+            .expect("the mapping should lower");
+        let projection = MappedValuesProjection::compile(MappedValuesProjectionInit {
+            label: "Iceberg",
+            namespace: "iceberg",
+            emitter: &emitter,
+            mapping: &mapping,
+            input_schema: schema.arrow_schema(),
+            udfs: None,
+        })
+        .expect("the test VALUES mapping should compile");
+
+        let value_schema = projection.value_schema();
+
+        assert_eq!(
+            value_schema.as_ref(),
+            &arrow_schema::Schema::new(vec![
+                arrow_schema::Field::new("label", arrow_schema::DataType::Utf8, false),
+                arrow_schema::Field::new("nonzero", arrow_schema::DataType::Int64, true),
+                arrow_schema::Field::new("doubled", arrow_schema::DataType::Int64, false),
+            ])
+        );
+        for field in projection.mapped_schema().fields() {
+            assert!(
+                field.is_nullable(),
+                "{} is nullable in the mapped batch",
+                field.name()
+            );
+        }
     }
 
     #[nervix_primitives::test]

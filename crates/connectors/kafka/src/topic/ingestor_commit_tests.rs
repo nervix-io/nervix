@@ -31,14 +31,14 @@ use super::{
 };
 
 const TOPIC: &str = "orders";
-const GROUP: &str = "orders-ingestor";
+pub(super) const GROUP: &str = "orders-ingestor";
 
 /// An auto-commit interval no test outlasts, so the driver's own cadence never commits during one.
 const DRIVER_CADENCE_MS: &str = "3600000";
 
 /// A round-trip time no test outlasts, so the broker holds the answer to every request it receives
 /// until the test sets its round-trip time back to zero.
-const HELD_ROUND_TRIP: Duration = Duration::from_secs(3600);
+pub(super) const HELD_ROUND_TRIP: Duration = Duration::from_secs(3600);
 
 /// How long a test waits for its ingestor to join the group and read the published record. The mock
 /// coordinator holds a new group's first rebalance for three seconds.
