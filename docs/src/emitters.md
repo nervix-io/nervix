@@ -1435,19 +1435,29 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-emit).
 <!-- connector-matrix:emit-nats-subject:end -->
 
-`NO ACK` publishes through Core NATS. A write hands its records to the client and delivers them once
-the client flushed them to its socket. The flush is local: the server answers nothing, so a record
-the client flushed is still lost when its connection fails before the server reads it. The client's
-optional `timeout_ms` bounds each write, the hand-over and the flush included. A write that runs out
-of it, because the client cannot write to a server that went down or stopped reading, fails as the
-emitter's transient status, which names `timeout_ms` and its bound, and the emitter retries it on
-its policy. Its records stay with the client, which sends them once its connection drains or
-reconnects, so the retry can deliver them a second time. A write first waits, within its own
-`timeout_ms`, for the client to flush what an earlier write left with it, and hands the client
-nothing more until it has, so a retry never queues another copy behind the one the client holds.
-Without `timeout_ms` a write waits for its flush however long that takes. When the emitter stops,
-its finish flushes what the client still holds by the finish deadline; see
-[Finishing an emitter](./connector-contract.md#finishing-a-emitter).
+`NO ACK` publishes through Core NATS. A write hands its records to the client's command queue and
+delivers them once the client reports them flushed to its socket. The flush is local: the server
+answers nothing, so a delivered record is still lost when its connection fails before the server
+reads it. A connection that fails also discards the records the client had already taken from its
+command queue for that connection but not yet written, while the records still queued are sent once
+the client has connected again. A flush that was waiting when its connection failed completes once
+the client has connected again and flushed the new connection, so a write whose flush spans a
+reconnect delivers records the server may never have received.
+
+The client's optional `timeout_ms` bounds each write, the hand-over and the flush included. A write
+that runs out of it, because the client cannot write to a server that went down or stopped reading,
+fails as the emitter's transient status, which names `timeout_ms` and its bound, and the emitter
+retries it on its policy. Its records stay with the client, which sends them once its connection
+drains or it has connected again, so the retry can deliver them a second time; a connection that
+fails first discards those it had already taken. A write first waits, within its own `timeout_ms`,
+for the client to flush what an earlier write left with it, and hands the client nothing more until
+it has, so a retry never queues another copy behind the one the client holds. Without `timeout_ms` a
+write waits for its flush however long that takes.
+
+The client connects again on its own after it loses its server, on the emitter's `RETRY POLICY`: it
+waits `BACKOFF` before its first attempt and doubles the wait for each further attempt up to `MAX`.
+When the emitter stops, its finish flushes what the client still holds by the finish deadline; see
+[Finishing an emitter](./connector-contract.md#finishing-an-emitter).
 
 `JETSTREAM` waits for one `PubAck` per record. The stream must already exist and capture the
 subject; a missing stream is an infrastructure error that remains under backpressure until an
@@ -2666,7 +2676,7 @@ Redis Pub/Sub, and ZeroMQ expose earlier acceptance boundaries and can lose ackn
 after a crash or downstream failure. A stop sends what a Kafka producer still queues, waits for
 accepted Pulsar messages' receipts, flushes what a Core NATS client still holds after a write ran
 out of `timeout_ms`, and waits for an MQTT QoS 0 client to send the publishes it still holds, within
-the stop's deadline; see [Finishing an emitter](./connector-contract.md#finishing-a-emitter). External
+the stop's deadline; see [Finishing an emitter](./connector-contract.md#finishing-an-emitter). External
 broker durability and
 idempotence settings remain the user's client and service configuration.
 
@@ -2694,7 +2704,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | --- | --- | --- | --- |
 | Kafka | `ACK` retry after an ambiguous delivery report or timeout; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration |
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
-| NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a write ran out of `timeout_ms`, whose records the client still sends; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` delivers once the client flushed a record to its socket, which is not durable stream acknowledgement | None |
+| NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a write ran out of `timeout_ms`, whose records the client still sends unless its connection fails first; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` delivers once the client reports a record flushed to its socket, which is not durable stream acknowledgement; a failed connection loses what the server had not read from it and what the client had taken for it but not yet written, even when a write's flush completes after the client connected again | None |
 | RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after the broker's channel has taken it; queue durability and message persistence remain broker policy | None |
 | SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |

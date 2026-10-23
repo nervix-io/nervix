@@ -800,13 +800,16 @@ event. Pulsar retains the receipts of records accepted under `NO ACK` and waits 
 that same finish deadline. A driver failure or still-unanswered receipts fail its finish; an
 expired deadline reports their count, without claiming the broker did not receive them. A Core
 NATS client holds records only after a write ran out of the client's `timeout_ms`, which leaves them
-unresolved and with the client; its finish flushes them within that same finish deadline, and a
-deadline that ends first reports how many the client still held. MQTT QoS 0 waits within that same
+unresolved and with the client; its finish flushes them within that same finish deadline. A
+deadline that ends first reports how many the client still held, and a client that fails while it
+flushes fails the finish with the driver's cause. A connection the client loses while it holds them
+discards those the client had taken for it but not yet written, and a finish whose flush completes
+after the client connected again still reports them flushed. MQTT QoS 0 waits within that same
 finish deadline for its client's event loop to write and flush the publishes the client still holds;
 a failed flush or publishes still unflushed when it ends fail its finish, which reports the failure
 or their count. Every other emitter
 holds nothing once a publish returns, so the publish itself is the
-completion point. [Finishing an emitter](./connector-contract.md#finishing-a-emitter) lists what each emitter
+completion point. [Finishing an emitter](./connector-contract.md#finishing-an-emitter) lists what each emitter
 holds and does.
 
 A emitter that stages what it accepts and publishes it later reaches its completion point at its

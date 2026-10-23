@@ -21,7 +21,7 @@ owns its pending receipt futures and an optional first driver failure; the `ACK`
 confirmation settings. An empty receipt collection means there are no outstanding receipts,
 and an absent failure means none has been observed. These are task-owned execution values,
 never persisted state or substitutes for a missing publishing mode. The
-[connector contract](./connector-contract.md#finishing-a-emitter) owns their completion semantics.
+[connector contract](./connector-contract.md#finishing-an-emitter) owns their completion semantics.
 
 The Kafka emitter installs its effective native queue byte capacity as `NonZeroU64` after librdkafka
 validates the client configuration. Its confirmation window's on-demand settlement returns
@@ -449,6 +449,13 @@ BSON's signed range. It does not publish that record with a replacement BSON nul
 conflict key. An actual null remains null, and other valid records in the batch can proceed under
 the connector's record outcome contract. See [Connector Crates And The Connector Contract](./connector-contract.md)
 for the host's publish and acknowledgement boundaries.
+
+The MongoDB sink also distinguishes each failed write's document answers: delivered, rejected with
+the server's definitive refusal code, or unresolved. An insert's implicit applied-document account
+and a verbose bulk write's explicit applied indexes are separate request variants. The unsatisfied
+write concern remains an optional failure beside those answers; it never replaces the documents'
+individual outcomes. Repeated refusals leave that document unresolved. The connector contract owns
+how these answers narrow the host's retry.
 
 VM integer count and position operands retain their signedness and full magnitude. A large
 unsigned input does not narrow to the largest signed integer; an unsupported result size reports

@@ -47,8 +47,8 @@ use stored_branch::StoredBranchCheckpoint;
 use super::{
     BranchInstanceSnapshotEntry, BranchKey, CapturedDeduplicatorKeyspace, CapturedWindow,
     MaterializedGeneration, OwnershipHandoffError, OwnershipHandoffResult,
-    ReplicatedKafkaOffsetState, ReplicatedMaterializedRelayState, Runtime, RuntimeStateKind,
-    RuntimeStatePlacement, ScheduledNodeTask,
+    ProcessorCheckpointPurpose, ReplicatedKafkaOffsetState, ReplicatedMaterializedRelayState,
+    Runtime, RuntimeStateKind, RuntimeStatePlacement, ScheduledNodeTask,
     backup_capture_fence::{BackupCaptureFence, BackupPublication},
     branch_lru_state::{LifecycleBranches, NativeBranchLifecycle, write_branch_lru_snapshot},
     kafka_offset_state::{KafkaOffsetPositions, NativeKafkaOffsets, write_offset_payload},
@@ -445,7 +445,8 @@ impl Runtime {
                     })?;
                     task.commands.clone()
                 };
-                ScheduledNodeTask::checkpoint_via(&commands).await?
+                ScheduledNodeTask::checkpoint_via(&commands, ProcessorCheckpointPurpose::BackupCut)
+                    .await?
             } else {
                 self.checkpoint_entrypoint_branch_lifecycle(domain, &entity)
                     .await?

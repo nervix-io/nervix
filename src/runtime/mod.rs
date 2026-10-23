@@ -533,8 +533,9 @@ use planning::{
 use processor_branch_restore::PendingProcessorBranchRestore;
 use processor_branch_task::{
     PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, PreparedProcessorBranch, ProcessorBranchHandoff,
-    ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError, ProcessorNodeCommand,
-    ProcessorSnapshotRequest, SpawnedSnapshotTask,
+    ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,
+    ProcessorCheckpointPurpose, ProcessorNodeCommand, ProcessorSnapshotRequest,
+    SpawnedSnapshotTask,
 };
 pub(in crate::runtime) use processor_branch_task::{
     ProcessorRuntimeContext, spawn_processor_node_runtime,
