@@ -391,6 +391,16 @@ borrows. A ready borrow writes nothing; the first Pending poll publishes its wai
 that clears it on success, error or cancellation. Sink destruction removes only its own registry
 slot, so a replacement sink's slot survives an earlier sink's teardown.
 
+Each Redis Pub/Sub source has one socket reader and one bounded asynchronous handoff. The reader
+reserves a slot before decoding its next frame, retains one parsing future across its idle probe,
+and hands each decoded message over once. Host read cancellation acts on the receiver and leaves
+the reader's partial frame intact. Suspend and close abort and join that exact reader before a
+replacement is installed. The channel and Tokio I/O are outside Deloxide's tracked locks; ordinary
+owner tests cover binary payload order, capacity, protocol setup and probe outcomes. The public
+BUFFER, DROP and idle recovery cases also run in the active, order and stressed diagnostic
+selections to exercise the existing tracked host controls. No new tracked-lock owner or custom
+memory-ordering protocol is introduced.
+
 Postgres and MySQL borrow once per bounded insert and retain that connection through any
 record-error isolation. Isolation therefore takes no second pool wait behind another writer.
 The connection returns before the next insert or retry backoff. The MySQL public contention
