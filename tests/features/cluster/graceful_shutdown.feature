@@ -40,6 +40,41 @@ Feature: Graceful shutdown
       kind=junction name=drain_route owner={{drain_route_destination}} replicas=- transition_from=node-2 state_recovery=complete
       """
 
+  @shutdown_handoff_bystander
+  Scenario: A stopping owner hands its work over while the leader cannot reach a node that runs none of it
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When leadership is transferred to node "node-1"
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA bystander_event ( id I64 );
+      CREATE RELAY bystander_input SCHEMA bystander_event UNBRANCHED;
+      CREATE RELAY bystander_output SCHEMA bystander_event UNBRANCHED;
+      CREATE JUNCTION bystander_route FROM bystander_input UNBRANCHED
+        TO bystander_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      RELOCATE RELAY bystander_input ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY bystander_output ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE JUNCTION bystander_route ONTO NODE node-3 IGNORE PREFERENCES;
+      CORDON NODE node-2;
+      """
+    Then node "node-1" eventually reports status containing "kind=junction name=bystander_route owner=node-3"
+    Given the ownership handoff gate engagement requests node "node-1" sends to node "node-2" are lost
+    When node "node-3" is gracefully stopped
+    Then the last shutdown of node "node-3" reports its drain-support phase "Completed"
+    And the link from node "node-1" to node "node-2" lost no ownership handoff gate engagement request
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      kind=junction name=bystander_route owner=node-1 replicas=- transition_from=node-3 state_recovery=complete
+      """
+
   Scenario: Graceful shutdown preserves an operator cordon across restart
     Given graceful shutdown drain is enabled
     And the production sticky scheduler is configured
@@ -1185,6 +1220,7 @@ Feature: Graceful shutdown
   Scenario Outline: Every node stopping at once ends its generators together on a cluster of <cluster_size>
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And shutdown timeout is configured as "20s"
+    And drain timeout is configured as "20s"
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     When a materialized restore workload with 40 relays is created
@@ -1503,6 +1539,7 @@ Feature: Graceful shutdown
   Scenario: A transaction commit stuck at its shutdown deadline is cancelled and completed after restart
     Given graceful shutdown drain is enabled
     And shutdown timeout is configured as "5s"
+    And drain timeout is configured as "5s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands
@@ -1533,6 +1570,7 @@ Feature: Graceful shutdown
   Scenario: A command still waiting for admission is cancelled without an effect when its node stops
     Given graceful shutdown drain is enabled
     And shutdown timeout is configured as "5s"
+    And drain timeout is configured as "5s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands

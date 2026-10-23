@@ -1,7 +1,7 @@
 //! The Kafka producer's retained-record count explored under Shuttle.
 //!
 //! Layer: test harness.
-//! - **Owns.** The invariants the count is held to while the delivery reports of the records an emitter
+//! - **Owns.** The invariants the count is held to while the delivery reports of the records a emitter
 //!   handed over are served concurrently with further hand-overs and counts: every record counts
 //!   from before its hand-over until its report is served, and a publish that reads a record's
 //!   report never finds that record still counted.

@@ -228,17 +228,37 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
         ],
     );
 
+    let both_nodes = [
+        named::<ClusterNodeName>("node-a"),
+        named::<ClusterNodeName>("node-b"),
+    ];
+    let unprimaried_junction = replicated_junction
+        .clone()
+        .placed_on(None, both_nodes.to_vec());
+    let unplaced_junction = replicated_junction.clone().placed_on(None, Vec::new());
+
     assert_eq!(replicated_junction.execution_node(), Some(&named("node-a")));
     assert!(replicated_junction.executes_on(&named::<ClusterNodeName>("node-a")));
     assert!(!replicated_junction.executes_on(&named::<ClusterNodeName>("node-b")));
+    assert_eq!(
+        replicated_junction.execution_nodes(),
+        [named::<ClusterNodeName>("node-a")]
+    );
+
+    assert!(unprimaried_junction.executes_on(&named::<ClusterNodeName>("node-a")));
+    assert!(unprimaried_junction.executes_on(&named::<ClusterNodeName>("node-b")));
+    assert_eq!(unprimaried_junction.execution_nodes(), both_nodes);
+    assert!(unplaced_junction.execution_nodes().is_empty());
 
     assert_eq!(endpoint_ingestor.execution_node(), None);
     assert!(endpoint_ingestor.executes_on(&named::<ClusterNodeName>("node-a")));
     assert!(endpoint_ingestor.executes_on(&named::<ClusterNodeName>("node-b")));
+    assert_eq!(endpoint_ingestor.execution_nodes(), both_nodes);
 
     assert_eq!(syslog_ingestor.execution_node(), None);
     assert!(syslog_ingestor.executes_on(&named::<ClusterNodeName>("node-a")));
     assert!(syslog_ingestor.executes_on(&named::<ClusterNodeName>("node-b")));
+    assert_eq!(syslog_ingestor.execution_nodes(), both_nodes);
 }
 
 #[test]

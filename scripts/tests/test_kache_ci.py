@@ -149,7 +149,6 @@ class KacheWorkflowTests(unittest.TestCase):
                             "version": "${{ env.KACHE_VERSION }}",
                             "github-cache": '"false"',
                             "cache-executables": '"true"',
-                            "max-size": '"1TiB"',
                             "pr-comment": '"false"',
                         },
                     )
@@ -246,7 +245,6 @@ class KacheWorkflowTests(unittest.TestCase):
         self.assertIn("COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py", dockerfile)
         self.assertIn("ENV RUSTC_WRAPPER=kache", dockerfile)
         self.assertIn("ENV KACHE_CACHE_EXECUTABLES=true", dockerfile)
-        self.assertIn("ENV KACHE_MAX_SIZE=1TiB", dockerfile)
         self.assertIn("ENV KACHE_REMOTE_KEY_LISTING=false", dockerfile)
         configure = dockerfile.index('python3 scripts/kache_remote.py configure "${KACHE_CONFIG}"')
         daemon = dockerfile.index("kache daemon start")

@@ -642,13 +642,21 @@ recorded stay applied.
 Node drain, the ownership move of a graceful-shutdown drain, placement consolidation, and `RELOCATE`
 are planned ownership handoffs.
 Nervix computes the complete target schedule before it engages a hold. It then fences dispatch at
-the affected subgraph boundary on every live node, stops new intake for each moved ingestor, and
-drains work already admitted to the moved unit. Ownership-handoff intake does not consult `ON
-QUIESCE`: an already admitted payload continues through its routes, while polling and endpoint
-admission stop. The drain includes relay rings, processor work, moved-ingestor ACK roots, emitter
-buffers and active publishing, and an Iceberg emitter's staged commit. Internal relays whose every
-producer moves with the same hard group remain open so admitted work can reach the group's output
-boundary.
+the affected subgraph boundary on every live node that runs part of it, stops new intake for each
+moved ingestor, and drains work already admitted to the moved unit. Ownership-handoff intake does
+not consult `ON QUIESCE`: an already admitted payload continues through its routes, while polling
+and endpoint admission stop. The drain includes relay rings, processor work, moved-ingestor ACK
+roots, emitter buffers and active publishing, and an Iceberg emitter's staged commit. Internal
+relays whose every producer moves with the same hard group remain open so admitted work can reach
+the group's output boundary.
+
+The hold's participants are the live nodes on which the current or the target schedule runs a
+moved entity, a relay the hold fences, or an entity that writes to such a relay. An ingestor that
+runs on every node counts on each node it is assigned to. Only those nodes can admit work into the
+moved unit, hold work it must drain, or run the unit once the handoff activates. The coordinator
+asks no other node to hold anything and waits for none of them, so a live node that runs none of
+the unit cannot spend the preparation deadline, however slowly the coordinator reaches it. A
+participant the coordinator cannot reach still fails the unit when that deadline passes.
 
 Before publishing the ownership freeze, each participant requests a force flush and drains its
 local affected work with the intake and boundary gates already closed. Routes and processors can

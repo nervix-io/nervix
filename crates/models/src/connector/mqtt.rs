@@ -132,9 +132,19 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredBuffer {
+            holds: "publishes the connection reads ahead of the host",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting(
+                    "the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under \
+                     ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
             holds: "SUBSCRIBE and PUBACK requests for the connection",
             bound: BufferBound::Bounded {
-                capacity: BufferCapacity::Driver("1024 requests"),
+                capacity: BufferCapacity::Setting("the Receive Maximum, or 1 under NO ACK"),
                 overflow: BufferOverflow::Backpressure,
             },
         },
@@ -147,6 +157,10 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         DeclaredWait {
             wait: "SUBACK",
             bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "an acknowledgement's PUBACKs written to the connection",
+            bound: WaitBound::Driver("one keep-alive interval of 60 s, or the broker's"),
         },
         DeclaredWait {
             wait: "a silent connection",
@@ -192,7 +206,7 @@ impl IngestorDeclaration for MqttTopicIngestor {
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
         position_class: PositionClass::BrokerRedelivered,
-        acknowledgement_confirmation: AcknowledgementConfirmation::Queued,
+        acknowledgement_confirmation: AcknowledgementConfirmation::Written,
         delivery: &[
             DeclaredDelivery::NO_ACK,
             DeclaredDelivery::ACK_SEQUENTIAL.requiring(BROKER_KEPT_SESSION),
@@ -380,6 +394,16 @@ impl MqttIngestMode {
         match self {
             Self::AckSequential { .. } | Self::AckParallel { .. } => true,
             Self::NoAck { .. } => false,
+        }
+    }
+
+    /// How many of its publishes may wait on their acknowledgements at once: one under
+    /// `ACK SEQUENTIAL` and `MAX` under `ACK PARALLEL`. `NO ACK` acknowledges nothing, so none wait.
+    pub const fn acknowledgement_window(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::NoAck { .. } => None,
+            Self::AckSequential { .. } => Some(NonZeroU64::MIN),
+            Self::AckParallel { max, .. } => Some(*max),
         }
     }
 

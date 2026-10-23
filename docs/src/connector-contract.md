@@ -495,7 +495,8 @@ No driver call that parks its thread runs on an asynchronous worker. A connector
 in the executor's storage class with a declared deadline as its bound, or as a declared owner of the
 runtime's blocking pool. Kafka source control calls use the connector storage class: metadata,
 watermark and timestamp lookups, seeks and assignments run off the async workers, and so does the
-destruction of a consumer, as [Kafka consumer retirement](#kafka-consumer-retirement) describes.
+destruction of a consumer or a producer, as [Kafka client retirement](#kafka-client-retirement)
+describes.
 
 Network control calls have their own bounded connector storage admission, separate from filesystem
 and consensus storage. A broker that does not answer therefore cannot consume those classes'
@@ -510,7 +511,8 @@ including when the waiting caller is cancelled or its thirty-second deadline exp
 refusals remain transient source failures; they never reject a record as invalid.
 
 librdkafka's producer flush still runs on the runtime's blocking pool as a declared owner outside
-the executor, bounded by the host's physical flush deadline.
+the executor, bounded by the host's physical flush deadline. The producer's destruction does not:
+it is a connector storage job like a consumer's.
 [Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor)
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
@@ -524,32 +526,45 @@ These annotations describe this chapter's existing lifecycle; they supply no run
 ownership proof. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns their
 syntax, inheritance, diagnostics and operation-specific repair expectations.
 
-#### Kafka consumer retirement
+#### Kafka client retirement
 
-Destroying a Kafka consumer is native work that waits. Every consumer Nervix creates has a group,
-a partition inspector's included, and rust-rdkafka closes such a consumer by polling it in steps of
-100 milliseconds until librdkafka reports it closed. A consumer that joined its group waits there
-for the coordinator to answer its LeaveGroup request, which librdkafka gives five seconds whatever
-`socket.timeout.ms` says, and librdkafka then joins its threads.
+Destroying a librdkafka client is native work that waits, so Nervix never destroys a Kafka consumer
+or producer on the thread that lets it go.
 
-A source or partition inspector shares its consumer with the driver jobs it admits, and any of them
-can hold the last handle. A source goes when its host's task ends after the source's loop, or when
-composing its ingestor's instances fails; an inspector goes when its watch ends; a control job keeps
-running after its caller is cancelled, and a job the connector queue refuses lets its handle go
-unrun; and a consumer-group commit can be answered after its source is gone. Whichever of them lets
-the last handle go hands the consumer to its retirement and carries on at once, on an async worker
-and on a connector worker alike. The retirement destroys the consumer in one connector storage job.
-A full queue holds that job until a place frees instead of refusing it, because nothing could
-present the consumer again, and the job runs under a commands charge the consumer took when it was
-created, so retiring a consumer asks the node for nothing it could refuse. A consumer that cannot
-take that charge is not created: the source's open or the inspector's start fails with the transient
-`KafkaTopicIngestorError::RetirementAdmission`. Nothing waits for a retirement and nothing cancels it,
-since a destruction cannot stop part way. It takes the native consumer alone, never the source's
-host or its intake, and Nervix never hands a consumer to another source, so a replacement source
-opens a consumer of its own.
+Every consumer Nervix creates has a group, a partition inspector's included, and rust-rdkafka closes
+such a consumer by polling it in steps of 100 milliseconds until librdkafka reports it closed. A
+consumer that joined its group waits there for the coordinator to answer its LeaveGroup request,
+which librdkafka gives five seconds whatever `socket.timeout.ms` says, and librdkafka then joins its
+threads. Destroying a producer first stops its polling thread, which finishes its current poll of up
+to 100 milliseconds and any delivery report it is serving. rust-rdkafka then purges the records the
+producer still queues or has in flight, flushes for up to 500 milliseconds so that their reports
+are served, and librdkafka joins its threads, a broker thread still resolving a name included.
+
+A ingestor or partition inspector shares its consumer with the driver jobs it admits, a emitter shares
+its producer with the flush its finish runs, and any of them can hold the last handle. A ingestor goes
+when its host's task ends after the ingestor's loop, or when composing its ingestor's instances fails;
+an inspector goes when its watch ends; a control job keeps running after its caller is cancelled,
+and a job the connector queue refuses lets its handle go unrun; and a consumer-group commit can be
+answered after its ingestor is gone. A emitter goes when its emitter's task ends after the emitter's finish,
+when a swap or `ALTER` replaces it, or when composing its emitter fails after the emitter started; and
+a flush keeps running on the runtime's blocking pool after its finish's caller stops waiting for it,
+until librdkafka's flush returns. Whichever of them lets the last handle go hands the client to its
+retirement and carries on at once, on an async worker, a connector worker or a blocking-pool thread
+alike. The retirement destroys the client in one connector storage job. A full queue holds that job
+until a place frees instead of refusing it, because nothing could present the client again, and the
+job runs under a commands charge the client took before it was created, so retiring a client asks
+the node for nothing it could refuse. A client that cannot take that charge is not created: the
+ingestor's open or the inspector's start fails with the transient
+`KafkaTopicIngestorError::RetirementAdmission`, and the emitter's start fails with
+`KafkaProducerStartError::RetirementAdmission` beneath `EmitterOpenError::Initialize`, which its
+emitter retries after its retry delay like any emitter that could not start. Nothing waits for a
+retirement and nothing cancels it, since a destruction cannot stop part way. It takes the native
+client alone, never the ingestor's or emitter's host or its intake, and Nervix never hands a client to
+another ingestor or emitter, so a replacement opens a client of its own.
 
 A joined consumer whose coordinator does not answer holds a connector worker for those five
-seconds. A broker that stops answering while its consumers retire therefore delays the node's other
+seconds, and a producer holds one for its polling thread's last poll and up to half a second of
+flushing. A broker that stops answering while its clients retire therefore delays the node's other
 Kafka control calls queued behind them, never its async workers. The `connector_storage` class's
 `nervix_execution_jobs_running` and `nervix_execution_jobs_pending` count retirements with the other
 Kafka jobs. Node shutdown does not wait for a retirement: the process's runtime finishes or
@@ -906,7 +921,7 @@ when its transport stays connected with bounded memory while nothing reads it:
 | NATS | Waits for a place | The client's connection task keeps reading and answering the server, and holds at most the subscription's 65,536 messages before it drops the newest as a slow consumer. |
 | ZeroMQ | Waits for a place | `PULL` messages stay in the kernel buffers, and then the pushing peers' sends wait. |
 | Syslog | Waits for a place | The kernel drops UDP datagrams beyond the socket's receive buffer; TCP and TLS connections fill the listener's 64-frame queue and then push back on their senders. |
-| MQTT | Refused and counted | The event loop, which sends the keep-alive, runs only while the loop reads, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
+| MQTT | Refused and counted | The connection's driver task keeps the event loop, and with it the keep-alive, running while the loop is held, but under `NO ACK` reads only 64 publishes ahead of it. Once those fill, the driver stops reading, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
 | Redis Pub/Sub | Refused and counted | The dedicated reader holds at most `subscription_buffer_messages` messages and applies TCP backpressure when full. Keeping the host polling also keeps idle probes active. |
 | WebSocket client | Refused and counted | Server pings go unanswered while frames are unread, and a server that pings closes the connection. |
 | `KAFKA TOPIC` in `MODE NO ACK` | Refused and counted | A consumer-group member that does not poll for `max.poll.interval.ms` leaves its group, and a domain-offset instance would keep its partitions through an ownership handoff. |
@@ -1017,16 +1032,63 @@ in one of these ways:
 | Entities | A cancelled read |
 | --- | --- |
 | `KAFKA TOPIC`, `PULSAR TOPIC` | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
-| `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the client had already read when the read stopped waiting stays with the client, which hands it to the next read first. |
+| `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the connection had already read when the read stopped waiting stays in the connection's read-ahead, which hands it to the next read first. |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `RABBITMQ QUEUE`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
 | `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
 
-An MQTT read stops waiting by dropping its client's poll in flight, as its batch timeout ends a
-gathering. The client queues every packet it reads before it writes a reply, and its next poll
-returns a queued publish first, so a dropped poll loses no publish it read. It can cut short only an
-acknowledgement still waiting for room in a send buffer the broker has stopped draining; a
-persistent session then delivers that publish again when it resumes, as it does any publish whose
-acknowledgement never reached the broker.
+An MQTT read takes its publishes from its connection's read-ahead, which the connection's driver
+task fills while it polls the client's event loop; see
+[MQTT source connections](#mqtt-source-connections). A read that stops waiting, because the host
+cancelled it or its batch timeout passed, drops only its wait on the read-ahead, so it loses no
+publish, and the driver's poll never stops for it.
+
+### MQTT source connections
+
+Once an MQTT source instance has established its subscription, a task the connector owns drives
+its connection until the connection ends or the source drops it. The task is the only owner of the
+client's event loop and polls it without pause, so the client writes the acknowledgements the
+source requests and the keep-alive pings its broker expects whatever the host does meanwhile,
+including waiting on a batch's acknowledgement trees for as long as a downstream emitter holds
+them. The task hands every publish the event loop reads to the source through a bounded
+read-ahead, in the order it read them.
+
+In an `ACK` mode every `CONNECT` advertises the mode's acknowledgement window and 64 more as its
+Receive Maximum: 65 under `ACK SEQUENTIAL`, and `ACK PARALLEL MAX` plus 64 up to MQTT's largest
+Receive Maximum, 65,535. The broker then sends no further publish at QoS 1 while that many wait on
+their acknowledgements, so a batch holds at most that many, and an `ACK PARALLEL MAX` above 65,535
+gathers at most 65,535 of them before its `BATCH TIMEOUT` ends it. A broker that discards a
+publish above the advertised Maximum Packet Size may keep counting it against the Receive Maximum,
+waiting for an acknowledgement the source never sends, as EMQX does; the 64 let the window fill
+around that many such publishes instead of one of them holding back every later publish. The
+broker holds back no publish at QoS 0, which a subscription at QoS 1 receives from a publisher
+that sends at QoS 0, and under `NO ACK`, where the client acknowledges every publish on receipt,
+it holds back none. The read-ahead holds as many publishes as the Receive Maximum admits, or 64
+under `NO ACK`. Once it is full, the task holds the next publish and polls nothing until the
+source reads one, so the connection's flow control holds the broker back, and the client sends no
+keep-alive until the host reads again.
+
+Acknowledging a batch requests a `PUBACK` for each of its publishes at QoS 1 and returns once the
+event loop has written all of them to the connection and flushed them. The broker answers none, so
+that is everything the source can confirm. A batch never asks for more acknowledgements than the
+client's request queue holds, so no request waits for room. The acknowledgement never waits on a
+task that stopped polling. While the task holds a publish for room in a full read-ahead, only the
+host's next read, which follows the acknowledgement, could let it write, so the acknowledgement
+fails with `MqttSourceError::ReadAheadFull`. When the connection ended first, it fails with the
+lost connection beneath `MqttSourceError::Acknowledge`. A connection whose broker stopped reading
+it holds the writes, and the client's flush has no deadline of its own, so the acknowledgement
+waits at most one keep-alive interval, 60 seconds unless the broker's `CONNACK` announced its own,
+and then fails with `MqttSourceError::AcknowledgementDeadline`; a broker that announces a
+keep-alive of zero leaves it unbounded, as it leaves a silent connection. Every such failure drops
+the connection and the acknowledgements it never wrote: the host shows the failure as the ingestor's transient status and
+rejects the positions, a rejection fails once its publishes' connection is gone, and the broker
+delivers again every publish the lost connection did not acknowledge once the source resumes; see
+[Confirmed acknowledgements](#confirmed-acknowledgements).
+
+A failed poll ends the connection. The task has handed over every publish it read, so the source
+reads the read-ahead empty, and its next read then reports the lost connection: beneath
+`MqttSourceError::Receive`, or as `MqttSourceError::PacketTooLarge` for a packet above the
+advertised Maximum Packet Size. Suspension, close and every failure drop the connection, which
+aborts its task and closes the broker connection.
 
 ### Oversized payloads
 
@@ -1129,8 +1191,7 @@ it did not get:
 | --- | --- | --- |
 | `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `SQS QUEUE` | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
 | `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | The source acknowledges nothing on its transport. |
-| `queued` | `MQTT TOPIC` | Once the client queued the acknowledgement, before the broker answered it and possibly before it reached the connection. An MQTT `PUBACK` is written when the client's event loop is next polled. |
-| `written` | `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, so nothing more can be confirmed. |
+| `written` | `MQTT TOPIC`, `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT does not answer a `PUBACK`, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` the batch asks for to the connection. |
 <!-- connector-matrix:confirmation:end -->
 
 `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` and `CLIENT PRODUCER` declare `none` as both their position
@@ -1334,7 +1395,9 @@ thread checks that state when it next serves its partitions. rust-rdkafka's `flu
 librdkafka's flush without waiting and polls in between, so on a loaded node the broker threads miss
 that instant and the records linger past the deadline. The Kafka finish therefore waits inside
 librdkafka's flush itself, in steps of at most a second, while the producer's polling thread takes
-the delivery reports that end the flush.
+the delivery reports that end the flush. The flush holds a handle of its own, so a flush its finish's
+caller stopped waiting for keeps the producer until it returns, and then retires it if the sink is
+gone, as [Kafka client retirement](#kafka-client-retirement) describes.
 
 The Kafka emitter counts the records its producer holds itself. librdkafka's out-queue length adds
 every event waiting in the producer's queue, its errors, statistics and unserved delivery reports

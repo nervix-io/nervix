@@ -399,11 +399,8 @@ pub enum AcknowledgementConfirmation {
     /// Pulsar `CommandAckResponse`.
     Answered,
     /// The protocol does not answer an acknowledgement, and acknowledging returns once it is
-    /// written to the connection, such as a RabbitMQ `basic.ack`.
+    /// written to the connection, such as a RabbitMQ `basic.ack` or an MQTT `PUBACK`.
     Written,
-    /// Acknowledging returns once the client queued the acknowledgement, before the transport
-    /// answered it and possibly before it reached the connection, such as an MQTT `PUBACK`.
-    Queued,
     /// The source acknowledges nothing on its transport.
     None,
 }

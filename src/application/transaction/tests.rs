@@ -33,7 +33,7 @@ use super::{
             test_execution_reference,
         },
     },
-    DEFAULT_TRANSACTION_MAX_OPEN, TransactionAttachment,
+    TransactionAttachment, TransactionLimits,
 };
 
 #[test]
@@ -219,7 +219,7 @@ async fn empty_transaction_commit_storage_failure_is_reported() {
     service
         .inner
         .consensus
-        .open_transaction(transaction, DEFAULT_TRANSACTION_MAX_OPEN)
+        .open_transaction(transaction, TransactionLimits::default().max_open())
         .await
         .assured("the test transaction opens below the admission limit");
     probe.storage_fault().fail_next(
@@ -267,7 +267,7 @@ async fn attaching_an_overdue_transaction_atomically_expires_it() {
     service
         .inner
         .consensus
-        .open_transaction(transaction, DEFAULT_TRANSACTION_MAX_OPEN)
+        .open_transaction(transaction, TransactionLimits::default().max_open())
         .await
         .assured("the overdue test transaction is unique and below the admission limit");
     service

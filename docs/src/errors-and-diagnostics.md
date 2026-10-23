@@ -676,13 +676,21 @@ an address that refused the connection, a failed TLS handshake, including a cert
 not name the configured host, or a refused MQTT handshake. A source keeps the error beneath
 `MqttTopicIngestorError::Connect` while it connects and `MqttTopicIngestorError::Receive` while it reads, and
 those beneath `IngestorError`, so `DESCRIBE INGESTOR` shows the deepest cause: the resolver's lookup
-error or the driver's description. A emitter's event loop records the connection error's message as
-the emitter's transient error, which `DESCRIBE EMITTER` shows, and reconnects on the emitter's
-retry policy. None rejects a record or acknowledges input. A QoS 1 or 2 publish keeps the driver's
-`ClientError` when the client refuses to take a record, and its `PublishNoticeError` when an answer
-leaves a record unresolved, beneath `EmitterWriteError::Publish`, each with the connector's
-description of the failure for the emitter's transient error. A missed `ACK TIMEOUT` is the
-confirmation window's `ConfirmationWindowError`, which the window describes the same way.
+error or the driver's description. The task that drives a ingestor's connection hands the lost
+connection to the ingestor's next read, or to an acknowledgement that finds the connection ended,
+which keeps it beneath `MqttTopicIngestorError::Acknowledge`; a task that fails without a report keeps its
+`JoinError` beneath `MqttTopicIngestorError::Driver`. An acknowledgement that meets the task holding a
+publish for room in a full read-ahead fails as `MqttTopicIngestorError::ReadAheadFull`, naming the
+read-ahead's capacity, because nothing would write it before the host reads again, and one whose
+connection wrote nothing for a keep-alive interval fails as
+`MqttTopicIngestorError::AcknowledgementDeadline`, naming the keep-alive. A emitter's event
+loop records the connection error's message as the emitter's transient error, which
+`DESCRIBE EMITTER` shows, and reconnects on the emitter's retry policy. None rejects a record or
+acknowledges input. A QoS 1 or 2 publish keeps the driver's `ClientError` when the client refuses
+to take a record, and its `PublishNoticeError` when an answer leaves a record unresolved, beneath
+`EmitterWriteError::Publish`, each with the connector's description of the failure for the
+emitter's transient error. A missed `ACK TIMEOUT` is the confirmation window's
+`ConfirmationWindowError`, which the window describes the same way.
 
 MQTT input retirement reports `RuntimeError::RetireIngestorEntity`, naming its domain and
 ingestor, above the connector's `MqttTopicIngestorError::RetireInstance` and instance index. The report
@@ -752,9 +760,11 @@ that failed.
 A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
 and a refused charge keeps `AdmissionError` beneath `KafkaTopicIngestorError::RetirementAdmission`. It
 fails the source's open or the partition inspector's start, as transiently as a refused control
-call; see [Kafka consumer retirement](./connector-contract.md#kafka-consumer-retirement). A
-retirement has no caller to fail, so its supervisor reports a destruction job that panicked at
-`debug`.
+call. A Kafka producer takes the same charge, and a refused one keeps `AdmissionError` beneath
+`KafkaProducerStartError::RetirementAdmission` beneath `SinkStartError::Initialize`, whose
+description names the refused charge; the emitter starts its sink again after its retry delay. See
+[Kafka client retirement](./connector-contract.md#kafka-client-retirement). A retirement has no
+caller to fail, so its supervisor reports a destruction job that panicked at `debug`.
 
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
@@ -1146,9 +1156,20 @@ class, operation, configured budget, and required bytes, so the node fails start
 actionable diagnostic instead of discovering insufficient storage capacity while applying a
 transaction.
 
-Memory-pressure watermarks are validated where the node reads its options. A low watermark that is
-not below the high one, or a zero check interval, is a `MemoryPressureConfigError` carrying the
-configured values beneath `AppError::InvalidMemoryPressureConfig`, so the node does not start. The
+The node converts its settings once, where it reads its options, and before it opens a store. Each
+owner's definition validates its own value and its relationships with the settings it depends on,
+so defaults and an operator's values cross the same check, and each refusal names the settings by
+their option names with their values. A minimum election timeout that does not exceed the heartbeat
+interval, or a maximum that does not exceed the minimum, is a `RaftTimingError` beneath
+`AppError::InvalidRaftTimings`. A drain timeout above the shutdown timeout is a
+`ShutdownSettingsError` beneath `AppError::InvalidShutdownTimeouts`. A setting that a test names for
+a node but that the server's command line does not read keeps clap's error beneath
+`AppError::ReadSettings`.
+
+Memory-pressure watermarks are validated the same way. A watermark set without its pair, a low
+watermark that is not below the high one, or a zero check interval while the watermarks are set is
+a `MemoryPressureConfigError` carrying the configured values beneath
+`AppError::InvalidMemoryPressureConfig`, so the node does not start. The
 supervisor's constructor validates the same configuration beneath
 `MemoryPressureError::InvalidConfig`, and an allocator sample that jemalloc refuses is
 `MemoryPressureError::ReadJemalloc`, naming the control it read, the epoch, `stats.allocated` or

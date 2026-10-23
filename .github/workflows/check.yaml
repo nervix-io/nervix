@@ -6,6 +6,8 @@ on:
 
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # Kache sizes its local store from the cache volume (5%, rounded and bounded).
+  # Keep the default so a runner disk change also changes its cache budget.
   KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
   TINYGO_VERSION: "0.41.1"
@@ -166,7 +168,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -279,7 +280,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -420,7 +420,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -580,7 +579,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -778,7 +776,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -931,7 +928,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -1257,7 +1253,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -1405,7 +1400,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -1679,7 +1673,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -1831,7 +1824,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -1990,7 +1982,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -2116,7 +2107,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote

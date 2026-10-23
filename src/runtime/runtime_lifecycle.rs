@@ -30,14 +30,9 @@ impl Runtime {
     /// A runtime without persistence whose admitted work goes through `executor`.
     #[cfg(test)]
     pub(crate) fn with_executor(executor: Executor) -> Self {
-        Self::with_persistence_and_temp_dir(
-            executor,
-            None,
-            None,
-            DEFAULT_STATE_SNAPSHOT_INTERVAL,
-            ConfiguredFaultInjection::default(),
-            PathBuf::from(DEFAULT_TEMP_DIR),
-            DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        Self::with_environment(
+            RuntimeEnvironment::transient(executor),
+            RuntimeSettings::default(),
         )
         .verified("the None persistence path has no fallible step")
     }
@@ -46,42 +41,41 @@ impl Runtime {
     /// failures and waits its runtime seams take.
     #[cfg(all(test, feature = "testing"))]
     pub(crate) fn with_fault_injection(fault_injection: ConfiguredFaultInjection) -> Self {
-        Self::with_persistence_and_temp_dir(
-            Executor::default(),
-            None,
-            None,
-            DEFAULT_STATE_SNAPSHOT_INTERVAL,
+        let environment = RuntimeEnvironment {
             fault_injection,
-            PathBuf::from(DEFAULT_TEMP_DIR),
-            DEFAULT_RESTORE_STAGING_MAX_BYTES,
-        )
-        .verified("the None persistence path has no fallible step")
+            ..RuntimeEnvironment::transient(Executor::default())
+        };
+        Self::with_environment(environment, RuntimeSettings::default())
+            .verified("the None persistence path has no fallible step")
     }
 
     pub(in crate::runtime) fn with_persistence(
         db: Option<Database>,
         state_snapshot_interval: Duration,
     ) -> error_stack::Result<Self, RuntimePersistenceError> {
-        Self::with_persistence_and_temp_dir(
-            Executor::default(),
-            None,
+        let environment = RuntimeEnvironment {
             db,
-            state_snapshot_interval,
-            ConfiguredFaultInjection::default(),
-            PathBuf::from(DEFAULT_TEMP_DIR),
-            DEFAULT_RESTORE_STAGING_MAX_BYTES,
-        )
+            ..RuntimeEnvironment::transient(Executor::default())
+        };
+        let settings = RuntimeSettings::resolve(Some(state_snapshot_interval), None)
+            .assured("the runtime settings declare no validation");
+        Self::with_environment(environment, settings)
     }
 
-    pub(crate) fn with_persistence_and_temp_dir(
-        executor: Executor,
-        dns: Option<DnsResolver>,
-        db: Option<Database>,
-        state_snapshot_interval: Duration,
-        fault_injection: ConfiguredFaultInjection,
-        temp_dir: PathBuf,
-        restore_staging_max_bytes: u64,
+    /// A runtime constructed in `environment` with `settings`.
+    pub(crate) fn with_environment(
+        environment: RuntimeEnvironment,
+        settings: RuntimeSettings,
     ) -> error_stack::Result<Self, RuntimePersistenceError> {
+        let RuntimeEnvironment {
+            executor,
+            dns,
+            db,
+            fault_injection,
+            temp_dir,
+        } = environment;
+        let state_snapshot_interval = settings.state_snapshot_interval();
+        let restore_staging_max_bytes = settings.restore_staging_max_bytes();
         let events = RuntimeEvents::new();
         let (domain_status_changed, _) = watch::channel(0);
         let state_store = db
@@ -344,6 +338,17 @@ impl Runtime {
         self.inner
             .fault_injection
             .take_handoff_engagement_transport_failure(domain)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn loses_handoff_gate_engagement(
+        &self,
+        coordinator: &ClusterNodeName,
+        participant: &ClusterNodeName,
+    ) -> bool {
+        self.inner
+            .fault_injection
+            .loses_handoff_gate_engagement(coordinator, participant)
     }
 
     #[cfg(feature = "testing")]

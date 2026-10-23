@@ -2,7 +2,7 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The executor admission and native request budget of an ingestor or partition inspector,
+//! - **Owns.** The executor admission and native request budget of a ingestor or partition inspector,
 //!   and submission of a consumer-group commit whose answer may outlive its caller.
 //! - **Depends on.** The connector's typed operations, the bounded executor and librdkafka.
 //! - **Must not know.** Graphs, placement, registry state or host-owned domain offsets.

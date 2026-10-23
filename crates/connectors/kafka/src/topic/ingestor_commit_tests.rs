@@ -53,7 +53,7 @@ pub(super) fn cluster() -> MockCluster<'static, DefaultProducerContext> {
     cluster
 }
 
-/// The plan of an ingestor in the test group, whose offsets `commit` commits.
+/// The plan of a ingestor in the test group, whose offsets `commit` commits.
 pub(super) fn plan(
     cluster: &MockCluster<'static, DefaultProducerContext>,
     commit: KafkaGroupCommit,
@@ -121,10 +121,10 @@ pub(super) async fn read_positions(source: &mut KafkaTopicIngestor) -> Vec<Kafka
         source.next_batch(request, &IngestorReadCancellation::new()),
     )
     .await
-    .assured("the ingestor joins its group and reads the published record within its deadline")
-    .assured("the ingestor reads the record its broker serves");
+    .assured("the source joins its group and reads the published record within its deadline")
+    .assured("the source reads the record its broker serves");
     let IngestorBatch::Messages(messages) = batch else {
-        panic!("a subscribed ingestor reads a batch of messages");
+        panic!("a subscribed source reads a batch of messages");
     };
     messages
         .iter()
@@ -200,7 +200,7 @@ async fn a_commit_its_group_refuses_fails_the_acknowledgement() {
         .assured("the acknowledgement failure names the commit that failed");
     assert!(
         matches!(failure, KafkaTopicIngestorError::CommitOffset { group } if group == GROUP),
-        "unexpected Kafka ingestor failure {failure:?}"
+        "unexpected Kafka source failure {failure:?}"
     );
     let cause = report
         .downcast_ref::<KafkaError>()
@@ -244,7 +244,7 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
                 KafkaTopicIngestorError::CommitUnanswered { group, deadline }
                     if group == GROUP && *deadline == short_deadline
             ),
-            "unexpected Kafka ingestor failure {report:?}"
+            "unexpected Kafka source failure {report:?}"
         );
         assert!(commits.unanswered.is_some());
     }

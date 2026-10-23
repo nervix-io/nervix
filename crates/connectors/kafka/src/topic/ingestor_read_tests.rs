@@ -48,7 +48,7 @@ async fn a_cancelled_parallel_read_returns_every_record_it_gathered() {
         let batch = source
             .next_batch(request, &cancellation)
             .await
-            .assured("the ingestor reads the records its broker serves");
+            .assured("the source reads the records its broker serves");
         let IngestorBatch::Interrupted { gathered } = batch else {
             panic!("a read the host cancelled ends as interrupted");
         };

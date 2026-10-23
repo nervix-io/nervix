@@ -606,6 +606,18 @@ impl ScheduledNode {
         }
     }
 
+    /// Every node [`Self::executes_on`] accepts: each assigned node of an entity that runs on every
+    /// cluster node, and otherwise the primary, or each assigned node when there is no primary.
+    pub fn execution_nodes(&self) -> &[ClusterNodeName] {
+        if self.executes_on_every_cluster_node() {
+            return &self.assigned_nodes;
+        }
+        match &self.primary_node {
+            Some(primary) => std::slice::from_ref(primary),
+            None => &self.assigned_nodes,
+        }
+    }
+
     /// True when `other` gives this runtime node the same primary owner and the same replica set.
     /// A schedule difference that fails this check is an assignment change, which activates
     /// narrowly instead of rebuilding the domain.

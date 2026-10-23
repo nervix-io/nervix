@@ -3,13 +3,15 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The MQTT client and event loop each ingestor instance subscribes through, its
-//!   session and quality-of-service settings, the Maximum Packet Size every connection advertises
-//!   and the refusal of a larger packet, the shared subscription every instance joins, the client
-//!   identity each instance connects with, the batches a read gathers and how a read ends when the
-//!   host cancels it, manual acknowledgement of publishes, and the local replay of publishes the
-//!   host rejected, and retirement of obsolete broker sessions.
+//!   session and quality-of-service settings, the Maximum Packet Size and the Receive Maximum every
+//!   connection advertises and the refusal of a larger packet, the shared subscription every
+//!   instance joins, the client identity each instance connects with, the batches a read gathers
+//!   from its connection's read-ahead and how a read ends when the host cancels it, manual
+//!   acknowledgement of publishes and its confirmation once written, the local replay of publishes
+//!   the host rejected, and retirement of obsolete broker sessions.
 //! - **Depends on.** The connector contract, the crate's broker connection through the node DNS
-//!   resolver, typed client configuration entries, `error-stack`, Tokio, `rumqttc` and `url`.
+//!   resolver, the driver task that keeps each connection's event loop polled, typed client
+//!   configuration entries, `error-stack`, Tokio, `rumqttc` and `url`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
@@ -24,15 +26,18 @@
     )
 )]
 
+mod driver;
+
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::Duration,
 };
 
 use arch_into::ArchInto as _;
 use async_trait::async_trait;
+use driver::MqttConnection;
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_connector::{
@@ -56,6 +61,22 @@ use thiserror::Error;
 use url::{Host, Url};
 
 use crate::topic::connection::{MqttConnectionError, MqttDialer};
+
+/// How many publishes beyond its acknowledgement window a ingestor connection takes from its broker
+/// before the host reads them.
+///
+/// In an `ACK` mode every connection advertises its window and this many more as its Receive
+/// Maximum, and its read-ahead holds every publish the Receive Maximum admits. A broker that
+/// discards a publish above the advertised Maximum Packet Size may keep counting it against the
+/// Receive Maximum, waiting for an acknowledgement the ingestor never sends, as EMQX does, so the
+/// window still fills around this many such publishes. Under `NO ACK` the client acknowledges every
+/// publish on receipt, the broker holds back none, and the read-ahead holds this many.
+///
+/// A policy input: enough to keep a connection reading, and so sending its keep-alive, while the
+/// host holds its loop for a moment and the broker sends what it does not hold back, such as a
+/// publish at quality of service 0, and few enough to bound what a ingestor that stops drops with its
+/// connection.
+const HEADROOM: NonZeroU16 = nonzero_ext::nonzero!(64_u16);
 
 const MQTT: &str = "mqtt";
 /// The template a multi-instance client identity must contain, so that every instance connects
@@ -83,9 +104,9 @@ pub enum MqttTopicIngestorError {
     MissingPort,
     #[error("instance {instance} has no MQTT client configuration")]
     MissingInstance { instance: u64 },
-    #[error("failed to connect MQTT ingestor to its broker")]
+    #[error("failed to connect MQTT source to its broker")]
     Connect,
-    #[error("failed to subscribe MQTT ingestor")]
+    #[error("failed to subscribe MQTT source")]
     Subscribe,
     #[error("the MQTT broker refused the subscription")]
     SubscriptionRefused,
@@ -101,6 +122,20 @@ pub enum MqttTopicIngestorError {
     Disconnected,
     #[error("failed to acknowledge an MQTT message")]
     Acknowledge,
+    #[error(
+        "the {connector} connection stopped reading with its read-ahead of {publishes} publishes \
+         full, so it writes no acknowledgement until the source reads again",
+        connector = ConnectorKind::Mqtt
+    )]
+    ReadAheadFull { publishes: NonZeroUsize },
+    #[error(
+        "the {connector} connection did not write the acknowledgements within its keep-alive of \
+         {keep_alive:?}",
+        connector = ConnectorKind::Mqtt
+    )]
+    AcknowledgementDeadline { keep_alive: Duration },
+    #[error("the task driving the {connector} connection failed", connector = ConnectorKind::Mqtt)]
+    Driver,
     #[error("MQTT batch timeout exceeds the monotonic clock range")]
     BatchDeadline,
     #[error("failed to unsubscribe the retired {connector} input", connector = ConnectorKind::Mqtt)]
@@ -111,7 +146,7 @@ pub enum MqttTopicIngestorError {
     Disconnect,
     #[error("{connector} session cleanup exceeded its connection budget of {budget:?}", connector = ConnectorKind::Mqtt)]
     RetirementDeadline { budget: Duration },
-    #[error("failed to retire {connector} ingestor instance {instance}", connector = ConnectorKind::Mqtt)]
+    #[error("failed to retire {connector} source instance {instance}", connector = ConnectorKind::Mqtt)]
     RetireInstance { instance: u64 },
 }
 
@@ -140,11 +175,14 @@ impl MqttTopicIngestorError {
 
     /// Whether a read that failed with this error lost its connection.
     fn ends_connection(&self) -> bool {
-        matches!(self, Self::Receive | Self::PacketTooLarge { .. })
+        matches!(
+            self,
+            Self::Receive | Self::PacketTooLarge { .. } | Self::Driver | Self::Disconnected
+        )
     }
 }
 
-/// Why the declared client identity cannot serve every instance of an ingestor.
+/// Why the declared client identity cannot serve every instance of a ingestor.
 ///
 /// A ingestor with this conflict stays declared but never subscribes: each instance reports it as
 /// the reason it cannot resume until the declaration changes.
@@ -174,7 +212,7 @@ struct MqttSessionIdentity {
     client_id: String,
 }
 
-/// The validated broker identities of an ingestor plan, with one representative per broker session.
+/// The validated broker identities of a ingestor plan, with one representative per broker session.
 pub struct MqttTopicIngestorSessions<'a> {
     plan: &'a MqttTopicIngestorPlan,
     identities: BTreeMap<MqttSessionIdentity, u64>,
@@ -221,11 +259,73 @@ pub struct MqttTopicIngestorSettings {
     pub topic: String,
     pub session: MqttSession,
     pub qos: MqttQos,
-    /// Whether the ingestor acknowledges each publish itself once the host accepted it, rather
-    /// than the client acknowledging on receipt.
-    pub manual_acks: bool,
+    /// How many publishes may wait on their acknowledgements at once, where the ingestor
+    /// acknowledges each publish itself once the host accepted it. Absent, the client acknowledges
+    /// each publish on receipt.
+    pub acknowledgement_window: Option<NonZeroU64>,
     /// The node resolver every instance resolves its broker host through when it connects.
     pub dns: DnsResolver,
+}
+
+/// Who acknowledges a ingestor's publishes, and how many of them may wait on their acknowledgements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngestorAcknowledgement {
+    /// The client acknowledges each publish on receipt.
+    OnReceipt,
+    /// The ingestor acknowledges each publish once the host accepted it. Every connection
+    /// advertises `receive_maximum`, the window and its headroom, as its Receive Maximum, so the
+    /// broker sends no further publish at quality of service 1 or 2 while that many wait on their
+    /// acknowledgements.
+    Manual { receive_maximum: NonZeroU16 },
+}
+
+impl IngestorAcknowledgement {
+    /// The acknowledgement of a ingestor whose publishes may wait on their acknowledgements `window`
+    /// at a time, or that acknowledges none itself.
+    fn of(window: Option<NonZeroU64>) -> Self {
+        let Some(window) = window else {
+            return Self::OnReceipt;
+        };
+        // MQTT carries the Receive Maximum as a Two Byte Integer, so a wider one is advertised as
+        // the widest one the protocol holds: the broker sends no more unacknowledged publishes.
+        let Some(admitted) = window.checked_add(u64::from(HEADROOM.get())) else {
+            return Self::Manual {
+                receive_maximum: NonZeroU16::MAX,
+            };
+        };
+        let receive_maximum = match NonZeroU16::try_from(admitted) {
+            Ok(receive_maximum) => receive_maximum,
+            Err(_) => NonZeroU16::MAX,
+        };
+        Self::Manual { receive_maximum }
+    }
+
+    fn ack_mode(self) -> AckMode {
+        match self {
+            Self::OnReceipt => AckMode::Automatic,
+            Self::Manual { .. } => AckMode::Manual,
+        }
+    }
+
+    /// How many requests the client queues for its event loop: the most a connection queues before
+    /// its event loop takes them. A subscription, an unsubscription and a disconnection each queue
+    /// one and poll until it is written, and an acknowledgement queues one for each publish of its
+    /// batch, which holds no more of them than the Receive Maximum admits.
+    fn request_capacity(self) -> NonZeroUsize {
+        match self {
+            Self::OnReceipt => NonZeroUsize::MIN,
+            Self::Manual { receive_maximum } => NonZeroUsize::from(receive_maximum),
+        }
+    }
+
+    /// How many publishes a connection reads ahead of the host: every publish the Receive Maximum
+    /// admits, or the headroom when the client acknowledges every publish on receipt.
+    fn read_ahead(self) -> NonZeroUsize {
+        match self {
+            Self::OnReceipt => NonZeroUsize::from(HEADROOM),
+            Self::Manual { receive_maximum } => NonZeroUsize::from(receive_maximum),
+        }
+    }
 }
 
 /// One MQTT ingestor's subscription settings, the client entries of each of its instances, and the
@@ -237,48 +337,35 @@ pub struct MqttTopicIngestorPlan {
     subscribe_filter: String,
     session: MqttSession,
     qos: QoS,
-    manual_acks: bool,
+    acknowledgement: IngestorAcknowledgement,
     client_id_conflict: Option<MqttClientIdError>,
     dns: DnsResolver,
 }
 
-/// One instance's client and the event loop that carries its session.
-struct MqttConnection {
+/// One instance's client and the event loop that carries its session, before a driver owns the
+/// event loop: while the ingestor establishes its subscription, and while retirement releases the
+/// session.
+struct UnstartedConnection {
     client: AsyncClient,
     eventloop: EventLoop,
 }
 
-/// The publishes an ingestor instance reads from its broker connection: the event loop of its
-/// client, and a fake event loop in the checks of how a read meets the host's cancellation.
+/// The publishes a ingestor instance reads from its broker connection: the read-ahead its
+/// connection's driver hands them over through, and a fake connection in the checks of how a read
+/// meets the host's cancellation.
 ///
 /// A read stops waiting for the next publish when the host cancels it or its batch timeout
-/// passes. The connection keeps every publish it already read for its next poll: the client
-/// queues each packet it reads before it writes a reply, and its next poll returns a queued
-/// publish first.
+/// passes. The connection keeps every publish it already handed over for its next read.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "each steady poll of an ingestor's read takes its publishes through its \
-                  connection"
+        reason = "each steady poll of a source's read takes its publishes through its connection"
     )
 )]
 trait PublishRead: Send {
-    /// Polls the connection until it yields its next publish.
+    /// Waits until the connection yields its next publish.
     fn next_publish(&mut self) -> impl Future<Output = MqttTopicIngestorResult<Publish>> + Send;
-}
-
-impl PublishRead for MqttConnection {
-    async fn next_publish(&mut self) -> MqttTopicIngestorResult<Publish> {
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            match self.eventloop.poll().await {
-                Ok(Event::Incoming(Incoming::Publish(publish))) => return Ok(publish),
-                Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
-                Err(error) => return Err(MqttTopicIngestorError::lost_connection(error)),
-            }
-        }
-    }
 }
 
 impl MqttTopicIngestorPlan {
@@ -291,7 +378,7 @@ impl MqttTopicIngestorPlan {
             topic,
             session,
             qos,
-            manual_acks,
+            acknowledgement_window,
             dns,
         } = settings;
         Self {
@@ -303,7 +390,7 @@ impl MqttTopicIngestorPlan {
                 MqttQos::AtMostOnce => QoS::AtMostOnce,
                 MqttQos::AtLeastOnce => QoS::AtLeastOnce,
             },
-            manual_acks,
+            acknowledgement: IngestorAcknowledgement::of(acknowledgement_window),
             client_id_conflict,
             dns,
         }
@@ -328,7 +415,7 @@ impl MqttTopicIngestorPlan {
         })
     }
 
-    fn client(&self, instance_index: u64) -> MqttTopicIngestorResult<MqttConnection> {
+    fn client(&self, instance_index: u64) -> MqttTopicIngestorResult<UnstartedConnection> {
         let Some(instance) = self.instances.get(instance_index.arch_into()) else {
             return Err(Report::new(MqttTopicIngestorError::MissingInstance {
                 instance: instance_index,
@@ -339,10 +426,10 @@ impl MqttTopicIngestorPlan {
             instance,
             &default_client_id,
             self.session,
-            self.manual_acks,
+            self.acknowledgement,
             self.dns.clone(),
         )?;
-        Ok(MqttConnection { client, eventloop })
+        Ok(UnstartedConnection { client, eventloop })
     }
 
     fn default_instance_client_id(&self, instance_index: u64) -> String {
@@ -426,7 +513,7 @@ impl MqttTopicIngestorPlan {
 
     async fn retire_connection(
         &self,
-        connection: &mut MqttConnection,
+        connection: &mut UnstartedConnection,
     ) -> MqttTopicIngestorResult<()> {
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -474,7 +561,9 @@ impl MqttTopicIngestorPlan {
         }
     }
 
-    async fn confirm_unsubscribe(connection: &mut MqttConnection) -> MqttTopicIngestorResult<()> {
+    async fn confirm_unsubscribe(
+        connection: &mut UnstartedConnection,
+    ) -> MqttTopicIngestorResult<()> {
         loop {
             nervix_primitives::task::consume_budget().await;
             let event = connection.eventloop.poll().await.map_err(|error| {
@@ -501,7 +590,7 @@ impl MqttTopicIngestorPlan {
         config: &[ClientConfigEntry],
         default_client_id: &str,
         session: MqttSession,
-        manual_acks: bool,
+        acknowledgement: IngestorAcknowledgement,
         dns: DnsResolver,
     ) -> MqttTopicIngestorResult<(AsyncClient, EventLoop)> {
         let addr = client_config_value(config, "addr", ConnectorKind::Mqtt.into())
@@ -529,11 +618,12 @@ impl MqttTopicIngestorPlan {
             // QoS messages instead of requiring a local rumqttc protocol checkpoint.
             options.set_broker_session_resume_policy(BrokerSessionResumePolicy::AllowBrokerOnly);
         }
-        options.set_ack_mode(if manual_acks {
-            AckMode::Manual
-        } else {
-            AckMode::Automatic
-        });
+        options.set_ack_mode(acknowledgement.ack_mode());
+        if let IngestorAcknowledgement::Manual { receive_maximum } = acknowledgement {
+            // The broker sends no further publish that asks for an acknowledgement while this many
+            // wait on theirs, so neither the read-ahead nor the client's requests fill with them.
+            options.set_receive_maximum(Some(receive_maximum.get()));
+        }
         if mqtt_addr.tls {
             let tls = client_tls_paths(config);
             let ca = if let Some(ca_file) = tls.ca_file.as_ref() {
@@ -562,7 +652,7 @@ impl MqttTopicIngestorPlan {
         }
         MqttDialer::install(&mut options, dns);
         AsyncClient::builder(options)
-            .capacity(1024)
+            .capacity(acknowledgement.request_capacity().get())
             .try_build()
             .map_err(|error| Report::new(error).change_context(MqttTopicIngestorError::BuildClient))
     }
@@ -602,7 +692,7 @@ impl MqttTopicIngestorPlan {
     /// queued QoS messages follow immediately.
     async fn establish_subscription(
         &self,
-        connection: &mut MqttConnection,
+        connection: &mut UnstartedConnection,
     ) -> MqttTopicIngestorResult<()> {
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -648,6 +738,13 @@ impl MqttTopicIngestorPlan {
 #[derive(Debug, Clone)]
 pub struct MqttTopicIngestorPosition {
     publish: Publish,
+}
+
+impl MqttTopicIngestorPosition {
+    /// The publish this position settles.
+    fn publish(&self) -> &Publish {
+        &self.publish
+    }
 }
 
 /// One received publish. MQTT carries no headers into the ingest namespace.
@@ -696,7 +793,7 @@ enum Gathered {
 }
 
 /// One MQTT ingestor instance: its connection, absent while suspended or reconnecting, and the
-/// publishes the host rejected that it delivers again before polling the broker.
+/// publishes the host rejected that it delivers again before reading its connection.
 pub struct MqttTopicIngestor {
     plan: MqttTopicIngestorPlan,
     instance_index: u64,
@@ -705,8 +802,9 @@ pub struct MqttTopicIngestor {
 }
 
 impl MqttTopicIngestor {
-    /// Drops the connection, and with it every rejected publish, whose packet identifiers belong
-    /// to the session that ends here. A persistent session delivers them again on resume.
+    /// Drops the connection, which ends its driver and the broker connection, and with it every
+    /// rejected publish, whose packet identifiers belong to the session that ends here. A persistent
+    /// session delivers them again on resume.
     fn disconnect(&mut self) {
         self.connection = None;
         self.replay.clear();
@@ -835,7 +933,21 @@ impl IngestorConnector for MqttTopicIngestor {
                 .establish_subscription(&mut connection)
                 .await
                 .change_context(IngestorError::Resume { connector: MQTT })?;
-            self.connection = Some(connection);
+            let UnstartedConnection { client, eventloop } = connection;
+            // The CONNACK has replaced the client's own keep-alive with the broker's, if it
+            // announced one, and a keep-alive of zero is none.
+            let keep_alive = eventloop.options.keep_alive();
+            let keep_alive = if keep_alive.is_zero() {
+                None
+            } else {
+                Some(keep_alive)
+            };
+            self.connection = Some(MqttConnection::start(
+                client,
+                eventloop,
+                self.plan.acknowledgement.read_ahead(),
+                keep_alive,
+            ));
         }
         Ok(IngestorResume::Ready)
     }
@@ -875,32 +987,41 @@ impl BrokerIngestorConnector for MqttTopicIngestor {
         }
     }
 
+    /// Returns once the client's event loop has written every `PUBACK` the positions ask for to the
+    /// connection. The broker answers none, so nothing more can be confirmed.
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
-        if !self.plan.manual_acks {
+        let IngestorAcknowledgement::Manual { .. } = self.plan.acknowledgement else {
             return Ok(());
-        }
-        let Some(connection) = self.connection.as_ref() else {
+        };
+        let Some(connection) = self.connection.as_mut() else {
             return Err(Report::new(MqttTopicIngestorError::Disconnected)
                 .change_context(IngestorError::Acknowledge { connector: MQTT }));
         };
-        for position in positions {
-            nervix_primitives::task::consume_budget().await;
-            connection
-                .client
-                .ack(&position.publish)
-                .await
-                .map_err(|error| {
-                    Report::new(MqttTopicIngestorError::Acknowledge)
-                        .attach_printable(error.to_string())
-                })
-                .change_context(IngestorError::Acknowledge { connector: MQTT })?;
-        }
-        Ok(())
+        let Err(error) = connection.acknowledge(positions).await else {
+            return Ok(());
+        };
+        // An acknowledgement left unwritten waits where nothing writes it, so the connection is
+        // dropped with it: the broker delivers again what it never saw acknowledged once the
+        // ingestor resumes, and a later acknowledgement can never repeat one written late.
+        self.disconnect();
+        Err(error.change_context(IngestorError::Acknowledge { connector: MQTT }))
     }
 
     /// The broker delivers a QoS 1 publish again only when the session reconnects, so a rejected
     /// publish is delivered again from here, ahead of anything the broker sends next.
+    ///
+    /// A publish whose connection ended belongs to a session the broker delivers again once the
+    /// ingestor resumes, and no other connection can reject it, so its rejection fails.
     async fn reject(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
+        let ended = match self.connection.as_ref() {
+            Some(connection) => connection.has_ended(),
+            None => true,
+        };
+        if ended {
+            self.disconnect();
+            return Err(Report::new(MqttTopicIngestorError::Disconnected)
+                .change_context(IngestorError::Reject { connector: MQTT }));
+        }
         for position in positions.iter().rev() {
             nervix_primitives::task::consume_budget().await;
             self.replay.push_front(position.publish.clone());
@@ -939,7 +1060,7 @@ mod tests {
     ) -> Vec<u64> {
         let sessions = plan
             .sessions()
-            .assured("the ingestor fixture has valid session identities");
+            .assured("the source fixture has valid session identities");
         let replacement = replacement.map(|replacement| {
             replacement
                 .sessions()
@@ -956,7 +1077,7 @@ mod tests {
             config,
             "default-client",
             MqttSession::Clean,
-            false,
+            IngestorAcknowledgement::OnReceipt,
             fixture.dns.clone(),
         )
     }
@@ -981,7 +1102,7 @@ mod tests {
             topic: "events".to_string(),
             session,
             qos: MqttQos::AtLeastOnce,
-            manual_acks: true,
+            acknowledgement_window: Some(nonzero!(1u64)),
             dns,
         }
     }
@@ -997,7 +1118,7 @@ mod tests {
             &config,
             "fallback",
             MqttSession::Persistent,
-            true,
+            IngestorAcknowledgement::of(Some(nonzero!(1u64))),
             fixture.dns.clone(),
         )
         .expect("persistent MQTT client must be valid");
@@ -1018,7 +1139,7 @@ mod tests {
                 &config,
                 "bounded",
                 session,
-                true,
+                IngestorAcknowledgement::of(Some(nonzero!(1u64))),
                 fixture.dns.clone(),
             )
             .expect("the bounded MQTT client is valid");
@@ -1029,6 +1150,89 @@ mod tests {
                 "a {session:?} session's CONNECT advertises the declared bound"
             );
         }
+    }
+
+    #[nervix_primitives::test]
+    async fn an_acknowledging_connection_advertises_its_window_and_headroom_as_receive_maximum() {
+        let config = [entry("addr", "mqtt://127.0.0.1:1883")];
+        let fixture = DnsFixture::start().await;
+        for (window, advertised) in [
+            (nonzero!(1u64), 65),
+            (nonzero!(2_000u64), 2_064),
+            (nonzero!(65_471u64), u16::MAX),
+            (nonzero!(65_472u64), u16::MAX),
+            (NonZeroU64::MAX, u16::MAX),
+        ] {
+            nervix_primitives::task::consume_budget().await;
+            let (_, eventloop) = MqttTopicIngestorPlan::client_from_config(
+                &config,
+                "windowed",
+                MqttSession::Persistent,
+                IngestorAcknowledgement::of(Some(window)),
+                fixture.dns.clone(),
+            )
+            .expect("an acknowledging MQTT client is valid");
+
+            assert_eq!(
+                eventloop.options.receive_maximum(),
+                Some(advertised),
+                "a window of {window} is advertised with its headroom, as far as MQTT can carry"
+            );
+        }
+        let (_, eventloop) = MqttTopicIngestorPlan::client_from_config(
+            &config,
+            "on-receipt",
+            MqttSession::Clean,
+            IngestorAcknowledgement::OnReceipt,
+            fixture.dns.clone(),
+        )
+        .expect("a client that acknowledges on receipt is valid");
+        assert_eq!(
+            eventloop.options.receive_maximum(),
+            None,
+            "a client that acknowledges every publish on receipt advertises no window"
+        );
+    }
+
+    #[test]
+    fn the_read_ahead_and_the_request_queue_hold_every_publish_the_receive_maximum_admits() {
+        let on_receipt = IngestorAcknowledgement::OnReceipt;
+        assert_eq!(on_receipt.read_ahead().get(), 64);
+        assert_eq!(
+            on_receipt.request_capacity(),
+            NonZeroUsize::MIN,
+            "a connection that acknowledges on receipt queues one request at a time"
+        );
+
+        let sequential = IngestorAcknowledgement::of(Some(NonZeroU64::MIN));
+        assert_eq!(
+            sequential,
+            IngestorAcknowledgement::Manual {
+                receive_maximum: nonzero!(65u16)
+            }
+        );
+        assert_eq!(sequential.read_ahead().get(), 65);
+        assert_eq!(sequential.request_capacity().get(), 65);
+
+        let parallel = IngestorAcknowledgement::of(Some(nonzero!(2_000u64)));
+        assert_eq!(
+            parallel,
+            IngestorAcknowledgement::Manual {
+                receive_maximum: nonzero!(2_064u16)
+            }
+        );
+        assert_eq!(parallel.read_ahead().get(), 2_064);
+        assert_eq!(parallel.request_capacity().get(), 2_064);
+
+        let wide = IngestorAcknowledgement::of(Some(nonzero!(70_000u64)));
+        assert_eq!(
+            wide,
+            IngestorAcknowledgement::Manual {
+                receive_maximum: NonZeroU16::MAX
+            }
+        );
+        assert_eq!(wide.read_ahead().get(), usize::from(u16::MAX));
+        assert_eq!(wide.request_capacity().get(), usize::from(u16::MAX));
     }
 
     #[test]
@@ -1073,7 +1277,7 @@ mod tests {
         assert_eq!(
             singleton
                 .client(0)
-                .assured("the ingestor plan is valid")
+                .assured("the source plan is valid")
                 .eventloop
                 .options
                 .client_id(),
@@ -1087,7 +1291,7 @@ mod tests {
         assert_eq!(
             parallel
                 .client(0)
-                .assured("the ingestor plan is valid")
+                .assured("the source plan is valid")
                 .eventloop
                 .options
                 .client_id(),
@@ -1096,7 +1300,7 @@ mod tests {
         assert_eq!(
             parallel
                 .client(1)
-                .assured("the ingestor plan is valid")
+                .assured("the source plan is valid")
                 .eventloop
                 .options
                 .client_id(),
@@ -1202,7 +1406,7 @@ mod tests {
         ));
         let budget = plan
             .client(0)
-            .assured("the ingestor plan is valid")
+            .assured("the source plan is valid")
             .eventloop
             .options
             .connect_timeout();
@@ -1255,7 +1459,7 @@ mod tests {
             topic: "notifications".to_string(),
             session: MqttSession::Persistent,
             qos: MqttQos::AtLeastOnce,
-            manual_acks: true,
+            acknowledgement_window: Some(nonzero!(1u64)),
             dns: fixture.dns.clone(),
         });
         assert_eq!(
@@ -1391,16 +1595,28 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn rejected_publishes_replay_in_order_before_the_broker_is_polled() {
+    async fn rejected_publishes_replay_in_order_before_the_connection_is_read() {
+        use crate::topic::scripted_broker::ScriptedBroker;
+
         let fixture = DnsFixture::start().await;
+        let broker = ScriptedBroker::start().await;
         let plan = MqttTopicIngestorPlan::new(settings(
-            "mqtt://127.0.0.1:1",
+            &broker.addr(),
             MqttSession::Persistent,
             fixture.dns.clone(),
         ));
         let mut source = MqttTopicIngestor::open(&plan, 0)
             .await
-            .expect("an MQTT ingestor opens without connecting");
+            .expect("an MQTT source opens without connecting");
+        let grant = async {
+            let mut connection = broker.accept().await;
+            connection.grant_subscription().await;
+            connection
+        };
+        let (resumed, mut connection) = tokio::join!(source.resume(), grant);
+        resumed.expect("the scripted broker granted the subscription");
+        // The connection reads this publish into its read-ahead, behind the rejected ones.
+        connection.write_publish(3, b"3").await;
         let first = MqttTopicIngestorPosition {
             publish: Publish::new("events", QoS::AtLeastOnce, b"1".to_vec(), None),
         };
@@ -1410,27 +1626,49 @@ mod tests {
         source
             .reject(&[first, second])
             .await
-            .expect("rejecting queues the replay");
+            .expect("rejecting on a live connection queues the replay");
 
-        let batch = source
-            .next_batch(
+        let cancellation = IngestorReadCancellation::new();
+        let replayed = timeout(
+            Duration::from_secs(30),
+            source.next_batch(
                 IngestorBatchRequest {
                     max_messages: nonzero!(2usize),
                     batch_timeout: None,
                 },
-                &IngestorReadCancellation::new(),
-            )
-            .await
-            .expect("the replay is delivered without a connection");
-        let IngestorBatch::Messages(messages) = batch else {
-            panic!("the replay must be delivered as messages");
-        };
+                &cancellation,
+            ),
+        )
+        .await
+        .expect("the replay is delivered without waiting for the connection")
+        .expect("the replay is delivered before the connection is read");
+        let read = timeout(
+            Duration::from_secs(30),
+            source.next_batch(
+                IngestorBatchRequest {
+                    max_messages: NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &cancellation,
+            ),
+        )
+        .await
+        .expect("the client received the publish within its observation budget")
+        .expect("the scripted broker keeps the connection open");
+
+        let mut payloads = Vec::new();
+        for batch in [replayed, read] {
+            let IngestorBatch::Messages(messages) = batch else {
+                panic!("an uncancelled read is delivered as messages");
+            };
+            for message in &messages {
+                payloads.push(message.payload().to_vec());
+            }
+        }
         assert_eq!(
-            messages
-                .iter()
-                .map(|message| message.payload().to_vec())
-                .collect::<Vec<_>>(),
-            vec![b"1".to_vec(), b"2".to_vec()]
+            payloads,
+            [b"1".to_vec(), b"2".to_vec(), b"3".to_vec()],
+            "the rejected publishes come back in order, ahead of what the connection read"
         );
         assert!(source.replay.is_empty());
     }
@@ -1446,7 +1684,7 @@ mod tests {
         ));
         let mut source = MqttTopicIngestor::open(&plan, 0)
             .await
-            .expect("an MQTT ingestor opens without connecting");
+            .expect("an MQTT source opens without connecting");
 
         let resumed = source.resume().await;
         let Err(error) = resumed else {

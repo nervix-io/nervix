@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Kafka consumer configuration, polling, headers and metadata, partition assignment,
 //!   offset acknowledgement, partition inspection, consumer retirement, and the opaque services
-//!   through which an ingestor reads and advances host-owned domain offsets.
+//!   through which a ingestor reads and advances host-owned domain offsets.
 //! - **Depends on.** The connector contract, Kafka vocabulary values, the bounded executor,
 //!   the primitive boundary, `error-stack` and `rust-rdkafka`.
 //! - **Must not know.** Runtime offset-state types, domain execution maps, relays, branches,
@@ -168,7 +168,7 @@ impl KafkaDomainOffsetHost {
     ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization> {
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
-            "Kafka resume installs its exact domain-offset placement before polling; the ingestor \
+            "Kafka resume installs its exact domain-offset placement before polling; the source \
              retains the resulting position",
             self.inner.services.initialization(partitions)
         )
@@ -247,9 +247,9 @@ pub struct KafkaTopicIngestorPlan {
 
 #[derive(Debug, Error)]
 pub enum KafkaTopicIngestorError {
-    #[error("the {connector} ingestor cannot admit its control call", connector = ConnectorKind::Kafka)]
+    #[error("the {connector} source cannot admit its control call", connector = ConnectorKind::Kafka)]
     ControlAdmission,
-    #[error("the {connector} ingestor control call could not run", connector = ConnectorKind::Kafka)]
+    #[error("the {connector} source control call could not run", connector = ConnectorKind::Kafka)]
     ControlExecution,
     #[error("the {connector} control call did not finish within socket.timeout.ms {bound}", connector = ConnectorKind::Kafka, bound = humantime::format_duration(*timeout))]
     ControlTimeout { timeout: Duration },
@@ -427,7 +427,7 @@ impl IngestorMessage for KafkaTopicIngestorMessage {
 
 pub struct KafkaTopicIngestor {
     control: KafkaControl,
-    /// Shared with the driver jobs the source admits. A commit in flight keeps the consumer open
+    /// Shared with the driver jobs the ingestor admits. A commit in flight keeps the consumer open
     /// until librdkafka answers it, and whichever holder lets it go last retires it.
     consumer: KafkaConsumerHandle,
     topic: nervix_models::KafkaTopicName,
@@ -1364,7 +1364,7 @@ mod tests {
             rdkafka::Timestamp::NotAvailable,
             0,
             0,
-            Some(crate::topic::KafkaTopicEmitter::owned_headers(&written)),
+            Some(crate::KafkaTopicEmitter::owned_headers(&written)),
         );
         let message = KafkaTopicIngestorMessage::from_message(message)
             .assured("offset zero has a next offset");

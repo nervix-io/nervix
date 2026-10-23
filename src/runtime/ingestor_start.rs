@@ -544,16 +544,12 @@ mod tests {
         let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system())
             .await
             .expect("the host's resolver configuration should load");
-        Runtime::with_persistence_and_temp_dir(
-            nervix_execution::Executor::default(),
-            Some(dns),
-            None,
-            DEFAULT_STATE_SNAPSHOT_INTERVAL,
-            ConfiguredFaultInjection::default(),
-            PathBuf::from(DEFAULT_TEMP_DIR),
-            DEFAULT_RESTORE_STAGING_MAX_BYTES,
-        )
-        .expect("a runtime without persistence builds")
+        let environment = RuntimeEnvironment {
+            dns: Some(dns),
+            ..RuntimeEnvironment::transient(nervix_execution::Executor::default())
+        };
+        Runtime::with_environment(environment, RuntimeSettings::default())
+            .expect("a runtime without persistence builds")
     }
 
     #[nervix_primitives::test]

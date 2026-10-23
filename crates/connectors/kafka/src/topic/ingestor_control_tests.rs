@@ -41,12 +41,12 @@ async fn rejecting_a_delivered_record_admits_its_seek_and_reads_that_offset_agai
     plan.executor = executor.clone();
     let mut source = KafkaTopicIngestor::open(&plan, 0)
         .await
-        .assured("the ingestor accepts its group and broker configuration");
+        .assured("the source accepts its group and broker configuration");
     assert!(matches!(
         source
             .resume()
             .await
-            .assured("the ingestor subscribes to its topic"),
+            .assured("the source subscribes to its topic"),
         nervix_connector::IngestorResume::Ready
     ));
     let positions = read_positions(&mut source).await;
@@ -129,7 +129,7 @@ async fn a_domain_resume_yields_while_the_broker_holds_its_metadata() {
     let first_poll = poll_fn(|context| Poll::Ready(resume.as_mut().poll(context))).await;
     broker
         .broker_round_trip_time(1, Duration::ZERO)
-        .assured("the broker releases its replies before the test drops its ingestor");
+        .assured("the broker releases its replies before the test drops its source");
 
     assert!(
         first_poll.is_pending(),
@@ -163,7 +163,7 @@ async fn domain_source(
     };
     KafkaTopicIngestor::open(&plan, 0)
         .await
-        .assured("the ingestor accepts the test broker's configuration")
+        .assured("the source accepts the test broker's configuration")
 }
 
 #[nervix_primitives::test]
@@ -171,7 +171,7 @@ async fn a_control_memory_refusal_preserves_its_typed_admission_cause() {
     let broker = cluster();
     let executor = Executor::default();
     let mut source = domain_source(&broker, executor.clone()).await;
-    // The open source already holds the charge of its consumer's retirement.
+    // The open ingestor already holds the charge of its consumer's retirement.
     let commands = executor.snapshot().commands_memory;
     let _held = executor
         .try_reserve(
@@ -213,7 +213,7 @@ async fn control_admission_preserves_refusals_and_uses_the_client_deadline_while
     })
     .assured("the test changes only worker counts");
     let source = domain_source(&broker, executor.clone()).await;
-    // The charge of its consumer's retirement, which the open source holds throughout.
+    // The charge of its consumer's retirement, which the open ingestor holds throughout.
     let opened = executor.snapshot().commands_memory.reserved_bytes;
     let (started, has_started) = oneshot::channel();
     let (release, released) = oneshot::channel();

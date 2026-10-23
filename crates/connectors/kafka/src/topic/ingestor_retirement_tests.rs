@@ -1,45 +1,36 @@
 //! A Kafka consumer is destroyed on a connector worker, whoever lets its last handle go.
 //!
 //! Outside the layer order: a harness.
-//! - **Owns.** Causal regressions for each owner that can hold a consumer's last handle (the source
+//! - **Owns.** Causal regressions for each owner that can hold a consumer's last handle (the ingestor
 //!   its host drops, a partition inspector, a control job that outlives its caller, a commit
-//!   refused or answered after its source is gone), for a retirement that meets a full connector
+//!   refused or answered after its ingestor is gone), for a retirement that meets a full connector
 //!   queue, and for the charge a consumer holds for its own retirement.
 //! - **Depends on.** The connector contract, the bounded executor and librdkafka's mock broker.
 //! - **Must not know.** Runtime graph ownership, registry Models or cluster placement.
 
 use std::{
     future::{Future as _, poll_fn},
-    num::NonZeroUsize,
     task::Poll,
     time::Duration,
 };
 
-use error_stack::Report;
 use meticulous::ResultExt as _;
 use nervix_connector::IngestorConnector as _;
-use nervix_execution::{
-    AdmissionError, ConnectorStorageWorkers, ExecutionConfig, ExecutionError, Executor,
-    MemoryClass, StorageClass, WorkerClassSnapshot, WorkerCounts,
-};
+use nervix_execution::{AdmissionError, Executor, MemoryClass};
 use nervix_models::ClientConfigEntry;
-use nervix_primitives::{
-    sync::oneshot,
-    task::JoinHandle,
-    time::{sleep, timeout},
-};
+use nervix_primitives::sync::oneshot;
 use rdkafka::{consumer::StreamConsumer, mocking::MockCluster, producer::DefaultProducerContext};
 
 use super::{
     GroupCommitRequest, KafkaGroupCommit, KafkaOffsetPosition, KafkaTopicIngestor,
     KafkaTopicIngestorError, KafkaTopicIngestorPlan, TopicPartitionInspector,
-    commit_tests::{GROUP, HELD_ROUND_TRIP, READ_DEADLINE, cluster, plan, publish, read_positions},
+    commit_tests::{GROUP, HELD_ROUND_TRIP, cluster, plan, publish, read_positions},
+};
+use crate::topic::retirement_tests::{
+    FullConnectorQueue, connector_workers_reach, single_connector_worker,
 };
 
-/// How often a test reads the connector workers' counters while it waits for a retirement.
-const COUNTER_POLL: Duration = Duration::from_millis(10);
-
-/// The plan of a source in the test group that runs its driver jobs on `executor`.
+/// The plan of a ingestor in the test group that runs its driver jobs on `executor`.
 fn plan_on(
     broker: &MockCluster<'static, DefaultProducerContext>,
     executor: &Executor,
@@ -49,117 +40,11 @@ fn plan_on(
     plan
 }
 
-/// An executor with one connector worker and one place in the connector queue.
-fn single_connector_worker() -> Executor {
-    Executor::new(ExecutionConfig {
-        workers: WorkerCounts {
-            connector_storage: ConnectorStorageWorkers::resolve(Some(NonZeroUsize::MIN))
-                .assured("one worker fits the primitive permit bound"),
-            pending_jobs: NonZeroUsize::MIN,
-            ..WorkerCounts::default()
-        },
-        ..ExecutionConfig::default()
-    })
-    .assured("the test changes only worker counts")
-}
-
-/// Waits until the connector workers' counters show `reached`, and fails naming `awaited` once the
-/// test's read deadline passes.
-async fn connector_workers_reach(
-    executor: &Executor,
-    awaited: &str,
-    reached: impl Fn(&WorkerClassSnapshot) -> bool,
-) {
-    let waited = timeout(READ_DEADLINE, async {
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            if reached(&executor.snapshot().connector_storage) {
-                return;
-            }
-            sleep(COUNTER_POLL).await;
-        }
-    })
-    .await;
-    assert!(
-        waited.is_ok(),
-        "{awaited}; connector workers: {:?}",
-        executor.snapshot().connector_storage
-    );
-}
-
-type ConnectorJob = JoinHandle<Result<(), Report<ExecutionError>>>;
-
-/// The only connector worker, held by a job the test releases, and the only place in the queue,
-/// taken by a job waiting behind it.
-struct FullConnectorQueue {
-    release: oneshot::Sender<()>,
-    occupying: ConnectorJob,
-    queued: ConnectorJob,
-}
-
-impl FullConnectorQueue {
-    async fn fill(executor: &Executor) -> Self {
-        let (started, has_started) = oneshot::channel();
-        let (release, released) = oneshot::channel::<()>();
-        let occupier = executor.clone();
-        let charge = executor
-            .try_reserve(MemoryClass::Commands, 1)
-            .assured("the occupying job's envelope fits");
-        let occupying = nervix_primitives::task::spawn(async move {
-            occupier
-                .run_storage(StorageClass::Connector, charge, move |_, _| {
-                    started.send(()).assured("the test awaits worker admission");
-                    released
-                        .blocking_recv()
-                        .assured("the test releases the only connector worker");
-                })
-                .await
-        });
-        has_started
-            .await
-            .assured("the occupying job holds the only connector worker");
-        let waiter = executor.clone();
-        let charge = executor
-            .try_reserve(MemoryClass::Commands, 1)
-            .assured("the queued job's envelope fits");
-        let queued = nervix_primitives::task::spawn(async move {
-            waiter
-                .run_storage(StorageClass::Connector, charge, |_, _| ())
-                .await
-        });
-        connector_workers_reach(
-            executor,
-            "the second job takes the only queue place",
-            |workers| workers.pending == 1,
-        )
-        .await;
-        Self {
-            release,
-            occupying,
-            queued,
-        }
-    }
-
-    async fn release(self) {
-        self.release
-            .send(())
-            .assured("the occupying job waits for its release");
-        self.occupying
-            .await
-            .assured("the occupying job's supervisor is joined")
-            .assured("the occupying job exits");
-        self.queued
-            .await
-            .assured("the queued job's supervisor is joined")
-            .assured("the queued job runs once the worker is free");
-    }
-}
-
-/// A source's own drop, at the end of its host's loop, lets the last handle go. Its consumer joined
+/// A ingestor's own drop, at the end of its host's loop, lets the last handle go. Its consumer joined
 /// the group, so destroying it waits for the coordinator to answer its LeaveGroup request, which
 /// the held broker never does: that wait occupies a connector worker, not the dropping task.
 #[nervix_primitives::test]
-async fn a_dropped_source_destroys_its_joined_consumer_on_a_connector_worker() {
+async fn a_dropped_ingestor_destroys_its_joined_consumer_on_a_connector_worker() {
     let broker = cluster();
     publish(&broker).await;
     let executor = Executor::default();
@@ -260,10 +145,10 @@ async fn a_destruction_waits_for_a_place_in_a_full_connector_queue() {
 }
 
 /// A commit's job carries a handle of its own. When the node refuses that job after the commit's
-/// caller and its source are gone, the refused job let the last handle go.
+/// caller and its ingestor are gone, the refused job let the last handle go.
 #[nervix_primitives::test]
-async fn a_commit_refused_after_its_source_was_dropped_destroys_the_consumer_on_a_connector_worker()
-{
+async fn a_commit_refused_after_its_ingestor_was_dropped_destroys_the_consumer_on_a_connector_worker()
+ {
     let broker = cluster();
     let executor = single_connector_worker();
     let mut source = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
@@ -309,11 +194,11 @@ async fn a_commit_refused_after_its_source_was_dropped_destroys_the_consumer_on_
     .await;
 }
 
-/// A commit outlives its source when its answer comes late. Its job keeps the consumer for as long
+/// A commit outlives its ingestor when its answer comes late. Its job keeps the consumer for as long
 /// as the commit waits, and the consumer is destroyed by a job of its own once the commit's job
 /// lets the last handle go.
 #[nervix_primitives::test]
-async fn a_commit_answered_after_its_source_was_dropped_keeps_the_consumer_until_it_ends() {
+async fn a_commit_answered_after_its_ingestor_was_dropped_keeps_the_consumer_until_it_ends() {
     let broker = cluster();
     publish(&broker).await;
     let executor = Executor::default();
@@ -372,10 +257,10 @@ async fn a_commit_answered_after_its_source_was_dropped_keeps_the_consumer_until
     .await;
 }
 
-/// A control job keeps running when its caller stops waiting for it. Once its source is gone, the
+/// A control job keeps running when its caller stops waiting for it. Once its ingestor is gone, the
 /// job holds the last handle until its native operation returns.
 #[nervix_primitives::test]
-async fn a_control_job_that_outlives_its_source_destroys_the_consumer_on_a_connector_worker() {
+async fn a_control_job_that_outlives_its_ingestor_destroys_the_consumer_on_a_connector_worker() {
     let broker = cluster();
     let executor = Executor::default();
     let source = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
