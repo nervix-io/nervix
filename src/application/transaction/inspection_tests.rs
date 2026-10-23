@@ -14,7 +14,7 @@ use nervix_models::{
     TransactionOperationNumber, TransactionPosition, UserName,
 };
 
-use super::{super::DEFAULT_TRANSACTION_MAX_OPEN, InspectingSession, TransactionInspectionOutcome};
+use super::{super::TransactionLimits, InspectingSession, TransactionInspectionOutcome};
 use crate::application::{
     SessionServiceImpl,
     command_result::CommandResult,
@@ -237,7 +237,7 @@ async fn inspecting_another_owned_transaction_changes_no_binding_or_queue_positi
     service
         .inner
         .consensus
-        .open_transaction(other, DEFAULT_TRANSACTION_MAX_OPEN)
+        .open_transaction(other, TransactionLimits::default().max_open())
         .await
         .assured("the second test transaction is unique and below the admission limit");
     let before = service
@@ -358,7 +358,7 @@ async fn inspecting_a_transaction_owned_by_another_user_is_refused() {
     service
         .inner
         .consensus
-        .open_transaction(other, DEFAULT_TRANSACTION_MAX_OPEN)
+        .open_transaction(other, TransactionLimits::default().max_open())
         .await
         .assured("the other user's transaction is unique and below the admission limit");
 

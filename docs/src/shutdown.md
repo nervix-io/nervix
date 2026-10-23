@@ -95,11 +95,14 @@ running its remaining phases.
 
 Inside that deadline sits the drain timeout, `--drain-timeout` (`NERVIX_DRAIN_TIMEOUT`, default
 `30s`), which bounds the drain-support phase alone. The two defaults are ordered so that a full
-drain still leaves time for terminal teardown. Every drain step waits for the smaller of its
-remaining drain budget and the remaining shutdown deadline, so shortening the shutdown timeout below
-the drain timeout makes the shutdown deadline the effective bound. The one exception is the release
-of the cordon the node's own drain set, which keeps a one-second grace when moving the node's work
-used the whole drain timeout; see [Releasing The Drain Cordon](#releasing-the-drain-cordon).
+drain still leaves time for terminal teardown. A drain timeout may not exceed the shutdown timeout:
+a node given one above it refuses to start, before it opens a store, with
+`drain-timeout (…) must not exceed shutdown-timeout (…)`. Every drain step waits for the smaller of
+its remaining drain budget and the remaining shutdown deadline, so a drain timeout equal to the
+shutdown timeout lets the drain use the whole deadline, and the deadline also bounds a drain that
+starts after the earlier phases used part of it. The one exception is the
+release of the cordon the node's own drain set, which keeps a one-second grace when moving the
+node's work used the whole drain timeout; see [Releasing The Drain Cordon](#releasing-the-drain-cordon).
 
 Two bounds are deliberately outside the deadline. Terminal teardown's final stops — the runtime,
 consensus, cluster membership, and the interconnect — run to completion rather than being cut short,
@@ -1367,8 +1370,10 @@ mid-drain. When you raise `--shutdown-timeout`, raise the deployment grace perio
 grace period ends first, the supervisor sends `SIGKILL` and the node loses whatever the drain had
 not yet completed.
 
-Raising `--drain-timeout` above `--shutdown-timeout` does not extend the drain, because every drain
-step is also bounded by the shutdown deadline. Raise both together.
+A node refuses a `--drain-timeout` above its `--shutdown-timeout`, because every drain step is also
+bounded by the shutdown deadline, so such a drain could never use its own timeout. A drain timeout
+equal to the shutdown timeout leaves terminal teardown nothing once a drain uses all of it. Raise
+both together.
 
 ## Retained Drain Dependencies
 
