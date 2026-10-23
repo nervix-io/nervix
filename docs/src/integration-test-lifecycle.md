@@ -631,6 +631,15 @@ through a fresh client under the original reference. The recovery orchestration 
 runner, so delayed step polling cannot restart the wait bound or leave the second cut held. The
 archive must retain both quiesced cuts and the measured first hold.
 
+The duration window outline establishes its observation boundary through a public subscription:
+it first waits for a probe branch's window to emit, then submits all four interleaved tenant rows
+as one HTTP payload unfolded into a decoded batch. Explicit source timestamps are already due
+when that batch arrives, while `TIMESTAMP NOW` gives the whole batch one fresh ingestion snapshot.
+Each branch receives its two rows together before its next timer check. The outline retains both
+rates, one- and three-node clusters, exact counts and sums, timestamp preservation and its
+ten-second assertion bounds. Independent HTTP requests would allow domain-time completion between
+rows, even when their explicit source timestamps are identical.
+
 The reorderer sorting fixtures submit their ordering set as one JSON array and unfold it with JAQ
 into one input batch. Each route sorts the rows buffered at its own flush; separate HTTP requests
 do not establish a single sorting window. The one-node and three-node examples retain their exact
