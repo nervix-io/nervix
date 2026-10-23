@@ -91,11 +91,16 @@ of it, and a commit refused for room is retried by its emitter.
 The relay budget also carries the acknowledgement watches a relay owner keeps for rows another node
 delivered with acknowledgements: 1 KiB per row until the owner reports that row's outcome, and
 4 KiB per delivery. A delivery of 8 MiB of 164-byte rows therefore needs about 51 MiB of watches
-beside the 56 MiB its body and decoding reserve. When rows arrive faster than the owner reports
+beside the 56 MiB its grant reserves for its body and decoding until the body is decoded, when it
+keeps only its body and decoded columns. When rows arrive faster than the owner reports
 them, their watches fill the budget and the owner holds further deliveries back until reported
 rows return their share. Sustained remote delivery with acknowledgements is then bounded by how
 fast acknowledgements return to the sending node, not by the budget's size, and a source that sends
-there waits instead of failing. The budgets are fixed defaults and do not follow the node's own
+there waits instead of failing. A grant reserves the largest decoded batch and the scratch room
+whatever the body's size, so the budget grants about three deliveries at once; a sender whose grant
+is refused for that room, and a sender whose own budget has no room to store the acknowledgements
+of the rows it sends, hold their delivery back and wait as well; see
+[Held Deliveries](./interconnect.md#held-deliveries). The budgets are fixed defaults and do not follow the node's own
 memory.
 The commands budget also holds the 16 MiB working reservation for one normalized consensus state
 write; half is the keyed payload ceiling and half covers database journal encoding and descriptors.
