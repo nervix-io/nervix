@@ -1,4 +1,4 @@
-//! Sentry sink connector.
+//! Sentry emitter connector.
 //!
 //! Layer: engines and infrastructure.
 //!
@@ -51,19 +51,19 @@ const SENTRY_CLIENT_AGENT: &str = concat!("nervix/", env!("CARGO_PKG_VERSION"));
 const SENTRY_RATE_LIMITS_HEADER: &str = "x-sentry-rate-limits";
 const MAX_SENTRY_EVENT_BYTES: usize = 1_000_000;
 
-/// What one Sentry sink sends with: the entries naming its project DSN and HTTP client settings.
-pub struct SentryEmitterConfig {
+/// What one Sentry emitter sends with: the entries naming its project DSN and HTTP client settings.
+pub struct SentryEventEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub dns: DnsResolver,
 }
 
-pub struct SentryEmitter {
+pub struct SentryEventEmitter {
     client: HttpClient,
     envelope_url: url::Url,
     auth: HeaderValue,
 }
 
-/// Why one record's payload is not a Sentry event this sink can send.
+/// Why one record's payload is not a Sentry event this emitter can send.
 #[derive(Debug, Error)]
 enum SentryEventError {
     #[error("Sentry codec payload is not a valid event JSON object")]
@@ -95,8 +95,8 @@ enum SentryEventError {
     },
 }
 
-impl SentryEmitter {
-    pub fn new(config: SentryEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+impl SentryEventEmitter {
+    pub fn new(config: SentryEventEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
         let dns = config.dns;
         let config = config.config.as_slice();
         let dsn = Self::config_value(config, "dsn")?
@@ -279,8 +279,17 @@ impl SentryEmitter {
     }
 }
 
+impl SentryEventEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::Sentry(nervix_models::SentryEmitterEntity::Event);
+}
+
 #[async_trait]
-impl EmitterLifecycle for SentryEmitter {
+impl EmitterLifecycle for SentryEventEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// Each envelope is answered before the publish returns, so the client holds nothing.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
         Ok(EmitterFinish::NothingHeld)
@@ -288,7 +297,7 @@ impl EmitterLifecycle for SentryEmitter {
 }
 
 #[async_trait]
-impl RecordEmitter for SentryEmitter {
+impl RecordEmitter for SentryEventEmitter {
     #[cfg_attr(
         nervix_lint,
         nervix::error_boundary(
@@ -377,7 +386,7 @@ mod tests {
     #[test]
     fn envelope_preserves_event_fields_and_adds_protocol_defaults() {
         let occurred_at = Timestamp::from_unix_nanos(946_684_800_000_000_000);
-        let envelope = SentryEmitter::encode_envelope(
+        let envelope = SentryEventEmitter::encode_envelope(
             br#"{"message":"failed","environment":"test","future":{"nested":true}}"#,
             occurred_at,
         )
@@ -400,7 +409,7 @@ mod tests {
 
     #[test]
     fn envelope_preserves_an_explicit_event_timestamp() {
-        let envelope = SentryEmitter::encode_envelope(
+        let envelope = SentryEventEmitter::encode_envelope(
             br#"{"message":"failed","timestamp":"2010-05-06T07:08:09Z"}"#,
             Timestamp::from_unix_nanos(946_684_800_000_000_000),
         )
@@ -417,7 +426,7 @@ mod tests {
 
     #[test]
     fn envelope_keeps_every_digit_of_an_event_number() {
-        let envelope = SentryEmitter::encode_envelope(
+        let envelope = SentryEventEmitter::encode_envelope(
             br#"{"message":"failed","extra":{"reading":1.4000000000000001}}"#,
             Timestamp::from_unix_nanos(946_684_800_000_000_000),
         )
@@ -437,12 +446,12 @@ mod tests {
     #[test]
     fn a_payload_that_is_not_an_event_names_its_parser_error_once() {
         let occurred_at = Timestamp::from_unix_nanos(946_684_800_000_000_000);
-        let not_json = SentryEmitter::encode_envelope(b"not json", occurred_at)
+        let not_json = SentryEventEmitter::encode_envelope(b"not json", occurred_at)
             .expect_err("text that is not JSON is not an event");
         let json_cause =
             serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(b"not json")
                 .expect_err("text that is not JSON does not parse");
-        let wrong_level = SentryEmitter::encode_envelope(br#"{"level":5}"#, occurred_at)
+        let wrong_level = SentryEventEmitter::encode_envelope(br#"{"level":5}"#, occurred_at)
             .expect_err("a numeric level is not a Sentry level");
         let event_cause = serde_json::from_value::<Event<'static>>(serde_json::json!({"level": 5}))
             .expect_err("a numeric level does not read as an event");
@@ -460,7 +469,7 @@ mod tests {
     #[test]
     fn envelope_rejects_an_event_above_sentrys_decompressed_limit() {
         let payload = format!(r#"{{"message":"{}"}}"#, "x".repeat(1_000_000));
-        let result = SentryEmitter::encode_envelope(
+        let result = SentryEventEmitter::encode_envelope(
             payload.as_bytes(),
             Timestamp::from_unix_nanos(946_684_800_000_000_000),
         );
@@ -477,7 +486,7 @@ mod tests {
             StatusCode::PAYLOAD_TOO_LARGE,
             StatusCode::UNPROCESSABLE_ENTITY,
         ] {
-            assert!(SentryEmitter::is_record_status(status));
+            assert!(SentryEventEmitter::is_record_status(status));
         }
         for status in [
             StatusCode::UNAUTHORIZED,
@@ -487,7 +496,7 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS,
             StatusCode::SERVICE_UNAVAILABLE,
         ] {
-            assert!(!SentryEmitter::is_record_status(status));
+            assert!(!SentryEventEmitter::is_record_status(status));
         }
     }
 
@@ -496,7 +505,7 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-08-05T12:00:00Z")
             .expect("fixed timestamp should parse")
             .with_timezone(&chrono::Utc);
-        let delay = SentryEmitter::server_retry_delay(
+        let delay = SentryEventEmitter::server_retry_delay(
             Some("15"),
             Some("60:error;transaction:organization:quota, 30::project"),
             now,
@@ -510,8 +519,11 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-08-05T12:00:00Z")
             .expect("fixed timestamp should parse")
             .with_timezone(&chrono::Utc);
-        let delay =
-            SentryEmitter::server_retry_delay(Some("Wed, 05 Aug 2026 12:00:20 +0000"), None, now);
+        let delay = SentryEventEmitter::server_retry_delay(
+            Some("Wed, 05 Aug 2026 12:00:20 +0000"),
+            None,
+            now,
+        );
 
         assert_eq!(delay, Some(Duration::from_secs(20)));
     }

@@ -1,4 +1,4 @@
-//! NATS connector for the subject entity.
+//! NatsSubjectIngestor, NatsSubjectEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public subject connector implementation surface.

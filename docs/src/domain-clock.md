@@ -685,7 +685,7 @@ elsewhere in the console; it does not recognize the browser's own `Date.now()`, 
 reads for display-only freshness of its dataflow graph and its reconnect countdown.
 
 The source check masks `cfg(test)` module bodies through the shared Rust scanner, including modules
-with ingestor contracts or additional attributes. It preserves line coordinates and product code
+with source contracts or additional attributes. It preserves line coordinates and product code
 after each fixture module. A harness layer contract alone grants no clock permission to product code.
 
 ## Recovery And Distributed Guarantees

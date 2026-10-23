@@ -13,7 +13,7 @@ use meticulous::OptionExt as _;
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_models::{
     ChoiceRequirement, ClickHouseEmitterEntity, ClientConfigOwner, ClientEmitterEntity,
-    ClientPooling, ClientSourceEntity, ConnectorKind, EmitterBatchLegality, EmitterBody,
+    ClientIngestorEntity, ClientPooling, ConnectorKind, EmitterBatchLegality, EmitterBody,
     EmitterBodyForm, EmitterEntityKind, EmitterPublishingModeKind, EmitterReferenceKind,
     EnvelopeClauseKind, ExternalName, HttpEmitterEntity, HttpIngestorEntity, IcebergEmitterEntity,
     IcebergStorageBackend, IngestDeliveryKind, IngestQuiesceKind, IngestorEntityKind,
@@ -74,7 +74,7 @@ fn source_surface(kind: IngestorEntityKind) -> IngestorSurface {
         options,
     };
     match kind {
-        IngestorEntityKind::Client(ClientSourceEntity::Producer) => unlocated(
+        IngestorEntityKind::Client(ClientIngestorEntity::Producer) => unlocated(
             &[
                 (IngestDeliveryKind::AckSequential, false),
                 (IngestDeliveryKind::AckParallel, false),
@@ -201,7 +201,7 @@ fn every_source_pair_declares_its_modes_quiesce_modes_locator_and_options() {
     }
 }
 
-/// The publishing modes, reference, locator and options one sink pair declares.
+/// The publishing modes, reference, locator and options one emitter pair declares.
 struct EmitterSurface {
     reference: EmitterReferenceKind,
     locator: Option<(&'static str, &'static str)>,
@@ -636,7 +636,7 @@ fn an_mqtt_source_answers_the_session_and_quality_of_service_it_subscribes_with(
 ///
 /// Each reads its own half of the input. A generated ingestor can read every byte it is given,
 /// and once the bytes run out every choice takes its first option, so an emitter drawn after it
-/// from the same bytes would always publish to the first sink.
+/// from the same bytes would always publish to the first emitter.
 fn assert_generated_entities_state_what_they_declare(bytes: &[u8]) {
     let (ingestor_bytes, emitter_bytes) = bytes.split_at(bytes.len() / 2);
     assert_generated_ingestor_states_what_its_entity_declares(ingestor_bytes);

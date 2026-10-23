@@ -2,7 +2,7 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Examples of equivalent and distinct service, topic and subscription identities.
-//! - **Depends on.** The production source settings and vocabulary.
+//! - **Depends on.** The production ingestor settings and vocabulary.
 //! - **Must not know.** Runtime schedules, graph installation or a live broker.
 
 use meticulous::ResultExt as _;
@@ -19,8 +19,8 @@ fn entry(key: &str, value: &str) -> ClientConfigEntry {
 fn settings<'a>(
     config: &'a [ClientConfigEntry],
     topic: &'a PulsarTopicName,
-) -> PulsarIngestorSettings<'a> {
-    PulsarIngestorSettings {
+) -> PulsarTopicIngestorSettings<'a> {
+    PulsarTopicIngestorSettings {
         config,
         topic,
         subscription: PulsarSubscription {

@@ -1,8 +1,8 @@
-//! Pulsar source transport.
+//! Pulsar ingestor transport.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The Pulsar client a source configuration declares, its TLS options, topic
+//! - **Owns.** The Pulsar client an ingestor configuration declares, its TLS options, topic
 //!   qualification, the shared-subscription consumer each instance reads through and the name it
 //!   registers under, the check that a provisioned subscription exists, the removal of a
 //!   subscription its ingestor owned, message properties as ingest headers, acknowledgements the
@@ -123,9 +123,9 @@ impl PulsarUnresolvedRequest {
     }
 }
 
-/// Why a Pulsar source could not connect, consume, or settle a message.
+/// Why a Pulsar ingestor could not connect, consume, or settle a message.
 #[derive(Debug, Error)]
-pub enum PulsarIngestorError {
+pub enum PulsarTopicIngestorError {
     #[error("invalid Pulsar client configuration")]
     ClientConfig,
     #[error(
@@ -156,11 +156,11 @@ pub enum PulsarIngestorError {
     /// and it redelivers an unacknowledged message once the connection that delivered it is gone.
     #[error("the Pulsar consumer did not confirm sending a redelivery request: {unresolved}")]
     RedeliveryRequestUnsent { unresolved: PulsarUnresolvedRequest },
-    /// An acknowledgement failed in a way this source does not classify; the client's error is the
+    /// An acknowledgement failed in a way this ingestor does not classify; the client's error is the
     /// cause beneath.
     #[error("failed to acknowledge a Pulsar message")]
     Acknowledge,
-    /// A redelivery request failed in a way this source does not classify; the client's error is
+    /// A redelivery request failed in a way this ingestor does not classify; the client's error is
     /// the cause beneath.
     #[error("failed to negatively acknowledge a Pulsar message")]
     NegativelyAcknowledge,
@@ -169,7 +169,7 @@ pub enum PulsarIngestorError {
     #[error("Pulsar batch timeout exceeds the monotonic clock range")]
     BatchDeadline,
     /// The subscription an operator provisioned does not exist. A provisioned subscription is
-    /// never created, so the source reports it until the operator provisions it.
+    /// never created, so the ingestor reports it until the operator provisions it.
     #[error(
         "{connector} subscription '{subscription}' of topic '{topic}' does not exist",
         connector = ConnectorKind::Pulsar
@@ -213,9 +213,9 @@ pub enum PulsarIngestorError {
     RemovalDeadline { budget: Duration },
 }
 
-impl PulsarIngestorError {
+impl PulsarTopicIngestorError {
     /// What a failed acknowledgement means: the refusal the broker answered with, an answer the
-    /// client could not get, or a failure this source does not classify, which keeps the client's
+    /// client could not get, or a failure this ingestor does not classify, which keeps the client's
     /// error beneath it.
     fn unsettled_acknowledgement(error: PulsarConsumerError) -> Report<Self> {
         if let PulsarConsumerError::Connection(PulsarConnectionError::PulsarError(code, reason)) =
@@ -235,7 +235,7 @@ impl PulsarIngestorError {
     }
 
     /// What a failed redelivery request means: a request the consumer could not confirm sending,
-    /// or a failure this source does not classify, which keeps the client's error beneath it.
+    /// or a failure this ingestor does not classify, which keeps the client's error beneath it.
     fn unsent_redelivery_request(error: PulsarConsumerError) -> Report<Self> {
         if let Some(unresolved) = PulsarUnresolvedRequest::of(&error) {
             return Report::new(Self::RedeliveryRequestUnsent { unresolved });
@@ -244,9 +244,9 @@ impl PulsarIngestorError {
     }
 }
 
-type PulsarIngestorResult<T> = Result<T, Report<PulsarIngestorError>>;
+type PulsarTopicIngestorResult<T> = Result<T, Report<PulsarTopicIngestorError>>;
 
-/// Whether acknowledging a Pulsar source's positions waits for the broker's answer, which the
+/// Whether acknowledging a Pulsar ingestor's positions waits for the broker's answer, which the
 /// ingestor's acknowledgement mode decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PulsarAckReceipts {
@@ -269,10 +269,10 @@ impl PulsarAckReceipts {
     }
 }
 
-/// What one Pulsar source subscribes with: its resolved client entries, the topic it reads, the
+/// What one Pulsar ingestor subscribes with: its resolved client entries, the topic it reads, the
 /// shared subscription it joins and who owns it, the name its consumers register under, and
 /// whether acknowledging waits for the broker.
-pub struct PulsarIngestorSettings<'a> {
+pub struct PulsarTopicIngestorSettings<'a> {
     pub config: &'a [ClientConfigEntry],
     pub topic: &'a PulsarTopicName,
     pub subscription: PulsarSubscription,
@@ -282,11 +282,11 @@ pub struct PulsarIngestorSettings<'a> {
     pub ack_receipts: PulsarAckReceipts,
 }
 
-impl PulsarIngestorSettings<'_> {
+impl PulsarTopicIngestorSettings<'_> {
     /// Whether both inputs read the same broker subscription. Consumer policy and declared
     /// ownership do not change that identity. Configuration is resolved by the host first;
     /// comparison opens no connection and performs no DNS lookup.
-    pub fn reads_same_subscription(&self, replacement: &Self) -> PulsarIngestorResult<bool> {
+    pub fn reads_same_subscription(&self, replacement: &Self) -> PulsarTopicIngestorResult<bool> {
         let previous = self.service_url()?;
         let next = replacement.service_url()?;
         let same_host = previous.host_str().map(str::to_ascii_lowercase)
@@ -294,39 +294,41 @@ impl PulsarIngestorSettings<'_> {
         let same_broker =
             previous.scheme() == next.scheme() && same_host && previous.port() == next.port();
         let previous_topic =
-            PulsarIngestorPlan::topic_from_config(self.config, self.topic.as_str());
-        let next_topic =
-            PulsarIngestorPlan::topic_from_config(replacement.config, replacement.topic.as_str());
+            PulsarTopicIngestorPlan::topic_from_config(self.config, self.topic.as_str());
+        let next_topic = PulsarTopicIngestorPlan::topic_from_config(
+            replacement.config,
+            replacement.topic.as_str(),
+        );
         Ok(same_broker
             && previous_topic == next_topic
             && self.subscription.name == replacement.subscription.name)
     }
 
-    fn service_url(&self) -> PulsarIngestorResult<Url> {
+    fn service_url(&self) -> PulsarTopicIngestorResult<Url> {
         let addr = client_config_value(self.config, "addr", ConnectorKind::Pulsar.into())
-            .change_context(PulsarIngestorError::ClientConfig)?;
-        let mut url = Url::parse(&addr).change_context(PulsarIngestorError::ClientConfig)?;
+            .change_context(PulsarTopicIngestorError::ClientConfig)?;
+        let mut url = Url::parse(&addr).change_context(PulsarTopicIngestorError::ClientConfig)?;
         let default_port = match url.scheme() {
             "pulsar" => 6650,
             "pulsar+ssl" => 6651,
-            _ => return Err(Report::new(PulsarIngestorError::InvalidServiceAddress)),
+            _ => return Err(Report::new(PulsarTopicIngestorError::InvalidServiceAddress)),
         };
         if !url.has_host() {
-            return Err(Report::new(PulsarIngestorError::InvalidServiceAddress));
+            return Err(Report::new(PulsarTopicIngestorError::InvalidServiceAddress));
         }
         if url.port().is_none() {
             url.set_port(Some(default_port))
-                .map_err(|()| Report::new(PulsarIngestorError::InvalidServiceAddress))?;
+                .map_err(|()| Report::new(PulsarTopicIngestorError::InvalidServiceAddress))?;
         }
         Ok(url)
     }
 }
 
-/// One Pulsar source's client and the shared subscription every instance consumes from.
+/// One Pulsar ingestor's client and the shared subscription every instance consumes from.
 ///
 /// The client is connected once and shared by the instances, which each open their own consumer.
 #[derive(Clone)]
-pub struct PulsarIngestorPlan {
+pub struct PulsarTopicIngestorPlan {
     client: Pulsar<TokioExecutor>,
     topic: String,
     subscription: PulsarSubscription,
@@ -334,9 +336,11 @@ pub struct PulsarIngestorPlan {
     ack_receipts: PulsarAckReceipts,
 }
 
-impl PulsarIngestorPlan {
-    pub async fn connect(settings: PulsarIngestorSettings<'_>) -> PulsarIngestorResult<Self> {
-        let PulsarIngestorSettings {
+impl PulsarTopicIngestorPlan {
+    pub async fn connect(
+        settings: PulsarTopicIngestorSettings<'_>,
+    ) -> PulsarTopicIngestorResult<Self> {
+        let PulsarTopicIngestorSettings {
             config,
             topic,
             subscription,
@@ -355,9 +359,9 @@ impl PulsarIngestorPlan {
 
     async fn client_from_config(
         config: &[ClientConfigEntry],
-    ) -> PulsarIngestorResult<Pulsar<TokioExecutor>> {
+    ) -> PulsarTopicIngestorResult<Pulsar<TokioExecutor>> {
         let addr = client_config_value(config, "addr", "Pulsar")
-            .change_context(PulsarIngestorError::ClientConfig)?;
+            .change_context(PulsarTopicIngestorError::ClientConfig)?;
         let mut builder = Pulsar::builder(addr, TokioExecutor);
         if let Some(tls_options) = Self::tls_options_from_config(config)? {
             if let Some(certificate_chain) = tls_options.certificate_chain {
@@ -370,7 +374,7 @@ impl PulsarIngestorPlan {
                 );
         }
         builder.build().await.map_err(|source| {
-            Report::new(PulsarIngestorError::Connect).attach_printable(source.to_string())
+            Report::new(PulsarTopicIngestorError::Connect).attach_printable(source.to_string())
         })
     }
 
@@ -386,18 +390,20 @@ impl PulsarIngestorPlan {
 
     fn tls_options_from_config(
         config: &[ClientConfigEntry],
-    ) -> PulsarIngestorResult<Option<PulsarTlsOptions>> {
+    ) -> PulsarTopicIngestorResult<Option<PulsarTlsOptions>> {
         let tls = client_tls_paths(config);
         if tls.cert_file.is_some() || tls.key_file.is_some() {
-            return Err(Report::new(PulsarIngestorError::UnsupportedTlsIdentity));
+            return Err(Report::new(
+                PulsarTopicIngestorError::UnsupportedTlsIdentity,
+            ));
         }
 
         let allow_insecure_connection =
             optional_bool_client_config_value(config, "tls_allow_insecure_connection")
-                .change_context(PulsarIngestorError::ClientConfig)?;
+                .change_context(PulsarTopicIngestorError::ClientConfig)?;
         let tls_hostname_verification_enabled =
             optional_bool_client_config_value(config, "tls_hostname_verification_enabled")
-                .change_context(PulsarIngestorError::ClientConfig)?;
+                .change_context(PulsarTopicIngestorError::ClientConfig)?;
 
         if tls.ca_file.is_none()
             && allow_insecure_connection.is_none()
@@ -410,7 +416,7 @@ impl PulsarIngestorPlan {
         if let Some(ca_file) = tls.ca_file.as_ref() {
             tls_options.certificate_chain = Some(
                 read_tls_file(ca_file, "TLS CA certificate")
-                    .change_context(PulsarIngestorError::ClientConfig)?,
+                    .change_context(PulsarTopicIngestorError::ClientConfig)?,
             );
         }
         if let Some(allow_insecure_connection) = allow_insecure_connection {
@@ -429,7 +435,7 @@ impl PulsarIngestorPlan {
     async fn consumer(
         &self,
         instance_index: u64,
-    ) -> PulsarIngestorResult<PulsarConsumer<Vec<u8>, TokioExecutor>> {
+    ) -> PulsarTopicIngestorResult<PulsarConsumer<Vec<u8>, TokioExecutor>> {
         let consumer_name = format!("{}-{instance_index}", self.consumer_name);
         match self.subscription.ownership {
             PulsarSubscriptionOwnership::Ingestor => {}
@@ -444,14 +450,14 @@ impl PulsarIngestorPlan {
             .build()
             .await
             .map_err(|source| {
-                Report::new(PulsarIngestorError::Subscribe {
+                Report::new(PulsarTopicIngestorError::Subscribe {
                     topic: self.topic.clone(),
                 })
                 .attach_printable(source.to_string())
             })
     }
 
-    /// A consumer of this source's topic on its shared subscription, registered under
+    /// A consumer of this ingestor's topic on its shared subscription, registered under
     /// `consumer_name`.
     fn consumer_builder(
         &self,
@@ -472,7 +478,7 @@ impl PulsarIngestorPlan {
     /// The broker refuses a non-durable subscribe while a durable subscription of the same name
     /// exists. Without one it opens a non-durable cursor of that name instead, which closing the
     /// probe removes again, so the check never creates the subscription it asks about.
-    async fn verify_provisioned(&self, consumer_name: &str) -> PulsarIngestorResult<()> {
+    async fn verify_provisioned(&self, consumer_name: &str) -> PulsarTopicIngestorResult<()> {
         let options = PulsarConsumerOptions::default().durable(false);
         let probe = self
             .consumer_builder(consumer_name.to_string(), options)
@@ -485,7 +491,7 @@ impl PulsarIngestorPlan {
                     return Ok(());
                 }
                 return Err(Report::new(error).change_context(
-                    PulsarIngestorError::VerifySubscription {
+                    PulsarTopicIngestorError::VerifySubscription {
                         subscription: self.subscription.name.clone(),
                         topic: self.topic.clone(),
                     },
@@ -498,7 +504,7 @@ impl PulsarIngestorPlan {
             .close()
             .await
             .reported("closing the probe of a missing provisioned Pulsar subscription");
-        Err(Report::new(PulsarIngestorError::MissingSubscription {
+        Err(Report::new(PulsarTopicIngestorError::MissingSubscription {
             subscription: self.subscription.name.clone(),
             topic: self.topic.clone(),
         }))
@@ -531,17 +537,17 @@ impl PulsarIngestorPlan {
     /// The driver's connection timeout bounds the whole removal: connecting the client, joining
     /// and unsubscribing.
     pub async fn remove_subscription(
-        settings: PulsarIngestorSettings<'_>,
-    ) -> PulsarIngestorResult<()> {
+        settings: PulsarTopicIngestorSettings<'_>,
+    ) -> PulsarTopicIngestorResult<()> {
         let budget = PulsarConnectionRetryOptions::default().connection_timeout;
         Self::remove_subscription_within(settings, budget).await
     }
 
     async fn remove_subscription_within(
-        settings: PulsarIngestorSettings<'_>,
+        settings: PulsarTopicIngestorSettings<'_>,
         budget: Duration,
-    ) -> PulsarIngestorResult<()> {
-        let removal = PulsarIngestorError::RemoveSubscription {
+    ) -> PulsarTopicIngestorResult<()> {
+        let removal = PulsarTopicIngestorError::RemoveSubscription {
             subscription: settings.subscription.name.clone(),
             topic: Self::topic_from_config(settings.config, settings.topic.as_str()),
         };
@@ -551,21 +557,23 @@ impl PulsarIngestorPlan {
         })
         .await;
         let Ok(removed) = removed else {
-            return Err(Report::new(PulsarIngestorError::RemovalDeadline { budget })
-                .change_context(removal));
+            return Err(
+                Report::new(PulsarTopicIngestorError::RemovalDeadline { budget })
+                    .change_context(removal),
+            );
         };
         removed.change_context(removal)
     }
 
     /// Joins the subscription with a durable consumer and unsubscribes it.
-    async fn unsubscribe(&self) -> PulsarIngestorResult<()> {
+    async fn unsubscribe(&self) -> PulsarTopicIngestorResult<()> {
         let consumer_name = format!("{}-removal", self.consumer_name);
         let mut consumer = self
             .consumer_builder(consumer_name, PulsarConsumerOptions::default())
             .build::<Vec<u8>>()
             .await
             .map_err(|error| {
-                Report::new(error).change_context(PulsarIngestorError::JoinSubscription)
+                Report::new(error).change_context(PulsarTopicIngestorError::JoinSubscription)
             })?;
         let unsubscribed = consumer.unsubscribe().await;
         let Err(error) = unsubscribed else {
@@ -577,14 +585,14 @@ impl PulsarIngestorPlan {
             .close()
             .await
             .reported("closing the consumer of a refused Pulsar unsubscribe");
-        Err(Report::new(error).change_context(PulsarIngestorError::Unsubscribe))
+        Err(Report::new(error).change_context(PulsarTopicIngestorError::Unsubscribe))
     }
 }
 
 /// The message one acknowledgement or negative acknowledgement settles: the topic it arrived on,
 /// which a partitioned subscription routes by, and its Pulsar message id.
 #[derive(Debug, Clone)]
-pub struct PulsarIngestorPosition {
+pub struct PulsarTopicIngestorPosition {
     topic: String,
     message_id: MessageIdData,
 }
@@ -602,14 +610,14 @@ impl IngestMessageHeaders for PulsarMessageProperties {
     }
 }
 
-pub struct PulsarIngestorMessage {
+pub struct PulsarTopicIngestorMessage {
     properties: PulsarMessageProperties,
-    position: PulsarIngestorPosition,
+    position: PulsarTopicIngestorPosition,
 }
 
-impl PulsarIngestorMessage {
+impl PulsarTopicIngestorMessage {
     fn new(message: PulsarMessage<Vec<u8>>) -> Self {
-        let position = PulsarIngestorPosition {
+        let position = PulsarTopicIngestorPosition {
             topic: message.topic.clone(),
             message_id: message.message_id().clone(),
         };
@@ -620,8 +628,8 @@ impl PulsarIngestorMessage {
     }
 }
 
-impl IngestorMessage for PulsarIngestorMessage {
-    type Position = PulsarIngestorPosition;
+impl IngestorMessage for PulsarTopicIngestorMessage {
+    type Position = PulsarTopicIngestorPosition;
 
     fn payload(&self) -> &[u8] {
         &self.properties.message.payload.data
@@ -642,27 +650,30 @@ impl IngestorMessage for PulsarIngestorMessage {
     }
 }
 
-/// One Pulsar source instance: its consumer on the shared subscription, absent while suspended.
-pub struct PulsarIngestor {
-    plan: PulsarIngestorPlan,
+/// One Pulsar ingestor instance: its consumer on the shared subscription, absent while suspended.
+pub struct PulsarTopicIngestor {
+    plan: PulsarTopicIngestorPlan,
     instance_index: u64,
     consumer: Option<PulsarConsumer<Vec<u8>, TokioExecutor>>,
 }
 
-impl PulsarIngestor {
-    async fn close_consumer(&mut self) -> PulsarIngestorResult<()> {
+impl PulsarTopicIngestor {
+    async fn close_consumer(&mut self) -> PulsarTopicIngestorResult<()> {
         let Some(mut consumer) = self.consumer.take() else {
             return Ok(());
         };
         consumer.close().await.map_err(|source| {
-            Report::new(PulsarIngestorError::Close).attach_printable(source.to_string())
+            Report::new(PulsarTopicIngestorError::Close).attach_printable(source.to_string())
         })
     }
 }
 
 #[async_trait]
-impl IngestorConnector for PulsarIngestor {
-    type Plan = PulsarIngestorPlan;
+impl IngestorConnector for PulsarTopicIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Pulsar(nervix_models::PulsarIngestorEntity::Topic);
+
+    type Plan = PulsarTopicIngestorPlan;
 
     /// An instance of an owned subscription joins it here. An instance of a provisioned one joins
     /// in its first resume instead, where a subscription the operator has not provisioned yet is
@@ -717,9 +728,9 @@ impl IngestorConnector for PulsarIngestor {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for PulsarIngestor {
-    type Message = PulsarIngestorMessage;
-    type Position = PulsarIngestorPosition;
+impl BrokerIngestorConnector for PulsarTopicIngestor {
+    type Message = PulsarTopicIngestorMessage;
+    type Position = PulsarTopicIngestorPosition;
 
     async fn next_batch(
         &mut self,
@@ -737,18 +748,18 @@ impl BrokerIngestorConnector for PulsarIngestor {
         let first = match first {
             Some(Ok(message)) => message,
             Some(Err(error)) => {
-                return Err(Report::new(PulsarIngestorError::Receive)
+                return Err(Report::new(PulsarTopicIngestorError::Receive)
                     .attach_printable(error.to_string())
                     .change_context(IngestorError::Read { connector: PULSAR }));
             }
             None => {
                 self.consumer = None;
-                return Err(Report::new(PulsarIngestorError::ConsumerClosed)
+                return Err(Report::new(PulsarTopicIngestorError::ConsumerClosed)
                     .change_context(IngestorError::Read { connector: PULSAR }));
             }
         };
         let mut messages = Vec::with_capacity(request.max_messages.get());
-        messages.push(PulsarIngestorMessage::new(first));
+        messages.push(PulsarTopicIngestorMessage::new(first));
         if request.max_messages == NonZeroUsize::MIN {
             return Ok(IngestorBatch::Messages(messages));
         }
@@ -756,7 +767,7 @@ impl BrokerIngestorConnector for PulsarIngestor {
             return Ok(IngestorBatch::Messages(messages));
         };
         let Some(deadline) = Instant::now().checked_add(batch_timeout) else {
-            return Err(Report::new(PulsarIngestorError::BatchDeadline)
+            return Err(Report::new(PulsarTopicIngestorError::BatchDeadline)
                 .change_context(IngestorError::Read { connector: PULSAR }));
         };
         while messages.len() < request.max_messages.get() {
@@ -765,7 +776,7 @@ impl BrokerIngestorConnector for PulsarIngestor {
                 _ = sleep_until(deadline) => break,
                 next = consumer.next() => {
                     match next {
-                        Some(Ok(message)) => messages.push(PulsarIngestorMessage::new(message)),
+                        Some(Ok(message)) => messages.push(PulsarTopicIngestorMessage::new(message)),
                         Some(Err(error)) => {
                             warn!(error = %error, "failed to receive another Pulsar batch message");
                         }
@@ -785,7 +796,7 @@ impl BrokerIngestorConnector for PulsarIngestor {
     /// operation timeout; under `MODE NO ACK`, once the client queued them.
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
         let Some(consumer) = self.consumer.as_mut() else {
-            return Err(Report::new(PulsarIngestorError::ConsumerClosed)
+            return Err(Report::new(PulsarTopicIngestorError::ConsumerClosed)
                 .change_context(IngestorError::Acknowledge { connector: PULSAR }));
         };
         let mut by_topic: BTreeMap<&str, Vec<MessageIdData>> = BTreeMap::new();
@@ -800,7 +811,7 @@ impl BrokerIngestorConnector for PulsarIngestor {
             consumer
                 .ack_with_ids(topic, message_ids)
                 .await
-                .map_err(PulsarIngestorError::unsettled_acknowledgement)
+                .map_err(PulsarTopicIngestorError::unsettled_acknowledgement)
                 .change_context(IngestorError::Acknowledge { connector: PULSAR })?;
         }
         Ok(())
@@ -811,7 +822,7 @@ impl BrokerIngestorConnector for PulsarIngestor {
     /// not answer it.
     async fn reject(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
         let Some(consumer) = self.consumer.as_mut() else {
-            return Err(Report::new(PulsarIngestorError::ConsumerClosed)
+            return Err(Report::new(PulsarTopicIngestorError::ConsumerClosed)
                 .change_context(IngestorError::Reject { connector: PULSAR }));
         };
         for position in positions {
@@ -819,7 +830,7 @@ impl BrokerIngestorConnector for PulsarIngestor {
             consumer
                 .nack_with_id(&position.topic, position.message_id.clone())
                 .await
-                .map_err(PulsarIngestorError::unsent_redelivery_request)
+                .map_err(PulsarTopicIngestorError::unsent_redelivery_request)
                 .change_context(IngestorError::Reject { connector: PULSAR })?;
         }
         Ok(())
@@ -868,15 +879,18 @@ mod tests {
     #[test]
     fn short_topic_names_are_qualified_by_the_configured_namespace() {
         assert_eq!(
-            PulsarIngestorPlan::topic_from_config(&[], "events"),
+            PulsarTopicIngestorPlan::topic_from_config(&[], "events"),
             "persistent://public/default/events"
         );
         assert_eq!(
-            PulsarIngestorPlan::topic_from_config(&[entry("namespace", "tenant/ns")], "events"),
+            PulsarTopicIngestorPlan::topic_from_config(
+                &[entry("namespace", "tenant/ns")],
+                "events"
+            ),
             "persistent://tenant/ns/events"
         );
         assert_eq!(
-            PulsarIngestorPlan::topic_from_config(&[], "non-persistent://tenant/ns/events"),
+            PulsarTopicIngestorPlan::topic_from_config(&[], "non-persistent://tenant/ns/events"),
             "non-persistent://tenant/ns/events"
         );
     }
@@ -884,33 +898,35 @@ mod tests {
     #[test]
     fn tls_options_load_trust_and_reject_client_identities() {
         assert!(
-            PulsarIngestorPlan::tls_options_from_config(&[])
+            PulsarTopicIngestorPlan::tls_options_from_config(&[])
                 .expect("no TLS keys must be accepted")
                 .is_none()
         );
 
-        let error =
-            PulsarIngestorPlan::tls_options_from_config(&[entry("tls_cert_file", "client.pem")])
-                .expect_err("a client certificate must be rejected");
+        let error = PulsarTopicIngestorPlan::tls_options_from_config(&[entry(
+            "tls_cert_file",
+            "client.pem",
+        )])
+        .expect_err("a client certificate must be rejected");
         assert!(matches!(
             error.current_context(),
-            PulsarIngestorError::UnsupportedTlsIdentity
+            PulsarTopicIngestorError::UnsupportedTlsIdentity
         ));
 
-        let error = PulsarIngestorPlan::tls_options_from_config(&[entry(
+        let error = PulsarTopicIngestorPlan::tls_options_from_config(&[entry(
             "tls_allow_insecure_connection",
             "sometimes",
         )])
         .expect_err("an invalid boolean must be rejected");
         assert!(matches!(
             error.current_context(),
-            PulsarIngestorError::ClientConfig
+            PulsarTopicIngestorError::ClientConfig
         ));
 
         let root = tempfile::tempdir().expect("temporary Pulsar TLS directory should open");
         let ca = root.path().join("ca.pem");
         std::fs::write(&ca, b"test CA").expect("the Pulsar CA fixture should be writable");
-        let options = PulsarIngestorPlan::tls_options_from_config(&[
+        let options = PulsarTopicIngestorPlan::tls_options_from_config(&[
             entry("tls_ca_file", &ca.to_string_lossy()),
             entry("tls_hostname_verification_enabled", "false"),
         ])

@@ -1,10 +1,10 @@
-//! A paced poll's messages, split into intake batches and taken in by the production source host.
+//! A paced poll's messages, split into intake batches and taken in by the production ingestor host.
 //!
 //! Layer: test harness.
 //! - **Owns.** The intake batches one poll splits into for a bound, and driving the production
-//!   source host's poll intake, with the intake a paced source's host has, through polls larger
+//!   ingestor host's poll intake, with the intake a paced ingestor's host has, through polls larger
 //!   and smaller than their bound.
-//! - **Depends on.** The poll intake's batches, the production source host and the unfolding
+//! - **Depends on.** The poll intake's batches, the production ingestor host and the unfolding
 //!   domain fixture of the extension tests.
 //! - **Must not know.** Connector drivers or the paced loop that calls the host.
 

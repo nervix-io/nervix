@@ -291,7 +291,7 @@ and a field, UDF or function name inside an expression or a route construction m
 `~` or `.`, or begin with a digit, which canonical NSPL writes between backticks. Names reach both
 length limits, and counts reach the largest value their field holds.
 The language properties also sweep sixteen deterministic byte sequences through every Model
-family, every emitter emitter and every statement form on every ordinary run, so none is left to the
+family, every emitter entity and every statement form on every ordinary run, so none is left to the
 random cases.
 
 The NSPL Postgres generator keeps `DO UPDATE` targets nonempty and leaves at least one `VALUES`

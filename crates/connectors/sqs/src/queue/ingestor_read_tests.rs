@@ -21,8 +21,8 @@ use nervix_primitives::{
 use tokio::io::AsyncWriteExt as _;
 
 use super::{
-    CANCELLED_RECEIVE_BUDGET, QueueReceive, SQS, SqsIngestor, SqsIngestorError, SqsIngestorMessage,
-    SqsIngestorResult,
+    CANCELLED_RECEIVE_BUDGET, QueueReceive, SQS, SqsQueueIngestor, SqsQueueIngestorError,
+    SqsQueueIngestorMessage, SqsQueueIngestorResult,
 };
 use crate::queue::connection_tests::{
     Fixture, QUEUE, RefusedEndpoint, batch_request, client_config, open_source, read_request,
@@ -89,9 +89,9 @@ fn held_receive(
     })
 }
 
-/// A source instance polling the queue of the stand-in on `listener`, whose URL it already looked
+/// A ingestor instance polling the queue of the stand-in on `listener`, whose URL it already looked
 /// up.
-async fn polling_source(fixture: &Fixture, listener: &TcpListener) -> SqsIngestor {
+async fn polling_source(fixture: &Fixture, listener: &TcpListener) -> SqsQueueIngestor {
     let port = listener
         .local_addr()
         .expect("a bound listener has an address")
@@ -116,12 +116,12 @@ enum HostAction {
 
 /// What a read returned while the stand-in held its receive, and the stand-in that held it.
 struct HeldRead {
-    batch: IngestorBatch<SqsIngestorMessage>,
+    batch: IngestorBatch<SqsQueueIngestorMessage>,
     /// Returns the receive the stand-in took.
     service: JoinHandle<String>,
 }
 
-/// Starts a read of a source polling a stand-in that answers its receive with `answer`, lets the
+/// Starts a read of an ingestor polling a stand-in that answers its receive with `answer`, lets the
 /// host act once the receive reached the stand-in, and only then lets the stand-in answer.
 async fn read_while_the_receive_is_held(
     fixture: &Fixture,
@@ -222,7 +222,7 @@ async fn a_cancelled_read_whose_receive_brings_nothing_sends_no_further_receive(
 struct SilentQueue;
 
 impl QueueReceive for SilentQueue {
-    fn receive(&self) -> impl Future<Output = SqsIngestorResult<Vec<SqsMessage>>> + Send {
+    fn receive(&self) -> impl Future<Output = SqsQueueIngestorResult<Vec<SqsMessage>>> + Send {
         std::future::pending()
     }
 }
@@ -230,7 +230,7 @@ impl QueueReceive for SilentQueue {
 #[nervix_primitives::test(start_paused = true)]
 async fn a_cancelled_read_waits_for_a_receive_the_service_does_not_answer_only_until_its_budget() {
     let cancellation = IngestorReadCancellation::new();
-    let mut read = pin!(SqsIngestor::read_batch(&SilentQueue, &cancellation));
+    let mut read = pin!(SqsQueueIngestor::read_batch(&SilentQueue, &cancellation));
 
     // A read nobody cancelled has no budget: it waits for its receive however long that takes.
     let uncancelled = timeout(Duration::from_secs(3_600), &mut read).await;
@@ -254,8 +254,8 @@ async fn a_cancelled_read_waits_for_a_receive_the_service_does_not_answer_only_u
     );
     assert!(
         matches!(
-            report.downcast_ref::<SqsIngestorError>(),
-            Some(SqsIngestorError::CancelledReceiveUnanswered { budget })
+            report.downcast_ref::<SqsQueueIngestorError>(),
+            Some(SqsQueueIngestorError::CancelledReceiveUnanswered { budget })
                 if *budget == CANCELLED_RECEIVE_BUDGET
         ),
         "{report:?}"
@@ -287,8 +287,8 @@ async fn a_receive_that_cannot_reach_the_service_fails_the_read() {
     );
     assert!(
         matches!(
-            report.downcast_ref::<SqsIngestorError>(),
-            Some(SqsIngestorError::Receive)
+            report.downcast_ref::<SqsQueueIngestorError>(),
+            Some(SqsQueueIngestorError::Receive)
         ),
         "{report:?}"
     );

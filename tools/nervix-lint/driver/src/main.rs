@@ -30,7 +30,7 @@ use std::{
 use anyhow::{Context as _, bail};
 use meticulous::ResultExt as _;
 use nervix_lint_report::{
-    CompilerReport, Expansion, Finding, SiteId, IngestorSpan,
+    CompilerReport, Expansion, Finding, SiteId, SourceSpan,
     audit::{AuditCandidate, AuditPattern, KeyedOperation},
     rules,
 };
@@ -114,7 +114,7 @@ impl AcquisitionPass {
         })
     }
 
-    fn source_span(&self, cx: &LateContext<'_>, span: Span) -> Option<IngestorSpan> {
+    fn source_span(&self, cx: &LateContext<'_>, span: Span) -> Option<SourceSpan> {
         match self.locate(cx, span) {
             Ok(source) => Some(source),
             Err(Exclusion::Generated) => {
@@ -129,7 +129,7 @@ impl AcquisitionPass {
     }
 
     /// The authored source of a span; build output and external definitions are excluded.
-    fn locate(&self, cx: &LateContext<'_>, span: Span) -> Result<IngestorSpan, Exclusion> {
+    fn locate(&self, cx: &LateContext<'_>, span: Span) -> Result<SourceSpan, Exclusion> {
         let map = cx.tcx.sess.source_map();
         let lo = map.lookup_char_pos(span.lo());
         let hi = map.lookup_char_pos(span.hi());
@@ -147,7 +147,7 @@ impl AcquisitionPass {
         let Ok(source) = map.span_to_snippet(span) else {
             return Err(Exclusion::Generated);
         };
-        Ok(IngestorSpan {
+        Ok(SourceSpan {
             site: SiteId {
                 path,
                 start: (span.lo() - lo.file.start_pos).0,

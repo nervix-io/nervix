@@ -449,9 +449,9 @@ Feature: Web console NSPL REPL
     And selector ".suggestions" contains "read_headers"
     When selector ".prompt-row input" is filled with "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
     Then selector ".suggestions" does not contain "read_header"
-    When selector ".prompt-row input" is filled with "CREATE KAFKA TOPIC EMITTER sink FROM incoming TO broker TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_"
+    When selector ".prompt-row input" is filled with "CREATE KAFKA TOPIC EMITTER emitter FROM incoming TO broker TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_"
     Then selector ".suggestions" contains "write_header"
-    When selector ".prompt-row input" is filled with "CREATE SENTRY EVENT EMITTER sink FROM incoming TO client MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_"
+    When selector ".prompt-row input" is filled with "CREATE SENTRY EVENT EMITTER emitter FROM incoming TO client MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_"
     Then selector ".suggestions" does not contain "write_header"
 
   Scenario: Web console autocompletes entities queued in an open transaction
@@ -1960,7 +1960,7 @@ Feature: Web console NSPL REPL
     And branch group "by_reingestor_metrics_source" body does not overlap graph item "reingestor_metrics_node"
     And branch group "by_reingestor_metrics_node" body does not overlap graph item "reingestor_metrics_node"
 
-  Scenario: Web console routes shared sink client edges around downstream branch groups
+  Scenario: Web console routes shared emitter client edges around downstream branch groups
     Given a 3 node nervix cluster is started
     When these NSPL commands are executed on the leader node
       """

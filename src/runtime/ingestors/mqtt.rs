@@ -1,4 +1,4 @@
-//! MQTT source runtime composition.
+//! MQTT ingestor runtime composition.
 //!
 //! Layer: data plane.
 //!
@@ -6,7 +6,7 @@
 //!   instance, the node resolver its connections resolve the broker through, the declared
 //!   acknowledgement policy, and host-owned intake whose quiesce either disconnects the session or
 //!   buffers and drops what stays subscribed, and retiring inputs through their connector plans.
-//! - **Depends on.** The connector source contract, the MQTT connector, and pre-resolved runtime
+//! - **Depends on.** The connector ingestor contract, the MQTT connector, and pre-resolved runtime
 //!   execution handles.
 //! - **Must not know.** The MQTT driver, session protocol, Plexus parsing, registry validation, or
 //!   placement computation.
@@ -17,9 +17,9 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector::ClientResourceMounts;
+use nervix_connector::{ClientResourceMounts, IngestorConnector as _};
 use nervix_connector_mqtt::{
-    MqttIngestor, MqttIngestorError, MqttIngestorPlan, MqttIngestorSettings,
+    MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorPlan, MqttTopicIngestorSettings,
 };
 
 use super::{
@@ -30,14 +30,19 @@ use super::{
 
 /// The resolved connector plan and the resource mounts kept alive while it is used.
 struct ResolvedMqttIngestor {
-    connector: MqttIngestorPlan,
+    connector: MqttTopicIngestorPlan,
     client_mounts: Vec<Arc<ClientResourceMounts>>,
 }
+
+const _: () = assert!(matches!(
+    MqttTopicIngestor::KIND,
+    nervix_models::IngestorEntityKind::Mqtt(nervix_models::MqttIngestorEntity::Topic)
+));
 
 impl ResolvedMqttIngestor {
     /// Runs at most the declared instance count of cleanup connections concurrently. The resource
     /// mounts remain borrowed until every attempt finishes; all typed failures are returned.
-    async fn retire_instances(&self, instances: Vec<u64>) -> Vec<Report<MqttIngestorError>> {
+    async fn retire_instances(&self, instances: Vec<u64>) -> Vec<Report<MqttTopicIngestorError>> {
         let mut cleanups = FuturesUnordered::new();
         for instance in instances {
             cleanups.push(self.connector.retire(instance));
@@ -53,7 +58,7 @@ impl ResolvedMqttIngestor {
     }
 }
 
-impl MqttIngestorStartPlan {
+impl MqttTopicIngestorStartPlan {
     pub(super) async fn compose(
         self,
         runtime: &Runtime,
@@ -74,12 +79,11 @@ impl MqttIngestorStartPlan {
             flush_each_intake: self.mode.is_ack(),
             // The client sends its keep-alive only while the loop reads, so a held loop would let
             // the broker close the connection once one and a half keep-alive intervals pass
-            // without a packet from it, and lose what was published until the source reconnects.
+            // without a packet from it, and lose what was published until the ingestor reconnects.
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts,
-            connector_label: "mqtt",
         }
-        .open::<MqttIngestor>(ingestor)
+        .open::<MqttTopicIngestor>(ingestor)
         .await
     }
 
@@ -109,9 +113,9 @@ impl MqttIngestorStartPlan {
             return Err(Report::new(IngestorConnectorStartError::NodeDnsUnavailable));
         };
         let default_client_id = format!("{}~{}", ingestor.domain.as_str(), ingestor.name.as_str());
-        let connector = MqttIngestorPlan::new(MqttIngestorSettings {
+        let connector = MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
             instances: instance_configs,
-            client_id_conflict: MqttIngestorPlan::client_id_conflict(
+            client_id_conflict: MqttTopicIngestorPlan::client_id_conflict(
                 &self.client.config,
                 self.instances,
             ),
@@ -135,7 +139,7 @@ impl MqttIngestorStartPlan {
         ingestor: &IngestorSpec,
         replacement: Option<&Self>,
     ) -> error_stack::Result<(), RuntimeError> {
-        let context = || RuntimeError::RetireIngestorSource {
+        let context = || RuntimeError::RetireIngestorEntity {
             domain: ingestor.domain.clone(),
             ingestor: ingestor.name.clone(),
         };

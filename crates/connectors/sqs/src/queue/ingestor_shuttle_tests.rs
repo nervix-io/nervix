@@ -6,7 +6,7 @@
 //!   receive reaches the host, and a cancelled read sends at most the one receive it had already
 //!   decided to send. And, from a service that never answers, that the read ends only once the host
 //!   cancelled it and its budget passed.
-//! - **Depends on.** The source's read and its receive seam, an mpsc channel as the service's
+//! - **Depends on.** The ingestor's read and its receive seam, an mpsc channel as the service's
 //!   requests and oneshot channels as its answers, the model harness's Shuttle runner, and the
 //!   task labels and timeout triggers of Shuttle's Tokio.
 //! - **Must not know.** The AWS SDK, HTTP, or the host loop that cancels a read.
@@ -29,7 +29,7 @@ use nervix_primitives::{
 };
 use nervix_recovery::Discarded as _;
 
-use super::{QueueReceive, SqsIngestor, SqsIngestorError, SqsIngestorResult};
+use super::{QueueReceive, SqsQueueIngestor, SqsQueueIngestorError, SqsQueueIngestorResult};
 
 const CHECK_TASK_JOINS: &str =
     "a check task that panics fails the execution before its join returns";
@@ -49,7 +49,7 @@ struct ServedQueue {
 }
 
 impl QueueReceive for ServedQueue {
-    fn receive(&self) -> impl Future<Output = SqsIngestorResult<Vec<SqsMessage>>> + Send {
+    fn receive(&self) -> impl Future<Output = SqsQueueIngestorResult<Vec<SqsMessage>>> + Send {
         let receives = self.receives.clone();
         let cancellation = Arc::clone(&self.cancellation);
         async move {
@@ -63,7 +63,7 @@ impl QueueReceive for ServedQueue {
             }
             match answered.await {
                 Ok(messages) => Ok(messages),
-                Err(_service_gone) => Err(Report::new(SqsIngestorError::Receive)),
+                Err(_service_gone) => Err(Report::new(SqsQueueIngestorError::Receive)),
             }
         }
     }
@@ -122,7 +122,7 @@ async fn serve(mut receives: mpsc::UnboundedReceiver<Receive>, script: &[&[u64]]
 }
 
 /// The ids of the messages `batch` hands the host.
-fn handed_over(batch: IngestorBatch<super::SqsIngestorMessage>) -> Vec<u64> {
+fn handed_over(batch: IngestorBatch<super::SqsQueueIngestorMessage>) -> Vec<u64> {
     let messages = match batch {
         IngestorBatch::Messages(messages) => messages,
         IngestorBatch::Interrupted { gathered } => gathered,
@@ -160,7 +160,7 @@ fn a_cancelled_read_hands_over_every_message_its_receives_took(script: &'static 
             cancellation: Arc::clone(&cancellation),
         };
 
-        let batch = SqsIngestor::read_batch(&queue, &cancellation)
+        let batch = SqsQueueIngestor::read_batch(&queue, &cancellation)
             .await
             .assured("a service that answers every receive fails none");
         drop(queue);
@@ -229,7 +229,7 @@ fn a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget() {
             cancellation: Arc::clone(&cancellation),
         };
 
-        let ended = SqsIngestor::read_batch(&queue, &cancellation).await;
+        let ended = SqsQueueIngestor::read_batch(&queue, &cancellation).await;
 
         assert!(
             cancellation.is_cancelled(),
@@ -255,8 +255,8 @@ fn a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget() {
                 assert_eq!(sent, 1, "a cancelled read sends no receive after its first");
                 assert!(
                     matches!(
-                        report.downcast_ref::<SqsIngestorError>(),
-                        Some(SqsIngestorError::CancelledReceiveUnanswered { .. })
+                        report.downcast_ref::<SqsQueueIngestorError>(),
+                        Some(SqsQueueIngestorError::CancelledReceiveUnanswered { .. })
                     ),
                     "{report:?}"
                 );

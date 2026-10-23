@@ -1,4 +1,4 @@
-//! SQS connector for the queue entity.
+//! SqsQueueIngestor, SqsQueueEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public queue connector implementation surface.

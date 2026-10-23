@@ -254,7 +254,7 @@ that opened it, and a forwarded producer's link key is never reused within its p
 has a reserved value meaning none. The client ingestor endpoint's published counts are genuine
 zero counts, never markers.
 
-**Sources and emitters.** A source or a emitter is addressed by the connector that serves it and the
+**Sources and emitters.** A source or an emitter is addressed by the connector that serves it and the
 entity it consumes, and its Model states both in its shape: the union holds one variant per
 connector, that variant holds one variant per entity, and each entity has its own Model with only
 the fields its statement writes. A Kafka topic source therefore cannot hold a Pub/Sub channel, and
@@ -271,9 +271,9 @@ decoded, and keeps its text exactly as written, case included, so a connector se
 statement says. What every source or emitter of a pair
 declares, whatever its statement says, is declared once on that entity's Model in the vocabulary:
 whether its messages carry headers, the typed `metadata` namespace they expose, whether it runs on
-every node, what its body references, and for a emitter whether it writes headers, needs a codec,
+every node, what its body references, and for an emitter whether it writes headers, needs a codec,
 requires batching and which publishing modes it accepts. A client Model names the connector it
-configures as a typed kind, so a source or a emitter is matched with its client by comparing kinds
+configures as a typed kind, so a source or an emitter is matched with its client by comparing kinds
 rather than labels. A session producer's source is no transport, so the transport union holds no
 Model of it; the kind union still names it, because capability decisions ask about every source.
 
@@ -412,7 +412,7 @@ no eligible destination.
 
 ## External Encodings And Conversion Failure
 
-The emitter emitter state owns its stop drain and returns one typed answer: finished with its
+The emitter connector state owns its stop drain and returns one typed answer: finished with its
 publish report and finish outcome, failed with the typed connector/runtime cause, or elapsed
 without an answer within the host bound. A connector reporting its own finish-deadline failure
 remains a failed finish with that cause. It does not become an absent answer because a host timer
@@ -566,7 +566,7 @@ refreshes retain the first table's initialized `FileIO`; they do not install a d
 owner alongside refreshed metadata. Invalid object references fail at this boundary.
 
 Generated compiler findings carry a required execution-context field. An explicit null means that
-analysis has not established a ingestor contract; it is an unknown effect, not a cold classification.
+analysis has not established a source contract; it is an unknown effect, not a cold classification.
 The report decoder requires that field even though its value is optional. Complete compiler,
 configuration and worktree identities are also required before generated evidence is reusable.
 
@@ -820,3 +820,10 @@ assignment available for storage-backed synchronization. Force-flush
 readiness is privately encoded as idle=0, available=1 and closed=2. Only its owning type writes or
 decodes that byte; the coordinator remains the authority for generation and claim state. The hint
 has no cross-location data-publication contract.
+
+Connector execution identity is a nested connector/entity variant. An ingestor plan's Kafka topic
+leaf can only compose the Kafka topic ingestor, and OTEL logs, traces and metrics have distinct
+emitter plans, configurations and concrete types. `IngestorConnector::KIND` and
+`EmitterLifecycle::kind()` expose the vocabulary identity; composition asserts the declared kind
+at compile time. Shared private encoding or endpoint intake state does not add an entity selector
+to those public configurations. A new entity adds a typed variant and implementation.

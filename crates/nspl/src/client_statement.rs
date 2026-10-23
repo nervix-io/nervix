@@ -780,7 +780,7 @@ fn expects_local_path(head: &str) -> bool {
 mod tests {
     use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{
-        ClientSourceEntity, CreateStatement, HttpIngestorEntity, KafkaEmitterEntity, Model,
+        ClientIngestorEntity, CreateStatement, HttpIngestorEntity, KafkaEmitterEntity, Model,
         MqttIngestorEntity, RequestedResourceVersion, SentryEmitterEntity,
     };
 
@@ -898,13 +898,14 @@ mod tests {
         assert!(suggest_client_expectations(client, client.len()).contains(
             &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
                 BuiltinFunctionScope::IngestorEntity(IngestorEntityKind::Client(
-                    ClientSourceEntity::Producer
+                    ClientIngestorEntity::Producer
                 )),
             ))
         ));
 
-        let kafka = "CREATE KAFKA TOPIC EMITTER sink FROM incoming TO broker TOPIC 'events' MODE \
-                     NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_";
+        let kafka = "CREATE KAFKA TOPIC EMITTER emitter FROM incoming TO broker TOPIC 'events' \
+                     MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE \
+                     write_";
         assert!(suggest_client_expectations(kafka, kafka.len()).contains(
             &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
                 BuiltinFunctionScope::EmitterInvocation(EmitterEntityKind::Kafka(
@@ -913,7 +914,7 @@ mod tests {
             ))
         ));
 
-        let sentry = "CREATE SENTRY EVENT EMITTER sink FROM incoming TO client MODE ACK RETRY \
+        let sentry = "CREATE SENTRY EVENT EMITTER emitter FROM incoming TO client MODE ACK RETRY \
                       POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_";
         assert!(suggest_client_expectations(sentry, sentry.len()).contains(
             &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(

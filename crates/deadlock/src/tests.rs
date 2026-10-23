@@ -6,8 +6,8 @@ use std::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::Entropy;
 use nervix_primitives::deadlock::{
-    Access, ActiveCycle, BlockedAttempt, BlockedThread, BoundedText, IngestorSite, LockKind,
-    LockSite, MAX_CYCLE_THREADS, MAX_TEXT_BYTES, TrackedLockId, TrackedThreadId, WaitedLock,
+    Access, ActiveCycle, BlockedAttempt, BlockedThread, BoundedText, LockKind, LockSite,
+    MAX_CYCLE_THREADS, MAX_TEXT_BYTES, SourceSite, TrackedLockId, TrackedThreadId, WaitedLock,
 };
 
 use crate::{
@@ -46,8 +46,8 @@ fn at(nanos: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_nanos(nanos)
 }
 
-fn site(file: &str, line: u32) -> IngestorSite {
-    IngestorSite {
+fn site(file: &str, line: u32) -> SourceSite {
+    SourceSite {
         file: BoundedText::new(file),
         line,
         column: 9,
@@ -556,8 +556,8 @@ fn generated_thread(entropy: &mut Entropy<'_>) -> BlockedThread {
     }
 }
 
-fn generated_site(entropy: &mut Entropy<'_>) -> IngestorSite {
-    IngestorSite {
+fn generated_site(entropy: &mut Entropy<'_>) -> SourceSite {
+    SourceSite {
         file: generated_text(entropy),
         line: u32::try_from(entropy.up_to(u64::from(u32::MAX))).assured("drawn below u32::MAX"),
         column: u32::try_from(entropy.up_to(u64::from(u32::MAX))).assured("drawn below u32::MAX"),

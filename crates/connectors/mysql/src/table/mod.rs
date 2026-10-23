@@ -1,4 +1,4 @@
-//! MySQL sink connector.
+//! MySQL emitter connector.
 //!
 //! Layer: engines and infrastructure.
 //!
@@ -105,15 +105,15 @@ impl MySqlConnection {
     }
 }
 
-/// The node-owned pool this sink borrows connections from while its host holds the lease.
+/// The node-owned pool this emitter borrows connections from while its host holds the lease.
 #[async_trait]
 pub trait MySqlConnections: Send + Sync + 'static {
     /// Borrow for one insert and its row isolation, with the host's pool wait recorded around it.
     async fn connection(&self) -> EmitterWriteResult<MySqlConnection>;
 }
 
-/// What one MySQL emitter inserts with, from its typed sink plan.
-pub struct MySqlEmitterConfig {
+/// What one MySQL emitter inserts with, from its typed emitter plan.
+pub struct MySqlTableEmitterConfig {
     pub table: MySqlTableName,
     pub conflict_action: MySqlConflictAction,
     /// The emitter's `BATCH` limits, which bound the rows and the measured bytes of every insert.
@@ -128,8 +128,8 @@ pub enum MySqlConflictAction {
     DoUpdate,
 }
 
-/// The MySQL sink, which binds each mapped row as the parameters of one multi-row insert.
-pub struct MySqlEmitter {
+/// The MySQL emitter, which binds each mapped row as the parameters of one multi-row insert.
+pub struct MySqlTableEmitter {
     connections: Box<dyn MySqlConnections>,
     table: MySqlTableName,
     conflict_action: MySqlConflictAction,
@@ -316,7 +316,7 @@ impl MySqlPool {
     }
 }
 
-impl MySqlEmitter {
+impl MySqlTableEmitter {
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -324,11 +324,11 @@ impl MySqlEmitter {
         )
     )]
     pub fn new(
-        config: MySqlEmitterConfig,
+        config: MySqlTableEmitterConfig,
         connections: Box<dyn MySqlConnections>,
         _host: EmitterHost,
     ) -> EmitterStartResult<Self> {
-        let MySqlEmitterConfig {
+        let MySqlTableEmitterConfig {
             table,
             conflict_action,
             batch,
@@ -414,8 +414,17 @@ impl MySqlEmitter {
     }
 }
 
+impl MySqlTableEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::MySql(nervix_models::MySqlEmitterEntity::Table);
+}
+
 #[async_trait]
-impl EmitterLifecycle for MySqlEmitter {
+impl EmitterLifecycle for MySqlTableEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// Each insert completes before the publish returns, so the pool holds nothing.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
         Ok(EmitterFinish::NothingHeld)
@@ -423,7 +432,7 @@ impl EmitterLifecycle for MySqlEmitter {
 }
 
 #[async_trait]
-impl RowEmitter for MySqlEmitter {
+impl RowEmitter for MySqlTableEmitter {
     /// Writes the rows of every carrier in multi-row inserts of at most `MAX MESSAGES` rows and as
     /// many as fit the placeholders one statement binds, whose statement and bound values measure
     /// at most `MAX SIZE` bytes.
@@ -701,7 +710,7 @@ impl BoundValues {
     }
 }
 
-/// A mapped column this sink cannot bind, named with the exact type it carries.
+/// A mapped column this emitter cannot bind, named with the exact type it carries.
 #[derive(Debug, thiserror::Error)]
 #[error("MySQL VALUES column '{column}' has unsupported exact type {data_type}")]
 #[cfg_attr(
@@ -980,7 +989,7 @@ mod tests {
 
     #[test]
     fn invalid_insert_clause_keeps_its_typed_cause_at_the_host_boundary() {
-        let failure = MySqlEmitter::conflict_clause(&[], MySqlConflictAction::DoUpdate)
+        let failure = MySqlTableEmitter::conflict_clause(&[], MySqlConflictAction::DoUpdate)
             .expect_err("an update needs mapped values");
         let report = MySqlWriteError::into_report(failure);
         assert!(report.contains::<MySqlWriteError>());
@@ -1113,8 +1122,8 @@ mod tests {
         }
     }
 
-    fn test_emitter(conflict_action: MySqlConflictAction) -> MySqlEmitter {
-        MySqlEmitter {
+    fn test_emitter(conflict_action: MySqlConflictAction) -> MySqlTableEmitter {
+        MySqlTableEmitter {
             connections: Box::new(NoConnections),
             table: MySqlTableName::parse("limit_a_t0192a1b2c3d4e5f60718293a4b5c6d7e")
                 .expect("the test table name is valid"),

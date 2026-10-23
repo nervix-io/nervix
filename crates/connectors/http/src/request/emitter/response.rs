@@ -1,4 +1,4 @@
-//! Bounded HTTP/1.1 response heads for the outbound HTTP sink.
+//! Bounded HTTP/1.1 response heads for the outbound HTTP emitter.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** Reading and validating each interim and final header block, classifying a

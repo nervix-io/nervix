@@ -12,9 +12,14 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    PostgresTableEmitter::KIND,
+    nervix_models::EmitterEntityKind::Postgres(nervix_models::PostgresEmitterEntity::Table)
+));
+
 impl EmitterConnectorStarter {
     pub(super) async fn postgres(
-        connector: &PostgresEmitterPlan,
+        connector: &PostgresTableEmitterPlan,
         context: &EmitterConnectorContext,
         input_schema: &CompiledSchema,
     ) -> EmitterRuntimeResult<Box<dyn EmitterConnector>> {
@@ -33,8 +38,8 @@ impl EmitterConnectorStarter {
                     .map_err(emitter_init_error)?;
             Self::row(
                 projection,
-                PostgresEmitter::new(
-                    PostgresEmitterConfig {
+                PostgresTableEmitter::new(
+                    PostgresTableEmitterConfig {
                         table: connector.table.clone(),
                         conflict_action: connector.conflict_action.clone(),
                         batch: connector.batch,

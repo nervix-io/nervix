@@ -12,9 +12,14 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    KafkaTopicEmitter::KIND,
+    nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
+));
+
 impl EmitterConnectorStarter {
     pub(super) fn kafka(
-        connector: &KafkaEmitterPlan,
+        connector: &KafkaTopicEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
         label: &str,
@@ -24,8 +29,8 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            KafkaEmitter::new(
-                KafkaEmitterConfig {
+            KafkaTopicEmitter::new(
+                KafkaTopicEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     topic: connector.topic.clone(),
                     mode: connector.mode,

@@ -704,7 +704,7 @@ Feature: Kafka emission
       """
     Then within "30s" the active session observes a server error containing
       """
-      kafka sink's transport client still held 3 records when its finish deadline passed
+      kafka emitter's transport client still held 3 records when its finish deadline passed
       """
 
     Examples:
@@ -788,7 +788,7 @@ Feature: Kafka emission
     When client "owner" attempts to commit its transaction
     Then the last command error contains
       """
-      kafka sink's transport client still held 3 records when its finish deadline passed
+      kafka emitter's transport client still held 3 records when its finish deadline passed
       """
     And transaction "{{swap_transaction}}" eventually has state "FAILED"
     Examples:

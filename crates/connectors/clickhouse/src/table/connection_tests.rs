@@ -79,7 +79,7 @@ impl Fixture {
             key: "addr".to_string(),
             value: addr.to_string(),
         }];
-        let (client, _) = ClickHouseEmitter::client_from_config(&config, self.dns())
+        let (client, _) = ClickHouseTableEmitter::client_from_config(&config, self.dns())
             .expect("the client configuration is valid");
         client
     }
@@ -114,7 +114,7 @@ fn stand_in(listener: TcpListener) -> JoinHandle<String> {
 }
 
 async fn insert(client: &ClickHouseClient) -> error_stack::Result<(), ClickHouseWriteError> {
-    ClickHouseEmitter::insert(
+    ClickHouseTableEmitter::insert(
         client,
         "events",
         Bytes::from_static(b"{\"id\":1}\n"),

@@ -165,7 +165,7 @@ impl BranchedInputBenchmark {
 }
 
 /// One emitter batch whose every row is encoded through an `ON EMITTING` JAQ program, as a record
-/// sink's rows are before they are published.
+/// emitter's rows are before they are published.
 pub struct TransformedEncodingBenchmark {
     runtime: nervix_primitives::runtime::Runtime,
     context: EmitterConnectorContext,

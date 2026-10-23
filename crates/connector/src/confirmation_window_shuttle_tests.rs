@@ -135,7 +135,7 @@ impl CheckedPublish {
     fn new(max_in_flight: usize, records: usize) -> Self {
         Self {
             window: ConfirmationWindow::new(
-                super::tests::SINK,
+                super::tests::EMITTER,
                 settings(max_in_flight, TIMEOUT),
                 records,
             ),

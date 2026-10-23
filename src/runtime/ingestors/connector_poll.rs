@@ -3,9 +3,9 @@
 //! Layer: data plane.
 //!
 //! - **Owns.** Reporting the records a poll could not read, splitting the messages it did read
-//!   into intake batches no larger than the bound the source's entity declares, and starting an
+//!   into intake batches no larger than the bound the ingestor's entity declares, and starting an
 //!   ingest group of its own for each batch.
-//! - **Depends on.** The connector source contract's poll result and the source host's
+//! - **Depends on.** The connector ingestor contract's poll result and the ingestor host's
 //!   unacknowledged intake, quiesce control and ingest group flush.
 //! - **Must not know.** A connector driver, the domain cadence that schedules the poll, or the
 //!   paced loop's readiness and retry decisions.
@@ -20,7 +20,7 @@ use nervix_connector::IngestorPollMessage;
 use super::*;
 
 /// The intake batches one poll's messages enter the graph in: consecutive runs of at most `bound`
-/// messages, in the order the source returned them, each observed at the poll's instant.
+/// messages, in the order the ingestor returned them, each observed at the poll's instant.
 pub(super) struct PollIntakeBatches {
     messages: std::vec::IntoIter<IngestorPollMessage>,
     bound: NonZeroUsize,
@@ -76,7 +76,7 @@ impl RuntimeIngestorHost {
         for failure in poll.failures {
             nervix_primitives::task::consume_budget().await;
             self.report_error(format!(
-                "source poll could not materialize one message: {failure:?}"
+                "ingestor poll could not materialize one message: {failure:?}"
             ));
         }
         let mut entered = false;

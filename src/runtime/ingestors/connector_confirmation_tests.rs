@@ -1,12 +1,12 @@
-//! What a broker source's host reports while the source's transport confirms its positions.
+//! What a broker ingestor's host reports while the ingestor's transport confirms its positions.
 //!
 //! Layer: test harness.
-//! - **Owns.** A source double whose acknowledgement a test fails or watches, a host double whose
+//! - **Owns.** A ingestor double whose acknowledgement a test fails or watches, a host double whose
 //!   acknowledgement trees are real roots on detached trackers, and the unit tests of the broker
 //!   loop's confirmed progress.
 //! - **Depends on.** The production broker loop, the runtime's batch acknowledgement and the
 //!   confirmed ACK roots it waits on.
-//! - **Must not know.** Broker drivers, the quiesce control or the runtime source host.
+//! - **Must not know.** Broker drivers, the quiesce control or the runtime ingestor host.
 
 #![cfg_attr(
     nervix_lint,
@@ -33,9 +33,9 @@ enum ConfirmationEvent {
     Acknowledged(Vec<u64>),
     /// The transport took these positions back to present them again.
     Rejected(Vec<u64>),
-    /// The source closed.
+    /// The ingestor closed.
     Closed,
-    /// The host reported positions the source stopped without confirming.
+    /// The host reported positions the ingestor stopped without confirming.
     Unconfirmed(usize),
 }
 
@@ -46,7 +46,7 @@ struct OutstandingRoots {
     ingestor: usize,
 }
 
-/// What the source and the host of one check did.
+/// What the ingestor and the host of one check did.
 #[derive(Default)]
 struct ConfirmationRecord {
     events: Vec<ConfirmationEvent>,
@@ -83,9 +83,9 @@ impl IngestorMessage for ConfirmingDelivery {
     }
 }
 
-/// A source whose queue the loop reads one message at a time, and whose transport fails a set
+/// A ingestor whose queue the loop reads one message at a time, and whose transport fails a set
 /// number of acknowledgements and rejections before it confirms or takes back the rest.
-struct ConfirmingSource {
+struct ConfirmingIngestor {
     queue: VecDeque<u64>,
     /// Acknowledgements the transport fails before it confirms one.
     failing_acknowledgements: usize,
@@ -95,7 +95,7 @@ struct ConfirmingSource {
     record: Arc<Mutex<ConfirmationRecord>>,
 }
 
-impl ConfirmingSource {
+impl ConfirmingIngestor {
     fn new(
         positions: impl IntoIterator<Item = u64>,
         trackers: IngestorAckRootTrackers,
@@ -112,7 +112,10 @@ impl ConfirmingSource {
 }
 
 #[async_trait]
-impl IngestorConnector for ConfirmingSource {
+impl IngestorConnector for ConfirmingIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic);
+
     type Plan = ();
 
     async fn open(_plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
@@ -128,7 +131,7 @@ impl IngestorConnector for ConfirmingSource {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for ConfirmingSource {
+impl BrokerIngestorConnector for ConfirmingIngestor {
     type Message = ConfirmingDelivery;
     type Position = u64;
 
@@ -191,10 +194,10 @@ struct ConfirmingHost {
     trackers: IngestorAckRootTrackers,
     shutdown: watch::Receiver<bool>,
     /// Whether the graph acknowledges what the host takes in. Otherwise the host holds the roots
-    /// unresolved, as a graph whose sink has not answered would.
+    /// unresolved, as a graph whose emitter has not answered would.
     resolve_trees: bool,
     unresolved: Vec<AckSet>,
-    /// Stops the source as its first batch is taken in, after that batch's acknowledgement trees
+    /// Stops the ingestor as its first batch is taken in, after that batch's acknowledgement trees
     /// resolved or were left unresolved.
     stop_after_first_intake: Option<watch::Sender<bool>>,
     record: Arc<Mutex<ConfirmationRecord>>,
@@ -286,9 +289,9 @@ impl IngestorHostServices for ConfirmingHost {
     }
 }
 
-/// A check's source and host over the same trackers and record.
+/// A check's ingestor and host over the same trackers and record.
 struct ConfirmationCheck {
-    source: ConfirmingSource,
+    source: ConfirmingIngestor,
     host: ConfirmingHost,
     trackers: IngestorAckRootTrackers,
     record: Arc<Mutex<ConfirmationRecord>>,
@@ -303,7 +306,7 @@ impl ConfirmationCheck {
         let record = Arc::new(Mutex::new(ConfirmationRecord::default()));
         let (shutdown, loop_shutdown) = watch::channel(false);
         Self {
-            source: ConfirmingSource::new(positions, trackers.clone(), record.clone()),
+            source: ConfirmingIngestor::new(positions, trackers.clone(), record.clone()),
             host: ConfirmingHost {
                 trackers: trackers.clone(),
                 shutdown: loop_shutdown.clone(),
@@ -325,9 +328,9 @@ impl ConfirmationCheck {
         self
     }
 
-    /// Runs the broker loop until its source closes or the check stops it.
+    /// Runs the broker loop until its ingestor closes or the check stops it.
     async fn run(self) -> (IngestorAckRootTrackers, Arc<Mutex<ConfirmationRecord>>) {
-        run_source_instance_with_retry(
+        run_ingestor_instance_with_retry(
             self.source,
             IngestorHost::new(self.host),
             sequential_policy(PositionClass::Replayable),
@@ -380,7 +383,7 @@ async fn a_failed_rejection_is_a_transient_status_until_a_later_confirmation() {
             // The confirmation failed, and so did the rejection of the batch it settled.
             ConfirmationEvent::Transient,
             ConfirmationEvent::Transient,
-            // The loop's retry of that rejection failed before the source was reestablished.
+            // The loop's retry of that rejection failed before the ingestor was reestablished.
             ConfirmationEvent::Transient,
             ConfirmationEvent::Rejected(vec![1]),
             ConfirmationEvent::Acknowledged(vec![1]),
@@ -391,7 +394,7 @@ async fn a_failed_rejection_is_a_transient_status_until_a_later_confirmation() {
 }
 
 /// The roots of a batch whose acknowledgement trees resolved stay outstanding, so a drain or an
-/// ownership handoff keeps waiting for them, until the source's transport confirmed the batch.
+/// ownership handoff keeps waiting for them, until the ingestor's transport confirmed the batch.
 #[nervix_primitives::test]
 async fn a_batch_stays_outstanding_for_a_drain_until_its_transport_confirms_it() {
     let check = ConfirmationCheck::reading([1]);
@@ -411,7 +414,7 @@ async fn a_batch_stays_outstanding_for_a_drain_until_its_transport_confirms_it()
 }
 
 /// A stop that arrives once a batch's acknowledgement trees resolved does not abandon the batch:
-/// the source confirms it before the loop closes the source.
+/// the ingestor confirms it before the loop closes the ingestor.
 #[nervix_primitives::test]
 async fn a_stop_after_a_batch_resolved_still_confirms_the_batch_before_closing() {
     // Each run offers the loop a resolved batch and a stop at the same time, so a loop that picks

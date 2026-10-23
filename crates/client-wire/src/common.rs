@@ -67,12 +67,12 @@ pub enum WireValueError {
 
 /// A byte range of the NSPL source text a request carried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct IngestorSpan {
+pub struct SourceSpan {
     start: u32,
     end: u32,
 }
 
-impl IngestorSpan {
+impl SourceSpan {
     pub fn new(start: u32, end: u32) -> Result<Self, Report<WireValueError>> {
         if end < start {
             return Err(Report::new(WireValueError::ReversedSourceSpan {
@@ -91,7 +91,7 @@ impl IngestorSpan {
         self.end
     }
 
-    fn decode(span: &wire::IngestorSpan) -> Result<Self, Report<WireDecodeError>> {
+    fn decode(span: &wire::SourceSpan) -> Result<Self, Report<WireDecodeError>> {
         match Self::new(span.start(), span.end()) {
             Ok(span) => Ok(span),
             Err(error) => Err(error.change_context(WireDecodeError::InvalidValue {
@@ -107,7 +107,7 @@ impl IngestorSpan {
 pub struct Diagnostic {
     pub message: String,
     /// Where the problem is in the request's source text, when it has a location.
-    pub span: Option<IngestorSpan>,
+    pub span: Option<SourceSpan>,
 }
 
 impl Diagnostic {
@@ -118,7 +118,7 @@ impl Diagnostic {
         let message = encoder.text("Diagnostic.message", &self.message)?;
         let span = self
             .span
-            .map(|span| wire::IngestorSpan::new(span.start, span.end));
+            .map(|span| wire::SourceSpan::new(span.start, span.end));
         Ok(wire::Diagnostic::create(
             encoder.fbb(),
             &wire::DiagnosticArgs {
@@ -134,7 +134,7 @@ impl Diagnostic {
     ) -> Result<Self, Report<WireDecodeError>> {
         let message = decoder.text("Diagnostic.message", table.message())?;
         let span = match table.span() {
-            Some(span) => Some(IngestorSpan::decode(span)?),
+            Some(span) => Some(SourceSpan::decode(span)?),
             None => None,
         };
         Ok(Self { message, span })

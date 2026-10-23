@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Kafka client Model, the topic source and sink Models with their offset and
+//! - **Owns.** The Kafka client Model, the topic source and emitter Models with their offset and
 //!   delivery modes, the topic and consumer group names a source reads with the rules Kafka holds
 //!   them to, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The Kafka driver, its configuration keys, or how a topic is consumed or
 //!   produced to.
 
@@ -89,7 +89,7 @@ pub struct KafkaTopicIngestor {
 }
 
 /// What the connector of a KAFKA TOPIC ingestor holds and how long it waits.
-const KAFKA_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
             holds: "messages librdkafka prefetches",
@@ -149,7 +149,7 @@ const KAFKA_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a KAFKA TOPIC emitter holds and how long it waits.
-const KAFKA_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
             holds: "records the producer queues under ACK",
@@ -237,7 +237,7 @@ impl IngestorDeclaration for KafkaTopicIngestor {
             },
             OptionDeclaration::INSTANCES,
         ],
-        bounds: KAFKA_SOURCE_BOUNDS,
+        bounds: KAFKA_INGESTOR_BOUNDS,
     };
 }
 
@@ -315,7 +315,7 @@ connector_ingestors! {
     /// What a Kafka source reads.
     pub enum KafkaIngestor;
     /// The alterations of the ingestors that read a Kafka entity.
-    pub enum KafkaIngestorAlteration;
+    pub enum KafkaTopicIngestorAlteration;
     /// The entities a Kafka source reads.
     pub enum KafkaIngestorEntity {
         Topic(KafkaTopicIngestor) = "TOPIC", "Kafka";
@@ -348,7 +348,7 @@ impl EmitterDeclaration for KafkaTopicEmitter {
         options: &[],
         envelope: &[],
         properties: &[],
-        bounds: KAFKA_SINK_BOUNDS,
+        bounds: KAFKA_EMITTER_BOUNDS,
     };
 }
 
@@ -367,11 +367,11 @@ impl EmitterEntityBody for KafkaTopicEmitter {
 
 connector_emitters! {
     connector Kafka = "KAFKA";
-    /// What a Kafka sink writes.
+    /// What a Kafka emitter writes.
     pub enum KafkaEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum KafkaEmitterMode;
-    /// The entities a Kafka sink writes.
+    pub enum KafkaTopicEmitterMode;
+    /// The entities a Kafka emitter writes.
     pub enum KafkaEmitterEntity {
         Topic(KafkaTopicEmitter, KafkaTopicPublishingMode) = "TOPIC";
     }

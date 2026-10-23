@@ -119,7 +119,7 @@ struct FaultInjectionState {
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
     failed_ingestors: DashMap<String, (), RandomState>,
     unavailable_emitter_clients: DashMap<String, (), RandomState>,
-    /// One-shot, emitter-scoped sink stalls: the next write of the emitter keeps the sink's answers
+    /// One-shot, emitter-scoped emitter stalls: the next write of the emitter keeps the emitter's answers
     /// for this many of its records, and the answers for the rest are lost.
     stalled_emitter_connectors: DashMap<String, usize, RandomState>,
     failed_schedule_publications: DashMap<String, (), RandomState>,
@@ -1081,9 +1081,9 @@ impl FaultInjection {
             .remove(&emitter.to_ascii_lowercase());
     }
 
-    /// Makes the sink of `emitter` stall after it resolved `resolved` records of its next write.
+    /// Makes the emitter of `emitter` stall after it resolved `resolved` records of its next write.
     ///
-    /// The sink still writes every record, but the emitter receives only its answers for the first
+    /// The emitter still writes every record, but the emitter receives only its answers for the first
     /// `resolved` records in the order it handed them over, as it does from a broker that stops
     /// answering after it accepted the rest. The write then fails the way an unanswered one does,
     /// so the emitter cannot tell which of the other records landed.
@@ -2026,7 +2026,7 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "the scenario selects one retained sink unavailability seam",
+            reason = "the scenario selects one retained emitter unavailability seam",
             key = "one test emitter",
             bound = "one keyed presence read with no retained guard"
         )
@@ -2037,13 +2037,13 @@ impl FaultInjection {
             .contains_key(&emitter.as_str().to_ascii_lowercase())
     }
 
-    /// Consumes the sink stall armed for the next write of `emitter`: how many of its records the
-    /// sink resolves before it stalls.
+    /// Consumes the emitter stall armed for the next write of `emitter`: how many of its records the
+    /// emitter resolves before it stalls.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "the scenario consumes its single armed sink-write stall",
+            reason = "the scenario consumes its single armed emitter-write stall",
             key = "one test emitter",
             bound = "one keyed removal; no guard survives the operation"
         )

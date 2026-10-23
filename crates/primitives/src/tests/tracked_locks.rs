@@ -2,7 +2,7 @@
 //!
 //! A tracked lock refuses to run before the process installs its detector, so every check here
 //! starts by installing it, once for the whole test process. A check that deadlocked would reach
-//! the sink, which fails the process: this suite's checks never block on one another's locks. The
+//! the emitter, which fails the process: this suite's checks never block on one another's locks. The
 //! cycles the detector reports are checked in disposable processes by nervix-deadlock, which owns
 //! what a finding means.
 
@@ -31,7 +31,7 @@ const PARTICIPANT_BOUND: Duration = Duration::from_secs(60);
 const PARTICIPANT_JOINS: &str =
     "a participant panics only when an assertion fails, which fails the test first";
 
-/// Install this test process's detector, once, with a sink that fails the process on any finding.
+/// Install this test process's detector, once, with an emitter that fails the process on any finding.
 pub(super) fn detector_installed() {
     static INSTALLATION: Once = Once::new();
     INSTALLATION.call_once(|| {

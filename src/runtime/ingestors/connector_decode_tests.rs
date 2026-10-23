@@ -1,12 +1,12 @@
-//! Source payloads their ingestor's codec refuses, as the production source host consumes them.
+//! Ingestor payloads their ingestor's codec refuses, as the production ingestor host consumes them.
 //!
 //! Layer: test harness.
-//! - **Owns.** Driving the production source host's acknowledged, unacknowledged, poll and retained
+//! - **Owns.** Driving the production ingestor host's acknowledged, unacknowledged, poll and retained
 //!   intake with payloads the codec refuses beside payloads it decodes, and the delivery,
 //!   acknowledgement, report and accounting each path promises for them.
-//! - **Depends on.** The production source host, the unfolding domain fixture of the extension
+//! - **Depends on.** The production ingestor host, the unfolding domain fixture of the extension
 //!   tests, and the runtime's event bus.
-//! - **Must not know.** Broker drivers or the source loops that call the host.
+//! - **Must not know.** Broker drivers or the ingestor loops that call the host.
 
 #![cfg_attr(
     nervix_lint,
@@ -83,7 +83,7 @@ fn assert_rejected(fixture: &UnfoldingDomain, report: &str, rejections: u64) {
 }
 
 /// An acknowledged batch whose codec refuses one payload delivers the other and is acknowledged,
-/// so its source acknowledges the refused payload's position too instead of presenting it again.
+/// so its ingestor acknowledges the refused payload's position too instead of presenting it again.
 #[nervix_primitives::test]
 async fn an_acknowledged_batch_consumes_a_payload_its_codec_refuses_and_delivers_the_rest() {
     let mut fixture = UnfoldingDomain::start().await;

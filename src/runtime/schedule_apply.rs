@@ -349,7 +349,7 @@ impl Runtime {
                     Box::pin(self.swap_scheduled_nodes(&desired.domain, desired.clone(), change))
                         .await;
                 if let Err(error) = swap_result {
-                    // A failed emitter stop reinstalls its task with the sink's held records.
+                    // A failed emitter stop reinstalls its task with the emitter's held records.
                     // Rebuilding here would tear that task down and hide its finish outcome.
                     if matches!(
                         error.downcast_ref::<ExecutionBuildError>(),

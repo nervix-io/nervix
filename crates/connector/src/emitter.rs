@@ -1,12 +1,12 @@
-//! Sink operations and host services shared by every connector that emits records.
+//! Emitter operations and host services shared by every connector that emits records.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The record, mapped-row, row request and HTTP request sink traits, their lifecycle
+//! - **Owns.** The record, mapped-row, row request and HTTP request emitter traits, their lifecycle
 //!   hooks, typed start and publish failures, the carriers one mapped-row write covers, the
-//!   identities a sink answers for — a record or request the host assigned, or a mapped row's source
-//!   position — the requests a row request sink prepares from mapped rows, the outcome it answers
-//!   with, and the opaque handles through which a sink reports to its host or keeps host-owned
+//!   identities an emitter answers for — a record or request the host assigned, or a mapped row's ingestor
+//!   position — the requests a row request emitter prepares from mapped rows, the outcome it answers
+//!   with, and the opaque handles through which an emitter reports to its host or keeps host-owned
 //!   acknowledgements alive.
 //! - **Depends on.** Arrow batches, vocabulary values, `error-stack`, Tokio's monotonic instant,
 //!   and trait-object support.
@@ -42,7 +42,7 @@ pub struct AckConfirmation {
     pub timeout: Duration,
 }
 
-/// How a broker sink learns that a record was accepted.
+/// How a broker emitter learns that a record was accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrokerPublishingMode {
     NoAck,
@@ -51,7 +51,7 @@ pub enum BrokerPublishingMode {
 
 /// Where one source row sits in the host's buffered batches: its batch and its row within it.
 ///
-/// A row sink answers for each mapped row under its position. Positions order by batch and then by
+/// A row emitter answers for each mapped row under its position. Positions order by batch and then by
 /// row, which is the order the host hands rows over in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EmitterRecordPosition {
@@ -151,17 +151,17 @@ impl EmitterHttpRequest {
     }
 }
 
-/// One request a row request sink prepared from mapped rows, handed back to it on every attempt
+/// One request a row request emitter prepared from mapped rows, handed back to it on every attempt
 /// until it answers for the request.
 ///
-/// The host retains the bytes and the source rows the request carries from the moment the sink
+/// The host retains the bytes and the source rows the request carries from the moment the emitter
 /// prepared it, so every attempt, through whichever connector the emitter holds by then, sends the
 /// bytes the first attempt sent. A request carries no runtime acknowledgement: the host retains the
 /// acknowledgements of the source rows the request carries.
 #[derive(Debug)]
 pub struct EmitterRowRequest {
     pub id: EmitterRecordId,
-    /// Exactly the bytes the sink prepared.
+    /// Exactly the bytes the emitter prepared.
     pub body: Vec<u8>,
     /// When the host evaluated the mapping the request was prepared from, which a rejection of the
     /// request is reported with.
@@ -174,7 +174,7 @@ impl EmitterRowRequest {
     }
 }
 
-/// One request a row request sink prepared, and the source rows it carries.
+/// One request a row request emitter prepared, and the source rows it carries.
 #[derive(Debug)]
 pub struct PreparedRowRequest {
     /// The source rows the request carries, in the order it carries them.
@@ -183,23 +183,23 @@ pub struct PreparedRowRequest {
     pub body: Vec<u8>,
 }
 
-/// What a row request sink prepared from one batch of mapped rows.
+/// What a row request emitter prepared from one batch of mapped rows.
 ///
 /// Every selected row is a member of exactly one request or refused, and every member of a request
 /// follows the members of the requests before it in source order. The host checks both before it
 /// retains a request.
 #[derive(Debug, Default)]
 pub struct RowRequestPreparation {
-    /// The requests that carry the rows the sink accepted, in the order it sends them.
+    /// The requests that carry the rows the emitter accepted, in the order it sends them.
     pub requests: Vec<PreparedRowRequest>,
-    /// The rows the sink refused, each with the message error the host delivers for it.
+    /// The rows the emitter refused, each with the message error the host delivers for it.
     pub rejected: Vec<RejectedEmitterMember<EmitterRecordPosition>>,
 }
 
 /// One record the connector definitively rejected, with the message error the host must deliver.
 ///
-/// `Id` is what the connector answers for: a [`EmitterRecordId`] from a record sink, or a
-/// [`EmitterRecordPosition`] from a row sink.
+/// `Id` is what the connector answers for: a [`EmitterRecordId`] from a record emitter, or a
+/// [`EmitterRecordPosition`] from a row emitter.
 #[derive(Debug)]
 pub struct RejectedEmitterMember<Id> {
     pub id: Id,
@@ -265,9 +265,9 @@ impl<Id> RejectedEmitterMember<Id> {
 
 /// The result of one connector write, classified per record where a definitive outcome exists.
 ///
-/// `Id` is what the connector answers for: a [`EmitterRecordId`] from a record or request sink, whose
+/// `Id` is what the connector answers for: a [`EmitterRecordId`] from a record or request emitter, whose
 /// host applies the answer to every source row the record or request carries, or a
-/// [`EmitterRecordPosition`] from a row sink, which answers for each mapped row. A record the connector
+/// [`EmitterRecordPosition`] from a row emitter, which answers for each mapped row. A record the connector
 /// neither delivered nor rejected stays unresolved, and only an infrastructure failure explains why
 /// the write left it so.
 pub struct PerRecordOutcome<Id> {
@@ -308,7 +308,7 @@ impl<Id> PerRecordOutcome<Id> {
         self.infrastructure_error = Some(error);
     }
 
-    /// Whether this write already failed for a reason the host must retry, which a sink writing
+    /// Whether this write already failed for a reason the host must retry, which an emitter writing
     /// several chunks reads before it starts the next one.
     pub fn has_infrastructure_error(&self) -> bool {
         self.infrastructure_error.is_some()
@@ -323,10 +323,10 @@ impl<Id> PerRecordOutcome<Id> {
     }
 }
 
-/// One host-projected Arrow carrier of a mapped-row write and the rows a row sink writes, or a row
-/// request sink prepares requests, from it.
+/// One host-projected Arrow carrier of a mapped-row write and the rows a row emitter writes, or a row
+/// request emitter prepares requests, from it.
 ///
-/// `batch.column(i)` holds the values mapped to the write's `target_columns[i]`, so a sink reads
+/// `batch.column(i)` holds the values mapped to the write's `target_columns[i]`, so an emitter reads
 /// its columns by position and never resolves a name a mapping may have used twice.
 pub struct MappedEmitterCarrier<'a> {
     pub batch_index: usize,
@@ -335,9 +335,9 @@ pub struct MappedEmitterCarrier<'a> {
     /// When the host evaluated the mapping, which a rejected row is reported with and a commit
     /// report names as the domain time of the rows it published.
     pub occurred_at: Timestamp,
-    /// The acknowledgements of `selected_rows`, handed over to a sink that declares
-    /// [`EmitterLifecycle::retains_acknowledgements`]. The host builds them for no other sink, so a
-    /// sink that acknowledges on the publish boundary receives none.
+    /// The acknowledgements of `selected_rows`, handed over to an emitter that declares
+    /// [`EmitterLifecycle::retains_acknowledgements`]. The host builds them for no other emitter, so a
+    /// emitter that acknowledges on the publish boundary receives none.
     pub acknowledgements: Option<EmitterRecordAcknowledgements>,
 }
 
@@ -346,7 +346,7 @@ pub struct MappedEmitterCarrier<'a> {
 ///
 /// A write never spans source relays or branches, so every row it carries may travel in one
 /// request. Each carrier keeps its own mapped columns, execution time and acknowledgements. A row
-/// sink is handed every run of carriers; a row request sink is handed one carrier per preparation,
+/// emitter is handed every run of carriers; a row request emitter is handed one carrier per preparation,
 /// because the host checks and retains what it prepared batch by batch.
 pub struct MappedEmitterRows<'a> {
     pub target_columns: &'a [String],
@@ -387,7 +387,7 @@ impl MappedEmitterRows<'_> {
         count
     }
 
-    /// Where `member` sits in the host's buffered batches, which the sink answers for it under.
+    /// Where `member` sits in the host's buffered batches, which the emitter answers for it under.
     pub fn position(&self, member: MappedEmitterMember) -> EmitterRecordPosition {
         let carrier = self.carriers.get(member.carrier).assured(MEMBER_CARRIER);
         EmitterRecordPosition {
@@ -414,9 +414,9 @@ pub struct EmitterCommitReport {
     pub domain_timestamp: Timestamp,
 }
 
-/// What a sink that stages its writes holds for its next commit.
+/// What an emitter that stages its writes holds for its next commit.
 ///
-/// The sink reports what it staged and the host owns the cadence: it measures
+/// The emitter reports what it staged and the host owns the cadence: it measures
 /// [`EmitterStagedCommit::Cadence`] on the emitter's domain clock from the first cadence check that
 /// finds the rows staged, which follows the write that staged them. Rows the emitter's buffer held
 /// before releasing them therefore wait the whole cadence after they are staged, not after the
@@ -425,18 +425,18 @@ pub struct EmitterCommitReport {
 pub enum EmitterStagedCommit {
     /// Staged rows whose commit is due once this domain duration has passed since they were staged.
     Cadence(Duration),
-    /// Staged rows that reached the sink's maximum commit size, so their commit is due now.
+    /// Staged rows that reached the emitter's maximum commit size, so their commit is due now.
     SizeReached,
 }
 
-/// Why a connector could not initialize its sink client.
+/// Why a connector could not initialize its emitter client.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum EmitterOpenError {
-    #[error("invalid {connector} sink configuration")]
+    #[error("invalid {connector} emitter configuration")]
     InvalidConfiguration { connector: &'static str },
-    #[error("failed to initialize {connector} sink")]
+    #[error("failed to initialize {connector} emitter")]
     Initialize { connector: &'static str },
-    /// Nervix creates nothing in an external system, so an entity a sink writes to has to exist
+    /// Nervix creates nothing in an external system, so an entity an emitter writes to has to exist
     /// before it starts. A connector reports the entity it looked for rather than creating one.
     #[error("{kind} '{name}' does not exist")]
     MissingExternalEntity {
@@ -448,29 +448,29 @@ pub enum EmitterOpenError {
 
 pub type EmitterStartResult<T> = Result<T, Report<EmitterOpenError>>;
 
-/// Why a connector could not complete a sink operation.
+/// Why a connector could not complete an emitter operation.
 ///
 /// Every variant but [`EmitterWriteError::Misconfigured`] describes a condition the host retries on
 /// its declared backoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum EmitterWriteError {
-    #[error("{connector} sink is not initialized")]
+    #[error("{connector} emitter is not initialized")]
     NotInitialized { connector: &'static str },
-    #[error("failed to publish through {connector} sink")]
+    #[error("failed to publish through {connector} emitter")]
     Publish { connector: &'static str },
-    #[error("failed to commit {connector} sink")]
+    #[error("failed to commit {connector} emitter")]
     Commit { connector: &'static str },
-    #[error("{connector} sink cannot accept this write as it is configured")]
+    #[error("{connector} emitter cannot accept this write as it is configured")]
     Misconfigured { connector: &'static str },
 }
 
 pub type EmitterWriteResult<T> = Result<T, Report<EmitterWriteError>>;
 
-/// What finishing a sink did with the records its transport client still held.
+/// What finishing an emitter did with the records its transport client still held.
 ///
 /// A publish reports a record delivered at the completion point its mode declares. Where that point
 /// is the client taking the record, the client can still hold delivered records when the emitter
-/// stops, so the host finishes every sink once the emitter will publish nothing more through it.
+/// stops, so the host finishes every emitter once the emitter will publish nothing more through it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmitterFinish {
     /// The client holds no record once a publish returns, so there was nothing to send.
@@ -479,7 +479,7 @@ pub enum EmitterFinish {
     Flushed,
 }
 
-/// Why finishing a sink did not send every record its transport client still held.
+/// Why finishing an emitter did not send every record its transport client still held.
 ///
 /// The host retries neither: a stop that asked for the finish fails, and terminal teardown records
 /// what the client still held as lost.
@@ -487,7 +487,7 @@ pub enum EmitterFinish {
 pub enum EmitterFinishError {
     /// The deadline passed while the client still held `records` records it had not sent.
     #[error(
-        "{connector} sink's transport client still held {records} records when its finish \
+        "{connector} emitter's transport client still held {records} records when its finish \
          deadline passed"
     )]
     Unsent {
@@ -495,7 +495,7 @@ pub enum EmitterFinishError {
         records: u64,
     },
     /// The client failed while it sent the records it held.
-    #[error("{connector} sink's transport client failed while it sent the records it held")]
+    #[error("{connector} emitter's transport client failed while it sent the records it held")]
     Flush { connector: &'static str },
 }
 
@@ -520,12 +520,15 @@ pub struct EmitterRetryDelay(pub Duration);
     )
 )]
 pub trait EmitterLifecycle: Send {
+    /// The vocabulary entity implemented by this concrete connector.
+    fn kind(&self) -> nervix_models::EmitterEntityKind;
+
     /// Sends what the transport client still holds of the records a publish reported delivered, by
     /// `deadline`, and answers with what that did.
     ///
-    /// The host calls this once the emitter will publish nothing more through this sink: after a
+    /// The host calls this once the emitter will publish nothing more through this emitter: after a
     /// stop drained the emitter's buffer, and after terminal teardown ended the emitter task,
-    /// possibly in the middle of a publish. Every sink answers for what its own client holds, so
+    /// possibly in the middle of a publish. Every emitter answers for what its own client holds, so
     /// this hook has no default.
     async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult;
 
@@ -533,12 +536,12 @@ pub trait EmitterLifecycle: Send {
         false
     }
 
-    /// What this sink holds for its next commit, absent while it has nothing staged.
+    /// What this emitter holds for its next commit, absent while it has nothing staged.
     ///
     /// The host reads it after every write its cadence releases. It arms the cadence this names at
     /// the first such check that finds rows staged, includes that deadline in the emitter task's
-    /// next wake, and asks for the commit once the deadline is reached or the sink reports its size
-    /// boundary. A sink that writes each batch as it arrives stages nothing.
+    /// next wake, and asks for the commit once the deadline is reached or the emitter reports its size
+    /// boundary. A emitter that writes each batch as it arrives stages nothing.
     fn staged_commit(&self) -> Option<EmitterStagedCommit> {
         None
     }
@@ -547,16 +550,16 @@ pub trait EmitterLifecycle: Send {
         None
     }
 
-    /// Whether this sink takes the acknowledgements of the rows it accepts and resolves them
+    /// Whether this emitter takes the acknowledgements of the rows it accepts and resolves them
     /// itself once its commit succeeds.
     ///
-    /// The host merges a batch's acknowledgements only for a sink that answers `true`, so a sink
+    /// The host merges a batch's acknowledgements only for an emitter that answers `true`, so an emitter
     /// that acknowledges on the publish boundary never pays for a handover it would not read.
     fn retains_acknowledgements(&self) -> bool {
         false
     }
 
-    /// How many messages this sink holds that the host's own buffer no longer counts.
+    /// How many messages this emitter holds that the host's own buffer no longer counts.
     ///
     /// A drain reads this total together with the emitter buffer, so staged work keeps the node
     /// busy until its commit publishes it.
@@ -564,11 +567,11 @@ pub trait EmitterLifecycle: Send {
         0
     }
 
-    /// Publishes everything this sink staged and resolves the acknowledgements it retained.
+    /// Publishes everything this emitter staged and resolves the acknowledgements it retained.
     ///
     /// The host calls this when the commit [`EmitterLifecycle::staged_commit`] describes is due, and
     /// for a retry or a drain, which commit whatever is staged without waiting for the cadence or
-    /// reading the domain clock. A sink that writes each batch as it arrives stages nothing and has
+    /// reading the domain clock. A emitter that writes each batch as it arrives stages nothing and has
     /// nothing to commit.
     async fn commit(&mut self) -> EmitterWriteResult<Option<EmitterCommitReport>> {
         Ok(None)
@@ -642,7 +645,7 @@ pub trait HttpRequestEmitter: EmitterLifecycle {
     )
 )]
 pub trait RowEmitter: EmitterLifecycle {
-    /// Writes the selected rows and answers for each of them by its source position.
+    /// Writes the selected rows and answers for each of them by its ingestor position.
     async fn publish(
         &mut self,
         rows: MappedEmitterRows<'_>,
@@ -681,7 +684,7 @@ pub trait RowRequestEmitter: EmitterLifecycle {
     ) -> PerRecordOutcome<EmitterRecordId>;
 }
 
-/// Operations the host owns for acknowledgements retained by a sink.
+/// Operations the host owns for acknowledgements retained by an emitter.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -800,7 +803,7 @@ pub trait EmitterBoundedExecution: Send + Sync + 'static {
     fn executor(&self) -> Executor;
 }
 
-/// Every service exposed through one sink host handle.
+/// Every service exposed through one emitter host handle.
 #[cfg_attr(
     nervix_lint,
     nervix::context(

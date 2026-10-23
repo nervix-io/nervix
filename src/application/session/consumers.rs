@@ -226,7 +226,7 @@ impl SessionConsumers {
         if !matches!(model.connector.as_ref(), EmitterEntity::Client(_)) {
             return Err(refuse(
                 EmitterOpenRefusal::NotClientEmitter,
-                "emitter has an external sink",
+                "emitter has an external emitter",
             ));
         }
         let Some(owner) = scheduled.execution_node() else {

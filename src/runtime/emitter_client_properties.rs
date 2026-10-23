@@ -1,11 +1,11 @@
-//! Generated client emitter deliveries through the sink's encoder and the client library's decoder.
+//! Generated client emitter deliveries through the emitter's encoder and the client library's decoder.
 //!
 //! Layer: test harness.
 //!
-//! - **Owns.** The property that the rows a client emitter sink writes for one delivery are the
+//! - **Owns.** The property that the rows a client emitter connector writes for one delivery are the
 //!   rows an application consumer decodes, under exactly the fields the emitter declares, and that
 //!   the decoder refuses the delivery under any other fields or row count.
-//! - **Depends on.** The generated batches and their logical oracle, the sink's delivery encoder
+//! - **Depends on.** The generated batches and their logical oracle, the emitter's delivery encoder
 //!   and the client library's delivery decoder.
 //! - **Must not know.** Endpoints, consumers, sessions, the frames a delivery travels in between
 //!   nodes, or what settles a delivery.
@@ -32,7 +32,7 @@ use crate::runtime_schema::generated_batches::{
 const CASE_BYTES: usize = 2048;
 
 /// The rows of `source` a delivery carries: those `mask` names by their bit, in the order they
-/// lie in the batch. A sink packs a delivery from the pending rows of one branch, which need not
+/// lie in the batch. A emitter packs a delivery from the pending rows of one branch, which need not
 /// be adjacent, and never packs none, so a batch with rows always gives at least its first one.
 fn delivered_rows(source: &RecordBatch, mask: u8) -> Vec<usize> {
     let mut rows = Vec::new();
@@ -48,7 +48,7 @@ fn delivered_rows(source: &RecordBatch, mask: u8) -> Vec<usize> {
     rows
 }
 
-/// The stream the sink writes for `rows` of `source`.
+/// The stream the emitter writes for `rows` of `source`.
 fn delivery(schema: &GeneratedSchema, source: &RecordBatch, rows: &[usize]) -> Bytes {
     ClientConsumerConnector::encode_rows(&schema.compiled, source, rows)
         .assured("rows of the emitter's own output schema encode")
@@ -70,7 +70,7 @@ fn assert_refused(outcome: error_stack::Result<RecordBatch, ClientError>, what: 
     );
 }
 
-/// The rows a client emitter sink writes for a delivery are the rows an application consumer
+/// The rows a client emitter connector writes for a delivery are the rows an application consumer
 /// decodes from it: the Arrow schema of exactly the fields the emitter declares, every selected
 /// row in its order, and every value and null, floats by their bits, taken from a view whose
 /// columns start inside a larger batch. The consumer's decoder refuses the same bytes under one row
@@ -97,8 +97,9 @@ fn bolero_client_emitter_deliveries_decode_to_the_delivered_rows() {
                 "an emitter declares its output schema field for field"
             );
             let body = delivery(&schema, &source, &rows);
-            let decoded = EmitterDelivery::decode_record_batch(&declared, &body, members)
-                .assured("a delivery the sink wrote decodes under the fields its emitter declares");
+            let decoded = EmitterDelivery::decode_record_batch(&declared, &body, members).assured(
+                "a delivery the emitter wrote decodes under the fields its emitter declares",
+            );
 
             assert_eq!(
                 decoded.schema().as_ref(),
@@ -163,7 +164,7 @@ fn seeded_bytes(seed: u8) -> Vec<u8> {
     bytes
 }
 
-/// A delivery of every row of a batch is the batch itself, so the sink's encoder agrees with the
+/// A delivery of every row of a batch is the batch itself, so the emitter's encoder agrees with the
 /// oracle the other Arrow properties compare whole batches with.
 #[test]
 fn a_delivery_of_every_row_decodes_to_the_whole_batch() {
@@ -180,7 +181,7 @@ fn a_delivery_of_every_row_decodes_to_the_whole_batch() {
             &body,
             members,
         )
-        .assured("a delivery the sink wrote decodes under the fields its emitter declares");
+        .assured("a delivery the emitter wrote decodes under the fields its emitter declares");
         assert_same_batch(&decoded, &source);
     }
 }

@@ -4,7 +4,7 @@ use std::num::{NonZeroU16, NonZeroUsize};
 
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AckWindow, ClientIngestMode, ClientProducerIngestor, ClientSourceEntity, CreateIngestor,
+    AckWindow, ClientIngestMode, ClientIngestorEntity, ClientProducerIngestor, CreateIngestor,
     EndpointIngestMode, HttpEndpointIngestor, HttpIngestorEntity, HttpRequestIngestMode,
     HttpRequestIngestor, IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource,
     IngestorDeclaration, IngestorEntity, IngestorEntityBody, IngestorEntityKind, IngestorInput,
@@ -103,7 +103,7 @@ impl Arbitrary<'_> {
     /// build it.
     pub fn ingest_source_of(&mut self, kind: IngestorEntityKind) -> Option<IngestorEntity> {
         let source = match kind {
-            IngestorEntityKind::Client(ClientSourceEntity::Producer) => return None,
+            IngestorEntityKind::Client(ClientIngestorEntity::Producer) => return None,
             IngestorEntityKind::Http(HttpIngestorEntity::Request) => {
                 self.http_request_source().into()
             }

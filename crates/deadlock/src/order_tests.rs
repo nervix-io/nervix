@@ -8,9 +8,9 @@ use std::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::Entropy;
 use nervix_primitives::deadlock::{
-    Access, BlockedAttempt, BoundedText, IngestorSite, LockKind, LockLifetime, LockSite,
-    MAX_ORDER_EDGES, MAX_ORDER_WITNESSES, OrderEdge, OrderLock, OrderOutOfBounds, OrderWitness,
-    PotentialCycle, TrackedLockId, TrackedThreadId,
+    Access, BlockedAttempt, BoundedText, LockKind, LockLifetime, LockSite, MAX_ORDER_EDGES,
+    MAX_ORDER_WITNESSES, OrderEdge, OrderLock, OrderOutOfBounds, OrderWitness, PotentialCycle,
+    SourceSite, TrackedLockId, TrackedThreadId,
 };
 
 use crate::{
@@ -21,8 +21,8 @@ fn number(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).assured("test identities start from one")
 }
 
-fn source(line: u32) -> IngestorSite {
-    IngestorSite {
+fn source(line: u32) -> SourceSite {
+    SourceSite {
         file: BoundedText::new("src/owner.rs"),
         line,
         column: 4,
@@ -401,8 +401,8 @@ fn generated_text(entropy: &mut Entropy<'_>) -> BoundedText {
     }
     BoundedText::new(&text)
 }
-fn generated_site(entropy: &mut Entropy<'_>) -> IngestorSite {
-    IngestorSite {
+fn generated_site(entropy: &mut Entropy<'_>) -> SourceSite {
+    SourceSite {
         file: generated_text(entropy),
         line: u32::try_from(entropy.up_to(u64::from(u32::MAX))).assured("drawn within u32"),
         column: u32::try_from(entropy.up_to(u64::from(u32::MAX))).assured("drawn within u32"),

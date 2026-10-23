@@ -1694,19 +1694,19 @@ mod tests {
         let nodes = vec![
             placement_member("shared", ModelKind::Junction),
             placement_member("shared", ModelKind::Deduplicator),
-            placement_member("sink", ModelKind::Emitter),
+            placement_member("emitter", ModelKind::Emitter),
         ];
 
         assert_eq!(
             format_placement_runtime_nodes(&nodes),
-            "junction:shared, deduplicator:shared, sink"
+            "junction:shared, deduplicator:shared, emitter"
         );
         assert_eq!(
             format_placement_runtime_nodes(&[
                 placement_member("source", ModelKind::Junction),
-                placement_member("sink", ModelKind::Emitter),
+                placement_member("emitter", ModelKind::Emitter),
             ]),
-            "source, sink"
+            "source, emitter"
         );
     }
 

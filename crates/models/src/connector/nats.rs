@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The NATS client Model, the subject source and sink Models with their delivery
+//! - **Owns.** The NATS client Model, the subject source and emitter Models with their delivery
 //!   mode, the subject and queue group names a source subscribes with and the rules NATS holds
 //!   them to, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The NATS driver, its configuration keys, or how a subject is subscribed or
 //!   published to.
 
@@ -107,7 +107,7 @@ pub struct NatsSubjectIngestor {
 }
 
 /// What the connector of a NATS SUBJECT ingestor holds and how long it waits.
-const NATS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const NATS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "messages the subscription holds ahead of the host",
         bound: BufferBound::Bounded {
@@ -139,7 +139,7 @@ const NATS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a NATS SUBJECT emitter holds and how long it waits.
-const NATS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+const NATS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "commands queued for the connection",
         bound: BufferBound::Bounded {
@@ -198,7 +198,7 @@ impl IngestorDeclaration for NatsSubjectIngestor {
             },
             OptionDeclaration::INSTANCES.required(),
         ],
-        bounds: NATS_SOURCE_BOUNDS,
+        bounds: NATS_INGESTOR_BOUNDS,
     };
 }
 
@@ -240,7 +240,7 @@ connector_ingestors! {
     /// What a NATS source reads.
     pub enum NatsIngestor;
     /// The alterations of the ingestors that read a NATS entity.
-    pub enum NatsIngestorAlteration;
+    pub enum NatsSubjectIngestorAlteration;
     /// The entities a NATS source reads.
     pub enum NatsIngestorEntity {
         Subject(NatsSubjectIngestor) = "SUBJECT", "NATS";
@@ -274,7 +274,7 @@ impl EmitterDeclaration for NatsSubjectEmitter {
         options: &[],
         envelope: &[],
         properties: &[],
-        bounds: NATS_SINK_BOUNDS,
+        bounds: NATS_EMITTER_BOUNDS,
     };
 }
 
@@ -293,11 +293,11 @@ impl EmitterEntityBody for NatsSubjectEmitter {
 
 connector_emitters! {
     connector Nats = "NATS";
-    /// What a NATS sink writes.
+    /// What a NATS emitter writes.
     pub enum NatsEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum NatsEmitterMode;
-    /// The entities a NATS sink writes.
+    pub enum NatsSubjectEmitterMode;
+    /// The entities a NATS emitter writes.
     pub enum NatsEmitterEntity {
         Subject(NatsSubjectEmitter, NatsSubjectPublishingMode) = "SUBJECT";
     }

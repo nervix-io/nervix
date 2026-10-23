@@ -64,7 +64,7 @@ fn finding(seed: &[u8; 32], index: u8) -> Finding {
     let end = integer(seed, 2).max(start);
     let line = integer(seed, 3);
     let column = integer(seed, 4);
-    let source = IngestorSpan {
+    let source = SourceSpan {
         site: SiteId {
             path: text.clone(),
             start,
@@ -124,7 +124,7 @@ fn audit_candidate(seed: &[u8; 32], index: u8) -> AuditCandidate {
 }
 
 /// Every current audit pattern, with seed-selected values in each of its fields.
-fn pattern(seed: &[u8; 32], source: &IngestorSpan) -> AuditPattern {
+fn pattern(seed: &[u8; 32], source: &SourceSpan) -> AuditPattern {
     let name = format!("value_{}", seed[16]);
     let mut later = source.clone();
     if matches!(seed[19] % 7, 0 | 3) {

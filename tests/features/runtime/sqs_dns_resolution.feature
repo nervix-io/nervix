@@ -1,6 +1,6 @@
 Feature: SQS name resolution
 
-  An SQS source or sink resolves the host of its client's `endpoint` through the node's resolver for
+  An SQS source or emitter resolves the host of its client's `endpoint` through the node's resolver for
   each new connection, dials the answers in order, signs every request for the configured host, and
   over HTTPS verifies the service certificate against that host. These scenarios point every node at
   a DNS fixture the scenario controls, and provision every queue and topic explicitly.

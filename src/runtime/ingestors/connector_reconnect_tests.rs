@@ -1,13 +1,13 @@
-//! A broker source whose positions belong to the connection that delivered them, and what the
+//! A broker ingestor whose positions belong to the connection that delivered them, and what the
 //! broker host loop does with each position class once that connection is lost.
 //!
 //! Layer: test harness.
-//! - **Owns.** The connection-bound broker, source and host doubles that the reconnect unit tests
+//! - **Owns.** The connection-bound broker, ingestor and host doubles that the reconnect unit tests
 //!   and the Shuttle check share, and the unit tests of each position class across a lost
 //!   connection, and retry backoff across successful reconnects until a batch is delivered.
-//! - **Depends on.** The production broker host loop, the source contract and its position
+//! - **Depends on.** The production broker host loop, the ingestor contract and its position
 //!   classes.
-//! - **Must not know.** Broker drivers, the runtime source host or the quiesce control.
+//! - **Must not know.** Broker drivers, the runtime ingestor host or the quiesce control.
 
 #![cfg_attr(
     nervix_lint,
@@ -27,9 +27,9 @@ use nervix_primitives::sync::blocking::Mutex;
 
 use super::*;
 
-/// The broker a connection-bound source reads through: a connection delivers from one queue, and
+/// The broker a connection-bound ingestor reads through: a connection delivers from one queue, and
 /// once a connection is lost the broker requeues every delivery it did not settle. It also records
-/// what the source and the host did, for the checks to compare once the loop has ended.
+/// what the ingestor and the host did, for the checks to compare once the loop has ended.
 pub(super) struct RedeliveringBroker {
     connection: u64,
     alive: bool,
@@ -42,12 +42,12 @@ pub(super) struct RedeliveringBroker {
     pub(super) failed_rejections: usize,
     /// Positions the host counted as redelivered after a reconnect.
     pub(super) counted_redeliveries: usize,
-    /// How often the host suspended the source.
+    /// How often the host suspended the ingestor.
     pub(super) suspensions: usize,
 }
 
 impl RedeliveringBroker {
-    /// A broker whose queue holds `positions`, shared by the source, the host and the check.
+    /// A broker whose queue holds `positions`, shared by the ingestor, the host and the check.
     pub(super) fn shared(positions: impl IntoIterator<Item = u64>) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             connection: 0,
@@ -129,13 +129,13 @@ impl IngestorMessage for BrokerDelivery {
     }
 }
 
-/// A source reading through one connection of a [`RedeliveringBroker`] at a time.
-pub(super) struct RedeliveringSource {
+/// A ingestor reading through one connection of a [`RedeliveringBroker`] at a time.
+pub(super) struct RedeliveringIngestor {
     broker: Arc<Mutex<RedeliveringBroker>>,
     connection: u64,
 }
 
-impl RedeliveringSource {
+impl RedeliveringIngestor {
     pub(super) fn new(broker: Arc<Mutex<RedeliveringBroker>>) -> Self {
         Self {
             broker,
@@ -145,7 +145,10 @@ impl RedeliveringSource {
 }
 
 #[async_trait]
-impl IngestorConnector for RedeliveringSource {
+impl IngestorConnector for RedeliveringIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic);
+
     type Plan = ();
 
     async fn open(_plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
@@ -178,7 +181,7 @@ impl IngestorConnector for RedeliveringSource {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for RedeliveringSource {
+impl BrokerIngestorConnector for RedeliveringIngestor {
     type Message = BrokerDelivery;
     type Position = u64;
 
@@ -337,7 +340,7 @@ impl IngestorHostServices for RedeliveryHost {
     }
 }
 
-/// The broker loop policy of a connection-bound source of `position_class`, which acknowledges one
+/// The broker loop policy of a connection-bound ingestor of `position_class`, which acknowledges one
 /// message at a time.
 pub(super) fn sequential_policy(position_class: PositionClass) -> BrokerIngestorPolicy {
     let retry = ParsedRetryPolicy {
@@ -354,15 +357,15 @@ pub(super) fn sequential_policy(position_class: PositionClass) -> BrokerIngestor
     }
 }
 
-/// Runs the broker loop over two messages until its source closes, losing the connection while the
+/// Runs the broker loop over two messages until its ingestor closes, losing the connection while the
 /// first message is taken in, and returns the broker's records.
 async fn lose_the_connection_of_the_first_message(
     position_class: PositionClass,
 ) -> Arc<Mutex<RedeliveringBroker>> {
     let broker = RedeliveringBroker::shared([1, 2]);
     let (shutdown, shutdown_rx) = watch::channel(false);
-    run_source_instance_with_retry(
-        RedeliveringSource::new(broker.clone()),
+    run_ingestor_instance_with_retry(
+        RedeliveringIngestor::new(broker.clone()),
         IngestorHost::new(RedeliveryHost::new(broker.clone(), true)),
         sequential_policy(position_class),
         shutdown_rx,
@@ -392,7 +395,7 @@ async fn a_source_without_positions_keeps_no_failed_rejection() {
     let broker = lose_the_connection_of_the_first_message(PositionClass::None).await;
 
     let broker = broker.lock();
-    // Nothing is pending after the failed rejection, so the source is neither suspended nor asked
+    // Nothing is pending after the failed rejection, so the ingestor is neither suspended nor asked
     // to reject again, and nothing is counted as redelivered.
     assert_eq!(broker.acknowledged, vec![1, 2]);
     assert_eq!(broker.failed_rejections, 1);
@@ -401,8 +404,8 @@ async fn a_source_without_positions_keeps_no_failed_rejection() {
 }
 
 /// A transport that upgrades successfully but fails reads until it delivers a real batch.
-struct ClosingSource {
-    source: RedeliveringSource,
+struct ClosingIngestor {
+    source: RedeliveringIngestor,
     reads: Arc<Mutex<Vec<Instant>>>,
     steps: VecDeque<ScriptedRead>,
     reconnect: bool,
@@ -416,7 +419,10 @@ enum ScriptedRead {
 }
 
 #[async_trait]
-impl IngestorConnector for ClosingSource {
+impl IngestorConnector for ClosingIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic);
+
     type Plan = ();
 
     async fn open(_plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
@@ -434,7 +440,7 @@ impl IngestorConnector for ClosingSource {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for ClosingSource {
+impl BrokerIngestorConnector for ClosingIngestor {
     type Message = BrokerDelivery;
     type Position = u64;
 
@@ -474,8 +480,8 @@ async fn successful_upgrades_keep_read_failure_backoff_until_a_batch_is_delivere
     for interruption in [ScriptedRead::Failure, ScriptedRead::ResumeRequired] {
         let broker = RedeliveringBroker::shared([1]);
         let reads = Arc::new(Mutex::new(Vec::new()));
-        let source = ClosingSource {
-            source: RedeliveringSource::new(broker.clone()),
+        let source = ClosingIngestor {
+            source: RedeliveringIngestor::new(broker.clone()),
             reads: reads.clone(),
             steps: VecDeque::from([
                 interruption,
@@ -492,7 +498,7 @@ async fn successful_upgrades_keep_read_failure_backoff_until_a_batch_is_delivere
             max_backoff: Duration::from_secs(4),
         };
         let (shutdown, shutdown_rx) = watch::channel(false);
-        run_source_instance_with_retry(
+        run_ingestor_instance_with_retry(
             source,
             IngestorHost::new(RedeliveryHost::new(broker.clone(), false)),
             policy,

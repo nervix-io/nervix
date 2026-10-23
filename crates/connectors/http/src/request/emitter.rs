@@ -1,4 +1,4 @@
-//! Outbound HTTP request sink connector.
+//! Outbound HTTP request emitter connector.
 //!
 //! Layer: engines and infrastructure.
 //!
@@ -34,11 +34,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
+#[cfg(test)]
+use nervix_connector::HttpRequestEmitter as _;
 use nervix_connector::{
     ClientConfigError, ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost,
     EmitterHttpRequest, EmitterLifecycle, EmitterOpenError, EmitterRecordId, EmitterRetryDelay,
-    EmitterStartResult, EmitterWriteError, HttpRequestEmitter, PerRecordOutcome,
-    RustlsClientConfigProvider, physical_time::actual_utc_now,
+    EmitterStartResult, EmitterWriteError, PerRecordOutcome, RustlsClientConfigProvider,
+    physical_time::actual_utc_now,
 };
 use nervix_dns::{AddressAttempt, DnsResolver, LookupShare, OperationBudget};
 use nervix_models::{ClientConfigEntry, DeadlineKey};
@@ -52,7 +54,7 @@ use url::{Host, Position, Url};
 
 use self::response::{Disposition, FinalResponse, read_final_headers};
 
-const HTTP_SINK: &str = "HTTP";
+const HTTP_EMITTER: &str = "HTTP";
 
 /// How many times its name lookup's share goes into a request's `timeout_ms`. A policy input:
 /// whatever the name servers do, the address attempts, TLS and the request keep the rest of every
@@ -65,14 +67,14 @@ const _: () = assert!(
 );
 
 /// The emitter's resolved client settings and its node-owned resolver.
-pub struct HttpEmitterConfig {
+pub struct HttpRequestEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub dns: DnsResolver,
 }
 
 /// Each publish call sends its prepared requests sequentially. A fresh HTTP/1.1 connection serves
 /// one request; dropping it after final headers means no incomplete response body can be reused.
-pub struct HttpEmitter {
+pub struct HttpRequestEmitter {
     dns: DnsResolver,
     tls: StdArc<RustlsClientConfig>,
     timeout: Duration,
@@ -110,27 +112,27 @@ type HttpAttemptResult<T> = Result<T, Report<HttpAttemptError>>;
 #[error("no connection was accepted within the address's share of timeout_ms")]
 struct AddressShareElapsed;
 
-impl HttpEmitter {
-    pub fn new(config: HttpEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+impl HttpRequestEmitter {
+    pub fn new(config: HttpRequestEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
         let configured = ConfiguredDeadline::timeout(&config.config).change_context(
             EmitterOpenError::InvalidConfiguration {
-                connector: HTTP_SINK,
+                connector: HTTP_EMITTER,
             },
         )?;
         let Some(timeout) = configured else {
             return Err(Report::new(ClientConfigError::MissingRequired {
-                connector: HTTP_SINK,
+                connector: HTTP_EMITTER,
                 key: DeadlineKey::Timeout.key().to_string(),
             })
             .change_context(EmitterOpenError::InvalidConfiguration {
-                connector: HTTP_SINK,
+                connector: HTTP_EMITTER,
             }));
         };
         let timeout = timeout.bound();
         let tls = RustlsClientConfigProvider::new(&config.config)
             .build_with_default_roots()
             .change_context(EmitterOpenError::InvalidConfiguration {
-                connector: HTTP_SINK,
+                connector: HTTP_EMITTER,
             })?;
         // rustls requires a standard Arc. The client speaks HTTP/1.1 so every interim block can
         // be inspected, including those that higher-level clients discard before the final reply.
@@ -331,7 +333,7 @@ impl HttpEmitter {
         let description = format!("{error:#}");
         error
             .change_context(EmitterWriteError::Publish {
-                connector: HTTP_SINK,
+                connector: HTTP_EMITTER,
             })
             .attach_printable(description)
     }
@@ -352,16 +354,25 @@ impl HttpEmitter {
     }
 }
 
+impl HttpRequestEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::Http(nervix_models::HttpEmitterEntity::Request);
+}
+
 #[async_trait]
-impl EmitterLifecycle for HttpEmitter {
+impl EmitterLifecycle for HttpRequestEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// Each request's response headers arrive before the publish returns, so the client holds
     /// nothing.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
         Ok(EmitterFinish::NothingHeld)
     }
 
-    /// The sink holds no connection or staged work between attempts, so keeping it loses
-    /// nothing, and the emitter's retry sends the pending request without reopening a sink whose
+    /// The emitter holds no connection or staged work between attempts, so keeping it loses
+    /// nothing, and the emitter's retry sends the pending request without reopening an emitter whose
     /// successful reopening would clear the failure the request is still waiting out.
     fn keeps_client_on_publish_failure(&self) -> bool {
         true
@@ -369,7 +380,7 @@ impl EmitterLifecycle for HttpEmitter {
 }
 
 #[async_trait]
-impl HttpRequestEmitter for HttpEmitter {
+impl nervix_connector::HttpRequestEmitter for HttpRequestEmitter {
     async fn publish(
         &mut self,
         requests: Vec<EmitterHttpRequest>,
@@ -462,7 +473,7 @@ mod tests {
     #[test]
     fn encoded_request_uses_exact_fields_and_explicit_transport_headers() {
         let request = prepared("PATCH", Some(br#"{"id":1}"#.to_vec()));
-        let head = String::from_utf8(HttpEmitter::request_head(&request))
+        let head = String::from_utf8(HttpRequestEmitter::request_head(&request))
             .assured("the prepared test fields are all UTF-8");
         assert_eq!(
             head,
@@ -474,7 +485,7 @@ mod tests {
     #[test]
     fn absent_body_adds_no_framing_or_content_type() {
         let request = prepared("purge", None);
-        let head = String::from_utf8(HttpEmitter::request_head(&request))
+        let head = String::from_utf8(HttpRequestEmitter::request_head(&request))
             .assured("the prepared test fields are all UTF-8");
         assert!(head.starts_with("purge /v1/events?q=a+b HTTP/1.1\r\n"));
         assert!(!head.contains("content-length"));
@@ -489,7 +500,7 @@ mod tests {
     #[test]
     fn a_bodyless_request_declares_an_empty_length_only_when_its_method_defines_content() {
         for method in ["POST", "PUT", "PATCH", "post", "Patch"] {
-            let head = String::from_utf8(HttpEmitter::request_head(&prepared(method, None)))
+            let head = String::from_utf8(HttpRequestEmitter::request_head(&prepared(method, None)))
                 .assured("the prepared test fields are all UTF-8");
             assert!(
                 head.ends_with("\r\ncontent-length: 0\r\n\r\n"),
@@ -497,7 +508,7 @@ mod tests {
             );
         }
         for method in ["DELETE", "OPTIONS", "GET", "purge"] {
-            let head = String::from_utf8(HttpEmitter::request_head(&prepared(method, None)))
+            let head = String::from_utf8(HttpRequestEmitter::request_head(&prepared(method, None)))
                 .assured("the prepared test fields are all UTF-8");
             assert!(
                 !head.contains("content-length"),
@@ -518,7 +529,7 @@ mod tests {
                     .assured("application/json is a valid header value"),
             )
             .assured("two short headers fit the application envelope");
-        let head = String::from_utf8(HttpEmitter::request_head(&request))
+        let head = String::from_utf8(HttpRequestEmitter::request_head(&request))
             .assured("the prepared test fields are all UTF-8");
         assert!(head.contains("accept: application/json\r\n"));
         assert!(!head.contains("accept: */*"));
@@ -544,7 +555,7 @@ mod tests {
             b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\n\r\n",
         )
         .await;
-        let error = HttpEmitter::retryable_status_error(
+        let error = HttpRequestEmitter::retryable_status_error(
             HttpAttemptError::RetryableStatus { status: 429 },
             limited,
         );
@@ -555,13 +566,13 @@ mod tests {
         assert_eq!(
             *error.current_context(),
             EmitterWriteError::Publish {
-                connector: HTTP_SINK
+                connector: HTTP_EMITTER
             }
         );
 
         let unstated =
             final_response(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n").await;
-        let error = HttpEmitter::retryable_status_error(
+        let error = HttpRequestEmitter::retryable_status_error(
             HttpAttemptError::Authentication { status: 401 },
             unstated,
         );
@@ -575,7 +586,7 @@ mod tests {
         let target = origin
             .target("/")
             .assured("the root path is a valid target");
-        let name = HttpEmitter::server_name(target.url())
+        let name = HttpRequestEmitter::server_name(target.url())
             .assured("a parsed HTTP target has a TLS server name");
         assert_eq!(name, ServerName::from(std::net::Ipv4Addr::LOCALHOST));
     }
@@ -592,13 +603,14 @@ mod tests {
 
     #[test]
     fn a_failed_attempt_describes_its_status_or_every_cause_beneath_it() {
-        let status = HttpEmitter::publish_error(Report::new(HttpAttemptError::RetryableStatus {
-            status: 503,
-        }));
+        let status =
+            HttpRequestEmitter::publish_error(Report::new(HttpAttemptError::RetryableStatus {
+                status: 503,
+            }));
         assert_eq!(
             *status.current_context(),
             EmitterWriteError::Publish {
-                connector: HTTP_SINK
+                connector: HTTP_EMITTER
             }
         );
         assert_eq!(
@@ -606,7 +618,7 @@ mod tests {
             Some("HTTP endpoint answered with retryable status 503")
         );
 
-        let handshake = HttpEmitter::publish_error(
+        let handshake = HttpRequestEmitter::publish_error(
             Report::new(std::io::Error::other(
                 "invalid peer certificate: UnknownIssuer",
             ))
@@ -617,7 +629,7 @@ mod tests {
             Some("HTTP TLS handshake failed: invalid peer certificate: UnknownIssuer")
         );
 
-        let headers = HttpEmitter::publish_error(
+        let headers = HttpRequestEmitter::publish_error(
             Report::new(ResponseHeadError::Excessive).change_context(HttpAttemptError::Response),
         );
         assert_eq!(
@@ -661,7 +673,7 @@ mod tests {
             body: None,
             occurred_at: Timestamp::from_unix_nanos(1),
         };
-        let mut connector = HttpEmitter {
+        let mut connector = HttpRequestEmitter {
             dns: DnsResolver::load(nervix_dns::DnsConfiguration::system())
                 .await
                 .assured("the host resolver configuration loads in tests"),
@@ -672,7 +684,7 @@ mod tests {
         };
         assert!(
             connector.keeps_client_on_publish_failure(),
-            "a retry sends the pending request through the same sink"
+            "a retry sends the pending request through the same emitter"
         );
 
         let outcome = connector.publish(vec![request]).await.into_parts();
@@ -706,16 +718,16 @@ mod tests {
         }
     }
 
-    /// A sink whose requests resolve through a resolver that reads `hosts` and asks only `server`.
+    /// A emitter whose requests resolve through a resolver that reads `hosts` and asks only `server`.
     ///
     /// Each try of the resolver outlasts every budget below, so a lookup against a server that never
-    /// answers ends exactly when the sink's budget for it does. The returned directory holds the
-    /// resolver's files for as long as the sink lives.
+    /// answers ends exactly when the emitter's budget for it does. The returned directory holds the
+    /// resolver's files for as long as the emitter lives.
     async fn emitter_resolving_through(
         server: SocketAddr,
         hosts: &str,
         timeout: Duration,
-    ) -> (HttpEmitter, tempfile::TempDir) {
+    ) -> (HttpRequestEmitter, tempfile::TempDir) {
         let files = tempfile::tempdir().assured("the test host has a temporary directory");
         let resolver_configuration = files.path().join("resolv.conf");
         let hosts_file = files.path().join("hosts");
@@ -732,7 +744,7 @@ mod tests {
         })
         .await
         .assured("the test's resolver configuration is valid");
-        let connector = HttpEmitter {
+        let connector = HttpRequestEmitter {
             dns,
             tls: RustlsClientConfigProvider::new(&[])
                 .build_with_default_roots()
@@ -788,7 +800,7 @@ mod tests {
         let (mut stream, _) = listener
             .accept()
             .await
-            .assured("the sink connects to the answering address");
+            .assured("the emitter connects to the answering address");
         let mut head = Vec::new();
         let mut byte = [0_u8; 1];
         while !head.ends_with(b"\r\n\r\n") {
@@ -796,13 +808,13 @@ mod tests {
             stream
                 .read_exact(&mut byte)
                 .await
-                .assured("the sink writes its whole request head");
+                .assured("the emitter writes its whole request head");
             head.push(byte[0]);
         }
         stream
             .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
             .await
-            .assured("the sink reads the final head it waits for");
+            .assured("the emitter reads the final head it waits for");
     }
 
     /// A listener at `address` whose accept queue one connection holds full, so the kernel drops

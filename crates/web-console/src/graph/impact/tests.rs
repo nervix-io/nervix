@@ -563,7 +563,7 @@ fn removed_topology_stays_in_the_drawing_and_out_of_the_after_view() {
     let backup = unbranched(ModelKind::Relay, "backup");
     let dropped = unbranched(ModelKind::Junction, "legacy_route");
     let kept = unbranched(ModelKind::Junction, "route");
-    let connector = unbranched(ModelKind::Relay, "sink");
+    let connector = unbranched(ModelKind::Relay, "emitter");
     let before = topology(
         [&feed, &backup, &dropped, &kept, &connector].map(|coverage| held(coverage, &[1])),
         [

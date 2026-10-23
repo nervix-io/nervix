@@ -25,9 +25,9 @@ use std::{
 use meticulous::{OptionExt as _, ResultExt as _};
 
 use super::{
-    Access, BlockedAttempt, IngestorSite, MAX_ORDER_EDGES, MAX_ORDER_HISTORY_EDGES,
-    MAX_ORDER_WITNESSES, OrderEdge, OrderLock, OrderWitness, PotentialCycle, TrackedLockId,
-    TrackedThreadId, detector::order_enabled, registry::Registry,
+    Access, BlockedAttempt, MAX_ORDER_EDGES, MAX_ORDER_HISTORY_EDGES, MAX_ORDER_WITNESSES,
+    OrderEdge, OrderLock, OrderWitness, PotentialCycle, SourceSite, TrackedLockId, TrackedThreadId,
+    detector::order_enabled, registry::Registry,
 };
 use crate::{
     collections::{DashMap, dash_map::Entry},
@@ -158,7 +158,7 @@ impl OrderHistory {
         let after = registry.order_lock(lock);
         let requested = BlockedAttempt {
             access,
-            at: IngestorSite::from_location(at),
+            at: SourceSite::from_location(at),
         };
         let name = registry.thread_name(thread);
         let held = HELD.try_with(|held| {
@@ -263,7 +263,7 @@ impl OrderHistory {
             lock: registry.order_lock(lock),
             attempt: BlockedAttempt {
                 access,
-                at: IngestorSite::from_location(at),
+                at: SourceSite::from_location(at),
             },
         };
         match HELD.try_with(|held| {

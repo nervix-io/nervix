@@ -1,12 +1,12 @@
-//! The Syslog connector transport.
+//! SyslogListenerIngestor, SyslogCollectorEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Syslog client configuration, UDP/TCP/TLS listener and sender transports, RFC
-//!   6587 framing, peer metadata, source lifecycle operations, and record publication.
+//!   6587 framing, peer metadata, ingestor lifecycle operations, and record publication.
 //! - **Depends on.** The connector contract, typed client configuration entries, Tokio sockets,
 //!   `memchr`, and rustls.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -20,15 +20,17 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+pub mod collector;
 mod config;
-mod emitter;
-mod ingestor;
+pub mod listener;
 
+pub use collector::{SyslogCollectorEmitter, SyslogCollectorEmitterConfig};
 pub use config::{
     DEFAULT_MAX_MESSAGE_SIZE, MAX_UDP_PAYLOAD_SIZE, SyslogClientConfig, SyslogConfigError,
     SyslogDeadlineScope, SyslogDirection, SyslogFraming, SyslogProtocol,
 };
-pub use emitter::{SyslogEmitter, SyslogEmitterConfig};
 #[cfg(feature = "benchmarks")]
-pub use ingestor::{SyslogFrameError, frame_stream};
-pub use ingestor::{SyslogIngestor, SyslogIngestorMessage, SyslogIngestorPlan};
+pub use listener::{SyslogFrameError, frame_stream};
+pub use listener::{
+    SyslogListenerIngestor, SyslogListenerIngestorMessage, SyslogListenerIngestorPlan,
+};

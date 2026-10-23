@@ -2,9 +2,9 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The MySQL client Model with its connection pool, the table sink Model with its
+//! - **Owns.** The MySQL client Model with its connection pool, the table emitter Model with its
 //!   conflict action, and what it declares.
-//! - **Depends on.** The shared sink declarations and the names a body references.
+//! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The MySQL driver, its configuration keys, or how rows are inserted.
 
 #![cfg_attr(
@@ -124,11 +124,11 @@ impl EmitterEntityBody for MySqlTableEmitter {
 
 connector_emitters! {
     connector MySql = "MYSQL";
-    /// What a MySQL sink writes.
+    /// What a MySQL emitter writes.
     pub enum MySqlEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum MySqlEmitterMode;
-    /// The entities a MySQL sink writes.
+    pub enum MySqlTableEmitterMode;
+    /// The entities a MySQL emitter writes.
     pub enum MySqlEmitterEntity {
         Table(MySqlTableEmitter, MySqlTablePublishingMode) = "TABLE";
     }

@@ -12,9 +12,14 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    SyslogCollectorEmitter::KIND,
+    nervix_models::EmitterEntityKind::Syslog(nervix_models::SyslogEmitterEntity::Collector)
+));
+
 impl EmitterConnectorStarter {
     pub(super) async fn syslog(
-        connector: &SyslogEmitterPlan,
+        connector: &SyslogCollectorEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
         label: &str,
@@ -24,8 +29,8 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            SyslogEmitter::new(
-                SyslogEmitterConfig {
+            SyslogCollectorEmitter::new(
+                SyslogCollectorEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     dns: context.dns()?,
                 },

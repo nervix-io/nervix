@@ -1,9 +1,9 @@
-//! Kafka source transport and host-owned domain-offset services.
+//! Kafka ingestor transport and host-owned domain-offset services.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Kafka consumer configuration, polling, headers and metadata, partition assignment,
-//!   offset acknowledgement, partition inspection, and the opaque services through which a source
+//!   offset acknowledgement, partition inspection, and the opaque services through which an ingestor
 //!   reads and advances host-owned domain offsets.
 //! - **Depends on.** The connector contract, Kafka vocabulary values, the bounded executor,
 //!   the primitive boundary, `error-stack` and `rust-rdkafka`.
@@ -65,7 +65,7 @@ const DOMAIN_ASSIGNMENT_RETRY: Duration = Duration::from_millis(100);
 /// How long a consumer-group commit waits for its coordinator's answer.
 ///
 /// librdkafka keeps retrying a commit it could not send for as long as the group has no reachable
-/// coordinator, so the source stops waiting at this deadline and the commit fails. The commit stays
+/// coordinator, so the ingestor stops waiting at this deadline and the commit fails. The commit stays
 /// the instance's one commit in flight, which the next commit waits for first.
 const COMMIT_ANSWER_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -77,7 +77,7 @@ pub struct KafkaOffsetPosition {
     pub offset: i64,
 }
 
-/// Where a domain-owned Kafka source resolves its next assignment from.
+/// Where a domain-owned Kafka ingestor resolves its next assignment from.
 pub enum KafkaDomainOffsetStart {
     Resume {
         positions: Vec<KafkaOffsetPosition>,
@@ -86,14 +86,14 @@ pub enum KafkaDomainOffsetStart {
     At(Timestamp),
 }
 
-/// Host-owned state needed to initialize one domain-offset source instance.
+/// Host-owned state needed to initialize one domain-offset ingestor instance.
 pub struct KafkaDomainOffsetInitialization {
     pub generation: u64,
     pub start: KafkaDomainOffsetStart,
     pub schedule: Option<KafkaPartitionSchedule>,
 }
 
-/// Why host-owned Kafka offset state could not serve the source connector.
+/// Why host-owned Kafka offset state could not serve the ingestor connector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum KafkaDomainOffsetError {
     #[error("failed to read host-owned Kafka offset state")]
@@ -165,7 +165,7 @@ impl KafkaDomainOffsetHost {
     ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization> {
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
-            "Kafka resume installs its exact domain-offset placement before polling; the source \
+            "Kafka resume installs its exact domain-offset placement before polling; the ingestor \
              retains the resulting position",
             self.inner.services.initialization(partitions)
         )
@@ -181,9 +181,9 @@ impl KafkaDomainOffsetHost {
     }
 }
 
-/// How one Kafka source records the offsets it has accepted.
+/// How one Kafka ingestor records the offsets it has accepted.
 #[derive(Clone)]
-pub enum KafkaIngestorOffsetMode {
+pub enum KafkaTopicIngestorOffsetMode {
     ConsumerGroup {
         group_id: String,
         commit: KafkaGroupCommit,
@@ -195,7 +195,7 @@ pub enum KafkaIngestorOffsetMode {
     },
 }
 
-impl KafkaIngestorOffsetMode {
+impl KafkaTopicIngestorOffsetMode {
     /// Whether the driver commits the positions it delivers on its own cadence.
     fn driver_commits(&self) -> bool {
         matches!(
@@ -215,7 +215,7 @@ pub enum KafkaGroupCommit {
     /// `auto.commit.interval.ms`, so acknowledging them confirms nothing on the transport.
     /// Leaving the group commits what that cadence has not committed yet.
     DriverCadence,
-    /// An `ACK` mode: the source commits each acknowledged batch's positions and acknowledging
+    /// An `ACK` mode: the ingestor commits each acknowledged batch's positions and acknowledging
     /// returns once the group's coordinator answered the commit.
     EachAcknowledgedBatch,
 }
@@ -232,21 +232,21 @@ impl KafkaGroupCommit {
     }
 }
 
-/// The complete connector-owned plan for opening Kafka source instances.
+/// The complete connector-owned plan for opening Kafka ingestor instances.
 #[derive(Clone)]
-pub struct KafkaIngestorPlan {
-    /// The node-owned executor used by this source and its inspectors.
+pub struct KafkaTopicIngestorPlan {
+    /// The node-owned executor used by this ingestor and its inspectors.
     pub executor: Executor,
     pub config: Vec<ClientConfigEntry>,
     pub topic: KafkaTopicName,
-    pub offset_mode: KafkaIngestorOffsetMode,
+    pub offset_mode: KafkaTopicIngestorOffsetMode,
 }
 
 #[derive(Debug, Error)]
-pub enum KafkaIngestorError {
-    #[error("the {connector} source cannot admit its control call", connector = ConnectorKind::Kafka)]
+pub enum KafkaTopicIngestorError {
+    #[error("the {connector} ingestor cannot admit its control call", connector = ConnectorKind::Kafka)]
     ControlAdmission,
-    #[error("the {connector} source control call could not run", connector = ConnectorKind::Kafka)]
+    #[error("the {connector} ingestor control call could not run", connector = ConnectorKind::Kafka)]
     ControlExecution,
     #[error("the {connector} control call did not finish within socket.timeout.ms {bound}", connector = ConnectorKind::Kafka, bound = humantime::format_duration(*timeout))]
     ControlTimeout { timeout: Duration },
@@ -319,7 +319,7 @@ impl KafkaConsumerAssignment {
         consumer: &StreamConsumer,
         topic: &str,
         assignment: &TopicPartitionList,
-    ) -> Result<(), Report<KafkaIngestorError>> {
+    ) -> Result<(), Report<KafkaTopicIngestorError>> {
         if self.is_current(assignment) {
             return Ok(());
         }
@@ -327,7 +327,7 @@ impl KafkaConsumerAssignment {
             return self.clear(consumer, topic);
         }
         consumer.assign(assignment).map_err(|source| {
-            Report::new(source).change_context(KafkaIngestorError::Assign {
+            Report::new(source).change_context(KafkaTopicIngestorError::Assign {
                 topic: topic.to_string(),
             })
         })?;
@@ -339,12 +339,12 @@ impl KafkaConsumerAssignment {
         &mut self,
         consumer: &StreamConsumer,
         topic: &str,
-    ) -> Result<(), Report<KafkaIngestorError>> {
+    ) -> Result<(), Report<KafkaTopicIngestorError>> {
         if *self == Self::Cleared {
             return Ok(());
         }
         consumer.unassign().map_err(|source| {
-            Report::new(source).change_context(KafkaIngestorError::Unassign {
+            Report::new(source).change_context(KafkaTopicIngestorError::Unassign {
                 topic: topic.to_string(),
             })
         })?;
@@ -353,17 +353,17 @@ impl KafkaConsumerAssignment {
     }
 }
 
-pub struct KafkaIngestorMessage {
+pub struct KafkaTopicIngestorMessage {
     message: rdkafka::message::OwnedMessage,
     position: KafkaOffsetPosition,
 }
 
-impl KafkaIngestorMessage {
+impl KafkaTopicIngestorMessage {
     fn from_message(
         message: rdkafka::message::OwnedMessage,
-    ) -> Result<Self, Report<KafkaIngestorError>> {
+    ) -> Result<Self, Report<KafkaTopicIngestorError>> {
         let next_offset = message.offset().checked_add(1).ok_or_else(|| {
-            Report::new(KafkaIngestorError::OffsetOverflow {
+            Report::new(KafkaTopicIngestorError::OffsetOverflow {
                 topic: message.topic().to_string(),
                 partition: message.partition(),
             })
@@ -377,7 +377,7 @@ impl KafkaIngestorMessage {
     }
 }
 
-impl IngestMessageHeaders for KafkaIngestorMessage {
+impl IngestMessageHeaders for KafkaTopicIngestorMessage {
     fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
         let Some(headers) = self.message.headers() else {
             return;
@@ -392,7 +392,7 @@ impl IngestMessageHeaders for KafkaIngestorMessage {
     }
 }
 
-impl IngestorMessage for KafkaIngestorMessage {
+impl IngestorMessage for KafkaTopicIngestorMessage {
     type Position = KafkaOffsetPosition;
 
     fn payload(&self) -> &[u8] {
@@ -417,13 +417,13 @@ impl IngestorMessage for KafkaIngestorMessage {
     }
 }
 
-pub struct KafkaIngestor {
+pub struct KafkaTopicIngestor {
     control: KafkaControl,
     /// Shared with the blocking-pool job of a commit in flight, which keeps the consumer open
     /// until librdkafka answers it.
     consumer: Arc<StreamConsumer>,
     topic: nervix_models::KafkaTopicName,
-    offset_mode: KafkaIngestorOffsetMode,
+    offset_mode: KafkaTopicIngestorOffsetMode,
     commits: GroupCommits,
     instance_index: u64,
     assignment: KafkaConsumerAssignment,
@@ -431,8 +431,11 @@ pub struct KafkaIngestor {
 }
 
 #[async_trait]
-impl IngestorConnector for KafkaIngestor {
-    type Plan = KafkaIngestorPlan;
+impl IngestorConnector for KafkaTopicIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic);
+
+    type Plan = KafkaTopicIngestorPlan;
 
     async fn open(plan: &Self::Plan, instance_index: u64) -> IngestorResult<Self> {
         let mut config = ClientConfig::new();
@@ -440,8 +443,8 @@ impl IngestorConnector for KafkaIngestor {
             config.set(&entry.key, &entry.value);
         }
         let group_id = match &plan.offset_mode {
-            KafkaIngestorOffsetMode::ConsumerGroup { group_id, .. }
-            | KafkaIngestorOffsetMode::Domain { group_id, .. } => group_id,
+            KafkaTopicIngestorOffsetMode::ConsumerGroup { group_id, .. }
+            | KafkaTopicIngestorOffsetMode::Domain { group_id, .. } => group_id,
         };
         config.set("group.id", group_id);
         config.set("enable.partition.eof", "false");
@@ -457,7 +460,9 @@ impl IngestorConnector for KafkaIngestor {
             .change_context(IngestorError::Open { connector: KAFKA })?;
         let consumer = config
             .create()
-            .map_err(|source| Report::new(source).change_context(KafkaIngestorError::Initialize))
+            .map_err(|source| {
+                Report::new(source).change_context(KafkaTopicIngestorError::Initialize)
+            })
             .change_context(IngestorError::Open { connector: KAFKA })?;
         Ok(Self {
             control,
@@ -472,7 +477,7 @@ impl IngestorConnector for KafkaIngestor {
     }
 
     fn needs_resume(&mut self) -> bool {
-        let KafkaIngestorOffsetMode::Domain {
+        let KafkaTopicIngestorOffsetMode::Domain {
             offsets, rebalance, ..
         } = &mut self.offset_mode
         else {
@@ -485,12 +490,12 @@ impl IngestorConnector for KafkaIngestor {
 
     async fn suspend(&mut self) -> IngestorResult<()> {
         match &self.offset_mode {
-            KafkaIngestorOffsetMode::ConsumerGroup { group_id, commit } => self
+            KafkaTopicIngestorOffsetMode::ConsumerGroup { group_id, commit } => self
                 .commits
                 .leave_group(&self.control, &self.consumer, group_id, *commit)
                 .await
                 .change_context(IngestorError::Suspend { connector: KAFKA }),
-            KafkaIngestorOffsetMode::Domain { .. } => self
+            KafkaTopicIngestorOffsetMode::Domain { .. } => self
                 .clear_assignment()
                 .await
                 .change_context(IngestorError::Suspend { connector: KAFKA }),
@@ -498,13 +503,13 @@ impl IngestorConnector for KafkaIngestor {
     }
 
     async fn resume(&mut self) -> IngestorResult<IngestorResume> {
-        if let KafkaIngestorOffsetMode::ConsumerGroup { .. } = &self.offset_mode {
+        if let KafkaTopicIngestorOffsetMode::ConsumerGroup { .. } = &self.offset_mode {
             let topic = self.topic.as_str().to_owned();
             self.control
                 .run(&self.consumer, move |consumer, _budget| {
                     consumer
                         .subscribe(&[&topic])
-                        .change_context(KafkaIngestorError::Subscribe { topic })
+                        .change_context(KafkaTopicIngestorError::Subscribe { topic })
                 })
                 .await
                 .change_context(IngestorError::Resume { connector: KAFKA })?;
@@ -512,13 +517,13 @@ impl IngestorConnector for KafkaIngestor {
         }
 
         let offsets = match &mut self.offset_mode {
-            KafkaIngestorOffsetMode::Domain {
+            KafkaTopicIngestorOffsetMode::Domain {
                 offsets, rebalance, ..
             } => {
                 rebalance.borrow_and_update();
                 offsets.clone()
             }
-            KafkaIngestorOffsetMode::ConsumerGroup { .. } => {
+            KafkaTopicIngestorOffsetMode::ConsumerGroup { .. } => {
                 return Ok(IngestorResume::Ready);
             }
         };
@@ -537,12 +542,12 @@ impl IngestorConnector for KafkaIngestor {
 
     async fn close(&mut self) -> IngestorResult<()> {
         match &self.offset_mode {
-            KafkaIngestorOffsetMode::ConsumerGroup { group_id, commit } => self
+            KafkaTopicIngestorOffsetMode::ConsumerGroup { group_id, commit } => self
                 .commits
                 .leave_group(&self.control, &self.consumer, group_id, *commit)
                 .await
                 .change_context(IngestorError::Close { connector: KAFKA }),
-            KafkaIngestorOffsetMode::Domain { .. } => self
+            KafkaTopicIngestorOffsetMode::Domain { .. } => self
                 .clear_assignment()
                 .await
                 .change_context(IngestorError::Close { connector: KAFKA }),
@@ -551,8 +556,8 @@ impl IngestorConnector for KafkaIngestor {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for KafkaIngestor {
-    type Message = KafkaIngestorMessage;
+impl BrokerIngestorConnector for KafkaTopicIngestor {
+    type Message = KafkaTopicIngestorMessage;
     type Position = KafkaOffsetPosition;
 
     async fn next_batch(
@@ -561,7 +566,7 @@ impl BrokerIngestorConnector for KafkaIngestor {
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
         let first = match &mut self.offset_mode {
-            KafkaIngestorOffsetMode::Domain { rebalance, .. } => {
+            KafkaTopicIngestorOffsetMode::Domain { rebalance, .. } => {
                 nervix_primitives::select! {
                     changed = rebalance.changed() => {
                         return if changed.is_ok() {
@@ -578,7 +583,7 @@ impl BrokerIngestorConnector for KafkaIngestor {
                     }
                 }
             }
-            KafkaIngestorOffsetMode::ConsumerGroup { .. } => {
+            KafkaTopicIngestorOffsetMode::ConsumerGroup { .. } => {
                 let Some(message) = cancellation.unless_cancelled(self.consumer.recv()).await
                 else {
                     return Ok(IngestorBatch::Interrupted {
@@ -589,10 +594,12 @@ impl BrokerIngestorConnector for KafkaIngestor {
             }
         };
         let first = first
-            .map_err(|source| Report::new(source).change_context(KafkaIngestorError::Initialize))
+            .map_err(|source| {
+                Report::new(source).change_context(KafkaTopicIngestorError::Initialize)
+            })
             .change_context(IngestorError::Read { connector: KAFKA })?
             .detach();
-        let first = KafkaIngestorMessage::from_message(first)
+        let first = KafkaTopicIngestorMessage::from_message(first)
             .change_context(IngestorError::Read { connector: KAFKA })?;
         let mut messages = Vec::with_capacity(request.max_messages.get());
         messages.push(first);
@@ -604,7 +611,7 @@ impl BrokerIngestorConnector for KafkaIngestor {
         };
         let deadline = Instant::now().checked_add(batch_timeout).ok_or_else(|| {
             Report::new(IngestorError::Read { connector: KAFKA })
-                .attach(KafkaIngestorError::BatchDeadline)
+                .attach(KafkaTopicIngestorError::BatchDeadline)
         })?;
         while messages.len() < request.max_messages.get() {
             nervix_primitives::task::consume_budget().await;
@@ -613,7 +620,7 @@ impl BrokerIngestorConnector for KafkaIngestor {
                 next = self.consumer.recv() => {
                     match next {
                         Ok(message) => {
-                            let message = KafkaIngestorMessage::from_message(message.detach())
+                            let message = KafkaTopicIngestorMessage::from_message(message.detach())
                                 .change_context(IngestorError::Read { connector: KAFKA })?;
                             messages.push(message);
                         }
@@ -635,11 +642,11 @@ impl BrokerIngestorConnector for KafkaIngestor {
         match &self.offset_mode {
             // The driver commits the positions it delivered on its own cadence, so acknowledging
             // them confirms nothing on the transport.
-            KafkaIngestorOffsetMode::ConsumerGroup {
+            KafkaTopicIngestorOffsetMode::ConsumerGroup {
                 commit: KafkaGroupCommit::DriverCadence,
                 ..
             } => Ok(()),
-            KafkaIngestorOffsetMode::ConsumerGroup {
+            KafkaTopicIngestorOffsetMode::ConsumerGroup {
                 group_id,
                 commit: KafkaGroupCommit::EachAcknowledgedBatch,
             } => {
@@ -650,7 +657,7 @@ impl BrokerIngestorConnector for KafkaIngestor {
                     .await
                     .change_context(IngestorError::Acknowledge { connector: KAFKA })
             }
-            KafkaIngestorOffsetMode::Domain { offsets, .. } => {
+            KafkaTopicIngestorOffsetMode::Domain { offsets, .. } => {
                 for position in positions {
                     nervix_primitives::task::consume_budget().await;
                     offsets
@@ -669,12 +676,11 @@ impl BrokerIngestorConnector for KafkaIngestor {
         let topic = self.topic.as_str().to_owned();
         self.control
             .run(&self.consumer, move |consumer, budget| {
-                let assignment =
-                    consumer
-                        .assignment()
-                        .change_context(KafkaIngestorError::ReadAssignment {
-                            topic: topic.clone(),
-                        })?;
+                let assignment = consumer.assignment().change_context(
+                    KafkaTopicIngestorError::ReadAssignment {
+                        topic: topic.clone(),
+                    },
+                )?;
                 let assigned = AssignedPartitions::of_topic(&topic, &assignment);
                 for position in starts {
                     budget.remaining()?;
@@ -695,7 +701,7 @@ impl BrokerIngestorConnector for KafkaIngestor {
                             Offset::Offset(position.offset),
                             budget.remaining()?,
                         )
-                        .change_context(KafkaIngestorError::Seek {
+                        .change_context(KafkaTopicIngestorError::Seek {
                             topic: position.topic,
                             partition: position.partition,
                         })?;
@@ -707,8 +713,8 @@ impl BrokerIngestorConnector for KafkaIngestor {
     }
 }
 
-impl KafkaIngestor {
-    async fn clear_assignment(&mut self) -> Result<(), Report<KafkaIngestorError>> {
+impl KafkaTopicIngestor {
+    async fn clear_assignment(&mut self) -> Result<(), Report<KafkaTopicIngestorError>> {
         let mut assignment = std::mem::take(&mut self.assignment);
         let topic = self.topic.as_str().to_owned();
         self.assignment = self
@@ -811,7 +817,9 @@ enum GroupCommitRequest {
 
 impl GroupCommitRequest {
     /// The commit of an acknowledged batch's `positions`, each the next offset of its partition.
-    fn acknowledged(positions: &[KafkaOffsetPosition]) -> Result<Self, Report<KafkaIngestorError>> {
+    fn acknowledged(
+        positions: &[KafkaOffsetPosition],
+    ) -> Result<Self, Report<KafkaTopicIngestorError>> {
         let mut offsets = TopicPartitionList::new();
         for position in positions {
             offsets
@@ -821,7 +829,7 @@ impl GroupCommitRequest {
                     Offset::Offset(position.offset),
                 )
                 .map_err(|source| {
-                    Report::new(source).change_context(KafkaIngestorError::BuildOffsetCommit {
+                    Report::new(source).change_context(KafkaTopicIngestorError::BuildOffsetCommit {
                         topic: position.topic.clone(),
                         partition: position.partition,
                     })
@@ -848,9 +856,9 @@ impl GroupCommitRequest {
     }
 }
 
-/// One source instance's consumer-group commits, which run one at a time.
+/// One ingestor instance's consumer-group commits, which run one at a time.
 ///
-/// A commit parks a blocking-pool thread until its coordinator answers, and the source waits for
+/// A commit parks a blocking-pool thread until its coordinator answers, and the ingestor waits for
 /// that answer at most `deadline`. A commit whose answer outlasts the deadline stays in flight
 /// until librdkafka answers it, and the next commit waits for it first, so an instance never parks
 /// more than one thread.
@@ -876,7 +884,7 @@ impl GroupCommits {
         consumer: &Arc<StreamConsumer>,
         group_id: &str,
         request: GroupCommitRequest,
-    ) -> Result<(), Report<KafkaIngestorError>> {
+    ) -> Result<(), Report<KafkaTopicIngestorError>> {
         if let Some(unanswered) = self.unanswered.as_mut() {
             let earlier = timeout(self.deadline, unanswered).await;
             let Ok(earlier) = earlier else {
@@ -900,11 +908,11 @@ impl GroupCommits {
             return Err(self.unanswered_failure(group_id));
         };
         self.unanswered = None;
-        let executed = joined.change_context(KafkaIngestorError::CommitTask {
+        let executed = joined.change_context(KafkaTopicIngestorError::CommitTask {
             group: group_id.to_owned(),
         })?;
-        let committed = executed.change_context(KafkaIngestorError::ControlExecution)?;
-        committed.change_context(KafkaIngestorError::CommitOffset {
+        let committed = executed.change_context(KafkaTopicIngestorError::ControlExecution)?;
+        committed.change_context(KafkaTopicIngestorError::CommitOffset {
             group: group_id.to_owned(),
         })
     }
@@ -922,7 +930,7 @@ impl GroupCommits {
         consumer: &Arc<StreamConsumer>,
         group_id: &str,
         commit: KafkaGroupCommit,
-    ) -> Result<(), Report<KafkaIngestorError>> {
+    ) -> Result<(), Report<KafkaTopicIngestorError>> {
         let committed = match commit {
             KafkaGroupCommit::DriverCadence => {
                 self.commit(control, consumer, group_id, GroupCommitRequest::Delivered)
@@ -945,15 +953,15 @@ impl GroupCommits {
         }
     }
 
-    fn unanswered_failure(&self, group_id: &str) -> Report<KafkaIngestorError> {
-        Report::new(KafkaIngestorError::CommitUnanswered {
+    fn unanswered_failure(&self, group_id: &str) -> Report<KafkaTopicIngestorError> {
+        Report::new(KafkaTopicIngestorError::CommitUnanswered {
             group: group_id.to_string(),
             deadline: self.deadline,
         })
     }
 }
 
-/// The partitions of the source topic that the consumer's current assignment holds.
+/// The partitions of the ingestor topic that the consumer's current assignment holds.
 struct AssignedPartitions {
     topic: String,
     partitions: BTreeSet<i32>,
@@ -978,7 +986,7 @@ impl AssignedPartitions {
 }
 
 /// The latest acknowledged offset of every partition, ordered by topic and partition, which the
-/// source commits.
+/// ingestor commits.
 pub fn latest_positions(positions: &[KafkaOffsetPosition]) -> Vec<KafkaOffsetPosition> {
     let mut topics = BTreeMap::<String, BTreeMap<i32, i64>>::new();
     for position in positions {
@@ -1012,14 +1020,14 @@ pub fn latest_positions(positions: &[KafkaOffsetPosition]) -> Vec<KafkaOffsetPos
 }
 
 /// The earliest rejected message of every partition, ordered by topic and partition, from which the
-/// source reads again.
+/// ingestor reads again.
 pub fn earliest_message_offsets(
     positions: &[KafkaOffsetPosition],
-) -> Result<Vec<KafkaOffsetPosition>, Report<KafkaIngestorError>> {
+) -> Result<Vec<KafkaOffsetPosition>, Report<KafkaTopicIngestorError>> {
     let mut topics = BTreeMap::<String, BTreeMap<i32, i64>>::new();
     for position in positions {
         let offset = position.offset.checked_sub(1).ok_or_else(|| {
-            Report::new(KafkaIngestorError::UnsupportedDomainOffset {
+            Report::new(KafkaTopicIngestorError::UnsupportedDomainOffset {
                 topic: position.topic.clone(),
                 partition: position.partition,
             })
@@ -1055,16 +1063,16 @@ fn topic_partitions(
     consumer: &StreamConsumer,
     topic: &str,
     budget: &ControlBudget<'_>,
-) -> Result<Vec<i32>, Report<KafkaIngestorError>> {
+) -> Result<Vec<i32>, Report<KafkaTopicIngestorError>> {
     let metadata = consumer
         .fetch_metadata(Some(topic), budget.remaining()?)
         .map_err(|source| {
-            Report::new(source).change_context(KafkaIngestorError::FetchMetadata {
+            Report::new(source).change_context(KafkaTopicIngestorError::FetchMetadata {
                 topic: topic.to_string(),
             })
         })?;
     let Some(topic_metadata) = metadata.topics().iter().find(|entry| entry.name() == topic) else {
-        return Err(Report::new(KafkaIngestorError::MissingMetadata {
+        return Err(Report::new(KafkaTopicIngestorError::MissingMetadata {
             topic: topic.to_string(),
         }));
     };
@@ -1088,7 +1096,7 @@ fn offsets_for_partitions_by_timestamp<I>(
     partitions: I,
     timestamp: Timestamp,
     budget: &ControlBudget<'_>,
-) -> Result<BTreeMap<i32, Offset>, Report<KafkaIngestorError>>
+) -> Result<BTreeMap<i32, Offset>, Report<KafkaTopicIngestorError>>
 where
     I: IntoIterator<Item = i32>,
 {
@@ -1099,7 +1107,7 @@ where
         query
             .add_partition_offset(topic, partition, Offset::Offset(timestamp_ms))
             .map_err(|source| {
-                Report::new(source).change_context(KafkaIngestorError::BuildTimestampQuery {
+                Report::new(source).change_context(KafkaTopicIngestorError::BuildTimestampQuery {
                     topic: topic.to_string(),
                     partition,
                 })
@@ -1108,7 +1116,7 @@ where
     let resolved = consumer
         .offsets_for_times(query, budget.remaining()?)
         .map_err(|source| {
-            Report::new(source).change_context(KafkaIngestorError::ResolveTimestampOffsets {
+            Report::new(source).change_context(KafkaTopicIngestorError::ResolveTimestampOffsets {
                 topic: topic.to_string(),
             })
         })?;
@@ -1130,11 +1138,11 @@ fn normalized_resume_offset(
     partition: i32,
     next_offset: i64,
     budget: &ControlBudget<'_>,
-) -> Result<Offset, Report<KafkaIngestorError>> {
+) -> Result<Offset, Report<KafkaTopicIngestorError>> {
     let (low, high) = consumer
         .fetch_watermarks(topic, partition, budget.remaining()?)
         .map_err(|source| {
-            Report::new(source).change_context(KafkaIngestorError::FetchWatermarks {
+            Report::new(source).change_context(KafkaTopicIngestorError::FetchWatermarks {
                 topic: topic.to_string(),
                 partition,
             })
@@ -1149,7 +1157,7 @@ fn resume_offsets(
     positions: Vec<KafkaOffsetPosition>,
     missing_partition_timestamp: Option<Timestamp>,
     budget: &ControlBudget<'_>,
-) -> Result<BTreeMap<i32, Offset>, Report<KafkaIngestorError>> {
+) -> Result<BTreeMap<i32, Offset>, Report<KafkaTopicIngestorError>> {
     let mut recorded = BTreeMap::new();
     for position in positions {
         if position.topic == topic {
@@ -1190,7 +1198,7 @@ fn assign_offsets_for_instance(
     instance_index: u64,
     consumer_assignment: &mut KafkaConsumerAssignment,
     budget: &ControlBudget<'_>,
-) -> Result<bool, Report<KafkaIngestorError>> {
+) -> Result<bool, Report<KafkaTopicIngestorError>> {
     let has_topic_partitions = schedule.is_some() && !offsets.is_empty();
     let assigned_partitions = if let Some(schedule) = schedule
         && let Ok(instance_index) = usize::try_from(instance_index)
@@ -1207,7 +1215,7 @@ fn assign_offsets_for_instance(
             assignment
                 .add_partition_offset(topic, *partition, *offset)
                 .map_err(|source| {
-                    Report::new(source).change_context(KafkaIngestorError::BuildAssignment {
+                    Report::new(source).change_context(KafkaTopicIngestorError::BuildAssignment {
                         topic: topic.to_string(),
                         partition: *partition,
                     })
@@ -1224,7 +1232,7 @@ fn concrete_next_offsets_from_assignment(
     topic: &str,
     offsets: &BTreeMap<i32, Offset>,
     budget: &ControlBudget<'_>,
-) -> Result<Vec<KafkaOffsetPosition>, Report<KafkaIngestorError>> {
+) -> Result<Vec<KafkaOffsetPosition>, Report<KafkaTopicIngestorError>> {
     let mut concrete = Vec::with_capacity(offsets.len());
     for (partition, offset) in offsets {
         budget.remaining()?;
@@ -1237,7 +1245,7 @@ fn concrete_next_offsets_from_assignment(
                 match mapping_input {
                     Ok(mapped_value) => Ok(mapped_value),
                     Err(source) => Err(Report::new(source).change_context(
-                        KafkaIngestorError::FetchWatermarks {
+                        KafkaTopicIngestorError::FetchWatermarks {
                             topic: topic.to_string(),
                             partition: *partition,
                         },
@@ -1251,7 +1259,7 @@ fn concrete_next_offsets_from_assignment(
                 match mapping_input {
                     Ok(mapped_value) => Ok(mapped_value),
                     Err(source) => Err(Report::new(source).change_context(
-                        KafkaIngestorError::FetchWatermarks {
+                        KafkaTopicIngestorError::FetchWatermarks {
                             topic: topic.to_string(),
                             partition: *partition,
                         },
@@ -1259,10 +1267,12 @@ fn concrete_next_offsets_from_assignment(
                 }
             }?,
             Offset::Stored | Offset::OffsetTail(_) => {
-                return Err(Report::new(KafkaIngestorError::UnsupportedDomainOffset {
-                    topic: topic.to_string(),
-                    partition: *partition,
-                }));
+                return Err(Report::new(
+                    KafkaTopicIngestorError::UnsupportedDomainOffset {
+                        topic: topic.to_string(),
+                        partition: *partition,
+                    },
+                ));
             }
         };
         concrete.push(KafkaOffsetPosition {
@@ -1284,7 +1294,7 @@ impl TopicPartitionInspector {
         config: &[ClientConfigEntry],
         group_id: String,
         executor: Executor,
-    ) -> Result<Self, Report<KafkaIngestorError>> {
+    ) -> Result<Self, Report<KafkaTopicIngestorError>> {
         let mut client_config = ClientConfig::new();
         for entry in config {
             client_config.set(&entry.key, &entry.value);
@@ -1293,23 +1303,26 @@ impl TopicPartitionInspector {
         client_config.set("enable.partition.eof", "false");
         client_config.set("enable.auto.commit", "false");
         let control = KafkaControl::new(&client_config, executor)?;
-        let consumer = client_config
-            .create()
-            .map_err(|source| Report::new(source).change_context(KafkaIngestorError::Initialize))?;
+        let consumer = client_config.create().map_err(|source| {
+            Report::new(source).change_context(KafkaTopicIngestorError::Initialize)
+        })?;
         Ok(Self {
             control,
             consumer: Arc::new(consumer),
         })
     }
 
-    pub async fn partitions(&self, topic: &str) -> Result<Vec<i32>, Report<KafkaIngestorError>> {
+    pub async fn partitions(
+        &self,
+        topic: &str,
+    ) -> Result<Vec<i32>, Report<KafkaTopicIngestorError>> {
         let topic = topic.to_owned();
         self.control
             .run(&self.consumer, move |consumer, budget| {
                 topic_partitions(consumer, &topic, budget)
             })
             .await
-            .change_context(KafkaIngestorError::InspectPartitions)
+            .change_context(KafkaTopicIngestorError::InspectPartitions)
     }
 }
 
@@ -1332,7 +1345,7 @@ mod tests {
     }
 
     /// Both KAFKA TOPIC sides declare ordered repeats with exact names: the record headers a
-    /// sink writes keep every write in the order written, and a reader of the produced record
+    /// emitter writes keep every write in the order written, and a reader of the produced record
     /// visits them in that order, a repeated name once for each of its values.
     #[test]
     fn written_headers_read_back_in_write_order_with_every_repeat() {
@@ -1352,10 +1365,10 @@ mod tests {
             rdkafka::Timestamp::NotAvailable,
             0,
             0,
-            Some(crate::topic::KafkaEmitter::owned_headers(&written)),
+            Some(crate::topic::KafkaTopicEmitter::owned_headers(&written)),
         );
-        let message =
-            KafkaIngestorMessage::from_message(message).assured("offset zero has a next offset");
+        let message = KafkaTopicIngestorMessage::from_message(message)
+            .assured("offset zero has a next offset");
         let mut visited = Vec::new();
         message.visit(&mut |name, value| visited.push(format!("{name}={value}")));
         assert_eq!(visited, ["trace=a", "Tenant=x", "trace=b", "tenant=y"]);
@@ -1468,7 +1481,7 @@ mod tests {
                         assert_eq!(expected, None);
                         assert!(matches!(
                             report.current_context(),
-                            KafkaIngestorError::UnsupportedDomainOffset { .. }
+                            KafkaTopicIngestorError::UnsupportedDomainOffset { .. }
                         ));
                     }
                 }

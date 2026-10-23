@@ -79,7 +79,7 @@ implementation in another language needs only the schema. The Rust client additi
 language edge, which it uses to split a request into statements and to recognize the statements it
 serves itself, such as `USE`; everything it knows about the cluster arrives over the protocol.
 
-The Rust client and CLI declare their edge ownership in gated compiler ingestor contracts. Their
+The Rust client and CLI declare their edge ownership in gated compiler source contracts. Their
 session maps remain client-owned synchronization outside the server record-path acquisition rule.
 Server relay subscription fan-out remains recurring data-plane execution with its own source
 contracts and exact-operation repair expectations. The annotations change no session framing,
@@ -1496,7 +1496,7 @@ contract. A large reply uses the normal bounded transfer parts. Reading the repl
 acknowledges it. The Rust client decodes a batch only when its stream declares exactly the Arrow
 schema of the fields the emitter declared at the open and holds one record batch of the member
 count, and treats any other stream as an unexpected reply. The registered
-`client-emitter-deliveries` property holds that decoder to the stream a client emitter's emitter
+`client-emitter-deliveries` property holds that decoder to the stream a client emitter's connector
 writes: the declared schema, every delivered row in order, and every value and null.
 
 `SettleEmitterBatchRequest` carries the consumer, attempt reference, and `Ack`, `Retry`, or

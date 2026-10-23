@@ -12,9 +12,14 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    MySqlTableEmitter::KIND,
+    nervix_models::EmitterEntityKind::MySql(nervix_models::MySqlEmitterEntity::Table)
+));
+
 impl EmitterConnectorStarter {
     pub(super) async fn mysql(
-        connector: &MySqlEmitterPlan,
+        connector: &MySqlTableEmitterPlan,
         context: &EmitterConnectorContext,
         input_schema: &CompiledSchema,
     ) -> EmitterRuntimeResult<Box<dyn EmitterConnector>> {
@@ -33,8 +38,8 @@ impl EmitterConnectorStarter {
                     .map_err(emitter_init_error)?;
             Self::row(
                 projection,
-                MySqlEmitter::new(
-                    MySqlEmitterConfig {
+                MySqlTableEmitter::new(
+                    MySqlTableEmitterConfig {
                         table: connector.table.clone(),
                         conflict_action: connector.conflict_action,
                         batch: connector.batch,

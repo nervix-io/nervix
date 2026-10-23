@@ -253,7 +253,7 @@ interrupted publication and bounded cleanup, and the materialized publication li
 pass its libtest accounting and record exactly one qualifying process observation in both
 diagnostic selections. The tracked locks' conformance checks of `nervix-primitives` run the same
 way, each in a fresh process in both selections. They record no evidence file, because the
-primitive crate sits below the crate that owns evidence: a finding reaches a emitter that aborts the
+primitive crate sits below the crate that owns evidence: a finding reaches an emitter that aborts the
 check, and the lane fails on that ending.
 
 Test dependencies start through one suite-owned environment. If Docker creates a named container

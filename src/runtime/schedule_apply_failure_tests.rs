@@ -535,7 +535,7 @@ fn emitting_nodes() -> Vec<ScheduledNode> {
             encoding_rules: Vec::new(),
         })),
         scheduled_model(nervix_models::Model::ClientZeroMq(CreateClientZeroMq {
-            name: named("sink"),
+            name: named("emitter"),
             mount: None,
             config: Vec::new(),
         })),
@@ -560,7 +560,7 @@ fn emitting_nodes() -> Vec<ScheduledNode> {
                             max_backoff: "30s".to_string(),
                         },
                     },
-                    client: named("sink"),
+                    client: named("emitter"),
                 },
             ))),
             batch: None,

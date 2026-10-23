@@ -1348,7 +1348,7 @@ group coordinator hands it the partition only after that expiry, `session.timeou
 member's last heartbeat ([Kafka ingestors](./ingestors.md#kafka)). The baseline graph keeps
 librdkafka's 45-second default. The 60-second bound adds 15 seconds for the rebalance and one read of
 the group through the broker's CLI. Placement usually completes 22 to 26 seconds into a leader pause,
-so a emitter window opened at placement would close before the partition can move.
+so an emitter window opened at placement would close before the partition can move.
 
 After the long leader pause, the recovered leader must also differ from the paused one.
 

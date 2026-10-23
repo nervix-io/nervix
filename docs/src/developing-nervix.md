@@ -390,7 +390,7 @@ complete report carrier. [Errors And Diagnostics](errors-and-diagnostics.md) own
 rules and the current carriers. `just validate-typed-errors` separately guards textual
 `Result<_, String>` source, including inactive forms.
 
-The JSON output records resolved APIs, spans, owner variants, expansions, ingestor contracts,
+The JSON output records resolved APIs, spans, owner variants, expansions, source contracts,
 compiled configurations and generated/external exclusions. It is generated evidence under
 `target/`, not an approval database. Partial selections are inventories; the required diagnostic
 gate needs the complete matrix and complete current compiler/Cargo evidence, including zero.

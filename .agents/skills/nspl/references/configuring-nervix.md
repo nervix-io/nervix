@@ -199,7 +199,7 @@ relay. Do not use them to scan across branches.
   confirms asynchronously. No operational mode variable is inferred.
 - For Pulsar receipt deadlines and the final wait after `NO ACK` acceptance, read
   [Emitters → Pulsar](../../../docs/src/emitters.md#pulsar) and
-  [Finishing a emitter](../../../docs/src/connector-contract.md#finishing-a-emitter).
+  [Finishing an emitter](../../../docs/src/connector-contract.md#finishing-a-emitter).
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
   whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry

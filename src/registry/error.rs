@@ -343,9 +343,9 @@ pub(crate) enum RegistryError {
         connector: &'static str,
         target: String,
     },
-    /// An emitter whose sink keeps one value per header name writes one literal name twice, so
+    /// An emitter whose emitter keeps one value per header name writes one literal name twice, so
     /// on every record the later write replaces the earlier one and the earlier one is never
-    /// published. The header is named as the sink's header model records it.
+    /// published. The header is named as the emitter's header model records it.
     #[error(
         "emitter '{emitter}' in domain '{domain}' writes header '{header}' at INVOKE #{earlier} \
          and again at #{later}, but {connector} emitters keep one value per header name, so the \

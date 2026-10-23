@@ -29,7 +29,7 @@ use crate::conformance_support::{assert_offers_exactly, created_model, refused};
 /// The batching clause a generated emitter writes where its entity batches.
 const BATCH: &str = "BATCH MAX MESSAGES 10 MAX SIZE 64KiB";
 
-/// The mapping a generated direct `VALUES` sink writes.
+/// The mapping a generated direct `VALUES` emitter writes.
 const VALUES: &str = "VALUES {'id' = id, 'name' = name}";
 
 /// The option written in its first declared form.
@@ -331,7 +331,7 @@ fn a_batch_larger_than_the_declared_maximum_is_refused_by_the_batching_contract(
         assert!(
             matches!(
                 error.current_context(),
-                EmitterBatchContractError::SizeAboveSinkMaximum { .. }
+                EmitterBatchContractError::SizeAboveEmitterMaximum { .. }
             ),
             "{error:?}"
         );

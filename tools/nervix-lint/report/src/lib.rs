@@ -150,7 +150,7 @@ pub struct SiteId {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct IngestorSpan {
+pub struct SourceSpan {
     pub site: SiteId,
     pub end: u32,
     pub line: u32,
@@ -181,7 +181,7 @@ pub struct Finding {
     pub acquisition: Acquisition,
     #[serde(deserialize_with = "Option::deserialize")]
     pub context: Option<Context>,
-    pub span: IngestorSpan,
+    pub span: SourceSpan,
     pub expansion: Vec<Expansion>,
 }
 

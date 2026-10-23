@@ -3,7 +3,7 @@
 //! Layer: test harness.
 //! - **Owns.** A bounded lossless descriptor domain, exact scalar/list oracles and wire damage.
 //! - **Depends on.** The signaling conversion, protobuf descriptors and the shared byte generator.
-//! - **Must not know.** Connection scheduling, graph routing or source intake.
+//! - **Must not know.** Connection scheduling, graph routing or ingestor intake.
 
 #![cfg_attr(
     nervix_lint,

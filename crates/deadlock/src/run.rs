@@ -1,6 +1,6 @@
 //! The diagnostic run of a process built for the `deloxide` mode.
 //!
-//! A run installs the deadlock detector with a recorder as its sink, then records the process's
+//! A run installs the deadlock detector with a recorder as its emitter, then records the process's
 //! evidence without findings. Potential cycles accumulate with bounded deduplication and leave the
 //! workload running; an active cycle or diagnostic loss ends the process. Each delivery writes a
 //! bounded description and atomically replaces the cumulative local evidence. Standard error uses
@@ -131,7 +131,7 @@ impl DiagnosticRun {
     }
 }
 
-/// The detector's sink.
+/// The detector's emitter.
 struct Recorder {
     /// Cumulative bounded evidence, present after the run starts.
     evidence: Option<DeadlockEvidence>,

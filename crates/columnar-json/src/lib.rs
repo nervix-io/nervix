@@ -901,7 +901,7 @@ mod tests {
         ));
     }
 
-    /// A sink that takes `remaining` bytes and then refuses every later write.
+    /// A emitter that takes `remaining` bytes and then refuses every later write.
     struct RefusingWriter {
         remaining: usize,
     }
@@ -909,7 +909,7 @@ mod tests {
     impl io::Write for RefusingWriter {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             if self.remaining == 0 {
-                return Err(io::Error::other("the sink refused more bytes"));
+                return Err(io::Error::other("the emitter refused more bytes"));
             }
             let taken = buf.len().min(self.remaining);
             self.remaining = self
@@ -938,31 +938,31 @@ mod tests {
             .with_float32_encoding(Float32Encoding::WidenedF64)];
         let number_columns = JsonColumns::new(&number, &number_specs, NestedNulls::Reject)
             .assured("float columns are supported");
-        // `{"s":` and `{"f":` are five bytes, so the sink refuses the value that follows them.
+        // `{"s":` and `{"f":` are five bytes, so the emitter refuses the value that follows them.
         let refused_bytes = text_columns
             .write_row(0, &mut RefusingWriter { remaining: 0 })
             .err()
-            .assured("the sink takes no byte");
+            .assured("the emitter takes no byte");
         let refused_escape = text_columns
             .write_row(1, &mut RefusingWriter { remaining: 5 })
             .err()
-            .assured("the sink refuses the escaped string");
+            .assured("the emitter refuses the escaped string");
         let refused_number = number_columns
             .write_row(0, &mut RefusingWriter { remaining: 5 })
             .err()
-            .assured("the sink refuses the widened number");
+            .assured("the emitter refuses the widened number");
 
         assert_eq!(
             format!("{refused_bytes:#}"),
-            "failed to write JSON bytes: the sink refused more bytes"
+            "failed to write JSON bytes: the emitter refused more bytes"
         );
         assert_eq!(
             format!("{refused_escape:#}"),
-            "failed to escape a JSON string: the sink refused more bytes"
+            "failed to escape a JSON string: the emitter refused more bytes"
         );
         assert_eq!(
             format!("{refused_number:#}"),
-            "failed to write a JSON number: the sink refused more bytes"
+            "failed to write a JSON number: the emitter refused more bytes"
         );
     }
 }

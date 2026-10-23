@@ -2,13 +2,13 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The union of sink Models and the kind that names every sink pair, the declaration
-//!   each sink entity makes whatever its statement says, the contract the body of a sink statement
+//! - **Owns.** The union of emitter Models and the kind that names every emitter pair, the declaration
+//!   each emitter entity makes whatever its statement says, the contract the body of an emitter statement
 //!   fulfils, and the value mapping the direct `VALUES` emitters share.
 //! - **Depends on.** The connector modules' entity Models, the emitter's batching and publishing
 //!   vocabulary, the shapes a declaration is written in, expressions, and the names a body
 //!   references.
-//! - **Must not know.** How a sink is opened, published to, retried or committed at run time.
+//! - **Must not know.** How an emitter is opened, published to, retried or committed at run time.
 
 #![cfg_attr(
     nervix_lint,
@@ -34,15 +34,16 @@ use super::{
     entity_union::emitter_destinations,
 };
 use crate::{
-    AlterEmitterError, ClickHouseEmitterMode, ClientEmitterMode, ClientName, ConnectorKind,
+    AlterEmitterError, ClickHouseTableEmitterMode, ClientEmitterMode, ClientName, ConnectorKind,
     EmitterBatchLegality, EmitterPublishing, EmitterPublishingModeKind, Expression,
-    HttpEmitterMode, IcebergEmitterMode, KafkaEmitterMode, MongoDbEmitterMode, MqttEmitterMode,
-    MySqlEmitterMode, NatsEmitterMode, OtelEmitterMode, PostgresEmitterMode, PulsarEmitterMode,
-    RabbitMqEmitterMode, RedisEmitterMode, SchemaName, SentryEmitterMode, SqsEmitterMode,
-    SyslogEmitterMode, ZeroMqEmitterMode,
+    HttpRequestEmitterMode, IcebergTableEmitterMode, KafkaTopicEmitterMode,
+    MongoDbCollectionEmitterMode, MqttTopicEmitterMode, MySqlTableEmitterMode,
+    NatsSubjectEmitterMode, OtelEmitterMode, PostgresTableEmitterMode, PulsarTopicEmitterMode,
+    RabbitMqQueueEmitterMode, RedisPubSubEmitterMode, SchemaName, SentryEventEmitterMode,
+    SqsQueueEmitterMode, SyslogCollectorEmitterMode, ZeroMqPushEmitterMode,
 };
 
-/// One column, attribute or field a direct `VALUES` sink writes, and the expression that computes
+/// One column, attribute or field a direct `VALUES` emitter writes, and the expression that computes
 /// it.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -52,7 +53,7 @@ pub struct EmitterValueMapping {
     pub expression: Expression,
 }
 
-/// The expressions a direct `VALUES` sink sends across its external boundary, in the groups its
+/// The expressions a direct `VALUES` emitter sends across its external boundary, in the groups its
 /// statement writes them in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmitterValueMappings<'a> {
@@ -62,7 +63,7 @@ pub struct EmitterValueMappings<'a> {
 }
 
 impl<'a> EmitterValueMappings<'a> {
-    /// The mappings of a sink whose payload a codec encodes, which writes no direct value.
+    /// The mappings of an emitter whose payload a codec encodes, which writes no direct value.
     pub const fn none() -> Self {
         Self {
             values: &[],
@@ -71,7 +72,7 @@ impl<'a> EmitterValueMappings<'a> {
         }
     }
 
-    /// The mappings of a sink that writes one `VALUES` map and nothing beside it.
+    /// The mappings of an emitter that writes one `VALUES` map and nothing beside it.
     pub const fn values(values: &'a [EmitterValueMapping]) -> Self {
         Self {
             values,
@@ -89,17 +90,17 @@ impl<'a> EmitterValueMappings<'a> {
     }
 }
 
-/// A configured client the body of a sink names, and the connector that client must configure.
+/// A configured client the body of an emitter names, and the connector that client must configure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmitterClientReference<'a> {
     pub client: &'a ClientName,
     pub connector: ConnectorKind,
 }
 
-/// The model the body of one sink names to publish to.
+/// The model the body of one emitter names to publish to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmitterReference<'a> {
-    /// The configured client the sink publishes through.
+    /// The configured client the emitter publishes through.
     Client(EmitterClientReference<'a>),
     /// An object-store client whose concrete connector is resolved during planning.
     StorageClient(&'a ClientName),
@@ -107,7 +108,7 @@ pub enum EmitterReference<'a> {
     Schema(&'a SchemaName),
 }
 
-/// What kind of model the body of a sink statement names to publish to.
+/// What kind of model the body of an emitter statement names to publish to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmitterReferenceKind {
     /// A configured client of one connector.
@@ -157,7 +158,7 @@ pub enum EmitterBodyForm {
     Codec,
     /// `ENCODE USING <codec>` or `WITHOUT BODY`: a request carries an encoded payload or none.
     CodecOrWithoutBody,
-    /// `VALUES { … }` in the destination: the sink writes the mapped values directly.
+    /// `VALUES { … }` in the destination: the emitter writes the mapped values directly.
     Values,
     /// The output the emitter constructs against the destination's schema, delivered as native
     /// batches.
@@ -174,11 +175,11 @@ impl EmitterBodyForm {
     }
 }
 
-/// What every sink of one entity declares, whatever its statement says: everything a statement
+/// What every emitter of one entity declares, whatever its statement says: everything a statement
 /// can say about it, and what it does with what a statement says.
 ///
 /// This lives in the vocabulary so the registry can validate an emitter, and a host can prepare
-/// one, without naming the connector crate that implements its sink. The grammar, completion,
+/// one, without naming the connector crate that implements its emitter. The grammar, completion,
 /// documentation and the generated conformance tests read the same declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmitterEntityCapabilities {
@@ -231,7 +232,7 @@ impl EmitterEntityCapabilities {
             .find(|option| option.keywords == keywords)
     }
 
-    /// What a statement can make every sink of the entity do at run time: publish in each
+    /// What a statement can make every emitter of the entity do at run time: publish in each
     /// declared mode, write each option or choice, batch where batching is available, and set
     /// each envelope clause and property.
     pub fn runtime_capabilities(&self) -> Vec<RuntimeCapability> {
@@ -256,12 +257,12 @@ impl EmitterEntityCapabilities {
     }
 }
 
-/// The declaration one sink entity's Model makes for every statement of that entity.
+/// The declaration one emitter entity's Model makes for every statement of that entity.
 pub trait EmitterDeclaration {
     const CAPABILITIES: EmitterEntityCapabilities;
 }
 
-/// What the body of one sink statement states: what it publishes to and through, and the values it
+/// What the body of one emitter statement states: what it publishes to and through, and the values it
 /// writes directly.
 pub trait EmitterEntityBody: EmitterPublication {
     /// The client the body publishes through, or the schema its session consumers receive.
@@ -288,7 +289,7 @@ pub trait EmitterEntityBody: EmitterPublication {
     }
 }
 
-/// What the kind of one connector's sink entities answers for each of them.
+/// What the kind of one connector's emitter entities answers for each of them.
 pub trait EmitterEntityMetadata {
     fn connector(&self) -> ConnectorKind;
 
@@ -305,29 +306,29 @@ emitter_destinations! {
     /// The destination an emitter publishes to, nested by the connector that serves it and the
     /// entity it writes.
     pub enum EmitterEntity as EmitterEntityBody;
-    /// The connector and entity of a sink, as capability decisions read them before an emitter is
+    /// The connector and entity of an emitter, as capability decisions read them before an emitter is
     /// fully parsed.
     pub enum EmitterEntityKind as EmitterEntityMetadata;
     pub enum EmitterModeChange;
     models {
         Client(ClientEmitter, ClientEmitterEntity, ClientEmitterMode),
-        Http(HttpEmitter, HttpEmitterEntity, HttpEmitterMode),
-        Kafka(KafkaEmitter, KafkaEmitterEntity, KafkaEmitterMode),
-        Pulsar(PulsarEmitter, PulsarEmitterEntity, PulsarEmitterMode),
-        RabbitMq(RabbitMqEmitter, RabbitMqEmitterEntity, RabbitMqEmitterMode),
-        Redis(RedisEmitter, RedisEmitterEntity, RedisEmitterMode),
-        Mqtt(MqttEmitter, MqttEmitterEntity, MqttEmitterMode),
-        Nats(NatsEmitter, NatsEmitterEntity, NatsEmitterMode),
-        ZeroMq(ZeroMqEmitter, ZeroMqEmitterEntity, ZeroMqEmitterMode),
-        Sqs(SqsEmitter, SqsEmitterEntity, SqsEmitterMode),
-        Sentry(SentryEmitter, SentryEmitterEntity, SentryEmitterMode),
-        Syslog(SyslogEmitter, SyslogEmitterEntity, SyslogEmitterMode),
+        Http(HttpEmitter, HttpEmitterEntity, HttpRequestEmitterMode),
+        Kafka(KafkaEmitter, KafkaEmitterEntity, KafkaTopicEmitterMode),
+        Pulsar(PulsarEmitter, PulsarEmitterEntity, PulsarTopicEmitterMode),
+        RabbitMq(RabbitMqEmitter, RabbitMqEmitterEntity, RabbitMqQueueEmitterMode),
+        Redis(RedisEmitter, RedisEmitterEntity, RedisPubSubEmitterMode),
+        Mqtt(MqttEmitter, MqttEmitterEntity, MqttTopicEmitterMode),
+        Nats(NatsEmitter, NatsEmitterEntity, NatsSubjectEmitterMode),
+        ZeroMq(ZeroMqEmitter, ZeroMqEmitterEntity, ZeroMqPushEmitterMode),
+        Sqs(SqsEmitter, SqsEmitterEntity, SqsQueueEmitterMode),
+        Sentry(SentryEmitter, SentryEmitterEntity, SentryEventEmitterMode),
+        Syslog(SyslogEmitter, SyslogEmitterEntity, SyslogCollectorEmitterMode),
         Otel(OtelEmitter, OtelEmitterEntity, OtelEmitterMode),
-        ClickHouse(ClickHouseEmitter, ClickHouseEmitterEntity, ClickHouseEmitterMode),
-        Postgres(PostgresEmitter, PostgresEmitterEntity, PostgresEmitterMode),
-        MySql(MySqlEmitter, MySqlEmitterEntity, MySqlEmitterMode),
-        MongoDb(MongoDbEmitter, MongoDbEmitterEntity, MongoDbEmitterMode),
-        Iceberg(IcebergEmitter, IcebergEmitterEntity, IcebergEmitterMode),
+        ClickHouse(ClickHouseEmitter, ClickHouseEmitterEntity, ClickHouseTableEmitterMode),
+        Postgres(PostgresEmitter, PostgresEmitterEntity, PostgresTableEmitterMode),
+        MySql(MySqlEmitter, MySqlEmitterEntity, MySqlTableEmitterMode),
+        MongoDb(MongoDbEmitter, MongoDbEmitterEntity, MongoDbCollectionEmitterMode),
+        Iceberg(IcebergEmitter, IcebergEmitterEntity, IcebergTableEmitterMode),
     }
 }
 
@@ -339,12 +340,12 @@ impl Display for EmitterEntityKind {
 }
 
 impl EmitterEntityKind {
-    /// The connector that serves this sink.
+    /// The connector that serves this emitter.
     pub fn connector(self) -> ConnectorKind {
         self.entity().connector()
     }
 
-    /// The keyword that names the entity this sink writes.
+    /// The keyword that names the entity this emitter writes.
     pub fn entity_keyword(self) -> &'static str {
         self.entity().keyword()
     }
@@ -354,14 +355,14 @@ impl EmitterEntityKind {
         self.entity().phrase()
     }
 
-    /// What every sink of this pair declares.
+    /// What every emitter of this pair declares.
     pub fn capabilities(self) -> EmitterEntityCapabilities {
         self.entity().capabilities()
     }
 }
 
 impl EmitterEntity {
-    /// The connector that serves this sink.
+    /// The connector that serves this emitter.
     pub fn connector(&self) -> ConnectorKind {
         self.kind().connector()
     }
@@ -391,12 +392,12 @@ impl EmitterEntity {
         self.kind().phrase()
     }
 
-    /// What this sink's body names to publish to.
+    /// What this emitter's body names to publish to.
     pub fn reference(&self) -> EmitterReference<'_> {
         self.body().reference()
     }
 
-    /// The client this sink publishes through. A sink that serves session consumers has none.
+    /// The client this emitter publishes through. A emitter that serves session consumers has none.
     pub fn client(&self) -> Option<&ClientName> {
         match self.reference() {
             EmitterReference::Client(reference) => Some(reference.client),
@@ -409,13 +410,13 @@ impl EmitterEntity {
         self.body_mut().client_mut()
     }
 
-    /// The catalog client this sink commits through, for a sink that names one beside the client
+    /// The catalog client this emitter commits through, for an emitter that names one beside the client
     /// it publishes through.
     pub fn catalog_client(&self) -> Option<EmitterClientReference<'_>> {
         self.body().catalog_client()
     }
 
-    /// The expressions a direct `VALUES` sink sends across its external boundary, in written order.
+    /// The expressions a direct `VALUES` emitter sends across its external boundary, in written order.
     pub fn value_mappings(&self) -> EmitterValueMappings<'_> {
         self.body().value_mappings()
     }
@@ -428,7 +429,7 @@ impl EmitterEntity {
         self.capabilities().body.requires_codec()
     }
 
-    /// Whether an emitter publishing to this sink may write the batching clause, must write it,
+    /// Whether an emitter publishing to this emitter may write the batching clause, must write it,
     /// and how large a batch may grow.
     pub fn batch_legality(&self) -> EmitterBatchLegality {
         self.capabilities().batch
@@ -443,7 +444,7 @@ impl EmitterEntity {
         self.body().commit_policy()
     }
 
-    /// Whether `other` is this sink published through a possibly different client: the same
+    /// Whether `other` is this emitter published through a possibly different client: the same
     /// connector and entity, with every field but the client equal.
     pub fn same_definition(&self, other: &Self) -> bool {
         if self.kind() != other.kind() {

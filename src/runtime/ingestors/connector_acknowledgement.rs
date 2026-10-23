@@ -1,15 +1,15 @@
-//! The acknowledgement a broker source's host returns for one acknowledged batch, and the work it
-//! keeps outstanding until the source has confirmed the batch on its transport.
+//! The acknowledgement a broker ingestor's host returns for one acknowledged batch, and the work it
+//! keeps outstanding until the ingestor has confirmed the batch on its transport.
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** The confirmed roots of one source batch's payloads, including the at-once resolved
+//! - **Owns.** The confirmed roots of one ingestor batch's payloads, including the at-once resolved
 //!   root of a payload the host consumed, waiting on them together, deciding the batch's outcome,
 //!   and holding the batch's work outstanding for drains and ownership handoffs from the moment its
-//!   last root resolves until the source loop drops the acknowledgement.
-//! - **Depends on.** The ACK tree's confirmed roots, the source contract's batch acknowledgement
-//!   and the stop the source host watches.
-//! - **Must not know.** A broker driver, connector configuration, the source loop's retry policy,
+//!   last root resolves until the ingestor loop drops the acknowledgement.
+//! - **Depends on.** The ACK tree's confirmed roots, the ingestor contract's batch acknowledgement
+//!   and the stop the ingestor host watches.
+//! - **Must not know.** A broker driver, connector configuration, the ingestor loop's retry policy,
 //!   or how the batch's messages were dispatched.
 
 #![cfg_attr(
@@ -76,7 +76,7 @@ struct SettledRoot {
     completion: AckCompletion,
 }
 
-/// The acknowledgement of one acknowledged source batch, over the confirmed roots of the messages
+/// The acknowledgement of one acknowledged ingestor batch, over the confirmed roots of the messages
 /// the host dispatched.
 ///
 /// A confirmed root keeps counting against its domain and ingestor after it resolves, for as long
@@ -85,7 +85,7 @@ struct SettledRoot {
 /// root that resolves last. Until then the unresolved roots hold the batch outstanding themselves,
 /// unless they wait on what a drain does not wait for, such as `REQUIRED WAIT` state. From then on
 /// the kept completion holds it, so a drain or an ownership handoff that waits for the batch keeps
-/// waiting until the source loop drops this acknowledgement, which it does once the source's
+/// waiting until the ingestor loop drops this acknowledgement, which it does once the ingestor's
 /// transport has confirmed or rejected the batch's positions.
 pub(super) struct RuntimeBatchAcknowledgement {
     /// The completions of the batch's roots, until the first wait starts waiting on them.
@@ -96,7 +96,7 @@ pub(super) struct RuntimeBatchAcknowledgement {
     /// outstanding until this acknowledgement drops.
     _confirming: Option<AckCompletion>,
     /// How long a scenario makes the host wait, once every root acknowledged, before it lets the
-    /// source confirm the batch, as a slow transport would.
+    /// ingestor confirm the batch, as a slow transport would.
     confirmation_delay: Option<Duration>,
 }
 
@@ -155,7 +155,7 @@ impl IngestorBatchAcknowledgementServices for RuntimeBatchAcknowledgement {
                     }
                 }
                 AckOutcome::NoAck(reason) => {
-                    // The source rejects the batch, and the drain waits for that as well.
+                    // The ingestor rejects the batch, and the drain waits for that as well.
                     self._confirming = Some(settled.completion);
                     return IngestorAcknowledgementOutcome::NoAck(reason);
                 }

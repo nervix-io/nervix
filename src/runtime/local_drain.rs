@@ -84,7 +84,7 @@ pub(crate) struct LocalDomainDrainStatus {
     /// Mailbox, in-flight, collected and route-buffered work of the domain's graph nodes.
     pub(crate) node_work_items: usize,
     pub(crate) buffered_emitter_messages: usize,
-    /// Emitter publishes awaiting sink confirmation or retrying, counted once per state.
+    /// Emitter publishes awaiting emitter confirmation or retrying, counted once per state.
     pub(crate) publishing_emitters: usize,
     pub(crate) required_waits: usize,
     pub(crate) force_flush_obligations: usize,
@@ -214,7 +214,7 @@ trait LocalDomainDrainSources {
     fn buffered_relay_batches(&self) -> usize;
     fn node_work(&self) -> LocalNodeWork;
     fn buffered_emitter_messages(&self) -> usize;
-    /// Emitter publishes awaiting sink confirmation or retrying, counted once per state.
+    /// Emitter publishes awaiting emitter confirmation or retrying, counted once per state.
     fn publishing_emitters(&self) -> usize;
 }
 

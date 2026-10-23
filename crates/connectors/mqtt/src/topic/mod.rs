@@ -1,13 +1,13 @@
-//! MQTT source and sink connector.
+//! MQTT ingestor and emitter connector.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The MQTT client a configuration declares, its event loop and reconnect backoff,
 //!   the connection it opens to the broker through the node resolver, the session, quality of
-//!   service and shared subscription a source reads through, the Maximum Packet Size a source
+//!   service and shared subscription an ingestor reads through, the Maximum Packet Size an ingestor
 //!   advertises, manual acknowledgement and local replay of publishes, the quality of service each
 //!   record is published at, the Maximum Packet Size the broker declares and the rejection of a
-//!   record whose PUBLISH packet would exceed it, the QoS 0 publishes a sink's client still holds
+//!   record whose PUBLISH packet would exceed it, the QoS 0 publishes an emitter's client still holds
 //!   until it sends them, and confirmation classification.
 //! - **Depends on.** The connector contract, the node DNS resolver, vocabulary values,
 //!   `error-stack`, Tokio and `rumqttc`.
@@ -56,8 +56,9 @@ use connection::MqttDialer;
 use error_stack::Report;
 use futures_util::FutureExt as _;
 pub use ingestor::{
-    MqttClientIdError, MqttIngestor, MqttIngestorError, MqttIngestorMessage, MqttIngestorPlan,
-    MqttIngestorPosition, MqttIngestorSessions, MqttIngestorSettings,
+    MqttClientIdError, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorMessage,
+    MqttTopicIngestorPlan, MqttTopicIngestorPosition, MqttTopicIngestorSessions,
+    MqttTopicIngestorSettings,
 };
 use meticulous::OptionExt as _;
 use nervix_connector::{
@@ -95,7 +96,7 @@ const MQTT: &str = "mqtt";
 /// four bytes of seven value bits each.
 const MQTT_MAX_REMAINING_LENGTH: usize = 268_435_455;
 
-/// The quality of service an MQTT sink publishes at.
+/// The quality of service an MQTT emitter publishes at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MqttPublishingMode {
     Qos0,
@@ -113,10 +114,10 @@ impl MqttPublishingMode {
     }
 }
 
-/// What one MQTT sink publishes through: its client entries, topic, quality of service, the
+/// What one MQTT emitter publishes through: its client entries, topic, quality of service, the
 /// backoff its event loop reconnects on, the client id to use when the configuration declares
 /// none, and the node resolver every connection resolves the broker host through.
-pub struct MqttEmitterConfig {
+pub struct MqttTopicEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub topic: MqttTopicName,
     pub mode: MqttPublishingMode,
@@ -125,7 +126,7 @@ pub struct MqttEmitterConfig {
     pub dns: DnsResolver,
 }
 
-pub struct MqttEmitter {
+pub struct MqttTopicEmitter {
     client: AsyncClient,
     topic: MqttTopicName,
     mode: MqttPublishingMode,
@@ -137,7 +138,7 @@ pub struct MqttEmitter {
     eventloop_shutdown: watch::Sender<bool>,
 }
 
-/// Why one record is not a PUBLISH packet this sink can send.
+/// Why one record is not a PUBLISH packet this emitter can send.
 #[derive(Debug, PartialEq, Eq, Error)]
 enum MqttRecordError {
     #[error(
@@ -157,8 +158,8 @@ enum MqttRecordError {
 
 type MqttRecordResult<T> = Result<T, Report<MqttRecordError>>;
 
-/// What the client writes around every payload this sink publishes, which its topic and quality
-/// of service fix for the sink's lifetime.
+/// What the client writes around every payload this emitter publishes, which its topic and quality
+/// of service fix for the emitter's lifetime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MqttPublishFraming {
     /// The variable header in front of the payload: the topic's two-byte length prefix and its
@@ -270,12 +271,12 @@ type MqttAnswer = Pin<Box<dyn Future<Output = BrokerAnswer> + Send>>;
 /// a clean session's next connection dropped the publish a lost connection left behind.
 type MqttFlush = Pin<Box<dyn Future<Output = Result<(), PublishNoticeError>> + Send>>;
 
-/// The QoS 0 publishes a sink reported delivered that its client has not yet sent.
+/// The QoS 0 publishes an emitter reported delivered that its client has not yet sent.
 ///
 /// A QoS 0 record is delivered once the client takes it, and the client's event loop writes it to
 /// the broker connection afterwards: at once while it is connected, or once it connects again. The
-/// sink keeps the flush of every publish the client took until that flush ends, so finishing the
-/// sink can wait for what the client still holds. Dropping the ended flushes at the start of each
+/// emitter keeps the flush of every publish the client took until that flush ends, so finishing the
+/// emitter can wait for what the client still holds. Dropping the ended flushes at the start of each
 /// publish keeps one flush for each publish the client still holds: the one request its queue
 /// takes, and those a lost connection left for the next.
 #[derive(Default)]
@@ -319,7 +320,7 @@ impl MqttUnsentPublishes {
     /// its publish with the connection whose failure the event loop reported.
     fn drop_settled(&mut self) {
         self.drop_ended().discarded(
-            "the event loop reported the lost connection that failed the flush as the sink's \
+            "the event loop reported the lost connection that failed the flush as the emitter's \
              transient error and an error event",
         );
     }
@@ -400,14 +401,14 @@ impl MqttReconnectBackoff {
     }
 }
 
-struct MqttEmitterAddr {
+struct MqttTopicEmitterAddr {
     host: String,
     port: u16,
     tls: bool,
 }
 
-impl MqttEmitter {
-    pub fn new(config: MqttEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
+impl MqttTopicEmitter {
+    pub fn new(config: MqttTopicEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
         let mode = config.mode;
         let (client, mut eventloop) =
             Self::client_from_config(&config.config, &config.default_client_id, mode, config.dns)?;
@@ -450,7 +451,7 @@ impl MqttEmitter {
                         warn!(
                             error = %reason,
                             retry_in = %humantime::format_duration(wait),
-                            "mqtt sink event loop reconnecting"
+                            "mqtt emitter event loop reconnecting"
                         );
                         nervix_primitives::select! {
                             changed = eventloop_shutdown_rx.changed() => {
@@ -538,7 +539,7 @@ impl MqttEmitter {
             .map_err(|error| Self::config_error(format!("invalid MQTT client config: {error}")))
     }
 
-    fn parse_addr(addr: &str) -> EmitterStartResult<MqttEmitterAddr> {
+    fn parse_addr(addr: &str) -> EmitterStartResult<MqttTopicEmitterAddr> {
         let url = Url::parse(addr).map_err(|source| {
             Self::config_error(format!("invalid MQTT addr '{addr}': {source}"))
         })?;
@@ -566,7 +567,7 @@ impl MqttEmitter {
         let port = url
             .port()
             .ok_or_else(|| Self::config_error(format!("missing port in MQTT addr '{addr}'")))?;
-        Ok(MqttEmitterAddr { host, port, tls })
+        Ok(MqttTopicEmitterAddr { host, port, tls })
     }
 
     /// Accepts a payload of `payload_bytes` whose PUBLISH packet the protocol can express and the
@@ -768,14 +769,23 @@ impl MqttEmitter {
     }
 }
 
-impl Drop for MqttEmitter {
+impl Drop for MqttTopicEmitter {
     fn drop(&mut self) {
         self.eventloop_shutdown.send_replace(true);
     }
 }
 
+impl MqttTopicEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::Mqtt(nervix_models::MqttEmitterEntity::Topic);
+}
+
 #[async_trait]
-impl EmitterLifecycle for MqttEmitter {
+impl EmitterLifecycle for MqttTopicEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// A QoS 0 publish is delivered once the client takes it, and the event loop sends it later,
     /// so the client can still hold delivered publishes, which the finish waits for the event loop
     /// to send. A QoS 1 or 2 publish is delivered only once the broker answered for it.
@@ -796,7 +806,7 @@ impl EmitterLifecycle for MqttEmitter {
 }
 
 #[async_trait]
-impl RecordEmitter for MqttEmitter {
+impl RecordEmitter for MqttTopicEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         match self.mode {
             MqttPublishingMode::Qos0 => self.publish_at_most_once(records).await,
@@ -823,7 +833,7 @@ mod tests {
 
     #[test]
     fn a_completed_handshake_confirms_the_record() {
-        let verdict = MqttEmitter::broker_answer(Ok(()))
+        let verdict = MqttTopicEmitter::broker_answer(Ok(()))
             .expect("a completed handshake is the broker's verdict on the record");
 
         assert_eq!(verdict, BrokerVerdict::Confirmed);
@@ -858,7 +868,7 @@ mod tests {
             ),
         ];
         for (refusal, message) in refusals {
-            let verdict = MqttEmitter::broker_answer(Err(refusal))
+            let verdict = MqttTopicEmitter::broker_answer(Err(refusal))
                 .expect("a refusal of the record itself is the broker's verdict on it");
 
             assert_eq!(
@@ -1080,7 +1090,7 @@ mod tests {
         bytes
     }
 
-    /// The size a sink measures a PUBLISH at is the length of the packet the client writes for it:
+    /// The size an emitter measures a PUBLISH at is the length of the packet the client writes for it:
     /// the fixed header, a Remaining Length of the variable header and payload, the topic, the
     /// packet identifier QoS 1 and 2 carry, the property length and the payload, across every
     /// Remaining Length width. A payload past the largest Remaining Length has no packet, and the
@@ -1164,7 +1174,7 @@ mod tests {
             });
     }
 
-    /// A host that ignores what the sink reports, for tests that only read its publish outcomes.
+    /// A host that ignores what the emitter reports, for tests that only read its publish outcomes.
     struct SilentHost;
 
     impl nervix_connector::EmitterTransientErrorStatus for SilentHost {
@@ -1198,7 +1208,7 @@ mod tests {
         }
     }
 
-    /// A host that keeps the latest transient error the sink records, for tests that read it.
+    /// A host that keeps the latest transient error the emitter records, for tests that read it.
     struct RecordingHost {
         transient_error: watch::Sender<Option<String>>,
     }
@@ -1236,10 +1246,10 @@ mod tests {
         }
     }
 
-    /// The configuration of a QoS 0 sink on `topic` whose client connects to `addr` through `dns`,
+    /// The configuration of a QoS 0 emitter on `topic` whose client connects to `addr` through `dns`,
     /// retrying slowly enough that a test never sees a second attempt.
-    fn qos0_config(addr: &str, topic_name: &str, dns: DnsResolver) -> MqttEmitterConfig {
-        MqttEmitterConfig {
+    fn qos0_config(addr: &str, topic_name: &str, dns: DnsResolver) -> MqttTopicEmitterConfig {
+        MqttTopicEmitterConfig {
             config: vec![ClientConfigEntry {
                 key: "addr".to_string(),
                 value: addr.to_string(),
@@ -1250,17 +1260,17 @@ mod tests {
                 backoff: Duration::from_secs(60),
                 max_backoff: Duration::from_secs(60),
             },
-            default_client_id: "nervix-mqtt-sink-test".to_string(),
+            default_client_id: "nervix-mqtt-emitter-test".to_string(),
             dns,
         }
     }
 
-    fn qos0_emitter(addr: &str, topic_name: &str, dns: DnsResolver) -> MqttEmitter {
-        MqttEmitter::new(
+    fn qos0_emitter(addr: &str, topic_name: &str, dns: DnsResolver) -> MqttTopicEmitter {
+        MqttTopicEmitter::new(
             qos0_config(addr, topic_name, dns),
             EmitterHost::new(SilentHost),
         )
-        .expect("the test sink config is valid")
+        .expect("the test emitter config is valid")
     }
 
     fn record(index: usize, payload_bytes: usize) -> EmitterRecord {
@@ -1318,7 +1328,7 @@ mod tests {
         let (mut connection, _) = broker
             .accept()
             .await
-            .expect("the sink's client connects to the test broker");
+            .expect("the emitter's client connects to the test broker");
         let mut connect = [0_u8; 256];
         let read = tokio::io::AsyncReadExt::read(&mut connection, &mut connect)
             .await
@@ -1334,9 +1344,9 @@ mod tests {
         assert_eq!(declared.get(), 1024);
     }
 
-    /// The maximum packet size the broker declared to `sink`, once its event loop has recorded the
+    /// The maximum packet size the broker declared to `emitter`, once its event loop has recorded the
     /// CONNACK that declared it.
-    async fn declared_packet_limit(connector: &MqttEmitter) -> NonZeroU32 {
+    async fn declared_packet_limit(connector: &MqttTopicEmitter) -> NonZeroU32 {
         nervix_primitives::time::timeout(Duration::from_secs(30), async {
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -1350,7 +1360,7 @@ mod tests {
         .expect("the event loop records the CONNACK it received")
     }
 
-    /// The first transient error the sink's event loop records with its host.
+    /// The first transient error the emitter's event loop records with its host.
     async fn first_transient_error(recorded: &mut watch::Receiver<Option<String>>) -> String {
         nervix_primitives::time::timeout(Duration::from_secs(30), async {
             loop {
@@ -1361,7 +1371,7 @@ mod tests {
                 recorded
                     .changed()
                     .await
-                    .expect("the sink's host keeps the sender");
+                    .expect("the emitter's host keeps the sender");
             }
         })
         .await
@@ -1379,8 +1389,8 @@ mod tests {
             fixture.dns.clone(),
         );
         let _emitter =
-            MqttEmitter::new(config, EmitterHost::new(RecordingHost { transient_error }))
-                .expect("the test sink config is valid");
+            MqttTopicEmitter::new(config, EmitterHost::new(RecordingHost { transient_error }))
+                .expect("the test emitter config is valid");
 
         let reason = first_transient_error(&mut recorded).await;
 
@@ -1402,15 +1412,15 @@ mod tests {
         None
     }
 
-    /// The configuration of a QoS 1 sink with `confirmation` on `topic` whose client connects to
+    /// The configuration of a QoS 1 emitter with `confirmation` on `topic` whose client connects to
     /// `addr` through `dns`, retrying slowly enough that a test never sees a second attempt.
     fn qos1_config(
         addr: &str,
         topic_name: &str,
         dns: DnsResolver,
         confirmation: AckConfirmation,
-    ) -> MqttEmitterConfig {
-        MqttEmitterConfig {
+    ) -> MqttTopicEmitterConfig {
+        MqttTopicEmitterConfig {
             mode: MqttPublishingMode::Qos1(confirmation),
             ..qos0_config(addr, topic_name, dns)
         }
@@ -1430,11 +1440,11 @@ mod tests {
             max_in_flight: NonZeroUsize::new(4).expect("four is non-zero"),
             timeout: Duration::from_secs(30),
         };
-        let mut connector = MqttEmitter::new(
+        let mut connector = MqttTopicEmitter::new(
             qos1_config(&broker.addr(), "window", fixture.dns.clone(), confirmation),
             EmitterHost::new(SilentHost),
         )
-        .expect("the test sink config is valid");
+        .expect("the test emitter config is valid");
         let script = async {
             let mut connection = broker.accept().await;
             let mut publishes = Vec::new();
@@ -1488,11 +1498,11 @@ mod tests {
             max_in_flight: NonZeroUsize::new(4).expect("four is non-zero"),
             timeout: Duration::from_secs(30),
         };
-        let mut connector = MqttEmitter::new(
+        let mut connector = MqttTopicEmitter::new(
             qos1_config(&broker.addr(), "limited", fixture.dns.clone(), confirmation),
             EmitterHost::new(SilentHost),
         )
-        .expect("the test sink config is valid");
+        .expect("the test emitter config is valid");
         let mut connection = broker.accept_declaring_packet_limit(64).await;
         assert_eq!(declared_packet_limit(&connector).await.get(), 64);
         let script = async {
@@ -1544,11 +1554,11 @@ mod tests {
             max_in_flight: NonZeroUsize::new(2).expect("two is non-zero"),
             timeout: Duration::from_secs(30),
         };
-        let mut connector = MqttEmitter::new(
+        let mut connector = MqttTopicEmitter::new(
             qos1_config(&broker.addr(), "window", fixture.dns.clone(), confirmation),
             EmitterHost::new(SilentHost),
         )
-        .expect("the test sink config is valid");
+        .expect("the test emitter config is valid");
         let script = async {
             let mut connection = broker.accept().await;
             let refused = connection.read_publish().await;
@@ -1586,7 +1596,7 @@ mod tests {
         let finished = connector
             .finish(Instant::now())
             .await
-            .expect("a QoS 0 sink that took no record has nothing to send");
+            .expect("a QoS 0 emitter that took no record has nothing to send");
 
         assert_eq!(finished, EmitterFinish::NothingHeld);
     }
@@ -1657,7 +1667,7 @@ mod tests {
             max_in_flight: NonZeroUsize::MIN,
             timeout: Duration::from_secs(30),
         };
-        let mut connector = MqttEmitter::new(
+        let mut connector = MqttTopicEmitter::new(
             qos1_config(
                 "mqtt://127.0.0.1:9",
                 "answered",
@@ -1666,12 +1676,12 @@ mod tests {
             ),
             EmitterHost::new(SilentHost),
         )
-        .expect("the test sink config is valid");
+        .expect("the test emitter config is valid");
 
         let finished = connector
             .finish(Instant::now())
             .await
-            .expect("a confirmed sink answers its finish");
+            .expect("a confirmed emitter answers its finish");
 
         assert_eq!(finished, EmitterFinish::NothingHeld);
     }
@@ -1790,7 +1800,7 @@ mod tests {
             max_in_flight: NonZeroUsize::MIN,
             timeout,
         };
-        let mut connector = MqttEmitter::new(
+        let mut connector = MqttTopicEmitter::new(
             qos1_config(
                 "mqtt://127.0.0.1:9",
                 "unreachable",
@@ -1799,7 +1809,7 @@ mod tests {
             ),
             EmitterHost::new(RecordingHost { transient_error }),
         )
-        .expect("the test sink config is valid");
+        .expect("the test emitter config is valid");
         first_transient_error(&mut recorded).await;
 
         let unanswered = connector.publish(vec![record(0, 1)]).await.into_parts();
@@ -1846,11 +1856,11 @@ mod tests {
         // connection, so the client takes the first record and refuses the second.
         let fixture = DnsFixture::start().await;
         let (transient_error, mut recorded) = watch::channel(None);
-        let mut connector = MqttEmitter::new(
+        let mut connector = MqttTopicEmitter::new(
             qos0_config("mqtt://127.0.0.1:9", "unreachable", fixture.dns.clone()),
             EmitterHost::new(RecordingHost { transient_error }),
         )
-        .expect("the test sink config is valid");
+        .expect("the test emitter config is valid");
         first_transient_error(&mut recorded).await;
 
         let outcome = connector
@@ -1903,7 +1913,7 @@ mod tests {
             ),
         ];
         for (ending, description) in endings {
-            let failure = MqttEmitter::broker_answer(Err(ending.clone()))
+            let failure = MqttTopicEmitter::broker_answer(Err(ending.clone()))
                 .expect_err("an ending that is not about the record leaves its outcome unknown");
 
             assert_eq!(
@@ -1928,7 +1938,7 @@ mod tests {
                 None,
             ))
         };
-        assert!(MqttEmitter::is_record_client_rejection(
+        assert!(MqttTopicEmitter::is_record_client_rejection(
             &MqttClientError::InvalidRequest(Box::new(publish()))
         ));
         let refusals = [
@@ -1947,8 +1957,8 @@ mod tests {
             ),
         ];
         for (refusal, description) in refusals {
-            assert!(!MqttEmitter::is_record_client_rejection(&refusal));
-            let failure = MqttEmitter::refused_hand_over(refusal);
+            assert!(!MqttTopicEmitter::is_record_client_rejection(&refusal));
+            let failure = MqttTopicEmitter::refused_hand_over(refusal);
             assert_eq!(
                 failure.current_context(),
                 &EmitterWriteError::Publish { connector: MQTT }

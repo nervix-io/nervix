@@ -769,7 +769,7 @@ A failed acknowledgement resolves negatively exactly once. The sweep and report 
 the exact delivery generation's guard, so a report that arrives first keeps the acknowledgement
 pending, and a terminal outcome or the delivery's own failure that resolves it first leaves the
 sweep nothing to fail. The source attempt fails with it and redelivers the record along the current
-routes, so a emitter that already completed the record can receive it again. A report or outcome that
+routes, so an emitter that already completed the record can receive it again. A report or outcome that
 arrives after its acknowledgement failed finds no entry and is rejected at `debug`.
 
 Every node on a record's path applies the same bound. A relay owner that routed a record to the

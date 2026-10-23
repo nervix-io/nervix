@@ -14,15 +14,15 @@ use super::*;
 
 impl EmitterConnectorStarter {
     pub(super) fn client(
-        connector: &ClientEmitterPlan,
+        connector: &ClientConsumerEmitterPlan,
         context: &EmitterConnectorContext,
         output_schema: &Arc<CompiledSchema>,
         plan: &EmitterStartPlan,
     ) -> EmitterRuntimeResult<Box<dyn EmitterConnector>> {
         let opened = Box::new(nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
-            "sink initialization publishes one concrete client-emitter endpoint lifetime before \
-             processing records",
+            "emitter initialization publishes one concrete client-emitter endpoint lifetime \
+             before processing records",
             ClientConsumerConnector::new(
                 context,
                 connector,

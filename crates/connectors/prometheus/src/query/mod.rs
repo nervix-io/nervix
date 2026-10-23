@@ -1,9 +1,9 @@
-//! Prometheus paced source connector.
+//! Prometheus paced ingestor connector.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Prometheus client configuration interpretation, instant queries, the bounded read
-//!   of each response, sample parsing, payload encoding and source-boundary arrival observation.
+//!   of each response, sample parsing, payload encoding and ingestor-boundary arrival observation.
 //! - **Depends on.** The connector contract, vocabulary configuration and the Prometheus HTTP
 //!   API.
 //! - **Must not know.** Domain clocks, runtime collectors, relays, branches, schedules, registry
@@ -42,7 +42,7 @@ use url::Url;
 
 const PROMETHEUS: &str = "prometheus";
 
-pub struct PrometheusIngestorPlan {
+pub struct PrometheusQueryIngestorPlan {
     pub config: Vec<ClientConfigEntry>,
     pub query: String,
     /// The most bytes of one query response a poll reads.
@@ -50,7 +50,7 @@ pub struct PrometheusIngestorPlan {
     pub dns: DnsResolver,
 }
 
-pub struct PrometheusIngestor {
+pub struct PrometheusQueryIngestor {
     client: HttpClient,
     api_root: PrometheusApiRoot,
     query: String,
@@ -58,7 +58,7 @@ pub struct PrometheusIngestor {
 }
 
 #[derive(Debug, Error)]
-pub enum PrometheusIngestorError {
+pub enum PrometheusQueryIngestorError {
     #[error("failed to send Prometheus query")]
     QueryRequest,
     #[error("Prometheus query failed with HTTP status {status}")]
@@ -105,8 +105,12 @@ struct PrometheusVectorResult {
 }
 
 #[async_trait]
-impl IngestorConnector for PrometheusIngestor {
-    type Plan = PrometheusIngestorPlan;
+impl IngestorConnector for PrometheusQueryIngestor {
+    const KIND: nervix_models::IngestorEntityKind = nervix_models::IngestorEntityKind::Prometheus(
+        nervix_models::PrometheusIngestorEntity::Query,
+    );
+
+    type Plan = PrometheusQueryIngestorPlan;
 
     async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
         let api_root = PrometheusApiRoot::of_client_config(&plan.config).change_context(
@@ -129,7 +133,7 @@ impl IngestorConnector for PrometheusIngestor {
 }
 
 #[async_trait]
-impl PacedIngestorConnector for PrometheusIngestor {
+impl PacedIngestorConnector for PrometheusQueryIngestor {
     async fn poll(&mut self, scheduled_at: Timestamp) -> IngestorResult<IngestorPoll> {
         let samples =
             self.query_vector(Some(scheduled_at))
@@ -159,7 +163,7 @@ impl PacedIngestorConnector for PrometheusIngestor {
     }
 }
 
-impl PrometheusIngestor {
+impl PrometheusQueryIngestor {
     fn client_from_config(
         config: &[ClientConfigEntry],
         dns: &DnsResolver,
@@ -170,35 +174,38 @@ impl PrometheusIngestor {
     async fn query_vector(
         &self,
         query_time: Option<Timestamp>,
-    ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusIngestorError>> {
+    ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusQueryIngestorError>> {
         let mut params = vec![("query".to_string(), self.query.clone())];
         if let Some(query_time) = query_time {
             params.push(("time".to_string(), Self::query_time_seconds(query_time)));
         }
         let url = Self::query_url(&self.api_root, params);
         let response = self.client.get(url).send().await.map_err(|source| {
-            Report::new(PrometheusIngestorError::QueryRequest).attach_printable(source.to_string())
+            Report::new(PrometheusQueryIngestorError::QueryRequest)
+                .attach_printable(source.to_string())
         })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(Report::new(PrometheusIngestorError::QueryStatus { status }));
+            return Err(Report::new(PrometheusQueryIngestorError::QueryStatus {
+                status,
+            }));
         }
         let body = Self::bounded_body(response, self.max_body_size).await?;
         // The decoder's own message can quote the payload, so it stays an attachment and out of
         // the transient error the ingestor reports.
         let payload =
             serde_json::from_slice::<PrometheusQueryResponse>(&body).map_err(|source| {
-                Report::new(PrometheusIngestorError::DecodeResponse)
+                Report::new(PrometheusQueryIngestorError::DecodeResponse)
                     .attach_printable(source.to_string())
             })?;
         if payload.status != "success" {
-            return Err(Report::new(PrometheusIngestorError::QueryRejected {
+            return Err(Report::new(PrometheusQueryIngestorError::QueryRejected {
                 status: payload.status,
             }));
         }
         if payload.data.result_type != "vector" {
             return Err(Report::new(
-                PrometheusIngestorError::UnsupportedResultType {
+                PrometheusQueryIngestorError::UnsupportedResultType {
                     result_type: payload.data.result_type,
                 },
             ));
@@ -215,14 +222,14 @@ impl PrometheusIngestor {
     async fn bounded_body(
         mut response: reqwest::Response,
         limit: PayloadSizeLimit,
-    ) -> Result<Vec<u8>, Report<PrometheusIngestorError>> {
+    ) -> Result<Vec<u8>, Report<PrometheusQueryIngestorError>> {
         let limit_bytes = limit.bytes().get();
         if let Some(announced) = response.content_length()
             && announced > limit_bytes
         {
-            return Err(Report::new(PrometheusIngestorError::ResponseTooLarge {
-                limit,
-            }));
+            return Err(Report::new(
+                PrometheusQueryIngestorError::ResponseTooLarge { limit },
+            ));
         }
         let mut body = Vec::new();
         loop {
@@ -232,7 +239,7 @@ impl PrometheusIngestor {
                 Ok(None) => return Ok(body),
                 Err(source) => {
                     return Err(Report::new(source.without_url())
-                        .change_context(PrometheusIngestorError::ReadResponse));
+                        .change_context(PrometheusQueryIngestorError::ReadResponse));
                 }
             };
             let read = u64::try_from(body.len())
@@ -243,9 +250,9 @@ impl PrometheusIngestor {
             let chunk_bytes = u64::try_from(chunk.len())
                 .assured("a length held in memory fits u64 on every supported target");
             if chunk_bytes > remaining {
-                return Err(Report::new(PrometheusIngestorError::ResponseTooLarge {
-                    limit,
-                }));
+                return Err(Report::new(
+                    PrometheusQueryIngestorError::ResponseTooLarge { limit },
+                ));
             }
             body.extend_from_slice(&chunk);
         }
@@ -281,18 +288,18 @@ impl PrometheusIngestor {
 
     fn sample_payload(
         sample: &PrometheusVectorResult,
-    ) -> Result<Vec<u8>, Report<PrometheusIngestorError>> {
+    ) -> Result<Vec<u8>, Report<PrometheusQueryIngestorError>> {
         let mut object = serde_json::Map::new();
         for (key, value) in &sample.metric {
             object.insert(key.clone(), serde_json::Value::String(value.clone()));
         }
 
         let value = sample.value.1.parse::<f64>().map_err(|source| {
-            Report::new(PrometheusIngestorError::InvalidSampleValue)
+            Report::new(PrometheusQueryIngestorError::InvalidSampleValue)
                 .attach_printable(source.to_string())
         })?;
         let value = serde_json::Number::from_f64(value)
-            .ok_or_else(|| Report::new(PrometheusIngestorError::NonFiniteSampleValue))?;
+            .ok_or_else(|| Report::new(PrometheusQueryIngestorError::NonFiniteSampleValue))?;
         object.insert("value".to_string(), serde_json::Value::Number(value));
         object.insert(
             "timestamp".to_string(),
@@ -300,18 +307,21 @@ impl PrometheusIngestor {
         );
 
         serde_json::to_vec(&serde_json::Value::Object(object)).map_err(|source| {
-            Report::new(PrometheusIngestorError::EncodeSample).attach_printable(source.to_string())
+            Report::new(PrometheusQueryIngestorError::EncodeSample)
+                .attach_printable(source.to_string())
         })
     }
 
-    fn timestamp_to_rfc3339(timestamp: f64) -> Result<String, Report<PrometheusIngestorError>> {
+    fn timestamp_to_rfc3339(
+        timestamp: f64,
+    ) -> Result<String, Report<PrometheusQueryIngestorError>> {
         if !timestamp.is_finite() {
-            return Err(Report::new(PrometheusIngestorError::InvalidTimestamp));
+            return Err(Report::new(PrometheusQueryIngestorError::InvalidTimestamp));
         }
         let secs: i64 = timestamp
             .trunc()
             .checked_approx_into()
-            .ok_or_else(|| Report::new(PrometheusIngestorError::InvalidTimestamp))?;
+            .ok_or_else(|| Report::new(PrometheusQueryIngestorError::InvalidTimestamp))?;
         let nanos: u32 = (timestamp.fract().abs() * 1_000_000_000.0)
             .round()
             .checked_approx_into()
@@ -319,7 +329,7 @@ impl PrometheusIngestor {
         let datetime = Utc
             .timestamp_opt(secs, nanos.min(999_999_999))
             .single()
-            .ok_or_else(|| Report::new(PrometheusIngestorError::InvalidTimestamp))?;
+            .ok_or_else(|| Report::new(PrometheusQueryIngestorError::InvalidTimestamp))?;
         Ok(datetime.to_rfc3339())
     }
 }
@@ -340,7 +350,7 @@ mod tests {
     async fn prometheus_source_opens_only_with_a_config_its_client_declares()
     -> Result<(), Report<nervix_dns::DnsConfigurationError>> {
         let dns = DnsResolver::load(nervix_dns::DnsConfiguration::system()).await?;
-        let plan = |config: Vec<ClientConfigEntry>| PrometheusIngestorPlan {
+        let plan = |config: Vec<ClientConfigEntry>| PrometheusQueryIngestorPlan {
             config,
             query: "up".to_string(),
             max_body_size: nervix_models::PROMETHEUS_DEFAULT_MAX_BODY_SIZE,
@@ -351,7 +361,7 @@ mod tests {
             value: value.to_string(),
         };
 
-        let source = PrometheusIngestor::open(
+        let source = PrometheusQueryIngestor::open(
             &plan(vec![
                 entry("addr", "http://prometheus:9090/base"),
                 entry("timeout_ms", "5000"),
@@ -365,7 +375,7 @@ mod tests {
             "http://prometheus:9090/base"
         );
 
-        let Err(refused) = PrometheusIngestor::open(
+        let Err(refused) = PrometheusQueryIngestor::open(
             &plan(vec![entry("addr", "http://prometheus:9090/?stale=true")]),
             0,
         )
@@ -387,7 +397,7 @@ mod tests {
             key: "timeout_ms".to_string(),
             value: "oops".to_string(),
         }];
-        let error = PrometheusIngestor::client_from_config(&timeout, &dns)
+        let error = PrometheusQueryIngestor::client_from_config(&timeout, &dns)
             .expect_err("invalid Prometheus timeout");
         assert!(error.to_string().contains("Prometheus timeout_ms"));
         Ok(())
@@ -400,10 +410,11 @@ mod tests {
             value: (1_735_782_245.25, "12.5".to_string()),
         };
 
-        let timestamp = PrometheusIngestor::timestamp_to_rfc3339(sample.value.0).expect("valid ts");
+        let timestamp =
+            PrometheusQueryIngestor::timestamp_to_rfc3339(sample.value.0).expect("valid ts");
         assert!(timestamp.starts_with("2025-"));
 
-        let payload = PrometheusIngestor::sample_payload(&sample).expect("must render");
+        let payload = PrometheusQueryIngestor::sample_payload(&sample).expect("must render");
         let value: serde_json::Value = serde_json::from_slice(&payload).expect("valid json");
         assert_eq!(value["source"], "local");
         assert_eq!(value["value"], 12.5);
@@ -413,14 +424,14 @@ mod tests {
             metric: BTreeMap::new(),
             value: (1.0, "NaN".to_string()),
         };
-        assert!(PrometheusIngestor::sample_payload(&bad_value).is_err());
-        assert!(PrometheusIngestor::timestamp_to_rfc3339(f64::INFINITY).is_err());
+        assert!(PrometheusQueryIngestor::sample_payload(&bad_value).is_err());
+        assert!(PrometheusQueryIngestor::timestamp_to_rfc3339(f64::INFINITY).is_err());
     }
 
     #[test]
     fn prometheus_query_time_keeps_every_nanosecond_digit() {
         let render = |unix_nanos: i64| {
-            PrometheusIngestor::query_time_seconds(Timestamp::from_unix_nanos(unix_nanos))
+            PrometheusQueryIngestor::query_time_seconds(Timestamp::from_unix_nanos(unix_nanos))
         };
 
         assert_eq!(render(1_788_765_595_123_456_789), "1788765595.123456789");
@@ -437,7 +448,7 @@ mod tests {
     fn prometheus_query_url_extends_the_api_root_path() {
         let api_root = PrometheusApiRoot::parse("http://prometheus:9090/base/")
             .expect("the test address is an API root");
-        let url = PrometheusIngestor::query_url(
+        let url = PrometheusQueryIngestor::query_url(
             &api_root,
             vec![("query".to_string(), "vector(1)".to_string())],
         );
@@ -496,7 +507,7 @@ mod tests {
     async fn query_response(
         status: &str,
         body: &str,
-    ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusIngestorError>> {
+    ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusQueryIngestorError>> {
         query_response_within(
             status,
             body,
@@ -506,14 +517,14 @@ mod tests {
         .await
     }
 
-    /// What a source bounded by `max_body_size` reads from a server that answers its one query
+    /// What an ingestor bounded by `max_body_size` reads from a server that answers its one query
     /// with `status` and `body`, framed as `framing` says.
     async fn query_response_within(
         status: &str,
         body: &str,
         framing: Framing,
         max_body_size: PayloadSizeLimit,
-    ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusIngestorError>> {
+    ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusQueryIngestorError>> {
         let listener = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test Prometheus listener should bind");
@@ -536,7 +547,7 @@ mod tests {
                 .await
                 .expect("test Prometheus response should be writable");
         });
-        let source = PrometheusIngestor {
+        let source = PrometheusQueryIngestor {
             client: HttpClient::new(),
             api_root: PrometheusApiRoot::parse(&format!("http://{address}"))
                 .expect("the test listener's address is an API root"),
@@ -588,7 +599,7 @@ mod tests {
             assert!(
                 matches!(
                     refused.current_context(),
-                    PrometheusIngestorError::ResponseTooLarge { limit } if *limit == short
+                    PrometheusQueryIngestorError::ResponseTooLarge { limit } if *limit == short
                 ),
                 "{framing:?}: {refused:?}"
             );
@@ -602,7 +613,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn prometheus_query_failures_have_distinct_typed_contexts() {
-        let unavailable = PrometheusIngestor {
+        let unavailable = PrometheusQueryIngestor {
             client: HttpClient::new(),
             api_root: PrometheusApiRoot::parse("http://127.0.0.1:1")
                 .expect("the unused port's address is an API root"),
@@ -614,7 +625,7 @@ mod tests {
         .expect_err("an unavailable endpoint must fail the request");
         assert!(matches!(
             unavailable.current_context(),
-            PrometheusIngestorError::QueryRequest
+            PrometheusQueryIngestorError::QueryRequest
         ));
 
         let status = query_response("503 Service Unavailable", "{}")
@@ -622,7 +633,7 @@ mod tests {
             .expect_err("a non-success status must fail");
         assert!(matches!(
             status.current_context(),
-            PrometheusIngestorError::QueryStatus { .. }
+            PrometheusQueryIngestorError::QueryStatus { .. }
         ));
 
         let truncated = query_response_within(
@@ -636,7 +647,7 @@ mod tests {
         assert!(
             matches!(
                 truncated.current_context(),
-                PrometheusIngestorError::ReadResponse
+                PrometheusQueryIngestorError::ReadResponse
             ),
             "{truncated:?}"
         );
@@ -650,7 +661,7 @@ mod tests {
             .expect_err("a malformed response must fail decoding");
         assert!(matches!(
             decode.current_context(),
-            PrometheusIngestorError::DecodeResponse
+            PrometheusQueryIngestorError::DecodeResponse
         ));
 
         let rejected = query_response(
@@ -661,7 +672,7 @@ mod tests {
         .expect_err("an unsuccessful Prometheus payload must fail");
         assert!(matches!(
             rejected.current_context(),
-            PrometheusIngestorError::QueryRejected { .. }
+            PrometheusQueryIngestorError::QueryRejected { .. }
         ));
 
         let result_type = query_response(
@@ -672,7 +683,7 @@ mod tests {
         .expect_err("a non-vector Prometheus payload must fail");
         assert!(matches!(
             result_type.current_context(),
-            PrometheusIngestorError::UnsupportedResultType { .. }
+            PrometheusQueryIngestorError::UnsupportedResultType { .. }
         ));
     }
 
@@ -682,11 +693,11 @@ mod tests {
             metric: BTreeMap::new(),
             value: (1.0, "not-a-number".to_string()),
         };
-        let value = PrometheusIngestor::sample_payload(&sample)
+        let value = PrometheusQueryIngestor::sample_payload(&sample)
             .expect_err("an invalid sample value must fail");
         assert!(matches!(
             value.current_context(),
-            PrometheusIngestorError::InvalidSampleValue
+            PrometheusQueryIngestorError::InvalidSampleValue
         ));
     }
 }

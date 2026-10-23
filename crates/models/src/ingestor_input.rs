@@ -24,7 +24,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ClientProducerIngestor, ClientSourceEntity, CodecName, IngestAcknowledgement,
+    ClientIngestorEntity, ClientProducerIngestor, CodecName, IngestAcknowledgement,
     IngestQuiesceMode, IngestorDeclaration, IngestorEntity, IngestorEntityKind, ModelKind,
     ModelName,
 };
@@ -59,7 +59,7 @@ impl IngestorInput {
     pub const fn entity_kind(&self) -> IngestorEntityKind {
         match self {
             Self::Transport(input) => input.source.kind(),
-            Self::Client(_) => IngestorEntityKind::Client(ClientSourceEntity::Producer),
+            Self::Client(_) => IngestorEntityKind::Client(ClientIngestorEntity::Producer),
         }
     }
 
@@ -113,7 +113,7 @@ impl IngestorInput {
     }
 
     /// The source application clients produce into. A transport input has none.
-    pub(crate) fn client_source_mut(&mut self) -> Option<&mut ClientProducerIngestor> {
+    pub(crate) fn client_entity_mut(&mut self) -> Option<&mut ClientProducerIngestor> {
         match self {
             Self::Transport(_) => None,
             Self::Client(source) => Some(source),

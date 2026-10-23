@@ -2531,15 +2531,15 @@ mod tests {
         let kafka = suggestion_values(
             &service,
             &subscriptions,
-            "CREATE KAFKA TOPIC EMITTER sink FROM incoming TO broker TOPIC 'events' MODE NO ACK \
-             RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_",
+            "CREATE KAFKA TOPIC EMITTER emitter FROM incoming TO broker TOPIC 'events' MODE NO \
+             ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_",
         )
         .await;
         assert_eq!(kafka, vec!["write_header"]);
         let sentry = suggestion_values(
             &service,
             &subscriptions,
-            "CREATE SENTRY EVENT EMITTER sink FROM incoming TO client MODE ACK RETRY POLICY \
+            "CREATE SENTRY EVENT EMITTER emitter FROM incoming TO client MODE ACK RETRY POLICY \
              BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_",
         )
         .await;

@@ -1,4 +1,4 @@
-//! SENTRY connector for the event entity.
+//! SentryEventEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public event connector implementation surface.

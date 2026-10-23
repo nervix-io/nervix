@@ -1,4 +1,4 @@
-//! WEBSOCKETS connector for the connection entity.
+//! WebsocketsConnectionIngestor connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public connection connector implementation surface.

@@ -1,7 +1,7 @@
-//! The Pulsar source's subscriptions, its reads that the host cancels, and its acknowledgements and
+//! The Pulsar ingestor's subscriptions, its reads that the host cancels, and its acknowledgements and
 //! redelivery requests, against a broker on loopback.
 //!
-//! Each test drives the production source through the client's real consumer, which subscribes to
+//! Each test drives the production ingestor through the client's real consumer, which subscribes to
 //! a broker that delivers the messages a test asks for and answers each acknowledgement,
 //! non-durable subscribe and unsubscribe as the test chooses, so an acknowledgement counts as
 //! confirmed only once the broker answered it. The broker serves only its first connection: a
@@ -42,9 +42,9 @@ use pulsar::{
 use tokio_util::codec::Framed;
 
 use super::{
-    DURABLE_SUBSCRIPTION_EXISTS, PulsarAckReceipts, PulsarIngestor, PulsarIngestorError,
-    PulsarIngestorPlan, PulsarIngestorPosition, PulsarIngestorSettings, PulsarRefusal,
-    PulsarServerError, PulsarUnresolvedRequest,
+    DURABLE_SUBSCRIPTION_EXISTS, PulsarAckReceipts, PulsarRefusal, PulsarServerError,
+    PulsarTopicIngestor, PulsarTopicIngestorError, PulsarTopicIngestorPlan,
+    PulsarTopicIngestorPosition, PulsarTopicIngestorSettings, PulsarUnresolvedRequest,
 };
 
 const TOPIC: &str = "persistent://public/default/orders";
@@ -52,7 +52,7 @@ const TOPIC: &str = "persistent://public/default/orders";
 /// The client's operation timeout in these tests, which bounds every answer the consumer awaits.
 const OPERATION_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// How long a test waits for something the broker or the source reports.
+/// How long a test waits for something the broker or the ingestor reports.
 const DEADLINE: Duration = Duration::from_secs(30);
 
 /// How the broker answers an acknowledgement.
@@ -464,7 +464,7 @@ impl LoopbackBroker {
             .expect("the broker keeps listening while the test runs")
     }
 
-    /// The client entries of a source that reads through this broker.
+    /// The client entries of an ingestor that reads through this broker.
     fn config(&self) -> Vec<ClientConfigEntry> {
         vec![ClientConfigEntry {
             key: "addr".to_string(),
@@ -482,26 +482,29 @@ fn message_id(entry_id: u64) -> MessageIdData {
     }
 }
 
-/// The source of one instance under an `ACK` mode, subscribed on `broker` through a client whose
+/// The ingestor of one instance under an `ACK` mode, subscribed on `broker` through a client whose
 /// operation timeout is short enough for a test to outlast.
-async fn open(broker: &LoopbackBroker) -> PulsarIngestor {
+async fn open(broker: &LoopbackBroker) -> PulsarTopicIngestor {
     open_with(broker, PulsarAckReceipts::Awaited).await
 }
 
-async fn open_with(broker: &LoopbackBroker, ack_receipts: PulsarAckReceipts) -> PulsarIngestor {
+async fn open_with(
+    broker: &LoopbackBroker,
+    ack_receipts: PulsarAckReceipts,
+) -> PulsarTopicIngestor {
     let plan = plan(broker, ack_receipts, PulsarSubscriptionOwnership::Ingestor).await;
-    PulsarIngestor::open(&plan, 0)
+    PulsarTopicIngestor::open(&plan, 0)
         .await
         .expect("the loopback broker serves the subscription")
 }
 
-/// The plan of a source on `broker` whose subscription `ownership` says who owns, through a client
+/// The plan of an ingestor on `broker` whose subscription `ownership` says who owns, through a client
 /// whose operation timeout is short enough for a test to outlast.
 async fn plan(
     broker: &LoopbackBroker,
     ack_receipts: PulsarAckReceipts,
     ownership: PulsarSubscriptionOwnership,
-) -> PulsarIngestorPlan {
+) -> PulsarTopicIngestorPlan {
     let client = Pulsar::builder(broker.service_url.clone(), TokioExecutor)
         .with_operation_retry_options(OperationRetryOptions {
             operation_timeout: OPERATION_TIMEOUT,
@@ -510,7 +513,7 @@ async fn plan(
         .build()
         .await
         .expect("the loopback broker serves the client's handshake");
-    PulsarIngestorPlan {
+    PulsarTopicIngestorPlan {
         client,
         topic: TOPIC.to_string(),
         subscription: subscription(ownership),
@@ -519,7 +522,7 @@ async fn plan(
     }
 }
 
-/// The subscription every test source reads through, owned as `ownership` says.
+/// The subscription every test ingestor reads through, owned as `ownership` says.
 fn subscription(ownership: PulsarSubscriptionOwnership) -> PulsarSubscription {
     PulsarSubscription {
         name: PulsarSubscriptionName::parse("orders-ingestor")
@@ -528,17 +531,17 @@ fn subscription(ownership: PulsarSubscriptionOwnership) -> PulsarSubscription {
     }
 }
 
-/// The topic every test source reads.
+/// The topic every test ingestor reads.
 fn topic() -> PulsarTopicName {
     PulsarTopicName::parse(TOPIC).expect("the test topic is a valid Pulsar topic name")
 }
 
-/// The settings that remove the owned subscription of a source on the broker `config` names.
+/// The settings that remove the owned subscription of an ingestor on the broker `config` names.
 fn removal_settings<'a>(
     config: &'a [ClientConfigEntry],
     topic: &'a PulsarTopicName,
-) -> PulsarIngestorSettings<'a> {
-    PulsarIngestorSettings {
+) -> PulsarTopicIngestorSettings<'a> {
+    PulsarTopicIngestorSettings {
         config,
         topic,
         subscription: subscription(PulsarSubscriptionOwnership::Ingestor),
@@ -547,8 +550,8 @@ fn removal_settings<'a>(
     }
 }
 
-/// The positions of the first `count` messages the source reads.
-async fn read(source: &mut PulsarIngestor, count: usize) -> Vec<PulsarIngestorPosition> {
+/// The positions of the first `count` messages the ingestor reads.
+async fn read(source: &mut PulsarTopicIngestor, count: usize) -> Vec<PulsarTopicIngestorPosition> {
     let mut positions = Vec::new();
     while positions.len() < count {
         let request = IngestorBatchRequest {
@@ -560,10 +563,10 @@ async fn read(source: &mut PulsarIngestor, count: usize) -> Vec<PulsarIngestorPo
             source.next_batch(request, &IngestorReadCancellation::new()),
         )
         .await
-        .expect("the source reads the broker's next message")
+        .expect("the ingestor reads the broker's next message")
         .expect("the loopback broker delivers its messages");
         let IngestorBatch::Messages(messages) = batch else {
-            panic!("an open source reads messages");
+            panic!("an open ingestor reads messages");
         };
         positions.extend(messages.iter().map(|message| message.position().clone()));
     }
@@ -622,11 +625,11 @@ async fn a_cancelled_parallel_read_returns_every_message_it_gathered() {
     );
 }
 
-/// The Pulsar failure a source operation reports beneath its connector context.
-fn pulsar_failure(error: &error_stack::Report<IngestorError>) -> &PulsarIngestorError {
+/// The Pulsar failure an ingestor operation reports beneath its connector context.
+fn pulsar_failure(error: &error_stack::Report<IngestorError>) -> &PulsarTopicIngestorError {
     error
-        .downcast_ref::<PulsarIngestorError>()
-        .expect("a Pulsar source failure carries its Pulsar cause")
+        .downcast_ref::<PulsarTopicIngestorError>()
+        .expect("a Pulsar ingestor failure carries its Pulsar cause")
 }
 
 #[nervix_primitives::test]
@@ -687,7 +690,8 @@ async fn an_acknowledgement_the_broker_refuses_reports_its_server_error_and_reas
         .await
         .expect_err("the broker refuses the acknowledgement");
 
-    let PulsarIngestorError::AcknowledgementRefused { refusal } = pulsar_failure(&error) else {
+    let PulsarTopicIngestorError::AcknowledgementRefused { refusal } = pulsar_failure(&error)
+    else {
         panic!("a refused acknowledgement names the refusal, got {error:?}");
     };
     assert_eq!(
@@ -720,7 +724,7 @@ async fn an_acknowledgement_the_broker_does_not_answer_is_unconfirmed_after_the_
     assert!(
         matches!(
             pulsar_failure(&error),
-            PulsarIngestorError::AcknowledgementUnconfirmed {
+            PulsarTopicIngestorError::AcknowledgementUnconfirmed {
                 unresolved: PulsarUnresolvedRequest::OperationTimeout
             }
         ),
@@ -741,7 +745,7 @@ async fn a_redelivery_request_the_consumer_cannot_send_is_reported_after_its_con
     assert!(
         matches!(
             pulsar_failure(&error),
-            PulsarIngestorError::AcknowledgementUnconfirmed {
+            PulsarTopicIngestorError::AcknowledgementUnconfirmed {
                 unresolved: PulsarUnresolvedRequest::ConnectionClosed
             }
         ),
@@ -766,7 +770,7 @@ async fn a_redelivery_request_the_consumer_cannot_send_is_reported_after_its_con
     assert!(
         matches!(
             pulsar_failure(&error),
-            PulsarIngestorError::RedeliveryRequestUnsent {
+            PulsarTopicIngestorError::RedeliveryRequestUnsent {
                 unresolved: PulsarUnresolvedRequest::OperationTimeout
             }
         ),
@@ -861,17 +865,17 @@ fn a_failure_the_source_does_not_classify_keeps_the_client_error_beneath_it() {
         ))
     };
 
-    let acknowledgement = PulsarIngestorError::unsettled_acknowledgement(unclassified());
+    let acknowledgement = PulsarTopicIngestorError::unsettled_acknowledgement(unclassified());
     assert!(matches!(
         acknowledgement.current_context(),
-        PulsarIngestorError::Acknowledge
+        PulsarTopicIngestorError::Acknowledge
     ));
     assert!(acknowledgement.contains::<PulsarConsumerError>());
 
-    let redelivery = PulsarIngestorError::unsent_redelivery_request(unclassified());
+    let redelivery = PulsarTopicIngestorError::unsent_redelivery_request(unclassified());
     assert!(matches!(
         redelivery.current_context(),
-        PulsarIngestorError::NegativelyAcknowledge
+        PulsarTopicIngestorError::NegativelyAcknowledge
     ));
     assert!(redelivery.contains::<PulsarConsumerError>());
 
@@ -882,8 +886,8 @@ fn a_failure_the_source_does_not_classify_keeps_the_client_error_beneath_it() {
         None,
     ));
     assert!(matches!(
-        PulsarIngestorError::unsent_redelivery_request(refused).current_context(),
-        PulsarIngestorError::NegativelyAcknowledge
+        PulsarTopicIngestorError::unsent_redelivery_request(refused).current_context(),
+        PulsarTopicIngestorError::NegativelyAcknowledge
     ));
 }
 
@@ -906,7 +910,7 @@ fn a_refusal_names_the_server_error_and_the_reason_the_broker_gave() {
         "a server error this client does not know"
     );
     assert_eq!(
-        PulsarIngestorError::AcknowledgementUnconfirmed {
+        PulsarTopicIngestorError::AcknowledgementUnconfirmed {
             unresolved: PulsarUnresolvedRequest::OperationTimeout
         }
         .to_string(),
@@ -917,12 +921,12 @@ fn a_refusal_names_the_server_error_and_the_reason_the_broker_gave() {
 
 /// Whether `error` holds the Pulsar failure `matches` accepts in any of its frames.
 fn holds_pulsar_failure(
-    error: &error_stack::Report<PulsarIngestorError>,
-    matches: impl Fn(&PulsarIngestorError) -> bool,
+    error: &error_stack::Report<PulsarTopicIngestorError>,
+    matches: impl Fn(&PulsarTopicIngestorError) -> bool,
 ) -> bool {
     error
         .frames()
-        .filter_map(|frame| frame.downcast_ref::<PulsarIngestorError>())
+        .filter_map(|frame| frame.downcast_ref::<PulsarTopicIngestorError>())
         .any(matches)
 }
 
@@ -936,7 +940,7 @@ async fn an_instance_joins_its_owned_subscription_at_open_under_its_indexed_cons
     )
     .await;
 
-    let mut source = PulsarIngestor::open(&plan, 1)
+    let mut source = PulsarTopicIngestor::open(&plan, 1)
         .await
         .expect("the loopback broker serves the subscription");
 
@@ -963,7 +967,7 @@ async fn a_provisioned_subscription_is_verified_then_joined_on_resume() {
         PulsarSubscriptionOwnership::Provisioned,
     )
     .await;
-    let mut source = PulsarIngestor::open(&plan, 0)
+    let mut source = PulsarTopicIngestor::open(&plan, 0)
         .await
         .expect("opening a provisioned subscription asks the broker nothing");
     assert!(
@@ -1004,7 +1008,7 @@ async fn a_missing_provisioned_subscription_is_reported_and_never_created() {
         PulsarSubscriptionOwnership::Provisioned,
     )
     .await;
-    let mut source = PulsarIngestor::open(&plan, 0)
+    let mut source = PulsarTopicIngestor::open(&plan, 0)
         .await
         .expect("opening a provisioned subscription asks the broker nothing");
 
@@ -1013,7 +1017,7 @@ async fn a_missing_provisioned_subscription_is_reported_and_never_created() {
         .await
         .expect_err("a subscription nobody provisioned is missing");
 
-    let PulsarIngestorError::MissingSubscription {
+    let PulsarTopicIngestorError::MissingSubscription {
         subscription,
         topic,
     } = pulsar_failure(&error)
@@ -1046,7 +1050,7 @@ async fn a_missing_provisioned_subscription_is_reported_and_never_created() {
     );
     assert!(
         source.needs_resume(),
-        "the source joins no subscription it would create"
+        "the ingestor joins no subscription it would create"
     );
 }
 
@@ -1067,7 +1071,7 @@ async fn a_probe_refused_for_another_reason_does_not_say_the_subscription_exists
         PulsarSubscriptionOwnership::Provisioned,
     )
     .await;
-    let mut source = PulsarIngestor::open(&plan, 0)
+    let mut source = PulsarTopicIngestor::open(&plan, 0)
         .await
         .expect("opening a provisioned subscription asks the broker nothing");
 
@@ -1079,7 +1083,7 @@ async fn a_probe_refused_for_another_reason_does_not_say_the_subscription_exists
     assert!(
         matches!(
             pulsar_failure(&error),
-            PulsarIngestorError::VerifySubscription { .. }
+            PulsarTopicIngestorError::VerifySubscription { .. }
         ),
         "the refusal is a verification failure, got {error:?}"
     );
@@ -1103,9 +1107,12 @@ async fn removing_an_owned_subscription_joins_it_and_unsubscribes() {
     let config = broker.config();
     let topic = topic();
 
-    PulsarIngestorPlan::remove_subscription_within(removal_settings(&config, &topic), DEADLINE)
-        .await
-        .expect("the broker removes the subscription");
+    PulsarTopicIngestorPlan::remove_subscription_within(
+        removal_settings(&config, &topic),
+        DEADLINE,
+    )
+    .await
+    .expect("the broker removes the subscription");
 
     assert_eq!(
         broker.next_subscription_command().await,
@@ -1133,12 +1140,14 @@ async fn an_unsubscribe_the_broker_refuses_is_reported_and_closes_the_joined_con
     let config = broker.config();
     let topic = topic();
 
-    let error =
-        PulsarIngestorPlan::remove_subscription_within(removal_settings(&config, &topic), DEADLINE)
-            .await
-            .expect_err("the broker refuses the unsubscribe");
+    let error = PulsarTopicIngestorPlan::remove_subscription_within(
+        removal_settings(&config, &topic),
+        DEADLINE,
+    )
+    .await
+    .expect_err("the broker refuses the unsubscribe");
 
-    let PulsarIngestorError::RemoveSubscription {
+    let PulsarTopicIngestorError::RemoveSubscription {
         subscription,
         topic,
     } = error.current_context()
@@ -1150,7 +1159,7 @@ async fn an_unsubscribe_the_broker_refuses_is_reported_and_closes_the_joined_con
     assert!(
         holds_pulsar_failure(&error, |failure| matches!(
             failure,
-            PulsarIngestorError::Unsubscribe
+            PulsarTopicIngestorError::Unsubscribe
         )),
         "the refused unsubscribe is beneath the removal, got {error:?}"
     );
@@ -1200,20 +1209,22 @@ async fn a_removal_the_broker_never_answers_ends_at_its_budget() {
     let budget = Duration::from_millis(200);
     let started = Instant::now();
 
-    let error =
-        PulsarIngestorPlan::remove_subscription_within(removal_settings(&config, &topic), budget)
-            .await
-            .expect_err("a broker that never answers removes nothing");
+    let error = PulsarTopicIngestorPlan::remove_subscription_within(
+        removal_settings(&config, &topic),
+        budget,
+    )
+    .await
+    .expect_err("a broker that never answers removes nothing");
 
     assert!(started.elapsed() >= budget);
     assert!(matches!(
         error.current_context(),
-        PulsarIngestorError::RemoveSubscription { .. }
+        PulsarTopicIngestorError::RemoveSubscription { .. }
     ));
     assert!(
         holds_pulsar_failure(&error, |failure| matches!(
             failure,
-            PulsarIngestorError::RemovalDeadline { budget: actual } if *actual == budget
+            PulsarTopicIngestorError::RemovalDeadline { budget: actual } if *actual == budget
         )),
         "the removal ends at its budget, got {error:?}"
     );
@@ -1234,7 +1245,7 @@ fn only_a_refusal_for_a_durable_subscription_says_the_subscription_exists() {
     ];
     for error in &found {
         assert!(
-            PulsarIngestorPlan::refused_for_a_durable_subscription(error),
+            PulsarTopicIngestorPlan::refused_for_a_durable_subscription(error),
             "{error}"
         );
     }
@@ -1252,7 +1263,7 @@ fn only_a_refusal_for_a_durable_subscription_says_the_subscription_exists() {
     ];
     for error in &not_found {
         assert!(
-            !PulsarIngestorPlan::refused_for_a_durable_subscription(error),
+            !PulsarTopicIngestorPlan::refused_for_a_durable_subscription(error),
             "{error}"
         );
     }

@@ -1,8 +1,8 @@
-//! Admission and deadlines for the Kafka source's synchronous driver control calls.
+//! Admission and deadlines for the Kafka ingestor's synchronous driver control calls.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The executor admission and native request budget of a source or partition inspector,
+//! - **Owns.** The executor admission and native request budget of an ingestor or partition inspector,
 //!   and submission of a consumer-group commit whose answer may outlive its caller.
 //! - **Depends on.** The connector's typed operations, the bounded executor and librdkafka.
 //! - **Must not know.** Graphs, placement, registry state or host-owned domain offsets.
@@ -25,7 +25,7 @@ use nervix_primitives::{
 };
 use rdkafka::{config::ClientConfig, consumer::StreamConsumer, error::KafkaResult};
 
-use super::{GroupCommitRequest, KafkaIngestorError};
+use super::{GroupCommitRequest, KafkaTopicIngestorError};
 
 #[cfg_attr(
     nervix_lint,
@@ -37,7 +37,7 @@ use super::{GroupCommitRequest, KafkaIngestorError};
 )]
 const CONSUMER_CONTROL_TURNS: usize = 1;
 
-/// One commit's exact job and eventual coordinator answer, retained by its source instance.
+/// One commit's exact job and eventual coordinator answer, retained by its ingestor instance.
 pub(super) type CommitTask = JoinHandle<Result<KafkaResult<()>, Report<ExecutionError>>>;
 
 pub(super) struct KafkaControl {
@@ -51,13 +51,13 @@ impl KafkaControl {
     pub(super) fn new(
         config: &ClientConfig,
         executor: Executor,
-    ) -> Result<Self, Report<KafkaIngestorError>> {
+    ) -> Result<Self, Report<KafkaTopicIngestorError>> {
         let native = config
             .create_native_config()
-            .change_context(KafkaIngestorError::Initialize)?;
+            .change_context(KafkaTopicIngestorError::Initialize)?;
         let value = native
             .get("socket.timeout.ms")
-            .change_context(KafkaIngestorError::Initialize)?;
+            .change_context(KafkaTopicIngestorError::Initialize)?;
         let milliseconds = value.parse::<u32>().assured(
             "librdkafka validates socket.timeout.ms as an integer from 10 to 300000 and renders \
              decimal digits",
@@ -79,10 +79,13 @@ impl KafkaControl {
         &self,
         consumer: &Arc<StreamConsumer>,
         operation: F,
-    ) -> Result<T, Report<KafkaIngestorError>>
+    ) -> Result<T, Report<KafkaTopicIngestorError>>
     where
         T: Send + 'static,
-        F: FnOnce(&StreamConsumer, &ControlBudget<'_>) -> Result<T, Report<KafkaIngestorError>>
+        F: FnOnce(
+                &StreamConsumer,
+                &ControlBudget<'_>,
+            ) -> Result<T, Report<KafkaTopicIngestorError>>
             + Send
             + 'static,
     {
@@ -95,7 +98,7 @@ impl KafkaControl {
         let charge = self
             .executor
             .try_reserve(MemoryClass::Commands, std::mem::size_of::<F>().arch_into())
-            .change_context(KafkaIngestorError::ControlAdmission)?;
+            .change_context(KafkaTopicIngestorError::ControlAdmission)?;
         let consumer = consumer.clone();
         let bound = self.timeout;
         let turn = StdArc::clone(&self.turn);
@@ -122,8 +125,8 @@ impl KafkaControl {
         };
         timeout_at(deadline, running)
             .await
-            .map_err(|_| Report::new(KafkaIngestorError::ControlTimeout { timeout: bound }))?
-            .change_context(KafkaIngestorError::ControlExecution)?
+            .map_err(|_| Report::new(KafkaTopicIngestorError::ControlTimeout { timeout: bound }))?
+            .change_context(KafkaTopicIngestorError::ControlExecution)?
     }
 
     /// The supervisor owns admission and the answer until the synchronous commit actually ends.
@@ -132,14 +135,14 @@ impl KafkaControl {
         &self,
         consumer: &Arc<StreamConsumer>,
         request: GroupCommitRequest,
-    ) -> Result<CommitTask, Report<KafkaIngestorError>> {
+    ) -> Result<CommitTask, Report<KafkaTopicIngestorError>> {
         let charge = self
             .executor
             .try_reserve(
                 MemoryClass::Commands,
                 std::mem::size_of::<GroupCommitRequest>().arch_into(),
             )
-            .change_context(KafkaIngestorError::ControlAdmission)?;
+            .change_context(KafkaTopicIngestorError::ControlAdmission)?;
         let consumer = consumer.clone();
         let executor = self.executor.clone();
         Ok(nervix_primitives::task::spawn(async move {
@@ -160,16 +163,16 @@ pub(super) struct ControlBudget<'a> {
 
 impl ControlBudget<'_> {
     /// Check between partitions, and give each native wait only what remains of the operation.
-    pub(super) fn remaining(&self) -> Result<Duration, Report<KafkaIngestorError>> {
+    pub(super) fn remaining(&self) -> Result<Duration, Report<KafkaTopicIngestorError>> {
         self.cancellation
             .check()
-            .change_context(KafkaIngestorError::ControlCancelled)?;
+            .change_context(KafkaTopicIngestorError::ControlCancelled)?;
         if let Some(remaining) = self.deadline.checked_duration_since(Instant::now())
             && !remaining.is_zero()
         {
             return Ok(remaining);
         }
-        Err(Report::new(KafkaIngestorError::ControlTimeout {
+        Err(Report::new(KafkaTopicIngestorError::ControlTimeout {
             timeout: self.bound,
         }))
     }

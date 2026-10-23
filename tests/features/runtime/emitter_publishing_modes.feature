@@ -593,12 +593,12 @@ Feature: Emitter publishing modes
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE ZEROMQ CLIENT sink CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
       CREATE ZEROMQ PUSH EMITTER event_emitter FROM outgoing
-        TO sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -648,12 +648,12 @@ Feature: Emitter publishing modes
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ZEROMQ CLIENT sink CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
       CREATE ZEROMQ PUSH EMITTER event_emitter FROM outgoing
-        TO sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;

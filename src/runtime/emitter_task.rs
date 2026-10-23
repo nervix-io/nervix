@@ -5,10 +5,10 @@
 //!   force flushes, wakes and input batches, resolving each input batch's materialized state,
 //!   filters, ordering groups and HTTP request fields, the host context its connector reports
 //!   through, and the emitter's failure semantics.
-//! - **Depends on.** The emitter's execution and sink start plans and compiled programs, the relay interaction that
+//! - **Depends on.** The emitter's execution and emitter start plans and compiled programs, the relay interaction that
 //!   delivers its input, its buffer, retry schedule and publishing, and the node's metrics, events
 //!   and error policies.
-//! - **Must not know.** Which sink crate the emitter publishes through, how its records are
+//! - **Must not know.** Which emitter crate the emitter publishes through, how its records are
 //!   encoded or mapped, or how the registry validated it.
 
 #![cfg_attr(
@@ -19,7 +19,7 @@
     nervix_lint,
     nervix::context(
         lifecycle,
-        reason = "sink task installation binds retained handles before executing its recurring \
+        reason = "emitter task installation binds retained handles before executing its recurring \
                   body"
     )
 )]
@@ -36,7 +36,7 @@ use super::{emitter_publishing::EmitterStopDrainOutcome, *};
 
 pub(in crate::runtime) struct EmitterTask;
 
-/// What a sink connector needs to publish one emitter's output. The staging directory and the
+/// What an emitter connector needs to publish one emitter's output. The staging directory and the
 /// event bus are read through `runtime` rather than copied in beside it, so the context carries
 /// one handle to node state instead of a second view of the same values.
 #[derive(Clone)]
@@ -77,7 +77,7 @@ struct EmitterBatchContext<'a> {
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
     ordering_group: Option<&'a CompiledOrderingGroup>,
     /// The request fields an HTTP emitter evaluates for every record its route keeps, absent for
-    /// every other sink.
+    /// every other emitter.
     http_requests: Option<&'a CompiledHttpRequestFields>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
 }
@@ -114,12 +114,12 @@ pub(in crate::runtime) type EmitterRuntimeResult<T> = Result<T, Report<EmitterRu
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(in crate::runtime) enum EmitterRuntimeError {
-    #[error("invalid emitter sink configuration")]
-    InvalidSinkConfig,
-    #[error("failed to initialize emitter sink")]
-    InitializeSink,
-    #[error("emitter sink client is not initialized")]
-    SinkNotInitialized,
+    #[error("invalid emitter connector configuration")]
+    InvalidConnectorConfig,
+    #[error("failed to initialize emitter connector")]
+    InitializeConnector,
+    #[error("emitter connector client is not initialized")]
+    ConnectorNotInitialized,
     #[error("emitter flush policy is not initialized")]
     FlushPolicyNotInitialized,
     #[error("emitter header count {header_count} does not match row count {row_count}")]
@@ -153,13 +153,13 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     PreparedRowOutOfBounds { row: usize, row_count: usize },
     #[error("emitter row {row} is already carried by a prepared payload or resolved")]
     RowAlreadyPrepared { row: usize },
-    #[error("emitter sink answered for record {record} of a write with {records} records")]
-    UnknownSinkRecord { record: usize, records: usize },
-    #[error("emitter sink answered twice for record {record}")]
-    SinkRecordAnsweredTwice { record: usize },
-    #[error("emitter sink left {unanswered} of {records} records unanswered")]
-    UnansweredSinkRecords { unanswered: usize, records: usize },
-    #[error("emitter sink broke its preparation of batch {batch_index}: {violation}")]
+    #[error("emitter connector answered for record {record} of a write with {records} records")]
+    UnknownEmitterRecord { record: usize, records: usize },
+    #[error("emitter connector answered twice for record {record}")]
+    EmitterRecordAnsweredTwice { record: usize },
+    #[error("emitter connector left {unanswered} of {records} records unanswered")]
+    UnansweredEmitterRecords { unanswered: usize, records: usize },
+    #[error("emitter connector broke its preparation of batch {batch_index}: {violation}")]
     RowPreparation {
         batch_index: usize,
         violation: RowPreparationViolation,
@@ -176,7 +176,7 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     StopDeadlineElapsed,
     #[error("emitter final flush failed")]
     FinalFlush,
-    #[error("the emitter could not finish its sink's transport client")]
+    #[error("the emitter could not finish its emitter's transport client")]
     FinishTransport,
     #[error("failed to encode emitter batch")]
     EncodeBatch,
@@ -199,11 +199,11 @@ pub(in crate::runtime) enum EmitterRuntimeError {
 impl EmitterRuntimeError {
     pub(super) fn is_retryable_publish_failure(&self) -> bool {
         match self {
-            Self::SinkNotInitialized
+            Self::ConnectorNotInitialized
             | Self::PublishBatch
             | Self::PublishStalled
             | Self::EncodingRefused
-            | Self::UnansweredSinkRecords { .. } => true,
+            | Self::UnansweredEmitterRecords { .. } => true,
             Self::FlushPolicyNotInitialized
             | Self::HeaderCountMismatch { .. }
             | Self::OrderingGroupCountMismatch { .. }
@@ -216,11 +216,11 @@ impl EmitterRuntimeError {
             | Self::RejectionRowOutOfBounds { .. }
             | Self::PreparedRowOutOfBounds { .. }
             | Self::RowAlreadyPrepared { .. }
-            | Self::UnknownSinkRecord { .. }
-            | Self::SinkRecordAnsweredTwice { .. }
+            | Self::UnknownEmitterRecord { .. }
+            | Self::EmitterRecordAnsweredTwice { .. }
             | Self::RowPreparation { .. }
-            | Self::InvalidSinkConfig
-            | Self::InitializeSink
+            | Self::InvalidConnectorConfig
+            | Self::InitializeConnector
             | Self::FaultInjected
             | Self::ShutdownWhileStalled
             | Self::StopDeadlineElapsed
@@ -250,7 +250,7 @@ pub(super) fn emitter_report(
 }
 
 pub(super) fn emitter_init_error(error: impl std::fmt::Display) -> Report<EmitterRuntimeError> {
-    emitter_report(EmitterRuntimeError::InitializeSink, error)
+    emitter_report(EmitterRuntimeError::InitializeConnector, error)
 }
 
 impl EmitterConnectorContext {
@@ -290,7 +290,7 @@ impl EmitterConnectorContext {
 
     pub(super) fn dns(&self) -> Result<DnsResolver, Report<EmitterRuntimeError>> {
         let Some(dns) = self.runtime.dns() else {
-            return Err(Report::new(EmitterRuntimeError::InitializeSink)
+            return Err(Report::new(EmitterRuntimeError::InitializeConnector)
                 .attach_printable("the node DNS resolver is not installed"));
         };
         Ok(dns.clone())
@@ -310,7 +310,7 @@ impl EmitterConnectorContext {
             domain = self.domain.as_str(),
             emitter = self.emitter.as_str(),
             error,
-            "failed to initialize emitter sink"
+            "failed to initialize emitter connector"
         );
     }
 
@@ -342,7 +342,7 @@ impl EmitterConnectorContext {
         );
     }
 
-    /// Records what finishing the sink's transport client did when the emitter stopped.
+    /// Records what finishing the emitter's transport client did when the emitter stopped.
     fn record_finished(&self, connector: &str, ending: EmitterEnding, finished: EmitterFinish) {
         match finished {
             EmitterFinish::NothingHeld => debug!(
@@ -362,7 +362,7 @@ impl EmitterConnectorContext {
         }
     }
 
-    /// Records a finish that did not send every record the sink's transport client held, which
+    /// Records a finish that did not send every record the emitter's transport client held, which
     /// are lost with the client: as the emitter's transient error, an error event and a warning.
     fn record_unfinished(
         &self,
@@ -456,7 +456,7 @@ impl EmitterTransientErrorStatus for EmitterConnectorContext {
 impl EmitterEventReporter for EmitterConnectorContext {
     fn report_error(&self, message: String) {
         self.runtime.events().report_error(format!(
-            "sink error for emitter '{}' in domain '{}': {message}",
+            "emitter error for emitter '{}' in domain '{}': {message}",
             self.emitter.as_str(),
             self.domain.as_str(),
         ));
@@ -555,14 +555,14 @@ enum EmitterPublishErrorReport {
     Publish,
 }
 
-/// How an emitter task's loop ended, which decides who finishes its sink.
+/// How an emitter task's loop ended, which decides who finishes its emitter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr)]
 #[strum(serialize_all = "snake_case")]
 enum EmitterEnding {
-    /// A stop drained the emitter and finished its sink before the loop returned.
+    /// A stop drained the emitter and finished its emitter before the loop returned.
     Stop,
     /// The loop's relay interaction stopped without a stop, so the loop drained its buffer and
-    /// returned with the sink unfinished.
+    /// returned with the emitter unfinished.
     InteractionStopped,
     /// Terminal teardown ended the loop wherever it was, possibly in the middle of a publish.
     Teardown,
@@ -628,12 +628,12 @@ impl EmitterTaskState {
         !self.retry.is_active() || buffered_messages == 0
     }
 
-    /// Finishes the sink after the loop ended without a stop, by the deadline on the task's stop
+    /// Finishes the emitter after the loop ended without a stop, by the deadline on the task's stop
     /// signal, and records what that did.
     ///
     /// A stopping domain execution gives every emitter that deadline before its teardown ends the
     /// task. A task ended without one, such as a task whose execution was dropped without
-    /// stopping, has nothing to bound a finish by, so its sink closes unfinished.
+    /// stopping, has nothing to bound a finish by, so its emitter closes unfinished.
     async fn finish_after_loop(
         &mut self,
         context: &EmitterConnectorContext,
@@ -647,7 +647,7 @@ impl EmitterTaskState {
                 emitter = context.emitter.as_str(),
                 connector,
                 ending = ending.as_ref(),
-                "emitter task ended without a stop deadline, so its sink is not finished"
+                "emitter task ended without a stop deadline, so its emitter is not finished"
             );
             return;
         };
@@ -735,6 +735,7 @@ struct EmitterTaskLoop<'a> {
     state: EmitterTaskState,
     interaction: RelayInteraction<EmitterTaskCommand>,
     plan: &'a EmitterStartPlan,
+    connector_label: String,
     input_schema: &'a CompiledSchema,
     output_schema: &'a Arc<CompiledSchema>,
     codec: Option<&'a Arc<CompiledCodec>>,
@@ -808,7 +809,7 @@ impl EmitterTask {
         )
         .change_context(EmitterStartError::Route)?;
         let http_requests = match &plan.connector {
-            EmitterConnectorPlan::Http(connector) => {
+            EmitterConnectorPlan::Http(HttpEmitterPlan::Request(connector)) => {
                 let output = codec.as_ref().map(|codec| RuntimeVmSchema {
                     schema: codec.schema().arrow_schema(),
                     sensitivity: codec.schema().vm_sensitivity(),
@@ -1069,6 +1070,7 @@ impl EmitterTask {
                 &mut work_cancel_rx,
             )
             .await;
+            let connector_label = connector.connector_label(&plan.label);
             let state = EmitterTaskState::new(connector, buffer, backoff, &context);
             let task_emitter_node = ModelName::from(&task_emitter);
             let batch_context = EmitterBatchContext {
@@ -1094,6 +1096,7 @@ impl EmitterTask {
                 state,
                 interaction,
                 plan: &plan,
+                connector_label,
                 input_schema: &input_schema,
                 output_schema: &output_compiled_schema,
                 codec: codec.as_ref(),
@@ -1118,12 +1121,12 @@ impl EmitterTask {
 
 impl EmitterTaskLoop<'_> {
     /// Runs the loop until a stop ends it or terminal teardown cancels it, and then finishes the
-    /// sink unless the stop already did.
+    /// emitter unless the stop already did.
     ///
     /// The interaction observes shutdown while waiting for work, but a connector can be inside an
     /// external publish attempt when terminal teardown begins. Dropping the loop at that boundary
     /// releases its volatile prepared requests and unresolved ACK guards without reporting them as
-    /// delivered or waiting for the attempt timeout. The sink's transport client is then finished,
+    /// delivered or waiting for the attempt timeout. The emitter's transport client is then finished,
     /// by the deadline the stopping domain execution gave this task, so records a publish
     /// delivered still reach it.
     async fn run_to_end(&mut self, terminal_shutdown_rx: &mut watch::Receiver<bool>) {
@@ -1142,12 +1145,12 @@ impl EmitterTaskLoop<'_> {
         }
     }
 
-    /// Finishes the sink once the loop ended without a stop, by the deadline on the task's stop
+    /// Finishes the emitter once the loop ended without a stop, by the deadline on the task's stop
     /// signal.
     async fn finish_after_loop(&mut self, ending: EmitterEnding) {
         let deadline = *self.stop_rx.borrow();
         self.state
-            .finish_after_loop(self.context, self.plan.connector.label(), ending, deadline)
+            .finish_after_loop(self.context, &self.connector_label, ending, deadline)
             .await;
     }
 
@@ -1155,7 +1158,7 @@ impl EmitterTaskLoop<'_> {
         nervix_lint,
         nervix::context(
             recurring,
-            reason = "the retained sink task handles input, retries, flush and commit cadence"
+            reason = "the retained emitter task handles input, retries, flush and commit cadence"
         )
     )]
     async fn run(&mut self) -> EmitterEnding {
@@ -1183,10 +1186,8 @@ impl EmitterTaskLoop<'_> {
                     continue;
                 }
                 Err(failure) => {
-                    self.context.report_flush_error(
-                        self.plan.connector.label(),
-                        &format!("{:#}", failure.error),
-                    );
+                    self.context
+                        .report_flush_error(&self.connector_label, &format!("{:#}", failure.error));
                     self.context
                         .runtime
                         .handle_internal_processor_error_for_acks(
@@ -1213,7 +1214,7 @@ impl EmitterTaskLoop<'_> {
                         let reason = emitter_error_message(&error);
                         self.context.record_failure(reason.clone());
                         self.context
-                            .report_flush_error(self.plan.connector.label(), &reason);
+                            .report_flush_error(&self.connector_label, &reason);
                     }
                     response
                         .send(())
@@ -1233,7 +1234,7 @@ impl EmitterTaskLoop<'_> {
                     {
                         self.context.record_failure(reason.clone());
                         self.context
-                            .report_flush_error(self.plan.connector.label(), &reason);
+                            .report_flush_error(&self.connector_label, &reason);
                         clear_emitter_stop_signal(self.stop_signal, deadline);
                         response
                             .send(Err(Report::new(EmitterRuntimeError::FinalFlush)
@@ -1257,7 +1258,7 @@ impl EmitterTaskLoop<'_> {
                     };
                     let drained = connector
                         .drain_for_stop(
-                            self.plan.connector.label(),
+                            &self.connector_label,
                             self.context,
                             &mut control,
                             buffer,
@@ -1273,7 +1274,7 @@ impl EmitterTaskLoop<'_> {
                                 self.batch_context.observe_sent(report);
                             }
                             self.context.record_finished(
-                                self.plan.connector.label(),
+                                &self.connector_label,
                                 EmitterEnding::Stop,
                                 finished,
                             );
@@ -1283,7 +1284,7 @@ impl EmitterTaskLoop<'_> {
                             let reason = emitter_error_message(&error);
                             self.context.record_failure(reason.clone());
                             self.context
-                                .report_flush_error(self.plan.connector.label(), &reason);
+                                .report_flush_error(&self.connector_label, &reason);
                             Err(Report::new(EmitterRuntimeError::FinalFlush)
                                 .attach_printable(format!("emitter final flush failed: {reason}")))
                         }
@@ -1293,7 +1294,7 @@ impl EmitterTaskLoop<'_> {
                                 self.context.emitter.as_str()
                             );
                             self.context
-                                .report_flush_error(self.plan.connector.label(), &reason);
+                                .report_flush_error(&self.connector_label, &reason);
                             Err(Report::new(EmitterRuntimeError::StopDeadlineElapsed)
                                 .attach_printable(reason))
                         }
@@ -1340,7 +1341,7 @@ impl EmitterTaskLoop<'_> {
                             );
                         }
                         self.context
-                            .report_flush_error(self.plan.connector.label(), &reason);
+                            .report_flush_error(&self.connector_label, &reason);
                         completion.complete();
                         continue;
                     }
@@ -1358,12 +1359,7 @@ impl EmitterTaskLoop<'_> {
                             backoff,
                         };
                         connector
-                            .flush_all(
-                                self.plan.connector.label(),
-                                self.context,
-                                &mut control,
-                                buffer,
-                            )
+                            .flush_all(&self.connector_label, self.context, &mut control, buffer)
                             .await
                             .map_err(EmitterPublishFailure::buffer)
                     };
@@ -1375,7 +1371,7 @@ impl EmitterTaskLoop<'_> {
                             self.context,
                             &self.batch_context,
                             EmitterPublishOutcomeContext {
-                                emitter_label: self.plan.connector.label(),
+                                emitter_label: &self.connector_label,
                                 codec_route: self.codec.is_some(),
                                 error_report: EmitterPublishErrorReport::Flush,
                             },
@@ -1399,7 +1395,7 @@ impl EmitterTaskLoop<'_> {
                     {
                         self.context.record_failure(reason.clone());
                         self.context
-                            .report_flush_error(self.plan.connector.label(), &reason);
+                            .report_flush_error(&self.connector_label, &reason);
                         let pending = self.state.buffer.drain_pending();
                         self.batch_context
                             .handle_publish_error_batches(
@@ -1424,12 +1420,7 @@ impl EmitterTaskLoop<'_> {
                             backoff,
                         };
                         connector
-                            .flush_all(
-                                self.plan.connector.label(),
-                                self.context,
-                                &mut control,
-                                buffer,
-                            )
+                            .flush_all(&self.connector_label, self.context, &mut control, buffer)
                             .await
                     };
                     match flush_result {
@@ -1439,7 +1430,7 @@ impl EmitterTaskLoop<'_> {
                             let reason = emitter_error_message(&error);
                             self.context.record_failure(reason.clone());
                             self.context
-                                .report_flush_error(self.plan.connector.label(), &reason);
+                                .report_flush_error(&self.connector_label, &reason);
                             let pending = self.state.buffer.drain_pending();
                             let operation =
                                 emitter_message_error_operation(&error, self.codec.is_some());
@@ -1507,7 +1498,7 @@ impl EmitterTaskLoop<'_> {
                         };
                         connector
                             .flush_due(
-                                self.plan.connector.label(),
+                                &self.connector_label,
                                 self.context,
                                 &mut control,
                                 buffer,
@@ -1524,7 +1515,7 @@ impl EmitterTaskLoop<'_> {
                             self.context,
                             &self.batch_context,
                             EmitterPublishOutcomeContext {
-                                emitter_label: self.plan.connector.label(),
+                                emitter_label: &self.connector_label,
                                 codec_route: self.codec.is_some(),
                                 error_report: EmitterPublishErrorReport::Flush,
                             },
@@ -1614,7 +1605,7 @@ impl EmitterTaskLoop<'_> {
                             );
                             if let Some(reason) = unavailable.as_deref() {
                                 self.context
-                                    .report_publish_error(self.plan.connector.label(), reason);
+                                    .report_publish_error(&self.connector_label, reason);
                             }
                         }
                         self.state.reconnect_on_wake |=
@@ -1655,7 +1646,7 @@ impl EmitterTaskLoop<'_> {
                             self.context,
                             &self.batch_context,
                             EmitterPublishOutcomeContext {
-                                emitter_label: self.plan.connector.label(),
+                                emitter_label: &self.connector_label,
                                 codec_route: self.codec.is_some(),
                                 error_report: EmitterPublishErrorReport::Publish,
                             },
@@ -1912,7 +1903,7 @@ impl EmitterBatchContext<'_> {
         // The request fields of an HTTP emitter with a codec body read the original source record
         // of every finalized record its route keeps, and the route consumes the source batch.
         let source_records = match (self.http_requests, filter_map.codec_route) {
-            (Some(_), true) => Some(IngestorRecords::of(&batch)),
+            (Some(_), true) => Some(SourceRecords::of(&batch)),
             (Some(_), false) | (None, _) => None,
         };
         let planned = plan_emitter_filter_map_batch(
@@ -2118,7 +2109,7 @@ mod tests {
         buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
         EmitterTaskState::new(
             EmitterConnectorState::Unavailable {
-                reason: "test sink is unavailable".to_string(),
+                reason: "test emitter is unavailable".to_string(),
             },
             buffer,
             RuntimeReconnectBackoff::default(),
@@ -2178,7 +2169,7 @@ mod tests {
             .assured("the fixture runtime has no DNS resolver");
         assert!(matches!(
             error.current_context(),
-            EmitterRuntimeError::InitializeSink
+            EmitterRuntimeError::InitializeConnector
         ));
         assert_eq!(
             emitter_error_message(&error),
@@ -2189,10 +2180,10 @@ mod tests {
     #[test]
     fn emitter_error_classification_is_explicit_for_every_context() {
         for retryable in [
-            EmitterRuntimeError::SinkNotInitialized,
+            EmitterRuntimeError::ConnectorNotInitialized,
             EmitterRuntimeError::PublishBatch,
             EmitterRuntimeError::PublishStalled,
-            EmitterRuntimeError::UnansweredSinkRecords {
+            EmitterRuntimeError::UnansweredEmitterRecords {
                 unanswered: 1,
                 records: 2,
             },
@@ -2201,8 +2192,8 @@ mod tests {
             assert!(emitter_publish_error_is_retryable(&Report::new(retryable)));
         }
         for terminal in [
-            EmitterRuntimeError::InvalidSinkConfig,
-            EmitterRuntimeError::InitializeSink,
+            EmitterRuntimeError::InvalidConnectorConfig,
+            EmitterRuntimeError::InitializeConnector,
             EmitterRuntimeError::FlushPolicyNotInitialized,
             EmitterRuntimeError::FaultInjected,
             EmitterRuntimeError::EncodeBatch,
@@ -2211,11 +2202,11 @@ mod tests {
                 row_count: 1,
             },
             EmitterRuntimeError::RowAlreadyPrepared { row: 0 },
-            EmitterRuntimeError::UnknownSinkRecord {
+            EmitterRuntimeError::UnknownEmitterRecord {
                 record: 2,
                 records: 2,
             },
-            EmitterRuntimeError::SinkRecordAnsweredTwice { record: 0 },
+            EmitterRuntimeError::EmitterRecordAnsweredTwice { record: 0 },
         ] {
             assert!(!terminal.is_retryable_publish_failure());
             assert!(!emitter_publish_error_is_retryable(&Report::new(terminal)));
@@ -2327,7 +2318,7 @@ mod tests {
         ));
         let failure = EmitterPublishFailure::caller(
             Report::new(EmitterRuntimeError::PublishBatch)
-                .attach_printable("test sink rejected the attempt"),
+                .attach_printable("test emitter rejected the attempt"),
         );
 
         state
@@ -2353,7 +2344,7 @@ mod tests {
                 .runtime
                 .dataflow_node_transient_state(&context.domain, "EMITTER", &context.emitter)
                 .error,
-            Some("test sink rejected the attempt".to_string())
+            Some("test emitter rejected the attempt".to_string())
         );
     }
 
@@ -2636,7 +2627,8 @@ mod tests {
             .expect("the host must publish the event");
         assert_eq!(
             message,
-            "sink error for emitter 'output' in domain 'emitter_tests': connector background error"
+            "emitter error for emitter 'output' in domain 'emitter_tests': connector background \
+             error"
         );
         assert_eq!(host.staging_directory(), context.runtime.temp_dir());
 
@@ -2678,7 +2670,7 @@ mod tests {
         assert!(EmitterRecordAcknowledgements::new(AckSet::empty()).is_empty());
     }
 
-    /// A sink whose transport client still holds records once the loop ends. It answers its
+    /// A emitter whose transport client still holds records once the loop ends. It answers its
     /// finish as `answer` says and reports the deadline the host finished it by.
     struct HoldingEmitter {
         answer: fn() -> EmitterFinishResult,
@@ -2691,6 +2683,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl EmitterLifecycle for DeadlineFinishEmitter {
+        fn kind(&self) -> nervix_models::EmitterEntityKind {
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
+        }
+
         async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
             if self.overrun {
                 nervix_primitives::time::sleep_until(
@@ -2762,11 +2758,11 @@ mod tests {
                 );
                 assert_eq!(
                     emitter_error_message(&error),
-                    "test sink's transport client still held 3 records when its finish deadline \
-                     passed"
+                    "test emitter's transport client still held 3 records when its finish \
+                     deadline passed"
                 );
             }
-            _ => panic!("the sink's own finish outcome must win the deadline race"),
+            _ => panic!("the emitter's own finish outcome must win the deadline race"),
         }
     }
 
@@ -2784,6 +2780,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl EmitterLifecycle for HoldingEmitter {
+        fn kind(&self) -> nervix_models::EmitterEntityKind {
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
+        }
+
         async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
             self.finished_by.send_replace(Some(deadline));
             (self.answer)()
@@ -2809,8 +2809,8 @@ mod tests {
         }
     }
 
-    /// The state of an emitter whose open sink is a [`HoldingEmitter`] answering `answer`, and what
-    /// reports the deadline that sink was finished by.
+    /// The state of an emitter whose open emitter is a [`HoldingEmitter`] answering `answer`, and what
+    /// reports the deadline that emitter was finished by.
     fn holding_task_state(
         context: &EmitterConnectorContext,
         answer: fn() -> EmitterFinishResult,
@@ -2848,7 +2848,7 @@ mod tests {
         assert_eq!(
             *finished.borrow(),
             Some(deadline),
-            "teardown finishes the sink by the deadline on the task's stop signal"
+            "teardown finishes the emitter by the deadline on the task's stop signal"
         );
         assert_eq!(
             transient_error(&context),
@@ -2880,7 +2880,7 @@ mod tests {
         let error = transient_error(&context).expect("an unsent finish is the transient error");
         assert_eq!(
             error,
-            "test sink's transport client still held 2 records when its finish deadline passed"
+            "test emitter's transport client still held 2 records when its finish deadline passed"
         );
         let RuntimeEvent::Error(message) = events
             .recv()
@@ -2889,7 +2889,7 @@ mod tests {
         assert_eq!(
             message,
             "emitter 'output' in domain 'emitter_tests' stopped before its test transport client \
-             sent every record it held: test sink's transport client still held 2 records when \
+             sent every record it held: test emitter's transport client still held 2 records when \
              its finish deadline passed"
         );
     }
@@ -2913,7 +2913,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn an_emitter_without_an_open_emitter_holds_nothing_to_finish() {
         let mut connector = EmitterConnectorState::Unavailable {
-            reason: "test sink is unavailable".to_string(),
+            reason: "test emitter is unavailable".to_string(),
         };
 
         let finished = connector

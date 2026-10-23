@@ -129,7 +129,7 @@ impl Runtime {
                     .cloned(),
                 None => None,
             };
-            if previous.requires_source_retirement(replacement.as_deref()) {
+            if previous.requires_entity_retirement(replacement.as_deref()) {
                 retiring.insert(
                     previous.ingestor.name.clone(),
                     RetiringIngestorInput {

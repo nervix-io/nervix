@@ -5,7 +5,7 @@
 //! - **Owns.** One loopback listener, whether it greets or ends the connections a client opens to
 //!   it, and the protocol operations a check reads from a greeted connection or writes to it.
 //! - **Depends on.** Tokio's TCP sockets and I/O traits, and the boundary's tasks and channels.
-//! - **Must not know.** The connector's source or sink, the runtime host, or how a real server
+//! - **Must not know.** The connector's ingestor or emitter, the runtime host, or how a real server
 //!   decides.
 
 use nervix_primitives::{

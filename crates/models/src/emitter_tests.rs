@@ -267,7 +267,7 @@ fn emitter_alter_sets_replaces_and_drops_the_batch_clause() {
                     max_backoff: "30s".to_string(),
                 },
             },
-            client: named("sink"),
+            client: named("emitter"),
         })),
         None,
     );
@@ -384,7 +384,7 @@ fn batch_size_is_bounded_by_the_largest_sqs_message() {
     );
     assert_eq!(
         batch_violation(&batching_emitter(sqs(), Some(batch_policy(10, "262145B")))),
-        Some(EmitterBatchContractError::SizeAboveSinkMaximum {
+        Some(EmitterBatchContractError::SizeAboveEmitterMaximum {
             connector: "SQS QUEUE",
             declared: "262145B".parse().assured("a whole number of bytes"),
             maximum: "256KiB".parse().assured("a whole number of bytes"),
@@ -485,7 +485,7 @@ fn emitter_alter_reports_name_and_commit_policy_errors() {
                         max_backoff: "30s".to_string(),
                     },
                 },
-                client: named("sink"),
+                client: named("emitter"),
             },
         ))),
         batch: None,

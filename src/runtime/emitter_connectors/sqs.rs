@@ -12,9 +12,14 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    SqsQueueEmitter::KIND,
+    nervix_models::EmitterEntityKind::Sqs(nervix_models::SqsEmitterEntity::Queue)
+));
+
 impl EmitterConnectorStarter {
     pub(super) async fn sqs(
-        connector: &SqsEmitterPlan,
+        connector: &SqsQueueEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
         label: &str,
@@ -24,8 +29,8 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            SqsEmitter::new(
-                SqsEmitterConfig {
+            SqsQueueEmitter::new(
+                SqsQueueEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     queue: connector.queue.clone(),
                     mode: connector.mode,

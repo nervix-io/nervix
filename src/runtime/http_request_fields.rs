@@ -10,7 +10,7 @@
 //!   request rejected later reads: its original source record, the materialized state its batch
 //!   was admitted with, and its attempted codec record; and which part of a delivered request is
 //!   payload: its codec record, never its method, target or headers.
-//! - **Depends on.** The emitter's HTTP sink plan, the VM's compile and execute API, the
+//! - **Depends on.** The emitter's HTTP emitter plan, the VM's compile and execute API, the
 //!   vocabulary's HTTP request fields, and the node's planned message errors.
 //! - **Must not know.** Which connector sends the requests, how their bodies are encoded, or when
 //!   the emitter publishes them.
@@ -121,12 +121,12 @@ pub(in crate::runtime) struct CompiledHttpRequestFields {
 /// record the route keeps read, and report, the original input, and then with the requests it
 /// admitted until they complete, so that a later rejection reports it as well.
 #[derive(Clone)]
-pub(in crate::runtime) struct IngestorRecords {
+pub(in crate::runtime) struct SourceRecords {
     batch: Arc<RuntimeRecordBatch>,
     metadata: RecordMetadataColumns,
 }
 
-impl IngestorRecords {
+impl SourceRecords {
     pub(in crate::runtime) fn of(batch: &RelayRecordBatch) -> Self {
         Self {
             batch: batch.batch.clone(),
@@ -168,7 +168,7 @@ pub(in crate::runtime) enum HttpRequestInput {
     /// The emitter encodes finalized codec records, which its route built from these source rows,
     /// one for each published row in order.
     Source {
-        records: IngestorRecords,
+        records: SourceRecords,
         rows: Vec<usize>,
     },
 }
@@ -268,7 +268,7 @@ impl AdmittedHttpRequests {
         Self {
             fields,
             sources: HttpRequestInput::Source {
-                records: IngestorRecords::of(source),
+                records: SourceRecords::of(source),
                 rows,
             },
             materialized_state: HashMap::default(),
@@ -394,7 +394,7 @@ impl CompiledHttpRequestFields {
     /// Compiles the request fields of the HTTP emitter `emitter` against `schemas`.
     pub(in crate::runtime) fn compile(
         emitter: &EmitterName,
-        connector: &HttpEmitterPlan,
+        connector: &HttpRequestEmitterPlan,
         request: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
         schemas: HttpRequestSchemas,
         context: RuntimeVmCompileContext<'_>,
@@ -989,12 +989,12 @@ mod tests {
         (batch, completions)
     }
 
-    struct HttpEmitterTestPlan {
-        connector: HttpEmitterPlan,
+    struct HttpRequestEmitterTestPlan {
+        connector: HttpRequestEmitterPlan,
         request: nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     }
 
-    fn connector(method: &str, path: &str, header_writes: &str) -> HttpEmitterTestPlan {
+    fn connector(method: &str, path: &str, header_writes: &str) -> HttpRequestEmitterTestPlan {
         use nervix_models::{Assignment, AssignmentTarget};
 
         let construction = RouteConstruction {
@@ -1016,8 +1016,8 @@ mod tests {
             SemanticScopePolicy::read_write("message", HTTP_REQUEST_NAMESPACE),
         )
         .expect("the test request fields must lower");
-        HttpEmitterTestPlan {
-            connector: HttpEmitterPlan {
+        HttpRequestEmitterTestPlan {
+            connector: HttpRequestEmitterPlan {
                 client: EmitterClientSpec {
                     name: named("api"),
                     config: ResolvedClientConfig::default(),
@@ -1030,7 +1030,7 @@ mod tests {
     }
 
     fn compile(
-        plan: &HttpEmitterTestPlan,
+        plan: &HttpRequestEmitterTestPlan,
         output: Option<Arc<CompiledSchema>>,
     ) -> CompiledHttpRequestFields {
         let source = source_schema();
@@ -1339,7 +1339,7 @@ mod tests {
                 ..Row::valid("third")
             },
         ]);
-        let records = IngestorRecords::of(&source);
+        let records = SourceRecords::of(&source);
         let mut messages = Vec::new();
         let mut completions = Vec::new();
         for (id, payload) in [("first", "FIRST"), ("third", "a#b")] {

@@ -1,10 +1,10 @@
-//! Redis source and sink connector.
+//! Redis ingestor and emitter connector.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The Redis client a configuration declares, the `connect_timeout_ms` that bounds
 //!   opening a connection and checking one out, the node's shared pool of command connections,
-//!   the dedicated subscription connection a Pub/Sub source reads a channel through, and
+//!   the dedicated subscription connection a Pub/Sub ingestor reads a channel through, and
 //!   publication of each record to a channel.
 //! - **Depends on.** The connector contract, node DNS resolver, vocabulary values, `error-stack`,
 //!   Tokio, `redis` and `bb8`.
@@ -215,7 +215,7 @@ fn redis_pool_error(
 /// The Redis client one named client's configuration declares, with the TLS material a
 /// `rediss://` address names.
 ///
-/// The command pool draws its connections from it; a Pub/Sub source uses its connection settings
+/// The command pool draws its connections from it; a Pub/Sub ingestor uses its connection settings
 /// after opening a dedicated stream.
 fn redis_client(
     addr: &str,
@@ -265,10 +265,10 @@ fn invalid_client_config(reason: impl std::fmt::Display) -> Report<RedisClientEr
     })
 }
 
-/// The pool one Redis sink borrows command connections from, as the host leases it.
+/// The pool one Redis emitter borrows command connections from, as the host leases it.
 ///
 /// The host owns the interest that keeps the pool open and the wait it records while a connection
-/// is handed over; this handle holds both for as long as the sink publishes through them.
+/// is handed over; this handle holds both for as long as the emitter publishes through them.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -277,16 +277,16 @@ fn invalid_client_config(reason: impl std::fmt::Display) -> Report<RedisClientEr
     )
 )]
 pub trait RedisPoolServices: Send + Sync + 'static {
-    /// The shared command pool this sink's client opened on this node.
+    /// The shared command pool this emitter's client opened on this node.
     fn pool(&self) -> RedisCommandPool;
 
-    /// Records this sink's wait for a free connection until the returned guard is dropped.
+    /// Records this emitter's wait for a free connection until the returned guard is dropped.
     fn begin_pool_wait(&self) -> RedisPoolWait;
 }
 
-/// An opaque record of one sink's wait for a pooled connection, ended when it is dropped.
+/// An opaque record of one emitter's wait for a pooled connection, ended when it is dropped.
 pub struct RedisPoolWait {
-    /// Held until the pool hands this sink a connection; dropping it ends the recorded wait.
+    /// Held until the pool hands this emitter a connection; dropping it ends the recorded wait.
     _wait: Box<dyn Send>,
 }
 
@@ -302,7 +302,7 @@ struct RedisPoolInner {
     services: Box<dyn RedisPoolServices>,
 }
 
-/// A handle to the host-leased pool, shared by the sink and whatever else the host hands it to.
+/// A handle to the host-leased pool, shared by the emitter and whatever else the host hands it to.
 #[derive(Clone)]
 pub struct RedisPoolHandle {
     inner: Arc<RedisPoolInner>,
@@ -326,19 +326,19 @@ impl RedisPoolHandle {
     }
 }
 
-/// What one Redis sink publishes to: the pool it borrows from and the channel it writes.
-pub struct RedisEmitterConfig {
+/// What one Redis emitter publishes to: the pool it borrows from and the channel it writes.
+pub struct RedisPubSubEmitterConfig {
     pub pool: RedisPoolHandle,
     pub channel: RedisChannelName,
 }
 
-pub struct RedisEmitter {
+pub struct RedisPubSubEmitter {
     pool: RedisPoolHandle,
     channel: RedisChannelName,
 }
 
-impl RedisEmitter {
-    pub fn new(config: RedisEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+impl RedisPubSubEmitter {
+    pub fn new(config: RedisPubSubEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
         Ok(Self {
             pool: config.pool,
             channel: config.channel,
@@ -403,7 +403,7 @@ impl RedisEmitter {
             bb8::RunError::User(source) => redis_pool_error(source, connect_timeout)
                 .change_context(EmitterWriteError::Publish { connector: REDIS }),
             bb8::RunError::TimedOut => {
-                // The emitter shows the message a sink attached, so the deadline leads.
+                // The emitter shows the message an emitter attached, so the deadline leads.
                 let elapsed = connect_timeout.elapsed("checking out a Redis command connection");
                 Report::new(elapsed)
                     .change_context(EmitterWriteError::Publish { connector: REDIS })
@@ -413,8 +413,17 @@ impl RedisEmitter {
     }
 }
 
+impl RedisPubSubEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::Redis(nervix_models::RedisEmitterEntity::PubSub);
+}
+
 #[async_trait]
-impl EmitterLifecycle for RedisEmitter {
+impl EmitterLifecycle for RedisPubSubEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// Each `PUBLISH` is answered before the publish returns, so the client holds nothing.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
         Ok(EmitterFinish::NothingHeld)
@@ -422,7 +431,7 @@ impl EmitterLifecycle for RedisEmitter {
 }
 
 #[async_trait]
-impl RecordEmitter for RedisEmitter {
+impl RecordEmitter for RedisPubSubEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let pool = self.pool.pool();
@@ -493,9 +502,9 @@ mod tests {
         ));
         let disconnected = redis::RedisError::from((RedisErrorKind::Io, "connection interrupted"));
 
-        assert!(RedisEmitter::is_record_failure(&rejected));
-        assert!(!RedisEmitter::is_record_failure(&ambiguous));
-        assert!(!RedisEmitter::is_record_failure(&disconnected));
+        assert!(RedisPubSubEmitter::is_record_failure(&rejected));
+        assert!(!RedisPubSubEmitter::is_record_failure(&ambiguous));
+        assert!(!RedisPubSubEmitter::is_record_failure(&disconnected));
     }
 
     #[nervix_primitives::test]
@@ -545,7 +554,7 @@ mod tests {
             .await
             .expect_err("an absent name cannot open a command connection");
         assert!(DnsLookupError::find_in(&source).is_some(), "{source:?}");
-        let emitter_error = RedisEmitter::publish_pool_error(
+        let emitter_error = RedisPubSubEmitter::publish_pool_error(
             bb8::RunError::User(source.clone()),
             default_connect_timeout(),
         );
@@ -647,7 +656,8 @@ mod tests {
             value: "1000".to_string(),
         }])
         .expect("one second is a valid deadline");
-        let error = RedisEmitter::publish_pool_error(bb8::RunError::TimedOut, connect_timeout);
+        let error =
+            RedisPubSubEmitter::publish_pool_error(bb8::RunError::TimedOut, connect_timeout);
         assert!(matches!(
             error.current_context(),
             EmitterWriteError::Publish { connector: REDIS }

@@ -30,8 +30,8 @@ use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::queue::{
-    SQS, SqsEmitter, SqsIngestor, SqsIngestorError, SqsIngestorPlan, SqsPublishingMode,
-    connection::FailedRequest,
+    SQS, SqsPublishingMode, SqsQueueEmitter, SqsQueueIngestor, SqsQueueIngestorError,
+    SqsQueueIngestorPlan, connection::FailedRequest,
 };
 
 /// The fixture name every check resolves.
@@ -264,10 +264,10 @@ async fn requests_reach_the_answer_that_accepts_signed_for_the_configured_host()
     let service = stand_in(listener, 2, QueueAnswer::Url);
     let config = client_config(&format!("http://{SERVICE}:{port}"));
 
-    let client = SqsEmitter::client_from_config(&config, fixture.dns())
+    let client = SqsQueueEmitter::client_from_config(&config, fixture.dns())
         .await
-        .expect("the sink client configuration is valid");
-    let queue_url = SqsEmitter::queue_url(&client, QUEUE)
+        .expect("the emitter client configuration is valid");
+    let queue_url = SqsQueueEmitter::queue_url(&client, QUEUE)
         .await
         .expect("the answer that accepts returns the queue URL");
     assert_eq!(queue_url, format!("http://{SERVICE}/000000000000/{QUEUE}"));
@@ -320,13 +320,13 @@ async fn a_literal_endpoint_is_dialled_without_a_lookup() {
         .port();
     let service = stand_in(listener, 1, QueueAnswer::Url);
 
-    let client = SqsEmitter::client_from_config(
+    let client = SqsQueueEmitter::client_from_config(
         &client_config(&format!("http://127.0.0.1:{port}")),
         fixture.dns(),
     )
     .await
-    .expect("the sink client configuration is valid");
-    SqsEmitter::queue_url(&client, QUEUE)
+    .expect("the emitter client configuration is valid");
+    SqsQueueEmitter::queue_url(&client, QUEUE)
         .await
         .expect("the literal address returns the queue URL");
 
@@ -350,14 +350,14 @@ async fn a_host_that_does_not_resolve_is_the_typed_cause_of_the_queue_lookup_fai
             negative_ttl: Duration::from_secs(30),
         },
     );
-    let client = SqsEmitter::client_from_config(
+    let client = SqsQueueEmitter::client_from_config(
         &client_config(&format!("http://{SERVICE}:9324")),
         fixture.dns(),
     )
     .await
-    .expect("the sink client configuration is valid");
+    .expect("the emitter client configuration is valid");
 
-    let report = SqsEmitter::queue_url(&client, QUEUE)
+    let report = SqsQueueEmitter::queue_url(&client, QUEUE)
         .await
         .expect_err("a host that does not resolve cannot be reached");
 
@@ -382,14 +382,14 @@ async fn a_refused_connection_is_described_by_its_causes() {
     let fixture = Fixture::start().await;
     let endpoint = RefusedEndpoint::reserve();
     let port = endpoint.port();
-    let client = SqsEmitter::client_from_config(
+    let client = SqsQueueEmitter::client_from_config(
         &client_config(&format!("http://127.0.0.1:{port}")),
         fixture.dns(),
     )
     .await
-    .expect("the sink client configuration is valid");
+    .expect("the emitter client configuration is valid");
 
-    let report = SqsEmitter::queue_url(&client, QUEUE)
+    let report = SqsQueueEmitter::queue_url(&client, QUEUE)
         .await
         .expect_err("a closed port refuses the connection");
 
@@ -472,13 +472,13 @@ async fn a_send_that_cannot_connect_fails_the_publish_without_answering_a_record
             "SQS SendMessageBatch failed: dispatch failure: ",
         ),
     ] {
-        let client = SqsEmitter::client_from_config(
+        let client = SqsQueueEmitter::client_from_config(
             &client_config(&format!("http://127.0.0.1:{port}")),
             fixture.dns(),
         )
         .await
-        .expect("the sink client configuration is valid");
-        let mut connector = SqsEmitter {
+        .expect("the emitter client configuration is valid");
+        let mut connector = SqsQueueEmitter {
             client,
             queue_url: format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"),
             mode,
@@ -517,9 +517,9 @@ async fn a_ca_file_that_cannot_be_read_is_a_configuration_failure() {
         value: "/nonexistent/nervix-sqs-ca.pem".to_string(),
     });
 
-    let report = SqsEmitter::client_from_config(&config, fixture.dns())
+    let report = SqsQueueEmitter::client_from_config(&config, fixture.dns())
         .await
-        .expect_err("a CA file that cannot be read fails the sink configuration");
+        .expect_err("a CA file that cannot be read fails the emitter configuration");
 
     assert_eq!(
         report.current_context(),
@@ -529,18 +529,21 @@ async fn a_ca_file_that_cannot_be_read_is_a_configuration_failure() {
     assert!(message.contains("TLS CA certificate"), "{message}");
 }
 
-/// A source instance of the client `config` declares, polling the queue every check looks up.
-pub(crate) async fn open_source(config: &[ClientConfigEntry], dns: DnsResolver) -> SqsIngestor {
+/// A ingestor instance of the client `config` declares, polling the queue every check looks up.
+pub(crate) async fn open_source(
+    config: &[ClientConfigEntry],
+    dns: DnsResolver,
+) -> SqsQueueIngestor {
     let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
-    let plan = SqsIngestorPlan::new(config, queue, dns)
+    let plan = SqsQueueIngestorPlan::new(config, queue, dns)
         .await
         .expect("the source client configuration is valid");
-    SqsIngestor::open(&plan, 0)
+    SqsQueueIngestor::open(&plan, 0)
         .await
         .expect("opening a source sends no request")
 }
 
-/// A request for the next batch, which a source that has not looked its queue up never sends.
+/// A request for the next batch, which an ingestor that has not looked its queue up never sends.
 pub(crate) fn batch_request() -> IngestorBatchRequest {
     IngestorBatchRequest {
         max_messages: NonZeroUsize::MIN,
@@ -593,7 +596,7 @@ async fn a_source_looks_its_queue_up_once_when_it_first_resumes() {
         "{}",
         requests[0]
     );
-    // The stand-in no longer listens, so only a source that kept the URL is ready again.
+    // The stand-in no longer listens, so only an ingestor that kept the URL is ready again.
     assert_eq!(
         source
             .resume()
@@ -624,8 +627,8 @@ async fn a_source_that_cannot_reach_the_service_opens_and_fails_its_resume() {
         &IngestorError::Resume { connector: SQS }
     );
     assert!(matches!(
-        report.downcast_ref::<SqsIngestorError>(),
-        Some(SqsIngestorError::ResolveQueue { queue }) if queue == QUEUE
+        report.downcast_ref::<SqsQueueIngestorError>(),
+        Some(SqsQueueIngestorError::ResolveQueue { queue }) if queue == QUEUE
     ));
     assert!(report.downcast_ref::<DnsLookupError>().is_none());
     let message = message_of(&report).expect("the failure carries its description");
@@ -668,10 +671,10 @@ async fn a_queue_the_service_does_not_have_fails_the_resume_with_its_name() {
             "{answer:?}"
         );
         let missing = report
-            .downcast_ref::<SqsIngestorError>()
+            .downcast_ref::<SqsQueueIngestorError>()
             .expect("the lookup failure stays typed beneath the resume failure");
         assert!(
-            matches!(missing, SqsIngestorError::MissingQueue { queue } if queue == QUEUE),
+            matches!(missing, SqsQueueIngestorError::MissingQueue { queue } if queue == QUEUE),
             "{answer:?}: {report:?}"
         );
         assert_eq!(missing.to_string(), "SQS queue 'orders' does not exist");

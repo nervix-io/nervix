@@ -1,8 +1,8 @@
-//! Why the broker closed a channel a RabbitMQ sink published on.
+//! Why the broker closed a channel a RabbitMQ emitter published on.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Listening to the events of the sink's connection, reading the one reason Lapin
+//! - **Owns.** Listening to the events of the emitter's connection, reading the one reason Lapin
 //!   reports for each channel the broker closes, and recognizing in that reason the broker's
 //!   refusal of a message body larger than its `max_message_size`.
 //! - **Depends on.** Lapin's connection, events and errors, and Tokio's timer.
@@ -13,10 +13,10 @@
 //!
 //! The broker names its reason when it closes a channel, and Lapin hands that reason only to what
 //! was waiting on the channel at that moment: its pending publisher confirms and replies. A publish
-//! or request that starts afterwards fails with the bare channel state instead. Which of the sink's
-//! calls the reason reaches therefore depends on timing, so the sink never reads it from the call
+//! or request that starts afterwards fails with the bare channel state instead. Which of the emitter's
+//! calls the reason reaches therefore depends on timing, so the emitter never reads it from the call
 //! that failed. Lapin also reports the reason once as an error event of the connection, whatever
-//! was waiting, and the sink reads it there, exactly once for every channel it loses, so an event
+//! was waiting, and the emitter reads it there, exactly once for every channel it loses, so an event
 //! it has not read yet always belongs to a channel it has not lost yet.
 //!
 //! A failed connection takes the channel with it and reports no reason of the channel's own, so a
@@ -52,7 +52,7 @@ use lapin::{
     protocol::{AMQPErrorKind, AMQPSoftError},
 };
 
-/// How long the sink waits for its connection to report why the broker closed a channel. Lapin
+/// How long the emitter waits for its connection to report why the broker closed a channel. Lapin
 /// reports the reason as soon as it has answered the broker's close, so the wait normally ends at
 /// once; the bound covers only a close that reports no reason.
 const CLOSE_REASON_BUDGET: Duration = Duration::from_secs(5);
@@ -64,7 +64,7 @@ const CONFIGURED_LIMIT: &str = "is larger than configured max size ";
 /// What follows the refused size when the limit is the broker's own ceiling.
 const CEILING_LIMIT: &str = "is larger than max size ";
 
-/// Why the broker closed a channel the sink published on.
+/// Why the broker closed a channel the emitter published on.
 #[derive(Debug)]
 pub(crate) enum ChannelClosure {
     /// The broker refused a message whose body is larger than `limit` bytes, its
@@ -104,21 +104,21 @@ impl ChannelClosure {
     }
 }
 
-/// The error events of the connection a sink publishes through.
+/// The error events of the connection an emitter publishes through.
 pub(crate) struct ChannelClosures {
     events: Pin<Box<dyn Stream<Item = Event> + Send>>,
 }
 
 impl ChannelClosures {
     /// Starts listening to `connection`. Lapin reports an event only to a listener that exists when
-    /// it happens, so this runs before the sink opens its first channel.
+    /// it happens, so this runs before the emitter opens its first channel.
     pub(crate) fn listen(connection: &Connection) -> Self {
         Self {
             events: Box::pin(connection.events_listener()),
         }
     }
 
-    /// Why `channel`, on which the sink just saw `observed` fail, is gone. `observed` stands for the
+    /// Why `channel`, on which the emitter just saw `observed` fail, is gone. `observed` stands for the
     /// reason when the channel is still open, when its connection failed, or when no reason
     /// arrives.
     pub(crate) async fn next(

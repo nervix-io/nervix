@@ -6,7 +6,7 @@
 //!   for it before it reported what the emitter's client held as sent.
 //! - **Depends on.** The scenario's cluster, its controlled NATS endpoint, shared command steps and
 //!   the shared STOP timing record.
-//! - **Must not know.** The NATS sink's private state or how its driver queues what it sends.
+//! - **Must not know.** The NATS emitter's private state or how its driver queues what it sends.
 
 #![cfg_attr(
     nervix_lint,

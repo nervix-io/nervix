@@ -659,7 +659,7 @@ impl DomainState {
                                 }
                             }
                         }
-                        IngestorInput::Client(client_source) => {
+                        IngestorInput::Client(client_entity) => {
                             // A client source's batches carry the schema it names, so that schema
                             // is what the ingestor depends on in place of a codec and a client.
                             let schema_node = expect_kind(
@@ -667,7 +667,7 @@ impl DomainState {
                                 identifier,
                                 models,
                                 &indices,
-                                &client_source.schema,
+                                &client_entity.schema,
                                 ModelKind::Schema,
                             )?;
                             graph.add_edge(schema_node, source, EdgeKind::RequiredBy);

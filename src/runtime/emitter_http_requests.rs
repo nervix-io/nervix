@@ -1,14 +1,14 @@
-//! Publishing an HTTP emitter's rows as the requests its HTTP sink sends.
+//! Publishing an HTTP emitter's rows as the requests its HTTP emitter sends.
 //!
 //! Layer: data plane.
 //! - **Owns.** Preparing every row a flush released as one request — the fields the row was
 //!   admitted with and its body, the exact bytes the codec produced or none — rejecting a row whose
-//!   body cannot be encoded, retaining every prepared request until the sink answers for it, and
-//!   handing the retained requests to the sink in the order they were prepared.
+//!   body cannot be encoded, retaining every prepared request until the emitter answers for it, and
+//!   handing the retained requests to the emitter in the order they were prepared.
 //! - **Depends on.** The emitter's buffered batches and the request fields each row carries, the
 //!   codec's per-row encoding, the retained payloads and the answers they apply, and the connector
-//!   contract's HTTP request sink.
-//! - **Must not know.** How the request fields were evaluated, which endpoint the sink sends to, or
+//!   contract's HTTP request emitter.
+//! - **Must not know.** How the request fields were evaluated, which endpoint the emitter sends to, or
 //!   when the emitter retries.
 
 #![cfg_attr(
@@ -32,7 +32,7 @@ pub(super) enum HttpRequestBody {
     Absent,
 }
 
-/// An HTTP sink and the body the host prepares each of its requests with.
+/// An HTTP emitter and the body the host prepares each of its requests with.
 pub(super) struct PreparedRequestEmitter {
     connector: Box<dyn HttpRequestEmitter>,
     body: HttpRequestBody,
@@ -149,7 +149,7 @@ impl EmitterConnector for PreparedRequestEmitter {
     }
 
     /// Prepares a request for every row no retained request carries yet, and sends every retained
-    /// request in one write: the ones earlier attempts prepared and the sink left unanswered,
+    /// request in one write: the ones earlier attempts prepared and the emitter left unanswered,
     /// exactly as they were first sent, followed by the ones prepared now.
     async fn publish_batches(
         &mut self,
@@ -202,18 +202,18 @@ mod tests {
         runtime_schema::compile_codec,
     };
 
-    /// How the scripted sink answers one write.
+    /// How the scripted emitter answers one write.
     enum Answer {
-        /// The sink fails before it answers for any request, as an endpoint that lost the
+        /// The emitter fails before it answers for any request, as an endpoint that lost the
         /// response does.
         Lose,
-        /// The sink delivers every request of the write.
+        /// The emitter delivers every request of the write.
         DeliverAll,
-        /// The sink rejects the first request and delivers the rest.
+        /// The emitter rejects the first request and delivers the rest.
         RejectFirst,
     }
 
-    /// One request the scripted sink was handed, with everything it would send.
+    /// One request the scripted emitter was handed, with everything it would send.
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct SentRequest {
         method: String,
@@ -222,7 +222,7 @@ mod tests {
         body: Option<Vec<u8>>,
     }
 
-    /// An HTTP sink that keeps every request it was handed and answers each write from a script.
+    /// An HTTP emitter that keeps every request it was handed and answers each write from a script.
     struct ScriptedHttpEmitter {
         writes: Arc<Mutex<Vec<Vec<SentRequest>>>>,
         answers: VecDeque<Answer>,
@@ -230,6 +230,10 @@ mod tests {
 
     #[async_trait]
     impl EmitterLifecycle for ScriptedHttpEmitter {
+        fn kind(&self) -> nervix_models::EmitterEntityKind {
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
+        }
+
         async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
             Ok(EmitterFinish::NothingHeld)
         }
@@ -445,7 +449,10 @@ mod tests {
             vec![vec![sent(1), sent(2)], vec![sent(1), sent(2), sent(3)]]
         );
         assert!(requests.is_empty());
-        assert!(payloads.is_empty(), "an HTTP sink retains no batch payload");
+        assert!(
+            payloads.is_empty(),
+            "an HTTP emitter retains no batch payload"
+        );
         for completion in first_completions.into_iter().chain(second_completions) {
             assert_eq!(completion.wait().await, AckOutcome::Ack);
         }
@@ -495,7 +502,7 @@ mod tests {
     }
 
     /// What a flush of `batch`, whose first request the endpoint refuses and whose second it
-    /// delivers, reports as sent through an HTTP sink whose requests carry `body`.
+    /// delivers, reports as sent through an HTTP emitter whose requests carry `body`.
     async fn sent_by_a_flush_refusing_the_first(
         body: HttpRequestBody,
         batch: EmitterPublishBatch,
@@ -572,7 +579,7 @@ mod tests {
         );
         let error = without_fields
             .http_request(0)
-            .expect_err("a batch of another sink carries no request fields");
+            .expect_err("a batch of another emitter carries no request fields");
         assert_eq!(
             *error.current_context(),
             EmitterRuntimeError::MissingHttpRequest { row: 0 }

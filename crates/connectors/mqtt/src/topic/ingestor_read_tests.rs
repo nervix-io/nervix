@@ -1,4 +1,4 @@
-//! How an MQTT source reads one batch: its first publish, the publishes it gathers after it under
+//! How an MQTT ingestor reads one batch: its first publish, the publishes it gathers after it under
 //! a batch timeout, and how a read ends when the host cancels it.
 //!
 //! Most checks read from a fake event loop the check feeds through a channel, on a paused clock,
@@ -22,8 +22,8 @@ use nervix_primitives::{
 use rumqttc::{Publish, QoS};
 
 use super::{
-    MqttIngestor, MqttIngestorError, MqttIngestorMessage, MqttIngestorPlan, MqttIngestorResult,
-    MqttIngestorSettings, PublishRead,
+    MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorMessage, MqttTopicIngestorPlan,
+    MqttTopicIngestorResult, MqttTopicIngestorSettings, PublishRead,
 };
 use crate::topic::{
     scripted_broker::{ScriptedBroker, ScriptedConnection},
@@ -52,11 +52,11 @@ struct DeliveredPublishes {
 }
 
 impl PublishRead for DeliveredPublishes {
-    async fn next_publish(&mut self) -> MqttIngestorResult<Publish> {
+    async fn next_publish(&mut self) -> MqttTopicIngestorResult<Publish> {
         match self.publishes.recv().await {
             Some(publish) => Ok(publish),
             // The check dropped its end: the connection is lost.
-            None => Err(Report::new(MqttIngestorError::Receive)),
+            None => Err(Report::new(MqttTopicIngestorError::Receive)),
         }
     }
 }
@@ -92,7 +92,7 @@ enum Read {
 }
 
 impl Read {
-    fn of(batch: IngestorBatch<MqttIngestorMessage>) -> Self {
+    fn of(batch: IngestorBatch<MqttTopicIngestorMessage>) -> Self {
         match batch {
             IngestorBatch::Messages(messages) => Self::Completed(Self::ids(&messages)),
             IngestorBatch::Interrupted { gathered } => Self::Interrupted(Self::ids(&gathered)),
@@ -105,7 +105,7 @@ impl Read {
         }
     }
 
-    fn ids(messages: &[MqttIngestorMessage]) -> Vec<u8> {
+    fn ids(messages: &[MqttTopicIngestorMessage]) -> Vec<u8> {
         let mut ids = Vec::with_capacity(messages.len());
         for message in messages {
             let [id] = message.payload() else {
@@ -123,7 +123,7 @@ async fn read_batch(
     request: IngestorBatchRequest,
     cancellation: &IngestorReadCancellation,
 ) -> Read {
-    let batch = MqttIngestor::read_batch(connection, request, cancellation)
+    let batch = MqttTopicIngestor::read_batch(connection, request, cancellation)
         .await
         .assured("a connection whose end the check keeps fails no read");
     Read::of(batch)
@@ -261,7 +261,7 @@ async fn a_connection_lost_while_a_batch_gathers_fails_the_read() {
     let (deliveries, mut connection) = delivered(&[1]);
     drop(deliveries);
 
-    let failed = MqttIngestor::read_batch(
+    let failed = MqttTopicIngestor::read_batch(
         &mut connection,
         request(8, Some(LONG_BATCH_TIMEOUT)),
         &IngestorReadCancellation::new(),
@@ -273,7 +273,7 @@ async fn a_connection_lost_while_a_batch_gathers_fails_the_read() {
     };
     assert!(matches!(
         error.current_context(),
-        MqttIngestorError::Receive
+        MqttTopicIngestorError::Receive
     ));
 }
 
@@ -281,7 +281,7 @@ async fn a_connection_lost_while_a_batch_gathers_fails_the_read() {
 async fn a_batch_timeout_beyond_the_clock_fails_the_read() {
     let (_deliveries, mut connection) = delivered(&[1, 2]);
 
-    let failed = MqttIngestor::read_batch(
+    let failed = MqttTopicIngestor::read_batch(
         &mut connection,
         request(8, Some(Duration::MAX)),
         &IngestorReadCancellation::new(),
@@ -293,13 +293,13 @@ async fn a_batch_timeout_beyond_the_clock_fails_the_read() {
     };
     assert!(matches!(
         error.current_context(),
-        MqttIngestorError::BatchDeadline
+        MqttTopicIngestorError::BatchDeadline
     ));
 }
 
-/// One ACK-mode source instance subscribing to `events` through `addr` and `dns`.
-fn acknowledged_plan(addr: &str, dns: DnsResolver) -> MqttIngestorPlan {
-    MqttIngestorPlan::new(MqttIngestorSettings {
+/// One ACK-mode ingestor instance subscribing to `events` through `addr` and `dns`.
+fn acknowledged_plan(addr: &str, dns: DnsResolver) -> MqttTopicIngestorPlan {
+    MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
         instances: vec![vec![ClientConfigEntry {
             key: "addr".to_string(),
             value: addr.to_string(),
@@ -344,21 +344,21 @@ fn publish_packet(packet_id: u16, payload: &[u8]) -> Vec<u8> {
     packet
 }
 
-/// A source of `plan` that `broker` granted its subscription, and the broker's end of the source's
+/// A ingestor of `plan` that `broker` granted its subscription, and the broker's end of the ingestor's
 /// connection.
 async fn subscribed(
-    plan: &MqttIngestorPlan,
+    plan: &MqttTopicIngestorPlan,
     broker: &ScriptedBroker,
-) -> (MqttIngestor, ScriptedConnection) {
-    let mut source = MqttIngestor::open(plan, 0)
+) -> (MqttTopicIngestor, ScriptedConnection) {
+    let mut source = MqttTopicIngestor::open(plan, 0)
         .await
-        .assured("an MQTT source opens without connecting");
+        .assured("an MQTT ingestor opens without connecting");
     let grant = async {
         let mut connection = broker.accept().await;
         let (packet_type, body) = connection.read_packet().await;
         assert_eq!(
             packet_type, SUBSCRIBE,
-            "the source subscribes once connected"
+            "the ingestor subscribes once connected"
         );
         // SUBACK: the SUBSCRIBE's packet identifier, an empty property section, QoS 1 granted.
         connection
@@ -455,8 +455,8 @@ async fn a_packet_above_the_advertised_bound_ends_the_read_and_tells_the_broker(
         error.current_context(),
         IngestorError::Read { connector: "mqtt" }
     ));
-    let refused = error.downcast_ref::<MqttIngestorError>();
-    let Some(MqttIngestorError::PacketTooLarge {
+    let refused = error.downcast_ref::<MqttTopicIngestorError>();
+    let Some(MqttTopicIngestorError::PacketTooLarge {
         packet_bytes,
         maximum: advertised,
     }) = refused
@@ -467,8 +467,8 @@ async fn a_packet_above_the_advertised_bound_ends_the_read_and_tells_the_broker(
     assert_eq!(u64::from(*advertised), MQTT_SOURCE_MAXIMUM_PACKET_BYTES);
     assert!(
         source.needs_resume(),
-        "a read whose packet ended its connection drops it, so the source resumes before it reads \
-         again"
+        "a read whose packet ended its connection drops it, so the ingestor resumes before it \
+         reads again"
     );
     let Ok((packet_type, body)) = timeout(OBSERVATION_BUDGET, connection.read_packet()).await
     else {
@@ -508,11 +508,11 @@ async fn a_connection_the_broker_closes_fails_the_read_and_is_dropped() {
         IngestorError::Read { connector: "mqtt" }
     ));
     assert!(matches!(
-        error.downcast_ref::<MqttIngestorError>(),
-        Some(MqttIngestorError::Receive)
+        error.downcast_ref::<MqttTopicIngestorError>(),
+        Some(MqttTopicIngestorError::Receive)
     ));
     assert!(
         source.needs_resume(),
-        "a read that lost its connection drops it, so the source resumes before it reads again"
+        "a read that lost its connection drops it, so the ingestor resumes before it reads again"
     );
 }

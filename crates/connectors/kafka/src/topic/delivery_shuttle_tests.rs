@@ -1,14 +1,14 @@
 //! The Kafka producer's retained-record count explored under Shuttle.
 //!
 //! Layer: test harness.
-//! - **Owns.** The invariants the count is held to while the delivery reports of the records a sink
+//! - **Owns.** The invariants the count is held to while the delivery reports of the records an emitter
 //!   handed over are served concurrently with further hand-overs and counts: every record counts
 //!   from before its hand-over until its report is served, and a publish that reads a record's
 //!   report never finds that record still counted.
 //! - **Depends on.** The producer context's retention and delivery opaque, a channel as the
 //!   driver's queue of records, a task as its polling thread, and the model harness's Shuttle
 //!   runner.
-//! - **Must not know.** librdkafka, a broker, or the sink contract.
+//! - **Must not know.** librdkafka, a broker, or the emitter contract.
 
 #![cfg_attr(
     nervix_lint,

@@ -12,9 +12,14 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    IcebergTableEmitter::KIND,
+    nervix_models::EmitterEntityKind::Iceberg(nervix_models::IcebergEmitterEntity::Table)
+));
+
 impl EmitterConnectorStarter {
     pub(super) async fn iceberg(
-        connector: &IcebergEmitterPlan,
+        connector: &IcebergTableEmitterPlan,
         context: &EmitterConnectorContext,
         input_schema: &CompiledSchema,
     ) -> EmitterRuntimeResult<Box<dyn EmitterConnector>> {
@@ -28,8 +33,8 @@ impl EmitterConnectorStarter {
                 udfs: context.udfs.as_ref(),
             })?;
             let mapped_schema = projection.mapped_schema().clone();
-            let opened = IcebergEmitter::new(
-                IcebergEmitterConfig {
+            let opened = IcebergTableEmitter::new(
+                IcebergTableEmitterConfig {
                     backend: connector.backend,
                     dns: context.dns()?,
                     storage_config: connector.storage.config.entries.clone(),

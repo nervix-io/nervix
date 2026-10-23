@@ -76,7 +76,7 @@ builtin spellings, including datetime names and accepted aliases. That list excl
 calls and `write_header`; it is a candidate catalog, while VM lowering and registry validation
 still decide whether a call is valid for its arguments. The parser carries the source or emitter kind
 with header-function expectations. The resolver adds `read_header` and `read_headers` only for a
-source that can read headers, and `write_header` only for a emitter that can write them. UDF candidates
+source that can read headers, and `write_header` only for an emitter that can write them. UDF candidates
 come from the selected domain's Models after the session's queued transaction changes.
 
 Registry planning converts the validated scheduled Models into typed processor specifications.

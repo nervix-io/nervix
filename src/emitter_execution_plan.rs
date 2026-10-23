@@ -2,9 +2,9 @@
 //!
 //! Layer: decisions.
 //!
-//! - **Owns.** Resolving sink clients and source relays, preserving their delivery modes, and
+//! - **Owns.** Resolving emitter clients and source relays, preserving their delivery modes, and
 //!   lowering emitter route, source, HTTP request, and ordering expressions before runtime binding.
-//! - **Depends on.** Validated schedule Models, the activation plan's schemas, the sink start
+//! - **Depends on.** Validated schedule Models, the activation plan's schemas, the emitter start
 //!   decision, and the expression VM frontend.
 //! - **Must not know.** Tokio, locks, connector I/O, node-local resources, or task spawning.
 
@@ -59,8 +59,8 @@ pub(crate) enum EmitterExecutionPlanError {
         emitter: EmitterName,
         schema: nervix_models::SchemaName,
     },
-    #[error("emitter '{emitter}' cannot plan its sink")]
-    Sink { emitter: EmitterName },
+    #[error("emitter '{emitter}' cannot plan its emitter")]
+    Connector { emitter: EmitterName },
     #[error("emitter '{emitter}' has an invalid source predicate for '{relay}'")]
     SourceFilter {
         emitter: EmitterName,
@@ -96,7 +96,7 @@ pub(crate) struct EmitterRoutePlan {
     pub(crate) codec_route: bool,
 }
 
-/// The source-row group that the host evaluates before handing an SQS record to its sink.
+/// The source-row group that the host evaluates before handing an SQS record to its emitter.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum EmitterOrderingGroupPlan {
     FromBranch,
@@ -112,7 +112,7 @@ pub(crate) struct EmitterExecutionPlan {
     pub(crate) inputs: Vec<EmitterInputPlan>,
     pub(crate) collect_policy: Option<InputCollectPolicy>,
     pub(crate) codec: Option<CodecName>,
-    /// The validated schema of the rows handed to this emitter's sink.
+    /// The validated schema of the rows handed to this emitter's emitter.
     pub(crate) output_schema: Arc<CompiledSchema>,
     pub(crate) connector: EmitterStartPlan<DeclaredClientConfig>,
     pub(crate) route: Option<EmitterRoutePlan>,
@@ -148,7 +148,7 @@ impl EmitterExecutionPlan {
                 catalog_client,
             },
         )
-        .change_context(EmitterExecutionPlanError::Sink {
+        .change_context(EmitterExecutionPlanError::Connector {
             emitter: emitter.name.clone(),
         })?;
 
@@ -519,7 +519,7 @@ mod tests {
             mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
                 retry_policy: retry_policy(),
             },
-            client: named("sink"),
+            client: named("emitter"),
         }));
         direct.body = EmitterBody::Codec {
             codec: named("codec"),
@@ -583,7 +583,7 @@ mod tests {
         let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter { fifo_group, .. })) =
             sqs.connector.as_mut()
         else {
-            panic!("the fixture sink is SQS");
+            panic!("the fixture emitter is SQS");
         };
         *fifo_group = Some(SqsFifoGroup::FromBranch);
         assert_eq!(

@@ -32,9 +32,9 @@ use crate::{
     ChoiceLookupRequest, ChoiceSelection, ChoiceTarget, ChoiceValue, ClientMessage, ClientRequest,
     CloseEmitterRequest, CloseIngestorRequest, CommandDisposition, CommandOutcome, CommandRequest,
     ConsumerId, DetachDomainClockRequest, Diagnostic, EmitterBatchDecision, EncodedFrame,
-    IngestorSpan, InspectTransactionRequest, LeaderEndpoints, LeaderRedirect, OpenEmitterRequest,
+    InspectTransactionRequest, LeaderEndpoints, LeaderRedirect, OpenEmitterRequest,
     OpenIngestorRequest, OutcomeOrigin, ProducerId, ReadEmitterBatchRequest, RowBranch, RowSchema,
-    SelectDomainRequest, ServerFrame, SessionLimits, SettleEmitterBatchRequest,
+    SelectDomainRequest, ServerFrame, SessionLimits, SettleEmitterBatchRequest, SourceSpan,
     StatementDisposition, StatementOutcome, SubmitBatchRequest, SubscribeRequest,
     SubscriptionHandle, SubscriptionRowsEncoder, SubscriptionType, SuggestRequest,
     UnsubscribeRequest, WireEncodeError,
@@ -73,11 +73,11 @@ pub(crate) fn diagnostics() -> Vec<Diagnostic> {
     vec![
         Diagnostic {
             message: "unexpected token 'RELAY'".to_string(),
-            span: Some(IngestorSpan::new(7, 12).assured("an ordered span")),
+            span: Some(SourceSpan::new(7, 12).assured("an ordered span")),
         },
         Diagnostic {
             message: "an empty span marks a position".to_string(),
-            span: Some(IngestorSpan::new(u32::MAX, u32::MAX).assured("an ordered span")),
+            span: Some(SourceSpan::new(u32::MAX, u32::MAX).assured("an ordered span")),
         },
         Diagnostic {
             message: String::new(),
@@ -468,7 +468,7 @@ fn full_effects() -> ImpactEffects {
         },
     );
     let schema = ImpactNodeCoverage::configuration(node(ModelKind::Schema, "orders"));
-    let emitter = ImpactNodeCoverage::all_executions(node(ModelKind::Emitter, "sink"));
+    let emitter = ImpactNodeCoverage::all_executions(node(ModelKind::Emitter, "emitter"));
     let selected =
         ImpactNodeCoverage::execution(node(ModelKind::Deduplicator, "dedupe"), selected_keys());
     let before = ImpactTopology {
@@ -536,7 +536,7 @@ fn full_effects() -> ImpactEffects {
             },
             ConfigurationImpact {
                 transition: ConfigurationTransition::Dropped {
-                    node: node(ModelKind::Emitter, "sink"),
+                    node: node(ModelKind::Emitter, "emitter"),
                 },
                 attribution: attribution(1, 2),
             },
@@ -742,11 +742,11 @@ pub(crate) fn impact_report() -> TransactionImpactReport {
             3,
             TransactionOperation::DropConfiguration {
                 domain: tenant(),
-                node: node(ModelKind::Emitter, "sink"),
+                node: node(ModelKind::Emitter, "emitter"),
             },
             range(3, 3),
             vec![OperationImpactReason::Configuration {
-                node: node(ModelKind::Emitter, "sink"),
+                node: node(ModelKind::Emitter, "emitter"),
                 aspect: ModelChangeAspect::EntityDropped,
             }],
         ),

@@ -1,8 +1,8 @@
-//! Kafka source and sink connector.
+//! Kafka ingestor and emitter connector.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Kafka consumer and producer configuration, source polling and offset handling,
+//! - **Owns.** Kafka consumer and producer configuration, ingestor polling and offset handling,
 //!   record and header publication, native queue capacity and admission backpressure,
 //!   delivery-report classification, the records the producer
 //!   holds until their delivery reports are served, the delivery bound a confirmed publish gives
@@ -47,8 +47,8 @@ use error_stack::Report;
 pub use ingestor::{
     KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
     KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit,
-    KafkaIngestor, KafkaIngestorError, KafkaIngestorMessage, KafkaIngestorOffsetMode,
-    KafkaIngestorPlan, KafkaOffsetPosition, TopicPartitionInspector,
+    KafkaOffsetPosition, KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorMessage,
+    KafkaTopicIngestorOffsetMode, KafkaTopicIngestorPlan, TopicPartitionInspector,
 };
 // Criterion measures the per-partition folds an acknowledgement and a rejection run.
 #[cfg(feature = "benchmarks")]
@@ -104,13 +104,13 @@ const QUEUE_CAPACITY_PROPERTY: &str = "queue.buffering.max.kbytes";
 /// place. Recheck that short interval cooperatively; ACK TIMEOUT bounds the complete wait.
 const QUEUE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
 
-pub struct KafkaEmitterConfig {
+pub struct KafkaTopicEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub topic: KafkaTopicName,
     pub mode: BrokerPublishingMode,
 }
 
-pub struct KafkaEmitter {
+pub struct KafkaTopicEmitter {
     producer: ThreadedProducer<KafkaProducerContext>,
     topic: KafkaTopicName,
     mode: BrokerPublishingMode,
@@ -209,12 +209,12 @@ impl Future for KafkaAnswer {
             Poll::Ready(report) => report,
             Poll::Pending => return Poll::Pending,
         };
-        Poll::Ready(KafkaEmitter::broker_answer(report))
+        Poll::Ready(KafkaTopicEmitter::broker_answer(report))
     }
 }
 
-impl KafkaEmitter {
-    pub fn new(config: KafkaEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+impl KafkaTopicEmitter {
+    pub fn new(config: KafkaTopicEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
         let producer_config = Self::producer_config(&config.config, config.mode)?;
         let queue_capacity_bytes = Self::producer_queue_capacity(&producer_config)?;
         let producer = Self::create_producer(&producer_config)?;
@@ -578,8 +578,17 @@ impl KafkaEmitter {
     }
 }
 
+impl KafkaTopicEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic);
+}
+
 #[async_trait]
-impl EmitterLifecycle for KafkaEmitter {
+impl EmitterLifecycle for KafkaTopicEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// Flushes the producer's queue, which holds the records a `NO ACK` publish delivered and
     /// librdkafka has not sent yet, and any record a publish handed over and then gave up on. A
     /// flush sends them at once, whatever `linger.ms` says.
@@ -626,7 +635,7 @@ impl EmitterLifecycle for KafkaEmitter {
 }
 
 #[async_trait]
-impl RecordEmitter for KafkaEmitter {
+impl RecordEmitter for KafkaTopicEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         match self.mode {
             BrokerPublishingMode::NoAck => self.publish_unconfirmed(records).await,
@@ -653,7 +662,7 @@ mod tests {
     use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 
     use super::{
-        KafkaDeliveryReport, KafkaEmitter, KafkaMessageTimeout, KafkaMessageTimeoutError,
+        KafkaDeliveryReport, KafkaMessageTimeout, KafkaMessageTimeoutError, KafkaTopicEmitter,
         LONGEST_MESSAGE_TIMEOUT_MILLIS,
     };
 
@@ -683,7 +692,7 @@ mod tests {
 
     #[test]
     fn a_delivered_record_is_confirmed() {
-        let answer = KafkaEmitter::broker_answer(Ok(KafkaDeliveryReport::Delivered));
+        let answer = KafkaTopicEmitter::broker_answer(Ok(KafkaDeliveryReport::Delivered));
 
         let Ok(verdict) = answer else {
             panic!("a delivered record has an answer, got {answer:?}");
@@ -695,7 +704,8 @@ mod tests {
     fn a_delivery_error_about_the_record_refuses_it_for_good() {
         let error = KafkaError::MessageProduction(RDKafkaErrorCode::MessageSizeTooLarge);
 
-        let answer = KafkaEmitter::broker_answer(Ok(KafkaDeliveryReport::Failed(error.clone())));
+        let answer =
+            KafkaTopicEmitter::broker_answer(Ok(KafkaDeliveryReport::Failed(error.clone())));
 
         let Ok(verdict) = answer else {
             panic!("a refused record has an answer, got {answer:?}");
@@ -712,7 +722,8 @@ mod tests {
     fn any_other_delivery_error_leaves_the_record_unknown_under_its_typed_cause() {
         let error = KafkaError::MessageProduction(RDKafkaErrorCode::MessageTimedOut);
 
-        let answer = KafkaEmitter::broker_answer(Ok(KafkaDeliveryReport::Failed(error.clone())));
+        let answer =
+            KafkaTopicEmitter::broker_answer(Ok(KafkaDeliveryReport::Failed(error.clone())));
 
         let Err(failure) = answer else {
             panic!("a timed out record has no answer, got {answer:?}");
@@ -734,7 +745,7 @@ mod tests {
         drop(answer);
         let dropped = report.await;
 
-        let answer = KafkaEmitter::broker_answer(dropped);
+        let answer = KafkaTopicEmitter::broker_answer(dropped);
 
         let Err(failure) = answer else {
             panic!("a record without a report has no answer, got {answer:?}");
@@ -759,7 +770,7 @@ mod tests {
     fn a_refused_hand_over_keeps_the_producer_error_beneath_the_publish_failure() {
         let error = KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull);
 
-        let failure = KafkaEmitter::refused_hand_over(error.clone());
+        let failure = KafkaTopicEmitter::refused_hand_over(error.clone());
 
         assert_eq!(
             failure.current_context(),
@@ -819,7 +830,7 @@ mod tests {
         ];
 
         let config =
-            KafkaEmitter::producer_config(&entries, confirmed(Duration::from_millis(2_500)))
+            KafkaTopicEmitter::producer_config(&entries, confirmed(Duration::from_millis(2_500)))
                 .expect("an ACK TIMEOUT of seconds fits librdkafka's message timeout");
 
         assert_eq!(config.get("message.timeout.ms"), Some("2500"));
@@ -834,7 +845,7 @@ mod tests {
             entry("delivery.timeout.ms", "300000"),
         ];
 
-        let config = KafkaEmitter::producer_config(&entries, BrokerPublishingMode::NoAck)
+        let config = KafkaTopicEmitter::producer_config(&entries, BrokerPublishingMode::NoAck)
             .expect("the client entries pass through");
 
         assert_eq!(config.get("delivery.timeout.ms"), Some("300000"));
@@ -852,7 +863,7 @@ mod tests {
             BrokerPublishingMode::NoAck,
             confirmed(Duration::from_secs(5)),
         ] {
-            let config = KafkaEmitter::producer_config(&entries, mode)
+            let config = KafkaTopicEmitter::producer_config(&entries, mode)
                 .expect("the client entries pass through");
 
             assert_eq!(
@@ -866,25 +877,25 @@ mod tests {
 
     #[test]
     fn native_queue_configuration_installs_a_positive_capacity_or_its_typed_failure() {
-        let config = KafkaEmitter::producer_config(
+        let config = KafkaTopicEmitter::producer_config(
             &[entry("queue.buffering.max.kbytes", "1")],
             BrokerPublishingMode::NoAck,
         )
         .assured("NO ACK configuration does not perform a fallible conversion");
         assert_eq!(
-            KafkaEmitter::producer_queue_capacity(&config)
+            KafkaTopicEmitter::producer_queue_capacity(&config)
                 .assured("one KiB is within librdkafka's positive C-integer queue range")
                 .get(),
             1024
         );
 
         for value in ["0", "-1", "not-a-capacity"] {
-            let config = KafkaEmitter::producer_config(
+            let config = KafkaTopicEmitter::producer_config(
                 &[entry("queue.buffering.max.kbytes", value)],
                 BrokerPublishingMode::NoAck,
             )
             .assured("NO ACK configuration does not perform a fallible conversion");
-            let Err(failure) = KafkaEmitter::producer_queue_capacity(&config) else {
+            let Err(failure) = KafkaTopicEmitter::producer_queue_capacity(&config) else {
                 panic!("native validation must refuse queue capacity {value}");
             };
             assert_eq!(
@@ -900,7 +911,7 @@ mod tests {
     fn an_ack_timeout_librdkafka_cannot_hold_refuses_the_emitter_configuration() {
         let timeout = Duration::from_secs(30 * 24 * 60 * 60);
 
-        let Err(error) = KafkaEmitter::producer_config(&[], confirmed(timeout)) else {
+        let Err(error) = KafkaTopicEmitter::producer_config(&[], confirmed(timeout)) else {
             panic!("an ACK TIMEOUT of 30 days exceeds librdkafka's message timeout");
         };
 
@@ -927,7 +938,7 @@ mod tests {
             RDKafkaErrorCode::InvalidTimestamp,
             RDKafkaErrorCode::InvalidRecord,
         ] {
-            assert!(KafkaEmitter::is_record_rejection(
+            assert!(KafkaTopicEmitter::is_record_rejection(
                 &KafkaError::MessageProduction(code)
             ));
         }
@@ -941,7 +952,7 @@ mod tests {
             RDKafkaErrorCode::AllBrokersDown,
             RDKafkaErrorCode::MessageTimedOut,
         ] {
-            assert!(!KafkaEmitter::is_record_rejection(
+            assert!(!KafkaTopicEmitter::is_record_rejection(
                 &KafkaError::MessageProduction(code)
             ));
         }

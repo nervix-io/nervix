@@ -1,12 +1,12 @@
-//! Outbound WebSocket source transport and shared signaling execution.
+//! Outbound WebSocket ingestor transport and shared signaling execution.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The outbound client's transport requirements, source lifecycle, configuration and
+//! - **Owns.** The outbound client's transport requirements, ingestor lifecycle, configuration and
 //!   frames, and signaling compilation and execution shared with server endpoint sessions.
 //! - **Depends on.** The connector contract, typed plans and host services, vocabulary values,
 //!   execution primitives, WebSocket transport, jaq, protobuf reflection, and contextual errors.
-//! - **Must not know.** Configuration Models, NSPL, runtime collectors, relays, branches,
+//! - **Must not know.** Configuration Models, Plexus, runtime collectors, relays, branches,
 //!   schedules, registry state, endpoint routing or listeners, or another connector implementation.
 //!
 //! Current boundary violation: the signaling compiler consumes configuration Model steps and
@@ -29,7 +29,8 @@ mod ingestor;
 mod signaling;
 
 pub use ingestor::{
-    WebsocketIngestor, WebsocketIngestorMessage, WebsocketIngestorPlan, WebsocketIngestorPlanError,
+    WebsocketsConnectionIngestor, WebsocketsConnectionIngestorMessage,
+    WebsocketsConnectionIngestorPlan, WebsocketsConnectionIngestorPlanError,
 };
 pub use signaling::{
     CompiledSignalingProtocol, SignalingDataEmitter, SignalingFrameEncodeError,

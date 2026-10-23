@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The SQS client Model, the queue source and sink Models with their delivery mode
+//! - **Owns.** The SQS client Model, the queue source and emitter Models with their delivery mode
 //!   and FIFO grouping, the queue name a source receives with and the rule SQS holds it to, the
 //!   message size SQS itself admits, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations, expressions and the names a body
+//! - **Depends on.** The shared source and emitter declarations, expressions and the names a body
 //!   references.
 //! - **Must not know.** The SQS driver, its configuration keys, or how a queue is received from or
 //!   sent to.
@@ -80,7 +80,7 @@ pub struct SqsQueueIngestor {
 }
 
 /// What the connector of a SQS QUEUE ingestor holds and how long it waits.
-const SQS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const SQS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[],
     waits: &[
         DeclaredWait {
@@ -96,7 +96,7 @@ const SQS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a SQS QUEUE emitter holds and how long it waits.
-const SQS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+const SQS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[],
     waits: &[
         DeclaredWait {
@@ -136,7 +136,7 @@ impl IngestorDeclaration for SqsQueueIngestor {
             name: LocatorName::External(SqsQueueName::DECLARATION),
         }),
         options: &[OptionDeclaration::INSTANCES],
-        bounds: SQS_SOURCE_BOUNDS,
+        bounds: SQS_INGESTOR_BOUNDS,
     };
 }
 
@@ -187,7 +187,7 @@ connector_ingestors! {
     /// What an SQS source reads.
     pub enum SqsIngestor;
     /// The alterations of the ingestors that read an SQS entity.
-    pub enum SqsIngestorAlteration;
+    pub enum SqsQueueIngestorAlteration;
     /// The entities an SQS source reads.
     pub enum SqsIngestorEntity {
         Queue(SqsQueueIngestor) = "QUEUE", "SQS";
@@ -254,7 +254,7 @@ impl EmitterDeclaration for SqsQueueEmitter {
         }],
         envelope: &[],
         properties: &[],
-        bounds: SQS_SINK_BOUNDS,
+        bounds: SQS_EMITTER_BOUNDS,
     };
 }
 
@@ -273,11 +273,11 @@ impl EmitterEntityBody for SqsQueueEmitter {
 
 connector_emitters! {
     connector Sqs = "SQS";
-    /// What an SQS sink writes.
+    /// What an SQS emitter writes.
     pub enum SqsEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum SqsEmitterMode;
-    /// The entities an SQS sink writes.
+    pub enum SqsQueueEmitterMode;
+    /// The entities an SQS emitter writes.
     pub enum SqsEmitterEntity {
         Queue(SqsQueueEmitter, SqsQueuePublishingMode) = "QUEUE";
     }

@@ -4,7 +4,7 @@
 //! - **Owns.** A timed broker fault concurrent with an HTTP post, and the sequenced payloads a
 //!   Pulsar emitter publishes and its broker receives.
 //! - **Depends on.** The scenario's cluster, dependency forwarder and shared command steps.
-//! - **Must not know.** The Pulsar sink's private state or a driver receipt.
+//! - **Must not know.** The Pulsar emitter's private state or a driver receipt.
 
 #![cfg_attr(
     nervix_lint,

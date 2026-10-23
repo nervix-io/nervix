@@ -1,11 +1,11 @@
-//! The request head the sink writes, read back by an HTTP/1.1 parser.
+//! The request head the emitter writes, read back by an HTTP/1.1 parser.
 //!
 //! Layer: test harness.
 //! - **Owns.** A bounded domain of valid prepared requests, built only from valid methods, origins,
 //!   targets, application headers and bodies, and the complete oracle of the head each one is
 //!   written as: request line, generated transport fields, every application field in order, and
 //!   the declared framing.
-//! - **Depends on.** The sink's request-head encoding, the vocabulary's request fields and the
+//! - **Depends on.** The emitter's request-head encoding, the vocabulary's request fields and the
 //!   `httparse` request grammar.
 //! - **Must not know.** Connections, DNS, TLS, responses or the host.
 
@@ -22,7 +22,7 @@ use nervix_models::{
 };
 use url::Position;
 
-use super::HttpEmitter;
+use super::HttpRequestEmitter;
 
 /// Spellings whose framing the property must cover deliberately: the methods that define request
 /// content, those that define none, their ASCII case variants, and extension methods.
@@ -209,7 +209,7 @@ fn bolero_request_heads_carry_every_prepared_field_and_their_declared_framing() 
         .with_type::<HeadCase>()
         .for_each(|case| {
             let request = case.request();
-            let head = HttpEmitter::request_head(&request);
+            let head = HttpRequestEmitter::request_head(&request);
 
             let mut parsed_fields = [httparse::EMPTY_HEADER; 16];
             let mut parsed = httparse::Request::new(&mut parsed_fields);

@@ -12,9 +12,14 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    PulsarTopicEmitter::KIND,
+    nervix_models::EmitterEntityKind::Pulsar(nervix_models::PulsarEmitterEntity::Topic)
+));
+
 impl EmitterConnectorStarter {
     pub(super) async fn pulsar(
-        connector: &PulsarEmitterPlan,
+        connector: &PulsarTopicEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
         label: &str,
@@ -24,8 +29,8 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            PulsarEmitter::new(
-                PulsarEmitterConfig {
+            PulsarTopicEmitter::new(
+                PulsarTopicEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     topic: connector.topic.clone(),
                     mode: connector.mode,

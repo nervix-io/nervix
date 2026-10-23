@@ -5,7 +5,7 @@
 //!   a broker task delivers publishes into: every publish the broker delivered reaches the host
 //!   exactly once and in order, from the read or from the connection's next read, and a batch
 //!   that is not full ends only because the host cancelled it, unless its batch timeout passed.
-//! - **Depends on.** The source's read and its publish seam, an unbounded channel as the
+//! - **Depends on.** The ingestor's read and its publish seam, an unbounded channel as the
 //!   client's event loop, the model harness's Shuttle runner, and the task labels and timeout
 //!   triggers of Shuttle's Tokio.
 //! - **Must not know.** The MQTT client, the broker's protocol, or the host loop that cancels a
@@ -32,7 +32,8 @@ use nervix_primitives::{
 use rumqttc::{Publish, QoS};
 
 use super::{
-    MqttIngestor, MqttIngestorError, MqttIngestorMessage, MqttIngestorResult, PublishRead,
+    MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorMessage, MqttTopicIngestorResult,
+    PublishRead,
 };
 
 const CHECK_TASK_JOINS: &str =
@@ -54,10 +55,10 @@ struct DeliveredPublishes {
 }
 
 impl PublishRead for DeliveredPublishes {
-    async fn next_publish(&mut self) -> MqttIngestorResult<Publish> {
+    async fn next_publish(&mut self) -> MqttTopicIngestorResult<Publish> {
         match self.publishes.recv().await {
             Some(publish) => Ok(publish),
-            None => Err(Report::new(MqttIngestorError::Receive)),
+            None => Err(Report::new(MqttTopicIngestorError::Receive)),
         }
     }
 }
@@ -67,7 +68,7 @@ impl PublishRead for DeliveredPublishes {
 struct ReadDeadline;
 
 /// The ids of the publishes `messages` holds.
-fn ids(messages: &[MqttIngestorMessage]) -> Vec<u8> {
+fn ids(messages: &[MqttTopicIngestorMessage]) -> Vec<u8> {
     let mut ids = Vec::with_capacity(messages.len());
     for message in messages {
         let [id] = message.payload() else {
@@ -130,7 +131,7 @@ fn a_cancelled_read_hands_over_every_publish_the_broker_delivered(
             batch_timeout: Some(BATCH_TIMEOUT),
         };
 
-        let batch = MqttIngestor::read_batch(&mut connection, request, &cancellation)
+        let batch = MqttTopicIngestor::read_batch(&mut connection, request, &cancellation)
             .await
             .assured("a connection the broker keeps open fails no read");
 

@@ -2,8 +2,8 @@
 //!
 //! Layer: decisions.
 //!
-//! - **Owns.** The source and sink contracts: the client an ingestor or emitter may use, the
-//!   publishing and mapping rules of each sink, the headers each side supports, the timestamp
+//! - **Owns.** The source and emitter contracts: the client an ingestor or emitter may use, the
+//!   publishing and mapping rules of each emitter, the headers each side supports, the timestamp
 //!   source an ingestor declares, and the hostnames and paths a listener claims.
 //! - **Depends on.** The connector Models and the schema rules.
 //! - **Must not know.** How a connector is instantiated or driven.
@@ -377,7 +377,7 @@ pub(in crate::registry) fn validate_direct_values_sensitivity(
     Ok(())
 }
 
-/// Checks that the codec a batching emitter encodes through has a container its sink can publish
+/// Checks that the codec a batching emitter encodes through has a container its emitter can publish
 /// one batch in.
 pub(in crate::registry) fn validate_emitter_batch_container(
     domain: &DomainName,
@@ -1243,10 +1243,10 @@ fn emitter_entity_supports_headers(connector: &EmitterEntity) -> bool {
     connector.capabilities().writes_headers()
 }
 
-/// Refuses an emitter whose sink keeps one value per header name and whose `INVOKE` clause writes
+/// Refuses an emitter whose emitter keeps one value per header name and whose `INVOKE` clause writes
 /// one literal name twice: on every record the later write would replace the earlier one, so the
-/// earlier write could never reach a message. Names compare as the sink's header model records
-/// them, and a name an expression computes is left to the sink at run time.
+/// earlier write could never reach a message. Names compare as the emitter's header model records
+/// them, and a name an expression computes is left to the emitter at run time.
 fn refuse_replaced_header_writes(
     domain: &DomainName,
     identifier: &ModelName,

@@ -141,7 +141,7 @@ only at the external export boundary.
 
 ## Publishing modes
 
-Every emitter emitter requires `MODE <body>` before its body selection, immediately before
+Every emitter entity requires `MODE <body>` before its body selection, immediately before
 `ENCODE USING` when the emitter uses a codec. There is no implicit mode, confirmation window, ACK
 timeout, or retry cadence. `SHOW CREATE EMITTER` and `DESCRIBE EMITTER` render the complete mode.
 
@@ -976,7 +976,7 @@ Each emitter that writes transport headers declares a
 `CLIENT CONSUMER`, `REDIS PUBSUB`, `MQTT TOPIC`, `ZEROMQ PUSH`, `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`, `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION`, `ICEBERG TABLE` write no transport headers and refuse `write_header`.
 <!-- connector-matrix:emit-headers:end -->
 
-Where a emitter keeps one value per name, a second `write_header` whose name is a string literal equal,
+Where an emitter keeps one value per name, a second `write_header` whose name is a string literal equal,
 as the emitter compares names, to an earlier literal one is refused when the statement is validated,
 with a message such as `emitter 'out' in domain 'shop' writes header 'route' at INVOKE #1 and again
 at #3, but PULSAR TOPIC emitters keep one value per header name, so the later write would replace
@@ -1447,7 +1447,7 @@ reconnects, so the retry can deliver them a second time. A write first waits, wi
 nothing more until it has, so a retry never queues another copy behind the one the client holds.
 Without `timeout_ms` a write waits for its flush however long that takes. When the emitter stops,
 its finish flushes what the client still holds by the finish deadline; see
-[Finishing a emitter](./connector-contract.md#finishing-a-emitter).
+[Finishing an emitter](./connector-contract.md#finishing-a-emitter).
 
 `JETSTREAM` waits for one `PubAck` per record. The stream must already exist and capture the
 subject; a missing stream is an infrastructure error that remains under backpressure until an
@@ -2666,7 +2666,7 @@ Redis Pub/Sub, and ZeroMQ expose earlier acceptance boundaries and can lose ackn
 after a crash or downstream failure. A stop sends what a Kafka producer still queues, waits for
 accepted Pulsar messages' receipts, flushes what a Core NATS client still holds after a write ran
 out of `timeout_ms`, and waits for an MQTT QoS 0 client to send the publishes it still holds, within
-the stop's deadline; see [Finishing a emitter](./connector-contract.md#finishing-a-emitter). External
+the stop's deadline; see [Finishing an emitter](./connector-contract.md#finishing-a-emitter). External
 broker durability and
 idempotence settings remain the user's client and service configuration.
 
@@ -2682,7 +2682,7 @@ no-ACK source cannot create that retry duplicate, but it can lose the record ins
 
 A WASM processor on the path adds one more retry of the same kind. It dispatches a guest callback's
 output before the checkpoint of the guest's state completes and holds back only the source ACK, so
-a checkpoint that fails negatively acknowledges records whose output a emitter may already have
+a checkpoint that fails negatively acknowledges records whose output an emitter may already have
 published, and the source redelivers them. See
 [Recovery, Replay And Duplicates](wasm-processor-guests.md#recovery-replay-and-duplicates).
 

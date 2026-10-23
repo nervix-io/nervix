@@ -1,4 +1,4 @@
-//! CLICKHOUSE connector for the table entity.
+//! ClickHouseTableEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public table connector implementation surface.

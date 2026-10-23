@@ -2573,7 +2573,7 @@ mod tests {
                             max_backoff: "30s".to_string(),
                         },
                     },
-                    client: named("sink"),
+                    client: named("emitter"),
                 },
             ))),
             batch: None,
@@ -2612,7 +2612,7 @@ mod tests {
                 })),
                 scheduled_model(nervix_models::Model::ClientZeroMq(
                     nervix_models::CreateClientZeroMq {
-                        name: named("sink"),
+                        name: named("emitter"),
                         mount: None,
                         config: Vec::new(),
                     },

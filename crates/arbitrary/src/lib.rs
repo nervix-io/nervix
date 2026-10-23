@@ -266,7 +266,7 @@ mod tests {
             )) = emitter.connector.as_ref()
             else {
                 panic!(
-                    "a Postgres sink was requested, found {:?}",
+                    "a Postgres emitter was requested, found {:?}",
                     emitter.connector
                 );
             };

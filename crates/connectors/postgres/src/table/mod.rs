@@ -1,4 +1,4 @@
-//! Postgres sink connector.
+//! Postgres emitter connector.
 //!
 //! Layer: engines and infrastructure.
 //!
@@ -94,15 +94,15 @@ pub struct PostgresPool(sqlx::postgres::PgPool);
 /// One connection borrowed from the shared pool, returned to it when this is dropped.
 pub struct PostgresConnection(PoolConnection<Postgres>);
 
-/// The node-owned pool this sink borrows connections from while its host holds the lease.
+/// The node-owned pool this emitter borrows connections from while its host holds the lease.
 #[async_trait]
 pub trait PostgresConnections: Send + Sync + 'static {
     /// Borrow one connection for one operation, with the host's pool wait recorded around it.
     async fn connection(&self) -> EmitterWriteResult<PostgresConnection>;
 }
 
-/// What one Postgres emitter inserts with, from its typed sink plan.
-pub struct PostgresEmitterConfig {
+/// What one Postgres emitter inserts with, from its typed emitter plan.
+pub struct PostgresTableEmitterConfig {
     pub table: PostgresTableName,
     pub conflict_action: PostgresConflictAction,
     /// The emitter's `BATCH` limits, which bound the rows and the measured bytes of every insert.
@@ -117,8 +117,8 @@ pub enum PostgresConflictAction {
     DoUpdate { target: Vec<String> },
 }
 
-/// The Postgres sink, which binds each mapped column as one text array of an `unnest` insert.
-pub struct PostgresEmitter {
+/// The Postgres emitter, which binds each mapped column as one text array of an `unnest` insert.
+pub struct PostgresTableEmitter {
     connections: Box<dyn PostgresConnections>,
     table: PostgresTableName,
     conflict_action: PostgresConflictAction,
@@ -336,7 +336,7 @@ fn connect_options(
     Ok(options)
 }
 
-impl PostgresEmitter {
+impl PostgresTableEmitter {
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -344,11 +344,11 @@ impl PostgresEmitter {
         )
     )]
     pub fn new(
-        config: PostgresEmitterConfig,
+        config: PostgresTableEmitterConfig,
         connections: Box<dyn PostgresConnections>,
         _host: EmitterHost,
     ) -> EmitterStartResult<Self> {
-        let PostgresEmitterConfig {
+        let PostgresTableEmitterConfig {
             table,
             conflict_action,
             batch,
@@ -610,8 +610,17 @@ impl PostgresEmitter {
     }
 }
 
+impl PostgresTableEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::Postgres(nervix_models::PostgresEmitterEntity::Table);
+}
+
 #[async_trait]
-impl EmitterLifecycle for PostgresEmitter {
+impl EmitterLifecycle for PostgresTableEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// Each insert completes before the publish returns, so the pool holds nothing.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
         Ok(EmitterFinish::NothingHeld)
@@ -619,7 +628,7 @@ impl EmitterLifecycle for PostgresEmitter {
 }
 
 #[async_trait]
-impl RowEmitter for PostgresEmitter {
+impl RowEmitter for PostgresTableEmitter {
     /// Writes the rows of every carrier in `unnest` inserts of at most `MAX MESSAGES` rows whose
     /// statement and bound arrays measure at most `MAX SIZE` bytes.
     ///
@@ -829,7 +838,7 @@ impl UnnestInserts {
     }
 }
 
-/// A mapped column this sink cannot bind, named with the exact type it carries.
+/// A mapped column this emitter cannot bind, named with the exact type it carries.
 #[derive(Debug, thiserror::Error)]
 #[error("Postgres VALUES column '{column}' has unsupported exact type {data_type}")]
 #[cfg_attr(
@@ -1100,7 +1109,7 @@ mod tests {
 
     #[test]
     fn invalid_conflict_target_keeps_its_typed_cause_at_the_host_boundary() {
-        let failure = PostgresEmitter::conflict_target_sql(&[String::new()])
+        let failure = PostgresTableEmitter::conflict_target_sql(&[String::new()])
             .expect_err("a target column must be named");
         let report = PostgresWriteError::into_report(failure);
         assert!(report.contains::<PostgresWriteError>());
@@ -1246,7 +1255,7 @@ mod tests {
     /// it, so a scenario's `MAX SIZE` can be written to the byte.
     #[test]
     fn measures_the_statement_and_the_arrays_the_driver_encodes() {
-        let connector = PostgresEmitter {
+        let connector = PostgresTableEmitter {
             connections: Box::new(NoConnections),
             table: PostgresTableName::parse("limit_a_t0192a1b2c3d4e5f60718293a4b5c6d7e")
                 .expect("the test table name is valid"),
@@ -1371,7 +1380,7 @@ mod tests {
             .for_each(|case| {
                 let generated = &case.columns;
                 let rows = case.rows();
-                let connector = PostgresEmitter {
+                let connector = PostgresTableEmitter {
                     connections: Box::new(NoConnections),
                     table: PostgresTableName::parse("events").assured("the table name is valid"),
                     conflict_action: PostgresConflictAction::None,
@@ -1447,8 +1456,8 @@ mod tests {
         }
     }
 
-    fn emitter_without_connections() -> PostgresEmitter {
-        PostgresEmitter {
+    fn emitter_without_connections() -> PostgresTableEmitter {
+        PostgresTableEmitter {
             connections: Box::new(NoConnections),
             table: PostgresTableName::parse("events").expect("the test table name is valid"),
             conflict_action: PostgresConflictAction::None,

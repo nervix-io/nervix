@@ -5,7 +5,7 @@
 //! - **Owns.** One loopback listener, the connection a connector's client opens to it, and the packets a
 //!   check reads from that client or writes to it.
 //! - **Depends on.** Tokio's TCP sockets and I/O traits.
-//! - **Must not know.** The connector's source or sink, the runtime host, or how a real broker decides.
+//! - **Must not know.** The connector's ingestor or emitter, the runtime host, or how a real broker decides.
 
 use nervix_primitives::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -24,7 +24,7 @@ pub(crate) struct ScriptedBroker {
     listener: TcpListener,
 }
 
-/// The connection a sink's client opened to a scripted broker.
+/// The connection an emitter's client opened to a scripted broker.
 pub(crate) struct ScriptedConnection {
     stream: TcpStream,
 }
@@ -43,7 +43,7 @@ impl ScriptedBroker {
         Self { listener }
     }
 
-    /// The address a sink's client dials to reach this broker.
+    /// The address an emitter's client dials to reach this broker.
     pub(crate) fn addr(&self) -> String {
         let address = self
             .listener
@@ -83,7 +83,7 @@ impl ScriptedBroker {
             .listener
             .accept()
             .await
-            .expect("the sink's client connects to the scripted broker");
+            .expect("the emitter's client connects to the scripted broker");
         let mut connection = ScriptedConnection { stream };
         let (packet_type, _) = connection.read_packet().await;
         assert_eq!(packet_type, CONNECT, "the client opens with a CONNECT");

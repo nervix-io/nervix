@@ -1,4 +1,4 @@
-//! When an emitter tries again after a failed publish or an unavailable sink.
+//! When an emitter tries again after a failed publish or an unavailable emitter.
 //!
 //! Layer: data plane.
 //! - **Owns.** The monotonic deadline of an emitter's next attempt, the keepalive of the
@@ -224,7 +224,7 @@ impl EmitterRetrySchedule {
     }
 }
 
-/// How long the sink asked this emitter to wait, which bounds its next attempt from below.
+/// How long the emitter asked this emitter to wait, which bounds its next attempt from below.
 ///
 /// A delay whose end the monotonic clock cannot represent asks for an attempt that could never be
 /// scheduled, so it contributes nothing and the declared backoff alone decides the wait.

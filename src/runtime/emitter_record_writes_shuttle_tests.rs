@@ -2,7 +2,7 @@
 //! under Shuttle.
 //!
 //! Layer: test harness.
-//! - **Owns.** The invariants the members of a batch payload are held to while the sink's answers,
+//! - **Owns.** The invariants the members of a batch payload are held to while the emitter's answers,
 //!   a retry, a cancelled attempt, terminal shutdown, a sibling emitter and a drain race one
 //!   another: every member resolves once, no source acknowledgement completes before every
 //!   attached emitter confirmed it, a retry writes a retained payload with exactly the bytes it
@@ -37,9 +37,9 @@ const MODEL_TASK_JOINS: &str =
     "Shuttle fails the whole execution when a model task panics, so no join observes one";
 const MODEL_ROWS: &str = "every modeled position names a row of the one modeled batch";
 
-/// The payload the modeled sink confirms whenever it is written.
+/// The payload the modeled emitter confirms whenever it is written.
 const CONFIRMED_PAYLOAD: &[u8] = b"[0,1]";
-/// The payload the modeled sink rejects whenever it is written.
+/// The payload the modeled emitter rejects whenever it is written.
 const REJECTED_PAYLOAD: &[u8] = b"[2,3]";
 
 fn position(row_index: usize) -> EmitterRecordPosition {
@@ -83,7 +83,7 @@ fn payload(rows: &[usize], bytes: &[u8]) -> PreparedPayload<EncodedPayload> {
     }
 }
 
-/// The answers of a sink that stalled before it answered for any record of the write.
+/// The answers of an emitter that stalled before it answered for any record of the write.
 fn stalled() -> PerRecordOutcome<EmitterRecordId> {
     let mut outcome = PerRecordOutcome::with_capacity(0);
     outcome.fail(Report::new(EmitterWriteError::Publish {
@@ -92,7 +92,7 @@ fn stalled() -> PerRecordOutcome<EmitterRecordId> {
     outcome
 }
 
-/// The answers of the modeled sink, which confirms one payload and rejects the other by what the
+/// The answers of the modeled emitter, which confirms one payload and rejects the other by what the
 /// record carries.
 fn answered(records: &[EmitterRecord]) -> PerRecordOutcome<EmitterRecordId> {
     let mut outcome = PerRecordOutcome::with_capacity(records.len());
@@ -135,7 +135,7 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
                 if outcome == AckOutcome::Ack {
                     assert!(
                         emitter_confirmed.load(Ordering::SeqCst),
-                        "a source acknowledgement completed before the batching emitter's sink \
+                        "a source acknowledgement completed before the batching emitter's emitter \
                          confirmed the payload carrying it"
                     );
                     assert!(
@@ -167,7 +167,7 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
                 .assured("a stalled write answers for no record");
             assert!(
                 answers.unresolved.is_some(),
-                "a write the sink never answered must stay unresolved"
+                "a write the emitter never answered must stay unresolved"
             );
             nervix_primitives::task::yield_now().await;
 
@@ -245,7 +245,7 @@ struct AttemptRecord {
     deliveries: [AtomicUsize; 4],
     /// Every payload a write carried, in the order the writes carried them.
     written: nervix_primitives::sync::blocking::Mutex<Vec<Vec<u8>>>,
-    /// Every payload the sink answered for.
+    /// Every payload the emitter answered for.
     answered: nervix_primitives::sync::blocking::Mutex<Vec<Vec<u8>>>,
 }
 
@@ -284,7 +284,7 @@ async fn deliver_message_error(
         .assured(MODEL_ROWS);
 }
 
-/// One attempt: write every retained payload, apply the sink's answers, and deliver the message
+/// One attempt: write every retained payload, apply the emitter's answers, and deliver the message
 /// errors of the members it rejected.
 async fn attempt(
     batches: &mut [EmitterPublishBatch],
@@ -300,7 +300,7 @@ async fn attempt(
     let outcome = answered(&write.records);
     let answers = prepared
         .answers(batches, write.payloads, outcome)
-        .assured("the modeled sink answers once for each record of the write");
+        .assured("the modeled emitter answers once for each record of the write");
     record
         .answered
         .lock()
@@ -310,7 +310,7 @@ async fn attempt(
     }
 }
 
-/// An attempt that the emitter's stop deadline cuts short at any point — while the sink writes,
+/// An attempt that the emitter's stop deadline cuts short at any point — while the emitter writes,
 /// after its answers, or between two message errors — leaves every member to resolve exactly once
 /// in the attempt after it. That attempt writes again only the payloads nobody answered for, with
 /// their first bytes, and delivers only the message errors the first attempt did not.
@@ -360,7 +360,7 @@ fn a_cancelled_attempt_leaves_each_member_to_resolve_once() {
 
             attempt(&mut batches, &mut prepared, &record).await;
             // A rejected member whose message error the first attempt did not deliver is pending
-            // again, and the next attempt packs it anew; the modeled sink rejects it once more.
+            // again, and the next attempt packs it anew; the modeled emitter rejects it once more.
             let leftover = batches.first().assured(MODEL_ROWS).pending_record_rows();
             for row in leftover {
                 deliver_message_error(&mut batches, row, &record).await;
@@ -379,7 +379,7 @@ fn a_cancelled_attempt_leaves_each_member_to_resolve_once() {
                 );
                 assert!(
                     !first_answered.contains(bytes),
-                    "a retry wrote a payload the sink had already answered for: {bytes:?}"
+                    "a retry wrote a payload the emitter had already answered for: {bytes:?}"
                 );
             }
             assert!(prepared.is_empty());

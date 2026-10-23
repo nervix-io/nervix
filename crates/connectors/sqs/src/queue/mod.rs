@@ -1,9 +1,9 @@
-//! SQS source and sink connector.
+//! SQS ingestor and emitter connector.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The SQS client a configuration declares and the connections it makes, queue-URL
-//!   lookup, long polling and message deletion on the source side, protocol validation of each
+//!   lookup, long polling and message deletion on the ingestor side, protocol validation of each
 //!   message body, attribute and FIFO group, request batching, and per-entry response
 //!   classification.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio, the node
@@ -43,8 +43,8 @@ use aws_sdk_sqs::{
 use connection::{FailedRequest, SqsTrust};
 use error_stack::{Report, ResultExt as _};
 pub use ingestor::{
-    SqsIngestor, SqsIngestorError, SqsIngestorMessage, SqsIngestorPlan, SqsIngestorPosition,
-    SqsMessageAttributes,
+    SqsMessageAttributes, SqsQueueIngestor, SqsQueueIngestorError, SqsQueueIngestorMessage,
+    SqsQueueIngestorPlan, SqsQueueIngestorPosition,
 };
 use meticulous::OptionExt as _;
 use nervix_connector::{
@@ -63,15 +63,15 @@ const SQS: &str = "sqs";
 const SQS_MAX_BATCH_ENTRIES: usize = 10;
 const SQS_MAX_REQUEST_BYTES: usize = 256 * 1024;
 
-/// Whether an SQS sink sends one message per request or batches them.
+/// Whether an SQS emitter sends one message per request or batches them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqsPublishingMode {
     Single,
     Batch,
 }
 
-/// What one SQS sink sends to: its client entries, queue name and request shape.
-pub struct SqsEmitterConfig {
+/// What one SQS emitter sends to: its client entries, queue name and request shape.
+pub struct SqsQueueEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub queue: nervix_models::SqsQueueName,
     pub mode: SqsPublishingMode,
@@ -79,13 +79,13 @@ pub struct SqsEmitterConfig {
     pub dns: DnsResolver,
 }
 
-pub struct SqsEmitter {
+pub struct SqsQueueEmitter {
     client: SqsClient,
     queue_url: String,
     mode: SqsPublishingMode,
 }
 
-/// Why one record is not a message this sink can send.
+/// Why one record is not a message this emitter can send.
 #[derive(Debug, PartialEq, Eq, Error)]
 enum SqsRecordError {
     #[error("SQS message body is not valid UTF-8")]
@@ -156,7 +156,7 @@ impl PreparedSqsRecord {
         // per name and SQS counts those, after the writes have collapsed.
         let mut attributes = HashMap::with_capacity(headers.len());
         for (name, value) in headers {
-            SqsEmitter::validate_attribute(&name, &value)?;
+            SqsQueueEmitter::validate_attribute(&name, &value)?;
             let attribute = MessageAttributeValue::builder()
                 .data_type("String")
                 .string_value(&value)
@@ -174,7 +174,7 @@ impl PreparedSqsRecord {
             }));
         }
         if let Some(group_id) = group_id.as_deref() {
-            SqsEmitter::validate_group_id(group_id)?;
+            SqsQueueEmitter::validate_group_id(group_id)?;
         }
         let body_bytes = body.len();
         let mut attribute_bytes = 0_usize;
@@ -227,9 +227,12 @@ impl PreparedSqsRecord {
     }
 }
 
-impl SqsEmitter {
-    pub async fn new(config: SqsEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
-        let SqsEmitterConfig {
+impl SqsQueueEmitter {
+    pub async fn new(
+        config: SqsQueueEmitterConfig,
+        _host: EmitterHost,
+    ) -> EmitterStartResult<Self> {
+        let SqsQueueEmitterConfig {
             config,
             queue,
             mode,
@@ -669,8 +672,17 @@ impl SqsEmitter {
     }
 }
 
+impl SqsQueueEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::Sqs(nervix_models::SqsEmitterEntity::Queue);
+}
+
 #[async_trait]
-impl EmitterLifecycle for SqsEmitter {
+impl EmitterLifecycle for SqsQueueEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// Each send is answered before the publish returns, so the client holds nothing.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
         Ok(EmitterFinish::NothingHeld)
@@ -678,7 +690,7 @@ impl EmitterLifecycle for SqsEmitter {
 }
 
 #[async_trait]
-impl RecordEmitter for SqsEmitter {
+impl RecordEmitter for SqsQueueEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let mut prepared = Vec::with_capacity(records.len());
@@ -939,7 +951,7 @@ mod tests {
             GetQueueUrlError::QueueDoesNotExist(QueueDoesNotExist::builder().build()),
             (),
         );
-        let missing = SqsEmitter::queue_lookup_error("missing-queue", &missing);
+        let missing = SqsQueueEmitter::queue_lookup_error("missing-queue", &missing);
         assert!(matches!(
             missing.current_context(),
             EmitterOpenError::MissingExternalEntity {
@@ -952,7 +964,7 @@ mod tests {
         let refused = SdkError::<GetQueueUrlError, ()>::dispatch_failure(ConnectorError::io(
             "connection refused".into(),
         ));
-        let connection = SqsEmitter::queue_lookup_error("orders", &refused);
+        let connection = SqsQueueEmitter::queue_lookup_error("orders", &refused);
         assert_eq!(
             connection.current_context(),
             &EmitterOpenError::Initialize { connector: SQS }
@@ -966,11 +978,11 @@ mod tests {
         );
 
         assert_eq!(
-            SqsEmitter::require_queue_url("orders", Some("queue-url".to_string()))
+            SqsQueueEmitter::require_queue_url("orders", Some("queue-url".to_string()))
                 .expect("a returned queue URL should be accepted"),
             "queue-url"
         );
-        let no_url = SqsEmitter::require_queue_url("orders", None)
+        let no_url = SqsQueueEmitter::require_queue_url("orders", None)
             .expect_err("a successful response without a queue URL must fail");
         assert_eq!(
             no_url.current_context(),
@@ -984,7 +996,7 @@ mod tests {
         const ATTRIBUTE_VALUE: &str = "acme";
         const GROUP_ID: &str = "orders";
 
-        // Every attribute the sink builds declares the "String" data type, so those bytes count
+        // Every attribute the emitter builds declares the "String" data type, so those bytes count
         // against the protocol limit alongside the attribute name and value.
         let attribute_bytes = ATTRIBUTE_NAME.len() + "String".len() + ATTRIBUTE_VALUE.len();
         let body_bytes = SQS_MAX_REQUEST_BYTES - attribute_bytes - GROUP_ID.len();
@@ -1021,7 +1033,7 @@ mod tests {
         records.push(prepared(SQS_MAX_REQUEST_BYTES));
         records.push(prepared(2));
 
-        let chunks = SqsEmitter::batch_chunks(records);
+        let chunks = SqsQueueEmitter::batch_chunks(records);
         let records = chunks
             .iter()
             .flatten()
@@ -1045,7 +1057,7 @@ mod tests {
             prepared_in_group(3, "beta"),
         ];
 
-        let chunks = SqsEmitter::batch_chunks(records);
+        let chunks = SqsQueueEmitter::batch_chunks(records);
         let records = chunks
             .iter()
             .map(|chunk| {
@@ -1199,7 +1211,7 @@ mod tests {
                     .iter()
                     .map(|record| record.record)
                     .collect::<Vec<_>>();
-                let chunks = SqsEmitter::batch_chunks(accepted);
+                let chunks = SqsQueueEmitter::batch_chunks(accepted);
                 let mut chunked = Vec::new();
                 let mut previous: Option<HeldRequest> = None;
                 for chunk in &chunks {
@@ -1271,8 +1283,9 @@ mod tests {
                 .expect("the test response names every required field");
         let mut outcome = PerRecordOutcome::empty();
 
-        let infrastructure = SqsEmitter::apply_batch_response(&records, &response, &mut outcome)
-            .expect("an entry the service failed on its side and an omitted entry are retried");
+        let infrastructure =
+            SqsQueueEmitter::apply_batch_response(&records, &response, &mut outcome)
+                .expect("an entry the service failed on its side and an omitted entry are retried");
         let outcome = outcome.into_parts();
 
         assert_eq!(outcome.delivered, vec![EmitterRecordId::new(0)]);
@@ -1290,27 +1303,27 @@ mod tests {
 
     #[test]
     fn only_definitive_per_entry_failures_are_record_rejections() {
-        assert!(SqsEmitter::is_record_failure(
+        assert!(SqsQueueEmitter::is_record_failure(
             true,
             "InvalidMessageContents",
             Some("message contains an invalid character")
         ));
-        assert!(SqsEmitter::is_record_failure(
+        assert!(SqsQueueEmitter::is_record_failure(
             true,
             "InvalidParameterValue",
             Some("MessageGroupId contains an invalid character")
         ));
-        assert!(!SqsEmitter::is_record_failure(
+        assert!(!SqsQueueEmitter::is_record_failure(
             true,
             "InvalidParameterValue",
             Some("ContentBasedDeduplication is not enabled")
         ));
-        assert!(!SqsEmitter::is_record_failure(
+        assert!(!SqsQueueEmitter::is_record_failure(
             false,
             "ThrottlingException",
             None
         ));
-        assert!(!SqsEmitter::is_record_failure(
+        assert!(!SqsQueueEmitter::is_record_failure(
             true,
             "UnknownSenderFault",
             None
@@ -1319,16 +1332,16 @@ mod tests {
 
     #[test]
     fn fifo_group_ids_accept_branch_json_and_reject_invalid_values() {
-        assert!(SqsEmitter::validate_group_id(r#"{"tenant":"acme"}"#).is_ok());
-        assert!(SqsEmitter::validate_group_id("").is_err());
-        assert!(SqsEmitter::validate_group_id(&"x".repeat(129)).is_err());
-        assert!(SqsEmitter::validate_group_id("contains space").is_err());
+        assert!(SqsQueueEmitter::validate_group_id(r#"{"tenant":"acme"}"#).is_ok());
+        assert!(SqsQueueEmitter::validate_group_id("").is_err());
+        assert!(SqsQueueEmitter::validate_group_id(&"x".repeat(129)).is_err());
+        assert!(SqsQueueEmitter::validate_group_id("contains space").is_err());
     }
 
     #[nervix_primitives::test]
     async fn client_timeout_bounds_each_request_while_sdk_retries_stay_disabled() {
         let fixture = Fixture::start().await;
-        let client = SqsEmitter::client_from_config(&client_config("275"), fixture.dns())
+        let client = SqsQueueEmitter::client_from_config(&client_config("275"), fixture.dns())
             .await
             .expect("SQS client config should be valid");
         let timeout = client
@@ -1358,7 +1371,7 @@ mod tests {
     async fn client_rejects_an_invalid_request_timeout() {
         let fixture = Fixture::start().await;
         for value in ["later", "0"] {
-            let error = SqsEmitter::client_from_config(&client_config(value), fixture.dns())
+            let error = SqsQueueEmitter::client_from_config(&client_config(value), fixture.dns())
                 .await
                 .expect_err("invalid SQS timeout should fail client initialization");
 

@@ -1,4 +1,4 @@
-//! ICEBERG connector for the table entity.
+//! IcebergTableEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public table connector implementation surface.

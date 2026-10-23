@@ -1,13 +1,13 @@
-//! The endpoint source: the one request-scoped source, which the node's own HTTP listener feeds.
+//! The endpoint ingestor: the one request-scoped ingestor, which the node's own HTTP listener feeds.
 //!
 //! Layer: data plane.
 //!
 //! - **Owns.** Resolving the routes an endpoint ingestor receives requests on, and binding them to
-//!   the host's request intake for exactly as long as the source runs.
-//! - **Depends on.** The connector source contract, the domain's instantiated endpoint routes, and
+//!   the host's request intake for exactly as long as the ingestor runs.
+//! - **Depends on.** The connector ingestor contract, the domain's instantiated endpoint routes, and
 //!   the host's endpoint binding table.
 //! - **Must not know.** Request admission, the endpoint buffer, rejection with a retry delay, or
-//!   dispatch, all of which the host owns; NSPL parsing, registry validation, or placement
+//!   dispatch, all of which the host owns; Plexus parsing, registry validation, or placement
 //!   computation.
 
 #![cfg_attr(
@@ -25,23 +25,23 @@ use nervix_connector::{
 use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
-    connector::{IngestorInstance, IngestorStart, RuntimeIngestorHost, run_request_source},
+    connector::{IngestorInstance, IngestorStart, RuntimeIngestorHost, run_request_ingestor},
 };
 
 /// The routes one endpoint ingestor receives requests on.
-pub(in crate::runtime) struct EndpointIngestorPlan {
+pub(in crate::runtime) struct EndpointIntakePlan {
     runtime: Runtime,
     routes: Vec<HttpRouteKey>,
     mode: EndpointRequestPlan,
 }
 
-/// An endpoint ingestor's source: the binding between the routes it receives requests on and the
+/// An endpoint intake: the binding between the routes it receives requests on and the
 /// host's request intake.
 ///
-/// A request is admitted and dispatched by the host on the request path, so the source reads
+/// A request is admitted and dispatched by the host on the request path, so the ingestor reads
 /// nothing itself. Starting it binds its routes; closing it, or dropping it when its task ends any
 /// other way, unbinds them, so a stopped ingestor's routes never keep receiving requests.
-pub(in crate::runtime) struct EndpointIngestor {
+pub(in crate::runtime) struct EndpointIntake {
     runtime: Runtime,
     routes: Vec<HttpRouteKey>,
     mode: EndpointRequestPlan,
@@ -49,26 +49,63 @@ pub(in crate::runtime) struct EndpointIngestor {
     bound: Option<EndpointBinding<EndpointIngestBinding>>,
 }
 
-#[async_trait]
-impl IngestorConnector for EndpointIngestor {
-    type Plan = EndpointIngestorPlan;
-
-    async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
-        Ok(Self {
-            runtime: plan.runtime.clone(),
-            routes: plan.routes.clone(),
-            mode: plan.mode.clone(),
-            bound: None,
-        })
-    }
-
-    async fn close(&mut self) -> IngestorResult<()> {
-        self.unbind();
-        Ok(())
-    }
+macro_rules! endpoint_entity {
+    ($name:ident, $connector:ident, $entity:ident) => {
+        pub(in crate::runtime) struct $name(EndpointIntake);
+        #[async_trait]
+        impl IngestorConnector for $name {
+            const KIND: nervix_models::IngestorEntityKind =
+                nervix_models::IngestorEntityKind::$connector(nervix_models::$entity::Endpoint);
+            type Plan = EndpointIntakePlan;
+            async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
+                Ok(Self(EndpointIntake {
+                    runtime: plan.runtime.clone(),
+                    routes: plan.routes.clone(),
+                    mode: plan.mode.clone(),
+                    bound: None,
+                }))
+            }
+            async fn close(&mut self) -> IngestorResult<()> {
+                self.0.unbind();
+                Ok(())
+            }
+        }
+        impl IngestorInstance for $name {
+            fn start(
+                mut self: Box<Self>,
+                host: RuntimeIngestorHost,
+                shutdown: watch::Receiver<bool>,
+            ) -> BoxFuture<'static, ()> {
+                let request = EndpointRequestPolicy::from(&self.0.mode);
+                self.0.bind(host.request_intake(request));
+                host.mark_ready();
+                Box::pin(run_request_ingestor(
+                    *self,
+                    IngestorHost::new(host),
+                    shutdown,
+                ))
+            }
+        }
+    };
 }
+endpoint_entity!(HttpEndpointIngestor, Http, HttpIngestorEntity);
+endpoint_entity!(
+    WebsocketsEndpointIngestor,
+    Websockets,
+    WebsocketsIngestorEntity
+);
+const _: () = assert!(matches!(
+    HttpEndpointIngestor::KIND,
+    nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint)
+));
+const _: () = assert!(matches!(
+    WebsocketsEndpointIngestor::KIND,
+    nervix_models::IngestorEntityKind::Websockets(
+        nervix_models::WebsocketsIngestorEntity::Endpoint
+    )
+));
 
-impl EndpointIngestor {
+impl EndpointIntake {
     /// Binds every route to `intake`, so the requests arriving on it enter the host.
     fn bind(&mut self, intake: EndpointIngestBinding) {
         let identity = DomainNodeRef::node_in(
@@ -94,35 +131,23 @@ impl EndpointIngestor {
     }
 }
 
-impl Drop for EndpointIngestor {
+impl Drop for EndpointIntake {
     fn drop(&mut self) {
         self.unbind();
     }
 }
 
-impl IngestorInstance for EndpointIngestor {
-    fn start(
-        mut self: Box<Self>,
-        host: RuntimeIngestorHost,
-        shutdown: watch::Receiver<bool>,
-    ) -> BoxFuture<'static, ()> {
-        // Requests may arrive as soon as the ingestor's start returns, so the routes are bound
-        // here rather than when the source loop first runs.
-        let request = EndpointRequestPolicy::from(&self.mode);
-        self.bind(host.request_intake(request));
-        host.mark_ready();
-        Box::pin(run_request_source(*self, IngestorHost::new(host), shutdown))
-    }
-}
-
-impl EndpointIngestorStartPlan {
-    /// Resolves the routes the endpoint publishes, which its source binds when the host starts it.
-    pub(super) async fn compose(
+impl EndpointIntakeStartPlan {
+    /// Resolves the routes the endpoint publishes, which its ingestor binds when the host starts it.
+    async fn compose<C>(
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
-        let EndpointIngestorStartPlan { endpoint, mode } = self;
+    ) -> error_stack::Result<IngestorStart, IngestorStartError>
+    where
+        C: IngestorConnector<Plan = EndpointIntakePlan> + IngestorInstance,
+    {
+        let EndpointIntakeStartPlan { endpoint, mode } = self;
         let route = {
             let Some(execution) = runtime.inner.executions.get(&ingestor.domain) else {
                 return Err(Report::new(
@@ -175,7 +200,7 @@ impl EndpointIngestorStartPlan {
 
         let acknowledgement = IngestorAckPolicy::None;
         let plan = IngestorPlan {
-            connector: EndpointIngestorPlan {
+            connector: EndpointIntakePlan {
                 runtime: runtime.clone(),
                 routes,
                 mode,
@@ -184,14 +209,14 @@ impl EndpointIngestorStartPlan {
                 .ingestor_capabilities(NonZeroU64::MIN, acknowledgement.support()),
             acknowledgement,
         };
-        let source = EndpointIngestor::open(&plan.connector, 0)
+        let source = C::open(&plan.connector, 0)
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
         let instance: Box<dyn IngestorInstance> = Box::new(source);
         Ok(IngestorStart {
             instances: vec![instance],
             companions: Vec::new(),
-            // Requests never pass through the source loop's intake: the request path admits
+            // Requests never pass through the ingestor loop's intake: the request path admits
             // them. What the endpoint buffer retained replays one request per ingest group.
             buffered_intake: false,
             flush_each_intake: true,
@@ -199,9 +224,32 @@ impl EndpointIngestorStartPlan {
             // refusal its sender retries, so no request reaches the loop's live intake.
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: Vec::new(),
-            connector_label: "endpoint",
+            connector_label: C::KIND.connector().keyword().to_ascii_lowercase(),
             domain_offsets: None,
         })
+    }
+}
+
+impl HttpEndpointIngestorStartPlan {
+    pub(super) async fn compose(
+        self,
+        runtime: &Runtime,
+        ingestor: &IngestorSpec,
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
+        self.0
+            .compose::<HttpEndpointIngestor>(runtime, ingestor)
+            .await
+    }
+}
+impl WebsocketsEndpointIngestorStartPlan {
+    pub(super) async fn compose(
+        self,
+        runtime: &Runtime,
+        ingestor: &IngestorSpec,
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
+        self.0
+            .compose::<WebsocketsEndpointIngestor>(runtime, ingestor)
+            .await
     }
 }
 
@@ -552,7 +600,7 @@ pub(super) mod tests {
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
 
         // The routes are bound before the start returns, so a request that arrives right after it
-        // is admitted, and the source counts as ready at once.
+        // is admitted, and the ingestor counts as ready at once.
         let bound = route
             .bindings()
             .iter()

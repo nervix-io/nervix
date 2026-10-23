@@ -429,7 +429,7 @@ it does not prove write-once behavior. Genuinely replaceable fields declare `sta
 with their actual lifetime reason. [Typed States](docs/src/typed-states.md#source-owned-identity-and-installation-contracts)
 and [Data-Plane Concurrency](docs/src/data-plane-concurrency.md#resolved-architecture-boundaries)
 own the exact scope and limitations. No owner catalog, count allowance or filename exception
-substitutes for these ingestor contracts.
+substitutes for these source contracts.
 
 ### Execution-sensitive primitives
 
@@ -1367,7 +1367,7 @@ build and the existing tests, and nothing in it changes behavior.
   `Result<_, String>` rule remains distinct. No numeric allowance replaces these compiler rules.
 - Supported local helper/callback edges are re-evaluated, and callee/trait contracts cross compiler
   metadata boundaries. A hot caller of a lifecycle-only helper is diagnosed. Unknown dispatch needs
-  a callable ingestor contract or a diagnostic, not an inherited cold module classification. Preserve
+  a callable source contract or a diagnostic, not an inherited cold module classification. Preserve
   disjoint structural and primitive provenance checks, including inactive cfg and authored macros.
   [Data-Plane Concurrency](docs/src/data-plane-concurrency.md#source-contracts) owns the annotation,
   inheritance, exception and supported-effect contract; no universal ownership proof is claimed.

@@ -29,17 +29,18 @@ use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter};
 
 use super::{
-    ChoiceRequirement, ClientIngestorAlteration, ClientSourceEntity, DeclaredBounds, HeaderModel,
-    HttpIngestor, HttpIngestorAlteration, HttpIngestorEntity, KafkaIngestor,
-    KafkaIngestorAlteration, KafkaIngestorEntity, LocatorDeclaration, MqttIngestor,
-    MqttIngestorAlteration, MqttIngestorEntity, NatsIngestor, NatsIngestorAlteration,
-    NatsIngestorEntity, OptionDeclaration, PrometheusIngestor, PrometheusIngestorAlteration,
-    PrometheusIngestorEntity, PulsarIngestor, PulsarIngestorAlteration, PulsarIngestorEntity,
-    RabbitMqIngestor, RabbitMqIngestorAlteration, RabbitMqIngestorEntity, RedisIngestor,
-    RedisIngestorAlteration, RedisIngestorEntity, RuntimeCapability, SqsIngestor,
-    SqsIngestorAlteration, SqsIngestorEntity, SyslogIngestor, SyslogIngestorAlteration,
-    SyslogIngestorEntity, WebsocketsIngestor, WebsocketsIngestorAlteration,
-    WebsocketsIngestorEntity, ZeroMqIngestor, ZeroMqIngestorAlteration, ZeroMqIngestorEntity,
+    ChoiceRequirement, ClientIngestorAlteration, ClientIngestorEntity, DeclaredBounds, HeaderModel,
+    HttpIngestor, HttpIngestorEntity, HttpRequestIngestorAlteration, KafkaIngestor,
+    KafkaIngestorEntity, KafkaTopicIngestorAlteration, LocatorDeclaration, MqttIngestor,
+    MqttIngestorEntity, MqttTopicIngestorAlteration, NatsIngestor, NatsIngestorEntity,
+    NatsSubjectIngestorAlteration, OptionDeclaration, PrometheusIngestor, PrometheusIngestorEntity,
+    PrometheusQueryIngestorAlteration, PulsarIngestor, PulsarIngestorEntity,
+    PulsarTopicIngestorAlteration, RabbitMqIngestor, RabbitMqIngestorEntity,
+    RabbitMqQueueIngestorAlteration, RedisIngestor, RedisIngestorAlteration, RedisIngestorEntity,
+    RuntimeCapability, SqsIngestor, SqsIngestorEntity, SqsQueueIngestorAlteration, SyslogIngestor,
+    SyslogIngestorEntity, SyslogListenerIngestorAlteration, WebsocketsIngestor,
+    WebsocketsIngestorAlteration, WebsocketsIngestorEntity, ZeroMqIngestor, ZeroMqIngestorEntity,
+    ZeroMqPullIngestorAlteration,
     entity_union::{entity_union, ingestor_alteration_union},
 };
 use crate::{
@@ -599,7 +600,7 @@ entity_union! {
     /// ingestor is fully parsed.
     pub enum IngestorEntityKind as IngestorEntityMetadata;
     kinds {
-        Client(ClientSourceEntity),
+        Client(ClientIngestorEntity),
     }
     models {
         Http(HttpIngestor, HttpIngestorEntity),
@@ -622,18 +623,18 @@ ingestor_alteration_union! {
     /// its head names, so its `SET FROM` can only state a source of that pair.
     pub enum IngestorAlteration;
     Client(ClientIngestorAlteration),
-    Http(HttpIngestorAlteration),
-    Kafka(KafkaIngestorAlteration),
-    Pulsar(PulsarIngestorAlteration),
-    Mqtt(MqttIngestorAlteration),
-    Nats(NatsIngestorAlteration),
-    RabbitMq(RabbitMqIngestorAlteration),
+    Http(HttpRequestIngestorAlteration),
+    Kafka(KafkaTopicIngestorAlteration),
+    Pulsar(PulsarTopicIngestorAlteration),
+    Mqtt(MqttTopicIngestorAlteration),
+    Nats(NatsSubjectIngestorAlteration),
+    RabbitMq(RabbitMqQueueIngestorAlteration),
     Redis(RedisIngestorAlteration),
-    Prometheus(PrometheusIngestorAlteration),
-    ZeroMq(ZeroMqIngestorAlteration),
-    Sqs(SqsIngestorAlteration),
+    Prometheus(PrometheusQueryIngestorAlteration),
+    ZeroMq(ZeroMqPullIngestorAlteration),
+    Sqs(SqsQueueIngestorAlteration),
     Websockets(WebsocketsIngestorAlteration),
-    Syslog(SyslogIngestorAlteration),
+    Syslog(SyslogListenerIngestorAlteration),
 }
 
 /// A pair is written as its phrase: the connector's keyword, then the entity's.

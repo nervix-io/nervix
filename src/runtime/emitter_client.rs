@@ -14,7 +14,7 @@
     nervix_lint,
     nervix::context(
         lifecycle,
-        reason = "sink client setup resolves the configured driver and retained pool"
+        reason = "emitter client setup resolves the configured driver and retained pool"
     )
 )]
 
@@ -68,7 +68,7 @@ impl ClientConsumerConnector {
     )]
     pub(super) fn new(
         context: &EmitterConnectorContext,
-        plan: &ClientEmitterPlan,
+        plan: &ClientConsumerEmitterPlan,
         output_schema: Arc<CompiledSchema>,
         retry: nervix_connector::ParsedRetryPolicy,
     ) -> Self {
@@ -271,6 +271,10 @@ impl Drop for ClientConsumerConnector {
 
 #[async_trait]
 impl EmitterLifecycle for ClientConsumerConnector {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        nervix_models::EmitterEntityKind::Client(nervix_models::ClientEmitterEntity::Consumer)
+    }
+
     /// A batch is delivered only on its consumer's application ACK, and the batches still waiting
     /// for one are the host's retained payloads, not a client's, so nothing is left to send.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {

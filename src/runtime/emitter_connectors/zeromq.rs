@@ -12,9 +12,14 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    ZeroMqPushEmitter::KIND,
+    nervix_models::EmitterEntityKind::ZeroMq(nervix_models::ZeroMqEmitterEntity::Push)
+));
+
 impl EmitterConnectorStarter {
     pub(super) async fn zeromq(
-        connector: &ZeroMqEmitterPlan,
+        connector: &ZeroMqPushEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
         label: &str,
@@ -24,8 +29,8 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            ZeroMqEmitter::new(
-                ZeroMqEmitterConfig {
+            ZeroMqPushEmitter::new(
+                ZeroMqPushEmitterConfig {
                     config: connector.client.config.entries.clone(),
                 },
                 context.emitter_host(),

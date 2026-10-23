@@ -17,7 +17,7 @@
 use error_stack::Report;
 use flatbuffers::WIPOffset;
 use nervix_models::{
-    ClientSourceEntity, DomainName, FieldName, HttpIngestorEntity, IngestorEntityKind,
+    ClientIngestorEntity, DomainName, FieldName, HttpIngestorEntity, IngestorEntityKind,
     KafkaIngestorEntity, MqttIngestorEntity, NatsIngestorEntity, NodeRef, PlacementPolicy,
     PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity, RedisIngestorEntity,
     RequestedResourceVersion, ResourceName, SqsIngestorEntity, SyslogIngestorEntity,
@@ -118,7 +118,7 @@ impl ChoiceTarget {
     /// input schema its producers' batches carry.
     pub const fn for_ingest_source(kind: IngestorEntityKind) -> Self {
         match kind {
-            IngestorEntityKind::Client(ClientSourceEntity::Producer) => Self::Schema,
+            IngestorEntityKind::Client(ClientIngestorEntity::Producer) => Self::Schema,
             IngestorEntityKind::Http(HttpIngestorEntity::Request) => Self::IngestHttpRequestSource,
             IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => {
                 Self::IngestHttpEndpointSource

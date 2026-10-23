@@ -1,13 +1,13 @@
-//! Prometheus paced-source runtime composition.
+//! Prometheus paced-ingestor runtime composition.
 //!
 //! Layer: data plane.
 //!
 //! - **Owns.** Composing the Prometheus connector plan with the domain cadence the host polls it
 //!   on, and taking a poll's samples in intake batches of one ingest group each, the bound the
 //!   entity declares for its samples.
-//! - **Depends on.** The connector source contract, typed Prometheus plans and pre-resolved runtime
+//! - **Depends on.** The connector ingestor contract, typed Prometheus plans and pre-resolved runtime
 //!   handles.
-//! - **Must not know.** Prometheus query or sample details, NSPL parsing, registry validation, or
+//! - **Must not know.** Prometheus query or sample details, Plexus parsing, registry validation, or
 //!   placement computation.
 
 #![cfg_attr(
@@ -16,7 +16,8 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_prometheus::{PrometheusIngestor, PrometheusIngestorPlan};
+use nervix_connector::IngestorConnector as _;
+use nervix_connector_prometheus::{PrometheusQueryIngestor, PrometheusQueryIngestorPlan};
 
 use super::{
     super::*,
@@ -24,13 +25,18 @@ use super::{
     connector::{IngestorStart, PacedIngestorStart},
 };
 
-impl PrometheusIngestorStartPlan {
+const _: () = assert!(matches!(
+    PrometheusQueryIngestor::KIND,
+    nervix_models::IngestorEntityKind::Prometheus(nervix_models::PrometheusIngestorEntity::Query)
+));
+
+impl PrometheusQueryIngestorStartPlan {
     pub(super) async fn compose(
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
     ) -> error_stack::Result<IngestorStart, IngestorStartError> {
-        let PrometheusIngestorStartPlan {
+        let PrometheusQueryIngestorStartPlan {
             client,
             query,
             max_body_size,
@@ -49,7 +55,7 @@ impl PrometheusIngestorStartPlan {
         let intake_batch = NonZeroUsize::new(INGEST_GROUP_MAX_ROWS)
             .assured("an ingest group holds at least one message");
         PacedIngestorStart {
-            connector: PrometheusIngestorPlan {
+            connector: PrometheusQueryIngestorPlan {
                 config: resolved.entries,
                 query,
                 max_body_size,
@@ -59,9 +65,8 @@ impl PrometheusIngestorStartPlan {
             cadence_start: DomainCadenceStart::AfterInterval,
             intake_batch,
             client_mounts: resolved.mounts.into_iter().collect(),
-            connector_label: "prometheus",
         }
-        .open::<PrometheusIngestor>(runtime, ingestor)
+        .open::<PrometheusQueryIngestor>(runtime, ingestor)
         .await
     }
 }

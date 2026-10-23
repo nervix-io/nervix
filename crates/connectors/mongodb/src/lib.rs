@@ -1,4 +1,4 @@
-//! MONGODB connector for the collection entity.
+//! MongoDbCollectionEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public collection connector implementation surface.

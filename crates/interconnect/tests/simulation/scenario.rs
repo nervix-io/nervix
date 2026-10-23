@@ -520,7 +520,7 @@ impl ScenarioIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BuildFingerprint {
     /// The checked-out commit, when Git can say.
-    source: Option<IngestorRevision>,
+    source: Option<SourceRevision>,
     /// SHA-256 of the workspace `Cargo.lock`.
     lockfile_sha256: Option<String>,
     /// `rustc -vV` of the toolchain the workspace selects.
@@ -536,7 +536,7 @@ impl BuildFingerprint {
     fn current() -> &'static Self {
         static CURRENT: OnceLock<BuildFingerprint> = OnceLock::new();
         CURRENT.get_or_init(|| Self {
-            source: IngestorRevision::current(),
+            source: SourceRevision::current(),
             lockfile_sha256: Self::lockfile_sha256(),
             toolchain: Self::probe("rustc", &["-vV"]),
             tokio_unstable: cfg!(tokio_unstable),
@@ -604,13 +604,13 @@ impl BuildFingerprint {
 
 /// A commit and whether tracked files differed from it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct IngestorRevision {
+struct SourceRevision {
     commit: String,
     /// Tracked files had uncommitted changes, so the commit alone does not rebuild the source.
     modified: bool,
 }
 
-impl IngestorRevision {
+impl SourceRevision {
     fn current() -> Option<Self> {
         let commit = BuildFingerprint::probe("git", &["rev-parse", "HEAD"])?;
         let status =
@@ -622,7 +622,7 @@ impl IngestorRevision {
     }
 }
 
-impl fmt::Display for IngestorRevision {
+impl fmt::Display for SourceRevision {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.modified {
             write!(formatter, "{} with modified tracked files", self.commit)
@@ -1459,7 +1459,7 @@ mod tests {
     fn replay_reports_every_way_its_build_and_plan_differ() {
         let mut changed = record(Outcome::Running, Vec::new());
         changed.build = BuildFingerprint {
-            source: Some(IngestorRevision {
+            source: Some(SourceRevision {
                 commit: "0123abc".to_string(),
                 modified: true,
             }),

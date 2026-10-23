@@ -1,4 +1,4 @@
-//! MQTT connector for the topic entity.
+//! MqttTopicIngestor, MqttTopicEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public topic connector implementation surface.

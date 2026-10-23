@@ -423,18 +423,18 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
         ClientIngestMode, ClientIngestorAlteration, ClientProducerIngestor, CodecName,
-        EndpointIngestMode, FlushPolicy, HttpEndpointIngestor, HttpIngestor,
-        HttpIngestorAlteration, HttpRequestIngestMode, HttpRequestIngestor, IngestQuiesceMode,
+        EndpointIngestMode, FlushPolicy, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestMode,
+        HttpRequestIngestor, HttpRequestIngestorAlteration, IngestQuiesceMode,
         IngestQuiesceOverflow, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor,
-        MqttIngestMode, MqttIngestor, MqttIngestorAlteration, MqttQos, MqttSession,
-        MqttTopicIngestor, NatsIngestMode, NatsIngestor, NatsSubjectIngestor, PrometheusIngestMode,
-        PrometheusIngestor, PrometheusQueryIngestor, PulsarIngestMode, PulsarIngestor,
-        PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicIngestor, RabbitMqIngestMode,
-        RabbitMqIngestor, RabbitMqQueueIngestor, RedisIngestor, RedisPubSubIngestMode,
-        RedisPubSubIngestor, RetryPolicy, SchemaName, SqsIngestMode, SqsIngestor, SqsQueueIngestor,
-        SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor, WebsocketsConnectionIngestor,
-        WebsocketsEndpointIngestor, WebsocketsIngestMode, WebsocketsIngestor, ZeroMqIngestMode,
-        ZeroMqIngestor, ZeroMqPullIngestor,
+        MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor,
+        MqttTopicIngestorAlteration, NatsIngestMode, NatsIngestor, NatsSubjectIngestor,
+        PrometheusIngestMode, PrometheusIngestor, PrometheusQueryIngestor, PulsarIngestMode,
+        PulsarIngestor, PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicIngestor,
+        RabbitMqIngestMode, RabbitMqIngestor, RabbitMqQueueIngestor, RedisIngestor,
+        RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SchemaName, SqsIngestMode,
+        SqsIngestor, SqsQueueIngestor, SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor,
+        WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
+        WebsocketsIngestor, ZeroMqIngestMode, ZeroMqIngestor, ZeroMqPullIngestor,
     };
     use nonzero_ext::nonzero;
 
@@ -727,7 +727,7 @@ mod tests {
              NEWEST;",
         )
         .expect("SET QUIESCE should parse");
-        let IngestorAlteration::Mqtt(MqttIngestorAlteration::Topic(operations)) =
+        let IngestorAlteration::Mqtt(MqttTopicIngestorAlteration::Topic(operations)) =
             &parsed.alteration
         else {
             panic!("the head names an MQTT topic");
@@ -748,7 +748,7 @@ mod tests {
         .expect("ALTER INGESTOR should parse all operations");
 
         assert_eq!(parsed.ingestor.as_str(), "event_source");
-        let IngestorAlteration::Http(HttpIngestorAlteration::Endpoint(operations)) =
+        let IngestorAlteration::Http(HttpRequestIngestorAlteration::Endpoint(operations)) =
             &parsed.alteration
         else {
             panic!("the head names an HTTP endpoint");
@@ -2356,7 +2356,7 @@ mod tests {
                                BACKOFF 100ms MAX 5s ON QUIESCE SUSPEND";
 
     /// The head, the name and the body of a client producer ingestor.
-    fn client_source() -> String {
+    fn client_entity() -> String {
         format!("CLIENT PRODUCER INGESTOR submit_events FROM {CLIENT_BODY}")
     }
 
@@ -2371,7 +2371,7 @@ mod tests {
 
     #[test]
     fn parses_a_client_source_without_a_codec() {
-        let parsed = parse_create_ingestor(&client_ingestor(&client_source()))
+        let parsed = parse_create_ingestor(&client_ingestor(&client_entity()))
             .expect("a client source should parse");
         assert_eq!(
             parsed.input,

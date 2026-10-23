@@ -1401,7 +1401,7 @@ mod tests {
         // no session has been loaded and no ONNX operator pool has been created yet.
         tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
-            .with_writer(std::io::connector)
+            .with_writer(std::io::sink)
             .try_init()
             .assured("the isolated owner regression has installed no other tracing subscriber");
         drop(Session::builder().assured("ONNX Runtime creates its environment"));
@@ -1595,7 +1595,7 @@ mod tests {
     async fn a_queued_model_inspection_times_out_and_releases_its_admission() {
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
-            .with_writer(std::io::connector)
+            .with_writer(std::io::sink)
             .finish();
         let _tracing = tracing::subscriber::set_default(subscriber);
         let executor = crate::runtime::single_worker_executor();

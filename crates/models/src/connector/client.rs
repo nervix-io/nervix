@@ -1,10 +1,10 @@
-//! The vocabulary of application sessions as a source and a sink.
+//! The vocabulary of application sessions as a source and an emitter.
 //!
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The producer source Model with its acknowledgement mode, the alterations of the
-//!   ingestors that read it, the consumer sink Model, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations, the acknowledgement and retry
+//!   ingestors that read it, the consumer emitter Model, and what each entity declares.
+//! - **Depends on.** The shared source and emitter declarations, the acknowledgement and retry
 //!   vocabulary, and the schema name a body references.
 //! - **Must not know.** How a session attaches, how a batch is submitted, admitted or delivered,
 //!   or which node serves a producer or a consumer.
@@ -149,7 +149,7 @@ impl IngestorDeclaration for ClientProducerIngestor {
 connector_ingestor_kinds! {
     connector Client = "CLIENT";
     /// The entities a client source reads.
-    pub enum ClientSourceEntity {
+    pub enum ClientIngestorEntity {
         Producer(ClientProducerIngestor) = "PRODUCER", "Client batches";
     }
 }
@@ -165,9 +165,9 @@ pub enum ClientIngestorAlteration {
 
 impl ClientIngestorAlteration {
     /// The entity whose ingestors this alteration changes.
-    pub const fn entity(&self) -> ClientSourceEntity {
+    pub const fn entity(&self) -> ClientIngestorEntity {
         match self {
-            Self::Producer(_) => ClientSourceEntity::Producer,
+            Self::Producer(_) => ClientIngestorEntity::Producer,
         }
     }
 
@@ -207,7 +207,7 @@ impl From<Vec<AlterIngestorOperation<ClientProducerIngestor>>> for IngestorAlter
 
 impl AlteredIngestorEntity for ClientProducerIngestor {
     fn set_into(&self, input: &mut IngestorInput) {
-        let source = input.client_source_mut().verified(ALTERED_PAIR_CHECKED);
+        let source = input.client_entity_mut().verified(ALTERED_PAIR_CHECKED);
         *source = self.clone();
     }
 
@@ -264,11 +264,11 @@ impl EmitterEntityBody for ClientConsumerEmitter {
 
 connector_emitters! {
     connector Client = "CLIENT";
-    /// What a client sink writes.
+    /// What a client emitter writes.
     pub enum ClientEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum ClientEmitterMode;
-    /// The entities a client sink writes.
+    /// The entities a client emitter writes.
     pub enum ClientEmitterEntity {
         Consumer(ClientConsumerEmitter, ClientConsumerPublishingMode) = "CONSUMER";
     }

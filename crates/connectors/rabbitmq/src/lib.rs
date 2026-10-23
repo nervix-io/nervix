@@ -1,4 +1,4 @@
-//! RABBITMQ connector for the queue entity.
+//! RabbitMqQueueIngestor, RabbitMqQueueEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public queue connector implementation surface.

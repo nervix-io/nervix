@@ -244,10 +244,10 @@ fn record_outcomes_are_independent_and_the_delivery_releases_its_memory_last() {
     assert!(second_wait.as_mut().now_or_never().is_none());
     assert!(!owners.resolve_ack(first, AckOutcome::NoAck("duplicate".to_string())));
     assert!(owners.holds_ack(second));
-    assert!(owners.resolve_ack(second, AckOutcome::NoAck("sink refused".to_string())));
+    assert!(owners.resolve_ack(second, AckOutcome::NoAck("emitter refused".to_string())));
     assert_eq!(
         second_wait.as_mut().now_or_never(),
-        Some(AckOutcome::NoAck("sink refused".to_string()))
+        Some(AckOutcome::NoAck("emitter refused".to_string()))
     );
     assert_eq!(owners.executor.snapshot().relay_memory.reserved_bytes, 0);
     assert!(owners.resolve_ack(admission, AckOutcome::Ack));

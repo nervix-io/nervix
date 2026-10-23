@@ -1,12 +1,12 @@
-//! RabbitMQ source runtime composition.
+//! RabbitMQ ingestor runtime composition.
 //!
 //! Layer: data plane.
 //!
 //! - **Owns.** Composing the RabbitMQ connector plan with the declared acknowledgement policy and
 //!   host-owned intake.
-//! - **Depends on.** The connector source contract, the RabbitMQ connector, the node resolver,
+//! - **Depends on.** The connector ingestor contract, the RabbitMQ connector, the node resolver,
 //!   and pre-resolved runtime execution handles.
-//! - **Must not know.** The AMQP driver, channel lifecycle, NSPL parsing, registry validation, or
+//! - **Must not know.** The AMQP driver, channel lifecycle, Plexus parsing, registry validation, or
 //!   placement computation.
 
 #![cfg_attr(
@@ -15,7 +15,8 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_rabbitmq::{RabbitMqIngestor, RabbitMqIngestorPlan};
+use nervix_connector::IngestorConnector as _;
+use nervix_connector_rabbitmq::{RabbitMqQueueIngestor, RabbitMqQueueIngestorPlan};
 
 use super::{
     super::*,
@@ -23,13 +24,18 @@ use super::{
     connector::{BrokerIngestorStart, IngestorStart},
 };
 
-impl RabbitMqIngestorStartPlan {
+const _: () = assert!(matches!(
+    RabbitMqQueueIngestor::KIND,
+    nervix_models::IngestorEntityKind::RabbitMq(nervix_models::RabbitMqIngestorEntity::Queue)
+));
+
+impl RabbitMqQueueIngestorStartPlan {
     pub(super) async fn compose(
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
     ) -> error_stack::Result<IngestorStart, IngestorStartError> {
-        let RabbitMqIngestorStartPlan {
+        let RabbitMqQueueIngestorStartPlan {
             client,
             queue,
             instances,
@@ -44,7 +50,7 @@ impl RabbitMqIngestorStartPlan {
             );
         };
         BrokerIngestorStart {
-            connector: RabbitMqIngestorPlan::new(
+            connector: RabbitMqQueueIngestorPlan::new(
                 resolved.entries,
                 dns.clone(),
                 queue,
@@ -54,13 +60,12 @@ impl RabbitMqIngestorStartPlan {
             acknowledgement: mode.acknowledgement(),
             buffered_intake: false,
             flush_each_intake: false,
-            // Every delivery mode of this source is acknowledged: a batch the extension workers
+            // Every delivery mode of this ingestor is acknowledged: a batch the extension workers
             // refuse is rejected and delivered again, and no payload is taken in unacknowledged.
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
-            connector_label: "rabbitmq",
         }
-        .open::<RabbitMqIngestor>(ingestor)
+        .open::<RabbitMqQueueIngestor>(ingestor)
         .await
     }
 }

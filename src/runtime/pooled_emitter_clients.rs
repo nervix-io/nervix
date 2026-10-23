@@ -1,12 +1,12 @@
 //! The node's pooled clients, as the connectors that borrow from them see them.
 //!
 //! Layer: data plane.
-//! - **Owns.** The lease one pooled sink holds on its client's node-wide instance, the wait it
+//! - **Owns.** The lease one pooled emitter holds on its client's node-wide instance, the wait it
 //!   records while it has asked for a connection and not been handed one, and the connection
 //!   sources its connector calls.
 //! - **Depends on.** The shared client registry, the vocabulary that names a domain, a client and
 //!   a graph node, and the pooled connector crates.
-//! - **Must not know.** How a batch is mapped, how a row is encoded, or what a sink writes.
+//! - **Must not know.** How a batch is mapped, how a row is encoded, or what an emitter writes.
 
 #![cfg_attr(
     nervix_lint,
@@ -23,19 +23,19 @@ use nervix_connector_redis::{RedisCommandPool, RedisPoolHandle, RedisPoolService
 use super::*;
 use crate::runtime::shared_clients::{PoolWaitRegistration, PoolWaitSlot};
 
-/// One sink's interest in this node's shared pool for its client.
+/// One emitter's interest in this node's shared pool for its client.
 ///
-/// The pool belongs to the named client, so every local sink of that client borrows from it and the
-/// declared maximum bounds the node's connections rather than this sink's.
+/// The pool belongs to the named client, so every local emitter of that client borrows from it and the
+/// declared maximum bounds the node's connections rather than this emitter's.
 pub(super) struct PooledEmitterClient {
     lease: SharedClientLease,
-    /// The client borrowed from, named in this sink's diagnostics and in its pool wait.
+    /// The client borrowed from, named in this emitter's diagnostics and in its pool wait.
     client: ClientName,
     wait: PoolWaitRegistration,
 }
 
 impl PooledEmitterClient {
-    /// Take this sink's interest in the node's instance of `client`, opening it on first local use.
+    /// Take this emitter's interest in the node's instance of `client`, opening it on first local use.
     pub(super) async fn lease(
         context: &EmitterConnectorContext,
         client: &EmitterClientSpec,
@@ -43,8 +43,8 @@ impl PooledEmitterClient {
     ) -> Result<Self, Report<SharedClientError>> {
         let lease = nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
-            "sink initialization installs and retains one shared-client lease before publishing \
-             records",
+            "emitter initialization installs and retains one shared-client lease before \
+             publishing records",
             context
                 .runtime
                 .lease_shared_client(&context.domain, client, pool)
@@ -55,7 +55,7 @@ impl PooledEmitterClient {
             client: client.name.clone(),
             wait: nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
-                "sink initialization installs and retains its one pool-wait publication before \
+                "emitter initialization installs and retains its one pool-wait publication before \
                  borrowing connections",
                 context.runtime.register_pool_wait(
                     DomainNodeRef::node_in(
@@ -97,7 +97,7 @@ impl PostgresConnections for PooledEmitterClient {
     ///
     /// The borrow covers one bounded insert, together with the write's metadata lookup on its first
     /// insert and the isolation of the rows of an insert the database refused, and no more: between
-    /// inserts, and across a flush interval or a retry backoff, this sink holds no connection.
+    /// inserts, and across a flush interval or a retry backoff, this emitter holds no connection.
     async fn connection(&self) -> EmitterWriteResult<PostgresConnection> {
         let pool = self
             .lease
@@ -109,7 +109,7 @@ impl PostgresConnections for PooledEmitterClient {
 }
 
 impl MongoDbClientProvider for PooledEmitterClient {
-    /// The shared driver client this sink writes through, which pools its own connections per
+    /// The shared driver client this emitter writes through, which pools its own connections per
     /// server in the topology and is therefore never borrowed per write.
     fn client(&self) -> EmitterWriteResult<MongoDbClient> {
         self.lease
@@ -123,16 +123,16 @@ impl MongoDbClientProvider for PooledEmitterClient {
 impl EmitterConnectorContext {
     /// Leases this node's shared Redis command pool for `plan`'s client.
     ///
-    /// The lease travels with the handle the sink holds, so the pool stays open for exactly as
-    /// long as the sink publishes through it.
+    /// The lease travels with the handle the emitter holds, so the pool stays open for exactly as
+    /// long as the emitter publishes through it.
     pub(super) async fn lease_redis_pool(
         &self,
-        plan: &RedisEmitterPlan,
+        plan: &RedisPubSubEmitterPlan,
     ) -> EmitterRuntimeResult<RedisPoolHandle> {
         let lease = nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
-            "sink initialization installs and retains one shared-client lease before publishing \
-             records",
+            "emitter initialization installs and retains one shared-client lease before \
+             publishing records",
             self.runtime
                 .lease_shared_client(&self.domain, &plan.client, plan.pooled_client())
         )
@@ -148,7 +148,7 @@ impl EmitterConnectorContext {
             pool,
             wait: nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
-                "sink initialization installs and retains its one pool-wait publication before \
+                "emitter initialization installs and retains its one pool-wait publication before \
                  borrowing connections",
                 self.runtime.register_pool_wait(
                     DomainNodeRef::node_in(
@@ -166,7 +166,7 @@ impl EmitterConnectorContext {
 /// One emitter's interest in this node's shared Redis pool, and the wait it records while that
 /// pool hands a connection over.
 struct LeasedRedisPool {
-    /// Held for as long as the sink publishes: releasing it gives back this emitter's interest in
+    /// Held for as long as the emitter publishes: releasing it gives back this emitter's interest in
     /// the shared client, which closes the pool once its last local user leaves.
     _lease: SharedClientLease,
     pool: RedisCommandPool,

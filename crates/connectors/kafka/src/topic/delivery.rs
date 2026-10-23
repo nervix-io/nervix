@@ -8,7 +8,7 @@
 //!   served yet, and the delivery opaque that carries each record's retention and awaited report.
 //! - **Depends on.** `rust-rdkafka`'s client and producer contexts and its delivery opaque, and the
 //!   boundary's shared ownership, atomics and oneshot channel.
-//! - **Must not know.** The sink contract, how a report becomes a broker verdict, the host, or any
+//! - **Must not know.** The emitter contract, how a report becomes a broker verdict, the host, or any
 //!   other connector implementation.
 
 #![cfg_attr(

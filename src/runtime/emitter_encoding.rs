@@ -1,14 +1,14 @@
-//! Encoding an emitter's rows into the records a record sink publishes.
+//! Encoding an emitter's rows into the records a record emitter publishes.
 //!
 //! Layer: data plane.
 //! - **Owns.** Encoding every row a batch still holds with the emitter's codec — one record per row,
 //!   or, when the emitter declares `BATCH`, one batch payload per packed candidate — pairing each
 //!   record with its key, headers and ordering group, preparing its external bytes once, rejecting
-//!   the rows that cannot be encoded or do not fit, and handing one write to the record sink: the
+//!   the rows that cannot be encoded or do not fit, and handing one write to the record emitter: the
 //!   payloads earlier attempts retained, unchanged, followed by the ones prepared now.
 //! - **Depends on.** The emitter's compiled codec, its buffered batches, the batch packing, the
 //!   record identities and retained payloads a write is answered through, the connector
-//!   contract's record sink and record value type, and the node's bounded executor, whose extension
+//!   contract's record emitter and record value type, and the node's bounded executor, whose extension
 //!   workers run the encodings a codec's transformations make unbounded.
 //! - **Must not know.** Which external system receives the records, or when the emitter publishes
 //!   them.
@@ -70,11 +70,11 @@ impl EncodedBrokerRecord {
     }
 }
 
-/// A record sink and the codec the host encodes its records with.
+/// A record emitter and the codec the host encodes its records with.
 pub(super) struct EncodedRecordEmitter {
     pub(super) connector: Box<dyn RecordEmitter>,
     pub(super) codec: Arc<CompiledCodec>,
-    /// The emitter's `BATCH` clause. With it, each record the sink receives is one batch payload
+    /// The emitter's `BATCH` clause. With it, each record the emitter receives is one batch payload
     /// holding several rows; without it, each record is one row.
     pub(super) batch: Option<EmitterBatchPolicy>,
 }
@@ -92,8 +92,8 @@ impl EmitterConnector for EncodedRecordEmitter {
     /// Encodes every row no payload carries yet and publishes them in one write.
     ///
     /// The write carries every payload the emitter retains: the ones earlier attempts prepared and
-    /// the sink left unanswered, written again exactly as they were first written, and the ones
-    /// prepared now, one per row or, with `BATCH`, one per packed candidate. The sink prepares a
+    /// the emitter left unanswered, written again exactly as they were first written, and the ones
+    /// prepared now, one per row or, with `BATCH`, one per packed candidate. The emitter prepares a
     /// new payload's external bytes once, before the emitter retains it.
     async fn publish_batches(
         &mut self,
@@ -349,7 +349,7 @@ async fn encode_broker_records(
 /// One payload per row, once every record whose ordering group could not be evaluated
 /// has been rejected here.
 ///
-/// A sink that orders records per group receives the group already evaluated for its record, so
+/// A emitter that orders records per group receives the group already evaluated for its record, so
 /// the expression that produced it, and the reason a record has none, both stay with the host.
 async fn row_payloads(
     context: &EmitterConnectorContext,
@@ -679,15 +679,15 @@ mod tests {
         runtime_schema::{RuntimeSchemaError, compile_codec, test_runtime_row},
     };
 
-    /// How the scripted sink answers one write.
+    /// How the scripted emitter answers one write.
     enum Answer {
-        /// The sink fails before it answers for any record, as a stalled broker does.
+        /// The emitter fails before it answers for any record, as a stalled broker does.
         Stall,
-        /// The sink confirms every record of the write.
+        /// The emitter confirms every record of the write.
         ConfirmAll,
     }
 
-    /// A record sink that keeps every payload it was handed and answers each write from a script.
+    /// A record emitter that keeps every payload it was handed and answers each write from a script.
     struct ScriptedEmitter {
         writes: Arc<Mutex<Vec<Vec<Vec<u8>>>>>,
         answers: VecDeque<Answer>,
@@ -695,6 +695,10 @@ mod tests {
 
     #[async_trait]
     impl EmitterLifecycle for ScriptedEmitter {
+        fn kind(&self) -> nervix_models::EmitterEntityKind {
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
+        }
+
         async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
             Ok(EmitterFinish::NothingHeld)
         }
@@ -818,6 +822,10 @@ mod tests {
 
     #[async_trait]
     impl EmitterLifecycle for PreparingEmitter {
+        fn kind(&self) -> nervix_models::EmitterEntityKind {
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
+        }
+
         async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
             self.publisher.finish(deadline).await
         }

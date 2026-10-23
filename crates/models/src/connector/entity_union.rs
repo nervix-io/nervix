@@ -1,4 +1,4 @@
-//! The declarations that nest source and sink Models connector by entity.
+//! The declarations that nest source and emitter Models connector by entity.
 //!
 //! Layer: vocabulary.
 //!
@@ -6,7 +6,7 @@
 //!   data enum over the entity Models, the kind that names each entity, the alterations of the
 //!   ingestors that read each entity, and the conversions from an entity Model or its operations
 //!   into the enums that hold them.
-//! - **Depends on.** The source and sink declarations each entity Model implements, and the
+//! - **Depends on.** The source and emitter declarations each entity Model implements, and the
 //!   alteration operations an ingestor applies.
 //! - **Must not know.** Any one connector, entity or capability.
 //!
@@ -307,7 +307,7 @@ macro_rules! connector_emitters {
     (
         connector $Connector:ident = $connector_keyword:literal;
         $(#[$emitter_meta:meta])*
-        pub enum $Sink:ident;
+        pub enum $Emitter:ident;
         $(#[$change_meta:meta])*
         pub enum $ModeChange:ident;
         $(#[$entity_meta:meta])*
@@ -330,7 +330,7 @@ macro_rules! connector_emitters {
             ::rkyv::Serialize,
             ::rkyv::Deserialize,
         )]
-        pub enum $Sink {
+        pub enum $Emitter {
             $(
                 $(#[$variant_meta])*
                 $Variant($Model),
@@ -351,7 +351,7 @@ macro_rules! connector_emitters {
             }
         }
 
-        impl $crate::EmitterPublication for $Sink {
+        impl $crate::EmitterPublication for $Emitter {
             fn publishing(&self) -> $crate::EmitterPublishing<'_> {
                 match self { $(Self::$Variant(destination) => $crate::EmitterPublication::publishing(destination),)+ }
             }
@@ -393,8 +393,8 @@ macro_rules! connector_emitters {
             }
         )+
 
-        impl $Sink {
-            /// The entity this sink writes.
+        impl $Emitter {
+            /// The entity this emitter writes.
             pub const fn entity(&self) -> $Entity {
                 match self {
                     $(Self::$Variant(_) => $Entity::$Variant,)+
@@ -402,7 +402,7 @@ macro_rules! connector_emitters {
             }
         }
 
-        impl $crate::EmitterEntityBody for $Sink {
+        impl $crate::EmitterEntityBody for $Emitter {
             fn reference(&self) -> $crate::EmitterReference<'_> {
                 match self {
                     $(Self::$Variant(connector) => $crate::EmitterEntityBody::reference(connector),)+
@@ -435,7 +435,7 @@ macro_rules! connector_emitters {
         }
 
         $(
-            impl From<$Model> for $Sink {
+            impl From<$Model> for $Emitter {
                 fn from(connector: $Model) -> Self {
                     Self::$Variant(connector)
                 }
@@ -443,7 +443,7 @@ macro_rules! connector_emitters {
 
             impl From<$Model> for $crate::EmitterEntity {
                 fn from(connector: $Model) -> Self {
-                    Self::$Connector($Sink::$Variant(connector))
+                    Self::$Connector($Emitter::$Variant(connector))
                 }
             }
         )+
@@ -458,7 +458,7 @@ macro_rules! connector_emitters {
         }
 
         impl $Entity {
-            /// Every sink entity of this connector, in declared order.
+            /// Every emitter entity of this connector, in declared order.
             pub const ALL: &'static [Self] = &[$(Self::$Variant,)+];
         }
 

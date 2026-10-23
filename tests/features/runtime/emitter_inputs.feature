@@ -51,7 +51,7 @@ Feature: Emitter relay inputs
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ZEROMQ CLIENT sink
+      CREATE ZEROMQ CLIENT emitter
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
@@ -60,7 +60,7 @@ Feature: Emitter relay inputs
         FROM source_a_events WHERE input.source = 'a',
              source_b_events WHERE input.source = 'b'
         COLLECT FOR 20ms MAX BATCH SIZE 1MiB
-        TO sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec
           INHERIT ALL
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG

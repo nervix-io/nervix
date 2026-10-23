@@ -41,7 +41,7 @@ use nervix_client_core::{
     CommandDisposition, CommandExecutionReference, CommandOutcome, ConnectDns, ConnectOptions,
     Diagnostic, DomainClockAttachDisposition, DomainClockAttachOutcome,
     DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockEvent, DomainName,
-    IngestorSpan, LeaderRedirect, NoticeLevel, ServerEvent, StatementDisposition, StatementOutcome,
+    LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan, StatementDisposition, StatementOutcome,
     SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
     SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionLifecycle,
     TransactionStatus,
@@ -1755,7 +1755,7 @@ fn print_diagnostics(source_id: &str, source: &str, diagnostics: &[Diagnostic]) 
 
 /// The byte range of `source` a diagnostic underlines: its span, when the span lies within the
 /// source and both of its ends fall on character boundaries.
-fn diagnostic_range(source: &str, span: Option<IngestorSpan>) -> Option<Range<usize>> {
+fn diagnostic_range(source: &str, span: Option<SourceSpan>) -> Option<Range<usize>> {
     let span = span?;
     let start: usize = span.start().arch_into();
     let end: usize = span.end().arch_into();
@@ -2500,8 +2500,8 @@ mod tests {
         assert_eq!(rendered, "[events] server ERROR: relay 'orders' failed");
     }
 
-    fn span(start: u32, end: u32) -> Option<IngestorSpan> {
-        Some(IngestorSpan::new(start, end).assured("the test span starts before it ends"))
+    fn span(start: u32, end: u32) -> Option<SourceSpan> {
+        Some(SourceSpan::new(start, end).assured("the test span starts before it ends"))
     }
 
     #[test]

@@ -7872,8 +7872,8 @@ mod tests {
     use leptos::prelude::Owner;
     use nervix_client_wire::{
         DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockObserved,
-        DomainClockTicked, DomainList, DomainsObserved, IngestorSpan, OutcomeOrigin, Reply,
-        ReplyDelivery, SessionLimitSettings, SubscriptionEndReason,
+        DomainClockTicked, DomainList, DomainsObserved, OutcomeOrigin, Reply, ReplyDelivery,
+        SessionLimitSettings, SourceSpan, SubscriptionEndReason,
     };
     use nervix_dataflow_graph::{
         DataflowBranchStatistics, DataflowEdge, DataflowNode, DataflowProcessorKind,
@@ -12054,7 +12054,7 @@ mod tests {
     fn diagnostic(message: &str, start: u32, end: u32) -> Diagnostic {
         Diagnostic {
             message: message.to_string(),
-            span: Some(IngestorSpan::new(start, end).assured("the test span does not end first")),
+            span: Some(SourceSpan::new(start, end).assured("the test span does not end first")),
         }
     }
 

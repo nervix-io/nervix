@@ -191,7 +191,7 @@ displayed graph.
 
 The topology includes shared admission gates, branch coverage, hard-group members, moved owners,
 and the source and destination of each move. Every affected node, edge, gate, and effect retains
-the operation numbers that contributed to it. This is why a change to an emitter emitter, for
+the operation numbers that contributed to it. This is why a change to an emitter connector, for
 example, can show a changed emitter, upstream gate, force-flushed work, and replacement activation
 as different roles rather than as one ambiguous list of “affected nodes.”
 

@@ -111,7 +111,7 @@ mod shuttle_tests {
     use super::*;
 
     #[test]
-    fn shuttle_retirement_racing_source_polling_is_final_and_instance_local() {
+    fn shuttle_retirement_racing_ingestor_polling_is_final_and_instance_local() {
         check_interleavings(|| {
             let instance = IngestorInstanceReadiness::new();
             let reader = instance.clone();

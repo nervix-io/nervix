@@ -2,8 +2,8 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Sentry client Model, the event sink Model, and what it declares.
-//! - **Depends on.** The shared sink declarations and the names a body references.
+//! - **Owns.** The Sentry client Model, the event emitter Model, and what it declares.
+//! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The Sentry envelope protocol, its configuration keys, or how an event is
 //!   submitted.
 
@@ -83,11 +83,11 @@ impl EmitterEntityBody for SentryEventEmitter {
 
 connector_emitters! {
     connector Sentry = "SENTRY";
-    /// What a Sentry sink writes.
+    /// What a Sentry emitter writes.
     pub enum SentryEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum SentryEmitterMode;
-    /// The entities a Sentry sink writes.
+    pub enum SentryEventEmitterMode;
+    /// The entities a Sentry emitter writes.
     pub enum SentryEmitterEntity {
         Event(SentryEventEmitter, SentryEventPublishingMode) = "EVENT";
     }

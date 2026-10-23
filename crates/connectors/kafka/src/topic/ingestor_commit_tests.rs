@@ -1,6 +1,6 @@
-//! The Kafka source's consumer-group commits against librdkafka's in-process mock cluster.
+//! The Kafka ingestor's consumer-group commits against librdkafka's in-process mock cluster.
 //!
-//! Each test drives the production source through a real librdkafka consumer that joins a group on
+//! Each test drives the production ingestor through a real librdkafka consumer that joins a group on
 //! the mock broker, and reads the group's committed offset back through a second consumer, so a
 //! commit counts only once the broker stored it. The broker answers at once unless a test makes it
 //! refuse a commit or hold its answers.
@@ -26,8 +26,8 @@ use rdkafka::{
 };
 
 use super::{
-    GroupCommitRequest, GroupCommits, KafkaGroupCommit, KafkaIngestor, KafkaIngestorError,
-    KafkaIngestorOffsetMode, KafkaIngestorPlan, KafkaOffsetPosition,
+    GroupCommitRequest, GroupCommits, KafkaGroupCommit, KafkaOffsetPosition, KafkaTopicIngestor,
+    KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode, KafkaTopicIngestorPlan,
 };
 
 const TOPIC: &str = "orders";
@@ -40,7 +40,7 @@ const DRIVER_CADENCE_MS: &str = "3600000";
 /// until the test sets its round-trip time back to zero.
 const HELD_ROUND_TRIP: Duration = Duration::from_secs(3600);
 
-/// How long a test waits for its source to join the group and read the published record. The mock
+/// How long a test waits for its ingestor to join the group and read the published record. The mock
 /// coordinator holds a new group's first rebalance for three seconds.
 pub(super) const READ_DEADLINE: Duration = Duration::from_secs(60);
 
@@ -53,11 +53,11 @@ pub(super) fn cluster() -> MockCluster<'static, DefaultProducerContext> {
     cluster
 }
 
-/// The plan of a source in the test group, whose offsets `commit` commits.
+/// The plan of an ingestor in the test group, whose offsets `commit` commits.
 pub(super) fn plan(
     cluster: &MockCluster<'static, DefaultProducerContext>,
     commit: KafkaGroupCommit,
-) -> KafkaIngestorPlan {
+) -> KafkaTopicIngestorPlan {
     let entries = [
         ("bootstrap.servers", cluster.bootstrap_servers()),
         ("auto.offset.reset", "earliest".to_string()),
@@ -70,11 +70,11 @@ pub(super) fn plan(
             value,
         })
         .collect();
-    KafkaIngestorPlan {
+    KafkaTopicIngestorPlan {
         executor: nervix_execution::Executor::default(),
         config,
         topic: KafkaTopicName::parse(TOPIC).assured("the test topic is a valid Kafka topic"),
-        offset_mode: KafkaIngestorOffsetMode::ConsumerGroup {
+        offset_mode: KafkaTopicIngestorOffsetMode::ConsumerGroup {
             group_id: GROUP.to_string(),
             commit,
         },
@@ -94,12 +94,12 @@ pub(super) async fn publish(cluster: &MockCluster<'static, DefaultProducerContex
         .assured("the mock broker stores the test record");
 }
 
-/// A source whose offsets `commit` commits, subscribed to the test topic in the test group.
+/// A ingestor whose offsets `commit` commits, subscribed to the test topic in the test group.
 pub(super) async fn subscribed_source(
     cluster: &MockCluster<'static, DefaultProducerContext>,
     commit: KafkaGroupCommit,
-) -> KafkaIngestor {
-    let mut source = KafkaIngestor::open(&plan(cluster, commit), 0)
+) -> KafkaTopicIngestor {
+    let mut source = KafkaTopicIngestor::open(&plan(cluster, commit), 0)
         .await
         .assured("librdkafka accepts the test consumer configuration");
     let resumed = source
@@ -110,8 +110,8 @@ pub(super) async fn subscribed_source(
     source
 }
 
-/// Reads the next record from `source` once it joined its group, and returns its position.
-pub(super) async fn read_positions(source: &mut KafkaIngestor) -> Vec<KafkaOffsetPosition> {
+/// Reads the next record from `ingestor` once it joined its group, and returns its position.
+pub(super) async fn read_positions(source: &mut KafkaTopicIngestor) -> Vec<KafkaOffsetPosition> {
     let request = IngestorBatchRequest {
         max_messages: NonZeroUsize::MIN,
         batch_timeout: None,
@@ -121,10 +121,10 @@ pub(super) async fn read_positions(source: &mut KafkaIngestor) -> Vec<KafkaOffse
         source.next_batch(request, &IngestorReadCancellation::new()),
     )
     .await
-    .assured("the source joins its group and reads the published record within its deadline")
-    .assured("the source reads the record its broker serves");
+    .assured("the ingestor joins its group and reads the published record within its deadline")
+    .assured("the ingestor reads the record its broker serves");
     let IngestorBatch::Messages(messages) = batch else {
-        panic!("a subscribed source reads a batch of messages");
+        panic!("a subscribed ingestor reads a batch of messages");
     };
     messages
         .iter()
@@ -196,11 +196,11 @@ async fn a_commit_its_group_refuses_fails_the_acknowledgement() {
         panic!("a commit the broker refuses fails the acknowledgement");
     };
     let failure = report
-        .downcast_ref::<KafkaIngestorError>()
+        .downcast_ref::<KafkaTopicIngestorError>()
         .assured("the acknowledgement failure names the commit that failed");
     assert!(
-        matches!(failure, KafkaIngestorError::CommitOffset { group } if group == GROUP),
-        "unexpected Kafka source failure {failure:?}"
+        matches!(failure, KafkaTopicIngestorError::CommitOffset { group } if group == GROUP),
+        "unexpected Kafka ingestor failure {failure:?}"
     );
     let cause = report
         .downcast_ref::<KafkaError>()
@@ -241,10 +241,10 @@ async fn a_commit_its_coordinator_does_not_answer_fails_at_its_deadline_and_hold
         assert!(
             matches!(
                 report.current_context(),
-                KafkaIngestorError::CommitUnanswered { group, deadline }
+                KafkaTopicIngestorError::CommitUnanswered { group, deadline }
                     if group == GROUP && *deadline == short_deadline
             ),
-            "unexpected Kafka source failure {report:?}"
+            "unexpected Kafka ingestor failure {report:?}"
         );
         assert!(commits.unanswered.is_some());
     }

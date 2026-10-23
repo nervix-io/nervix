@@ -45,14 +45,14 @@ Feature: Batching across broker and message emitters
         ON GENERAL ERROR LOG;
       <client>
       CREATE <emitter_kind> EMITTER unbatched FROM events
-        TO <sink>
+        TO <connector_body>
           ENCODE USING event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE <emitter_kind> EMITTER batched FROM events
-        TO <sink>
+        TO <connector_body>
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 3 MAX SIZE 80B
@@ -96,28 +96,28 @@ Feature: Batching across broker and message emitters
       """
 
     Examples:
-      | cluster_size | target         | destination          | client                                                                                     | sink                                                                                                                  | emitter_kind   |
-      | 1            | Kafka          | batched_{{test_id}}  | CREATE KAFKA CLIENT sink CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                | sink TOPIC 'batched_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                         | KAFKA TOPIC    |
-      | 3            | Kafka          | batched_{{test_id}}  | CREATE KAFKA CLIENT sink CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                | sink TOPIC 'batched_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                 | KAFKA TOPIC    |
-      | 1            | Kafka          | batched_{{test_id}}  | CREATE KAFKA CLIENT sink CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                | sink TOPIC 'batched_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s             | KAFKA TOPIC    |
-      | 3            | Pulsar         | batched_{{test_id}}  | CREATE PULSAR CLIENT sink CONFIG { 'addr' = '{{pulsar_addr}}' };                           | sink TOPIC 'batched_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                         | PULSAR TOPIC   |
-      | 1            | Pulsar         | batched_{{test_id}}  | CREATE PULSAR CLIENT sink CONFIG { 'addr' = '{{pulsar_addr}}' };                           | sink TOPIC 'batched_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                 | PULSAR TOPIC   |
-      | 3            | Pulsar         | batched_{{test_id}}  | CREATE PULSAR CLIENT sink CONFIG { 'addr' = '{{pulsar_addr}}' };                           | sink TOPIC 'batched_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s             | PULSAR TOPIC   |
-      | 1            | RabbitMQ       | batched_{{test_id}}  | CREATE RABBITMQ CLIENT sink CONFIG { 'addr' = '{{rabbitmq_addr}}' };                       | sink QUEUE 'batched_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                         | RABBITMQ QUEUE |
-      | 3            | RabbitMQ       | batched_{{test_id}}  | CREATE RABBITMQ CLIENT sink CONFIG { 'addr' = '{{rabbitmq_addr}}' };                       | sink QUEUE 'batched_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                 | RABBITMQ QUEUE |
-      | 1            | RabbitMQ       | batched_{{test_id}}  | CREATE RABBITMQ CLIENT sink CONFIG { 'addr' = '{{rabbitmq_addr}}' };                       | sink QUEUE 'batched_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s             | RABBITMQ QUEUE |
-      | 1            | Redis          | batched_{{test_id}}  | CREATE REDIS CLIENT sink POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{redis_addr}}' };       | sink CHANNEL 'batched_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                       | REDIS PUBSUB   |
-      | 3            | Redis          | batched_{{test_id}}  | CREATE REDIS CLIENT sink POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{redis_addr}}' };       | sink CHANNEL 'batched_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                       | REDIS PUBSUB   |
-      | 3            | MQTT           | batched_{{test_id}}  | CREATE MQTT CLIENT sink CONFIG { 'addr' = '{{mqtt_addr}}' };                               | sink TOPIC 'batched_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 50ms MAX 1s                                          | MQTT TOPIC     |
-      | 1            | MQTT           | batched_{{test_id}}  | CREATE MQTT CLIENT sink CONFIG { 'addr' = '{{mqtt_addr}}' };                               | sink TOPIC 'batched_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s           | MQTT TOPIC     |
-      | 3            | MQTT           | batched_{{test_id}}  | CREATE MQTT CLIENT sink CONFIG { 'addr' = '{{mqtt_addr}}' };                               | sink TOPIC 'batched_{{test_id}}' MODE QOS 2 ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s       | MQTT TOPIC     |
-      | 1            | NATS           | batched_{{test_id}}  | CREATE NATS CLIENT sink CONFIG { 'addr' = '{{nats_addr}}' };                               | sink SUBJECT 'batched_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                       | NATS SUBJECT   |
-      | 3            | NATS JetStream | batched_{{test_id}}  | CREATE NATS CLIENT sink CONFIG { 'addr' = '{{nats_addr}}' };                               | sink SUBJECT 'batched_{{test_id}}' MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     | NATS SUBJECT   |
-      | 1            | NATS JetStream | batched_{{test_id}}  | CREATE NATS CLIENT sink CONFIG { 'addr' = '{{nats_addr}}' };                               | sink SUBJECT 'batched_{{test_id}}' MODE JETSTREAM ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s | NATS SUBJECT   |
-      | 1            | ZeroMQ         | {{zeromq_emit_addr}} | CREATE ZEROMQ CLIENT sink CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };    | sink MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                                     | ZEROMQ PUSH    |
-      | 3            | ZeroMQ         | {{zeromq_emit_addr}} | CREATE ZEROMQ CLIENT sink CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };    | sink MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                                     | ZEROMQ PUSH    |
-      | 3            | SQS            | batched_{{test_id}}  | CREATE SQS CLIENT sink CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1' }; | sink QUEUE 'batched_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 50ms MAX 1s                                         | SQS QUEUE      |
-      | 1            | SQS            | batched_{{test_id}}  | CREATE SQS CLIENT sink CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1' }; | sink QUEUE 'batched_{{test_id}}' MODE BATCH RETRY POLICY BACKOFF 50ms MAX 1s                                          | SQS QUEUE      |
+      | cluster_size | target         | destination          | client                                                                                        | connector_body                                                                                                           | emitter_kind   |
+      | 1            | Kafka          | batched_{{test_id}}  | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                | emitter TOPIC 'batched_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                         | KAFKA TOPIC    |
+      | 3            | Kafka          | batched_{{test_id}}  | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                | emitter TOPIC 'batched_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                 | KAFKA TOPIC    |
+      | 1            | Kafka          | batched_{{test_id}}  | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                | emitter TOPIC 'batched_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s             | KAFKA TOPIC    |
+      | 3            | Pulsar         | batched_{{test_id}}  | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };                           | emitter TOPIC 'batched_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                         | PULSAR TOPIC   |
+      | 1            | Pulsar         | batched_{{test_id}}  | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };                           | emitter TOPIC 'batched_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                 | PULSAR TOPIC   |
+      | 3            | Pulsar         | batched_{{test_id}}  | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };                           | emitter TOPIC 'batched_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s             | PULSAR TOPIC   |
+      | 1            | RabbitMQ       | batched_{{test_id}}  | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };                       | emitter QUEUE 'batched_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                         | RABBITMQ QUEUE |
+      | 3            | RabbitMQ       | batched_{{test_id}}  | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };                       | emitter QUEUE 'batched_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                 | RABBITMQ QUEUE |
+      | 1            | RabbitMQ       | batched_{{test_id}}  | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };                       | emitter QUEUE 'batched_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s             | RABBITMQ QUEUE |
+      | 1            | Redis          | batched_{{test_id}}  | CREATE REDIS CLIENT emitter POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{redis_addr}}' };       | emitter CHANNEL 'batched_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                       | REDIS PUBSUB   |
+      | 3            | Redis          | batched_{{test_id}}  | CREATE REDIS CLIENT emitter POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{redis_addr}}' };       | emitter CHANNEL 'batched_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                       | REDIS PUBSUB   |
+      | 3            | MQTT           | batched_{{test_id}}  | CREATE MQTT CLIENT emitter CONFIG { 'addr' = '{{mqtt_addr}}' };                               | emitter TOPIC 'batched_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 50ms MAX 1s                                          | MQTT TOPIC     |
+      | 1            | MQTT           | batched_{{test_id}}  | CREATE MQTT CLIENT emitter CONFIG { 'addr' = '{{mqtt_addr}}' };                               | emitter TOPIC 'batched_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s           | MQTT TOPIC     |
+      | 3            | MQTT           | batched_{{test_id}}  | CREATE MQTT CLIENT emitter CONFIG { 'addr' = '{{mqtt_addr}}' };                               | emitter TOPIC 'batched_{{test_id}}' MODE QOS 2 ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s       | MQTT TOPIC     |
+      | 1            | NATS           | batched_{{test_id}}  | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                               | emitter SUBJECT 'batched_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                       | NATS SUBJECT   |
+      | 3            | NATS JetStream | batched_{{test_id}}  | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                               | emitter SUBJECT 'batched_{{test_id}}' MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     | NATS SUBJECT   |
+      | 1            | NATS JetStream | batched_{{test_id}}  | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                               | emitter SUBJECT 'batched_{{test_id}}' MODE JETSTREAM ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s | NATS SUBJECT   |
+      | 1            | ZeroMQ         | {{zeromq_emit_addr}} | CREATE ZEROMQ CLIENT emitter CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };    | emitter MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                                     | ZEROMQ PUSH    |
+      | 3            | ZeroMQ         | {{zeromq_emit_addr}} | CREATE ZEROMQ CLIENT emitter CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };    | emitter MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                                     | ZEROMQ PUSH    |
+      | 3            | SQS            | batched_{{test_id}}  | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1' }; | emitter QUEUE 'batched_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 50ms MAX 1s                                         | SQS QUEUE      |
+      | 1            | SQS            | batched_{{test_id}}  | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1' }; | emitter QUEUE 'batched_{{test_id}}' MODE BATCH RETRY POLICY BACKOFF 50ms MAX 1s                                          | SQS QUEUE      |
 
   @emitter_batch_brokers
   Scenario Outline: A batch message carries the key, headers and FIFO group its members share
@@ -152,7 +152,7 @@ Feature: Batching across broker and message emitters
         ON GENERAL ERROR LOG;
       <client>
       CREATE <emitter_kind> EMITTER keyed FROM events
-        TO <sink>
+        TO <connector_body>
           ENCODE USING event_codec
         INHERIT ALL
         INVOKE write_header('source', output.source)
@@ -177,19 +177,19 @@ Feature: Batching across broker and message emitters
       | [{"seq":2,"tenant":"beta","source":"web"},{"seq":4,"tenant":"beta","source":"web"}] | <beta_key> | source=web | <beta_group> |
 
     Examples:
-      | cluster_size | target   | destination            | client                                                                                     | sink                                                                                                    | acme_key          | beta_key          | acme_group        | beta_group        | emitter_kind   |
-      | 1            | Kafka    | keyed_{{test_id}}      | CREATE KAFKA CLIENT sink CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                | sink TOPIC 'keyed_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | KAFKA TOPIC    |
-      | 3            | Kafka    | keyed_{{test_id}}      | CREATE KAFKA CLIENT sink CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                | sink TOPIC 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                             | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | KAFKA TOPIC    |
-      | 1            | Pulsar   | keyed_{{test_id}}      | CREATE PULSAR CLIENT sink CONFIG { 'addr' = '{{pulsar_addr}}' };                           | sink TOPIC 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                             | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | PULSAR TOPIC   |
-      | 3            | Pulsar   | keyed_{{test_id}}      | CREATE PULSAR CLIENT sink CONFIG { 'addr' = '{{pulsar_addr}}' };                           | sink TOPIC 'keyed_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | PULSAR TOPIC   |
-      | 1            | RabbitMQ | keyed_{{test_id}}      | CREATE RABBITMQ CLIENT sink CONFIG { 'addr' = '{{rabbitmq_addr}}' };                       | sink QUEUE 'keyed_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     |                   |                   |                   |                   | RABBITMQ QUEUE |
-      | 3            | RabbitMQ | keyed_{{test_id}}      | CREATE RABBITMQ CLIENT sink CONFIG { 'addr' = '{{rabbitmq_addr}}' };                       | sink QUEUE 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                             |                   |                   |                   |                   | RABBITMQ QUEUE |
-      | 1            | NATS     | keyed_{{test_id}}      | CREATE NATS CLIENT sink CONFIG { 'addr' = '{{nats_addr}}' };                               | sink SUBJECT 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                           |                   |                   |                   |                   | NATS SUBJECT   |
-      | 3            | NATS     | keyed_{{test_id}}      | CREATE NATS CLIENT sink CONFIG { 'addr' = '{{nats_addr}}' };                               | sink SUBJECT 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                           |                   |                   |                   |                   | NATS SUBJECT   |
-      | 1            | SQS      | keyed_{{test_id}}      | CREATE SQS CLIENT sink CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1' }; | sink QUEUE 'keyed_{{test_id}}' MODE BATCH RETRY POLICY BACKOFF 50ms MAX 1s                              |                   |                   |                   |                   | SQS QUEUE      |
-      | 3            | SQS      | keyed_{{test_id}}      | CREATE SQS CLIENT sink CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1' }; | sink QUEUE 'keyed_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 50ms MAX 1s                             |                   |                   |                   |                   | SQS QUEUE      |
-      | 1            | SQS      | keyed_{{test_id}}.fifo | CREATE SQS CLIENT sink CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1' }; | sink QUEUE 'keyed_{{test_id}}.fifo' FIFO GROUP FROM BRANCH MODE SINGLE RETRY POLICY BACKOFF 50ms MAX 1s |                   |                   | {"tenant":"acme"} | {"tenant":"beta"} | SQS QUEUE      |
-      | 3            | SQS      | keyed_{{test_id}}.fifo | CREATE SQS CLIENT sink CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1' }; | sink QUEUE 'keyed_{{test_id}}.fifo' FIFO GROUP FROM BRANCH MODE BATCH RETRY POLICY BACKOFF 50ms MAX 1s  |                   |                   | {"tenant":"acme"} | {"tenant":"beta"} | SQS QUEUE      |
+      | cluster_size | target   | destination            | client                                                                                        | connector_body                                                                                             | acme_key          | beta_key          | acme_group        | beta_group        | emitter_kind   |
+      | 1            | Kafka    | keyed_{{test_id}}      | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                | emitter TOPIC 'keyed_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | KAFKA TOPIC    |
+      | 3            | Kafka    | keyed_{{test_id}}      | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };                | emitter TOPIC 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                             | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | KAFKA TOPIC    |
+      | 1            | Pulsar   | keyed_{{test_id}}      | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };                           | emitter TOPIC 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                             | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | PULSAR TOPIC   |
+      | 3            | Pulsar   | keyed_{{test_id}}      | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };                           | emitter TOPIC 'keyed_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     | {"tenant":"acme"} | {"tenant":"beta"} |                   |                   | PULSAR TOPIC   |
+      | 1            | RabbitMQ | keyed_{{test_id}}      | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };                       | emitter QUEUE 'keyed_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     |                   |                   |                   |                   | RABBITMQ QUEUE |
+      | 3            | RabbitMQ | keyed_{{test_id}}      | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };                       | emitter QUEUE 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                             |                   |                   |                   |                   | RABBITMQ QUEUE |
+      | 1            | NATS     | keyed_{{test_id}}      | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                               | emitter SUBJECT 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                           |                   |                   |                   |                   | NATS SUBJECT   |
+      | 3            | NATS     | keyed_{{test_id}}      | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                               | emitter SUBJECT 'keyed_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                           |                   |                   |                   |                   | NATS SUBJECT   |
+      | 1            | SQS      | keyed_{{test_id}}      | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1' }; | emitter QUEUE 'keyed_{{test_id}}' MODE BATCH RETRY POLICY BACKOFF 50ms MAX 1s                              |                   |                   |                   |                   | SQS QUEUE      |
+      | 3            | SQS      | keyed_{{test_id}}      | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1' }; | emitter QUEUE 'keyed_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 50ms MAX 1s                             |                   |                   |                   |                   | SQS QUEUE      |
+      | 1            | SQS      | keyed_{{test_id}}.fifo | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1' }; | emitter QUEUE 'keyed_{{test_id}}.fifo' FIFO GROUP FROM BRANCH MODE SINGLE RETRY POLICY BACKOFF 50ms MAX 1s |                   |                   | {"tenant":"acme"} | {"tenant":"beta"} | SQS QUEUE      |
+      | 3            | SQS      | keyed_{{test_id}}.fifo | CREATE SQS CLIENT emitter CONFIG { 'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1' }; | emitter QUEUE 'keyed_{{test_id}}.fifo' FIFO GROUP FROM BRANCH MODE BATCH RETRY POLICY BACKOFF 50ms MAX 1s  |                   |                   | {"tenant":"acme"} | {"tenant":"beta"} | SQS QUEUE      |
 
   @emitter_batch_brokers @sqs_batch_request_answers
   Scenario Outline: An SQS batch request answers for every batch message it carries
@@ -228,12 +228,12 @@ Feature: Batching across broker and message emitters
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE SQS CLIENT sink CONFIG {
+      CREATE SQS CLIENT emitter CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
       CREATE SQS QUEUE EMITTER answered FROM events
-        TO sink QUEUE 'answered_{{test_id}}'
+        TO emitter QUEUE 'answered_{{test_id}}'
           MODE BATCH RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
@@ -256,7 +256,7 @@ Feature: Batching across broker and message emitters
     # emitter then learns the answers for the first two messages only: the acme entry and the
     # rejected message. It writes the unanswered beta message again, byte for byte, and never the
     # acme message or the rejected one.
-    When the sink of emitter "answered" stalls after resolving 2 records of its next publish
+    When the emitter of emitter "answered" stalls after resolving 2 records of its next publish
     And http payload is posted to host "answered-{{test_id}}.example.com" path "/events"
       """
       [{"seq":1,"tenant":"acme"},{"seq":2,"tenant":"acme"},{"seq":3,"tenant":""},{"seq":4,"tenant":""},{"seq":5,"tenant":"beta"},{"seq":6,"tenant":"beta"}]
@@ -317,7 +317,7 @@ Feature: Batching across broker and message emitters
         ON GENERAL ERROR LOG;
       <client>
       CREATE <emitter_kind> EMITTER limited FROM events
-        TO <sink>
+        TO <connector_body>
           ENCODE USING event_codec
         INHERIT ALL EXCEPT note
         SET note = repeat(input.note, 200000)
@@ -356,19 +356,19 @@ Feature: Batching across broker and message emitters
       """
 
     Examples:
-      | cluster_size | target         | client                                                                      | sink                                                                                                              | limit_message                         | emitter_kind   |
-      | 1            | Kafka          | CREATE KAFKA CLIENT sink CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' }; | sink TOPIC 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s             | Message size too large                | KAFKA TOPIC    |
-      | 3            | Kafka          | CREATE KAFKA CLIENT sink CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' }; | sink TOPIC 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                     | Message size too large                | KAFKA TOPIC    |
-      | 3            | MQTT           | CREATE MQTT CLIENT sink CONFIG { 'addr' = '{{mqtt_addr}}' };                | sink TOPIC 'limited_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 50ms MAX 1s                                      | maximum packet size of 1048576 bytes  | MQTT TOPIC     |
-      | 1            | MQTT           | CREATE MQTT CLIENT sink CONFIG { 'addr' = '{{mqtt_addr}}' };                | sink TOPIC 'limited_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s       | maximum packet size of 1048576 bytes  | MQTT TOPIC     |
-      | 1            | NATS           | CREATE NATS CLIENT sink CONFIG { 'addr' = '{{nats_addr}}' };                | sink SUBJECT 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                   | max payload size exceeded             | NATS SUBJECT   |
-      | 3            | NATS JetStream | CREATE NATS CLIENT sink CONFIG { 'addr' = '{{nats_addr}}' };                | sink SUBJECT 'limited_{{test_id}}' MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s | max payload size exceeded             | NATS SUBJECT   |
-      | 1            | Pulsar         | CREATE PULSAR CLIENT sink CONFIG { 'addr' = '{{pulsar_addr}}' };            | sink TOPIC 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s             | maximum message size of 1048576 bytes | PULSAR TOPIC   |
-      | 3            | Pulsar         | CREATE PULSAR CLIENT sink CONFIG { 'addr' = '{{pulsar_addr}}' };            | sink TOPIC 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                     | maximum message size of 1048576 bytes | PULSAR TOPIC   |
-      | 1            | RabbitMQ       | CREATE RABBITMQ CLIENT sink CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | sink QUEUE 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s             | max_message_size of 1048576 bytes     | RABBITMQ QUEUE |
-      | 3            | RabbitMQ       | CREATE RABBITMQ CLIENT sink CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | sink QUEUE 'limited_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s         | max_message_size of 1048576 bytes     | RABBITMQ QUEUE |
-      | 1            | RabbitMQ       | CREATE RABBITMQ CLIENT sink CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | sink QUEUE 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                     | max_message_size of 1048576 bytes     | RABBITMQ QUEUE |
-      | 3            | RabbitMQ       | CREATE RABBITMQ CLIENT sink CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | sink QUEUE 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                     | max_message_size of 1048576 bytes     | RABBITMQ QUEUE |
+      | cluster_size | target         | client                                                                         | connector_body                                                                                                       | limit_message                         | emitter_kind   |
+      | 1            | Kafka          | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' }; | emitter TOPIC 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s             | Message size too large                | KAFKA TOPIC    |
+      | 3            | Kafka          | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' }; | emitter TOPIC 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                     | Message size too large                | KAFKA TOPIC    |
+      | 3            | MQTT           | CREATE MQTT CLIENT emitter CONFIG { 'addr' = '{{mqtt_addr}}' };                | emitter TOPIC 'limited_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 50ms MAX 1s                                      | maximum packet size of 1048576 bytes  | MQTT TOPIC     |
+      | 1            | MQTT           | CREATE MQTT CLIENT emitter CONFIG { 'addr' = '{{mqtt_addr}}' };                | emitter TOPIC 'limited_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s       | maximum packet size of 1048576 bytes  | MQTT TOPIC     |
+      | 1            | NATS           | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                | emitter SUBJECT 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                   | max payload size exceeded             | NATS SUBJECT   |
+      | 3            | NATS JetStream | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                | emitter SUBJECT 'limited_{{test_id}}' MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s | max payload size exceeded             | NATS SUBJECT   |
+      | 1            | Pulsar         | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };            | emitter TOPIC 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s             | maximum message size of 1048576 bytes | PULSAR TOPIC   |
+      | 3            | Pulsar         | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };            | emitter TOPIC 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                     | maximum message size of 1048576 bytes | PULSAR TOPIC   |
+      | 1            | RabbitMQ       | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | emitter QUEUE 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s             | max_message_size of 1048576 bytes     | RABBITMQ QUEUE |
+      | 3            | RabbitMQ       | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | emitter QUEUE 'limited_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s         | max_message_size of 1048576 bytes     | RABBITMQ QUEUE |
+      | 1            | RabbitMQ       | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | emitter QUEUE 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                     | max_message_size of 1048576 bytes     | RABBITMQ QUEUE |
+      | 3            | RabbitMQ       | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | emitter QUEUE 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                     | max_message_size of 1048576 bytes     | RABBITMQ QUEUE |
 
   @emitter_batch_brokers @emitter_batch_destination_limits
   Scenario Outline: A Pulsar batch message larger than its topic allows is rejected with every member
@@ -408,9 +408,9 @@ Feature: Batching across broker and message emitters
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE PULSAR CLIENT sink CONFIG { 'addr' = '{{pulsar_addr}}' };
+      CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };
       CREATE PULSAR TOPIC EMITTER policed FROM events
-        TO sink TOPIC 'policed_{{test_id}}'
+        TO emitter TOPIC 'policed_{{test_id}}'
           MODE <publishing_mode> RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL EXCEPT note
@@ -490,12 +490,12 @@ Feature: Batching across broker and message emitters
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE SQS CLIENT sink CONFIG {
+      CREATE SQS CLIENT emitter CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
       CREATE SQS QUEUE EMITTER attributed FROM events
-        TO sink QUEUE 'attributed_{{test_id}}'
+        TO emitter QUEUE 'attributed_{{test_id}}'
           MODE <publishing_mode> RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL EXCEPT note

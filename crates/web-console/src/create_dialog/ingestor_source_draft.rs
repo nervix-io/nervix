@@ -16,7 +16,7 @@ use std::num::NonZeroU64;
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
-    ClientName, ClientSourceEntity, DomainClockPeriod, EndpointIngestMode, EndpointName,
+    ClientIngestorEntity, ClientName, DomainClockPeriod, EndpointIngestMode, EndpointName,
     HttpEndpointIngestor, HttpIngestorEntity, HttpRequestIngestMode, HttpRequestIngestor,
     IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind,
     KafkaConsumerGroupName, KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode,
@@ -100,7 +100,7 @@ pub(super) enum OffsetChoice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(super) struct IngestIngestorDraft {
+pub(super) struct IngestorEntityDraft {
     pub(super) kind: Option<IngestorEntityKind>,
     pub(super) reference: Option<SelectedReference<ModelName>>,
     pub(super) topic: String,
@@ -129,7 +129,7 @@ pub(super) struct IngestIngestorDraft {
     pub(super) retry_after: String,
 }
 
-impl IngestIngestorDraft {
+impl IngestorEntityDraft {
     pub(super) fn choose_kind(&mut self, kind: IngestorEntityKind) {
         if self.kind != Some(kind) {
             *self = Self {
@@ -211,7 +211,7 @@ impl IngestIngestorDraft {
                 )
                 | IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener),
             ) => &[DeliveryChoice::NoAck],
-            Some(IngestorEntityKind::Client(ClientSourceEntity::Producer)) | None => &[],
+            Some(IngestorEntityKind::Client(ClientIngestorEntity::Producer)) | None => &[],
         }
     }
 
@@ -249,29 +249,29 @@ impl IngestIngestorDraft {
                 IngestorEntityKind::Http(HttpIngestorEntity::Endpoint)
                 | IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint),
             ) => &[QuiesceChoice::Reject, QuiesceChoice::Buffer],
-            Some(IngestorEntityKind::Client(ClientSourceEntity::Producer)) | None => &[],
+            Some(IngestorEntityKind::Client(ClientIngestorEntity::Producer)) | None => &[],
         }
     }
 
-    pub(super) fn build(&self) -> error_stack::Result<IngestorEntity, IngestIngestorDraftError> {
+    pub(super) fn build(&self) -> error_stack::Result<IngestorEntity, IngestorEntityDraftError> {
         let kind = self
             .kind
-            .ok_or_else(|| Report::new(IngestIngestorDraftError::Kind))?;
+            .ok_or_else(|| Report::new(IngestorEntityDraftError::Kind))?;
         // The form offers transport sources only; a client source names no client or endpoint.
-        if let IngestorEntityKind::Client(ClientSourceEntity::Producer) = kind {
-            return Err(Report::new(IngestIngestorDraftError::ClientSource));
+        if let IngestorEntityKind::Client(ClientIngestorEntity::Producer) = kind {
+            return Err(Report::new(IngestorEntityDraftError::ClientInput));
         }
         if self.current_reference().is_none() {
             return Err(Report::new(if self.reference.is_some() {
-                IngestIngestorDraftError::ReferenceChanged
+                IngestorEntityDraftError::ReferenceChanged
             } else {
-                IngestIngestorDraftError::Reference
+                IngestorEntityDraftError::Reference
             }));
         }
         let quiesce = self.build_quiesce()?;
         let source: IngestorEntity = match kind {
-            IngestorEntityKind::Client(ClientSourceEntity::Producer) => {
-                return Err(Report::new(IngestIngestorDraftError::ClientSource));
+            IngestorEntityKind::Client(ClientIngestorEntity::Producer) => {
+                return Err(Report::new(IngestorEntityDraftError::ClientInput));
             }
             IngestorEntityKind::Http(HttpIngestorEntity::Request) => HttpRequestIngestor {
                 client: self.client()?,
@@ -289,7 +289,7 @@ impl IngestIngestorDraft {
             IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) => KafkaTopicIngestor {
                 client: self.client()?,
                 topic: KafkaTopicName::parse(&self.topic)
-                    .change_context(IngestIngestorDraftError::Topic)?,
+                    .change_context(IngestorEntityDraftError::Topic)?,
                 offset_mode: self.offset_mode()?,
                 instances: self.instances()?,
                 mode: self.kafka_mode()?,
@@ -299,7 +299,7 @@ impl IngestIngestorDraft {
             IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => PulsarTopicIngestor {
                 client: self.client()?,
                 topic: PulsarTopicName::parse(&self.topic)
-                    .change_context(IngestIngestorDraftError::Topic)?,
+                    .change_context(IngestorEntityDraftError::Topic)?,
                 subscription: self.pulsar_subscription()?,
                 instances: self.instances()?,
                 mode: self.kafka_mode()?,
@@ -309,7 +309,7 @@ impl IngestIngestorDraft {
             IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => MqttTopicIngestor {
                 client: self.client()?,
                 topic: MqttTopicFilter::parse(&self.topic)
-                    .change_context(IngestIngestorDraftError::Topic)?,
+                    .change_context(IngestorEntityDraftError::Topic)?,
                 instances: self.instances()?,
                 mode: self.mqtt_mode()?,
                 quiesce,
@@ -318,9 +318,9 @@ impl IngestIngestorDraft {
             IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => NatsSubjectIngestor {
                 client: self.client()?,
                 subject: NatsSubjectName::parse(&self.subject)
-                    .change_context(IngestIngestorDraftError::Subject)?,
+                    .change_context(IngestorEntityDraftError::Subject)?,
                 queue_group: NatsQueueGroupName::parse(&self.queue_group)
-                    .change_context(IngestIngestorDraftError::QueueGroup)?,
+                    .change_context(IngestorEntityDraftError::QueueGroup)?,
                 instances: self.instances()?,
                 mode: NatsIngestMode::NoAck,
                 quiesce,
@@ -329,7 +329,7 @@ impl IngestIngestorDraft {
             IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => RabbitMqQueueIngestor {
                 client: self.client()?,
                 queue: RabbitMqQueueName::parse(&self.queue)
-                    .change_context(IngestIngestorDraftError::Queue)?,
+                    .change_context(IngestorEntityDraftError::Queue)?,
                 instances: self.instances()?,
                 mode: RabbitMqIngestMode::AckSequential {
                     timeout: self.ack_timeout()?,
@@ -341,7 +341,7 @@ impl IngestIngestorDraft {
             IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => RedisPubSubIngestor {
                 client: self.client()?,
                 channel: RedisChannelName::parse(&self.channel)
-                    .change_context(IngestIngestorDraftError::Channel)?,
+                    .change_context(IngestorEntityDraftError::Channel)?,
                 mode: RedisPubSubIngestMode::NoAck,
                 quiesce,
             }
@@ -349,7 +349,7 @@ impl IngestIngestorDraft {
             IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => {
                 PrometheusQueryIngestor {
                     client: self.client()?,
-                    query: self.required(&self.query, IngestIngestorDraftError::Query)?,
+                    query: self.required(&self.query, IngestorEntityDraftError::Query)?,
                     max_body_size: None,
                     every: self.every()?,
                     mode: PrometheusIngestMode::NoAck,
@@ -366,7 +366,7 @@ impl IngestIngestorDraft {
             IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => SqsQueueIngestor {
                 client: self.client()?,
                 queue: SqsQueueName::parse(&self.queue)
-                    .change_context(IngestIngestorDraftError::Queue)?,
+                    .change_context(IngestorEntityDraftError::Queue)?,
                 instances: self.instances()?,
                 mode: SqsIngestMode::AckSequential {
                     timeout: self.ack_timeout()?,
@@ -399,28 +399,28 @@ impl IngestIngestorDraft {
             .into(),
         };
         if !source.supports_quiesce(source.quiesce()) {
-            return Err(Report::new(IngestIngestorDraftError::UnsupportedQuiesce));
+            return Err(Report::new(IngestorEntityDraftError::UnsupportedQuiesce));
         }
         Ok(source)
     }
 
-    fn client(&self) -> error_stack::Result<ClientName, IngestIngestorDraftError> {
+    fn client(&self) -> error_stack::Result<ClientName, IngestorEntityDraftError> {
         let reference = self.current_reference().ok_or_else(|| {
             Report::new(if self.reference.is_some() {
-                IngestIngestorDraftError::ReferenceChanged
+                IngestorEntityDraftError::ReferenceChanged
             } else {
-                IngestIngestorDraftError::Reference
+                IngestorEntityDraftError::Reference
             })
         })?;
         Ok(ClientName::from(reference))
     }
 
-    fn endpoint(&self) -> error_stack::Result<EndpointName, IngestIngestorDraftError> {
+    fn endpoint(&self) -> error_stack::Result<EndpointName, IngestorEntityDraftError> {
         let reference = self.current_reference().ok_or_else(|| {
             Report::new(if self.reference.is_some() {
-                IngestIngestorDraftError::ReferenceChanged
+                IngestorEntityDraftError::ReferenceChanged
             } else {
-                IngestIngestorDraftError::Reference
+                IngestorEntityDraftError::Reference
             })
         })?;
         Ok(EndpointName::from(reference))
@@ -429,71 +429,71 @@ impl IngestIngestorDraft {
     fn required(
         &self,
         value: &str,
-        error: IngestIngestorDraftError,
-    ) -> error_stack::Result<String, IngestIngestorDraftError> {
+        error: IngestorEntityDraftError,
+    ) -> error_stack::Result<String, IngestorEntityDraftError> {
         if value.trim().is_empty() {
             return Err(Report::new(error));
         }
         Ok(value.trim().to_string())
     }
 
-    fn instances(&self) -> error_stack::Result<NonZeroU64, IngestIngestorDraftError> {
+    fn instances(&self) -> error_stack::Result<NonZeroU64, IngestorEntityDraftError> {
         self.instances
             .trim()
             .parse()
-            .map_err(|_| Report::new(IngestIngestorDraftError::Instances))
+            .map_err(|_| Report::new(IngestorEntityDraftError::Instances))
     }
 
-    fn every(&self) -> error_stack::Result<DomainClockPeriod, IngestIngestorDraftError> {
+    fn every(&self) -> error_stack::Result<DomainClockPeriod, IngestorEntityDraftError> {
         self.every
             .trim()
             .parse()
-            .map_err(|_| Report::new(IngestIngestorDraftError::Every))
+            .map_err(|_| Report::new(IngestorEntityDraftError::Every))
     }
 
     /// The subscription a Pulsar source reads through, and who the draft says owns it, which
     /// every statement declares.
     fn pulsar_subscription(
         &self,
-    ) -> error_stack::Result<PulsarSubscription, IngestIngestorDraftError> {
+    ) -> error_stack::Result<PulsarSubscription, IngestorEntityDraftError> {
         let name = PulsarSubscriptionName::parse(&self.subscription)
-            .change_context(IngestIngestorDraftError::Subscription)?;
+            .change_context(IngestorEntityDraftError::Subscription)?;
         let Some(ownership) = self.subscription_ownership else {
-            return Err(Report::new(IngestIngestorDraftError::SubscriptionOwnership));
+            return Err(Report::new(IngestorEntityDraftError::SubscriptionOwnership));
         };
         Ok(PulsarSubscription { name, ownership })
     }
 
-    fn offset_mode(&self) -> error_stack::Result<KafkaOffsetMode, IngestIngestorDraftError> {
+    fn offset_mode(&self) -> error_stack::Result<KafkaOffsetMode, IngestorEntityDraftError> {
         match self.offset {
             Some(OffsetChoice::Domain) => Ok(KafkaOffsetMode::Domain),
             Some(OffsetChoice::ConsumerGroup) => Ok(KafkaOffsetMode::ConsumerGroup(
                 KafkaConsumerGroupName::parse(&self.consumer_group)
-                    .change_context(IngestIngestorDraftError::ConsumerGroup)?,
+                    .change_context(IngestorEntityDraftError::ConsumerGroup)?,
             )),
-            None => Err(Report::new(IngestIngestorDraftError::Offset)),
+            None => Err(Report::new(IngestorEntityDraftError::Offset)),
         }
     }
 
-    fn retry_policy(&self) -> error_stack::Result<RetryPolicy, IngestIngestorDraftError> {
+    fn retry_policy(&self) -> error_stack::Result<RetryPolicy, IngestorEntityDraftError> {
         Ok(RetryPolicy {
-            backoff: self.required(&self.retry_backoff, IngestIngestorDraftError::RetryBackoff)?,
-            max_backoff: self.required(&self.retry_max, IngestIngestorDraftError::RetryMax)?,
+            backoff: self.required(&self.retry_backoff, IngestorEntityDraftError::RetryBackoff)?,
+            max_backoff: self.required(&self.retry_max, IngestorEntityDraftError::RetryMax)?,
         })
     }
 
-    fn ack_timeout(&self) -> error_stack::Result<String, IngestIngestorDraftError> {
-        self.required(&self.ack_timeout, IngestIngestorDraftError::AckTimeout)
+    fn ack_timeout(&self) -> error_stack::Result<String, IngestorEntityDraftError> {
+        self.required(&self.ack_timeout, IngestorEntityDraftError::AckTimeout)
     }
 
-    fn ack_max(&self) -> error_stack::Result<NonZeroU64, IngestIngestorDraftError> {
+    fn ack_max(&self) -> error_stack::Result<NonZeroU64, IngestorEntityDraftError> {
         self.ack_max
             .trim()
             .parse()
-            .map_err(|_| Report::new(IngestIngestorDraftError::AckMax))
+            .map_err(|_| Report::new(IngestorEntityDraftError::AckMax))
     }
 
-    fn kafka_mode(&self) -> error_stack::Result<KafkaIngestMode, IngestIngestorDraftError> {
+    fn kafka_mode(&self) -> error_stack::Result<KafkaIngestMode, IngestorEntityDraftError> {
         match self.delivery {
             Some(DeliveryChoice::AckSequential) => Ok(KafkaIngestMode::AckSequential {
                 timeout: self.ack_timeout()?,
@@ -502,31 +502,31 @@ impl IngestIngestorDraft {
             Some(DeliveryChoice::AckParallel) => Ok(KafkaIngestMode::AckParallel {
                 max: self.ack_max()?,
                 batch_timeout: self
-                    .required(&self.batch_timeout, IngestIngestorDraftError::BatchTimeout)?,
+                    .required(&self.batch_timeout, IngestorEntityDraftError::BatchTimeout)?,
                 timeout: self.ack_timeout()?,
                 retry_policy: self.retry_policy()?,
             }),
             Some(DeliveryChoice::NoAck) => Ok(KafkaIngestMode::NoAck),
-            None => Err(Report::new(IngestIngestorDraftError::Mode)),
+            None => Err(Report::new(IngestorEntityDraftError::Mode)),
         }
     }
 
-    fn mqtt_mode(&self) -> error_stack::Result<MqttIngestMode, IngestIngestorDraftError> {
+    fn mqtt_mode(&self) -> error_stack::Result<MqttIngestMode, IngestorEntityDraftError> {
         match self.delivery {
             Some(DeliveryChoice::NoAck) => {
                 let session = self
                     .mqtt_session
-                    .ok_or_else(|| Report::new(IngestIngestorDraftError::MqttSession))?;
+                    .ok_or_else(|| Report::new(IngestorEntityDraftError::MqttSession))?;
                 let qos = self
                     .mqtt_qos
-                    .ok_or_else(|| Report::new(IngestIngestorDraftError::MqttQos))?;
+                    .ok_or_else(|| Report::new(IngestorEntityDraftError::MqttQos))?;
                 Ok(MqttIngestMode::NoAck { session, qos })
             }
             Some(DeliveryChoice::AckSequential | DeliveryChoice::AckParallel) => {
                 if self.mqtt_session != Some(MqttSession::Persistent)
                     || self.mqtt_qos != Some(MqttQos::AtLeastOnce)
                 {
-                    return Err(Report::new(IngestIngestorDraftError::MqttAckContract));
+                    return Err(Report::new(IngestorEntityDraftError::MqttAckContract));
                 }
                 if self.delivery == Some(DeliveryChoice::AckSequential) {
                     Ok(MqttIngestMode::AckSequential {
@@ -538,34 +538,34 @@ impl IngestIngestorDraft {
                         max: self.ack_max()?,
                         batch_timeout: self.required(
                             &self.batch_timeout,
-                            IngestIngestorDraftError::BatchTimeout,
+                            IngestorEntityDraftError::BatchTimeout,
                         )?,
                         timeout: self.ack_timeout()?,
                         retry_policy: self.retry_policy()?,
                     })
                 }
             }
-            None => Err(Report::new(IngestIngestorDraftError::Mode)),
+            None => Err(Report::new(IngestorEntityDraftError::Mode)),
         }
     }
 
-    fn build_quiesce(&self) -> error_stack::Result<IngestQuiesceMode, IngestIngestorDraftError> {
+    fn build_quiesce(&self) -> error_stack::Result<IngestQuiesceMode, IngestorEntityDraftError> {
         let choice = self
             .quiesce
-            .ok_or_else(|| Report::new(IngestIngestorDraftError::Quiesce))?;
+            .ok_or_else(|| Report::new(IngestorEntityDraftError::Quiesce))?;
         if !self.available_quiesce().contains(&choice) {
-            return Err(Report::new(IngestIngestorDraftError::UnsupportedQuiesce));
+            return Err(Report::new(IngestorEntityDraftError::UnsupportedQuiesce));
         }
         match choice {
             QuiesceChoice::Suspend => Ok(IngestQuiesceMode::Suspend),
             QuiesceChoice::Drop => Ok(IngestQuiesceMode::Drop),
             QuiesceChoice::Reject => Ok(IngestQuiesceMode::Reject {
                 retry_after: self
-                    .required(&self.retry_after, IngestIngestorDraftError::RetryAfter)?,
+                    .required(&self.retry_after, IngestorEntityDraftError::RetryAfter)?,
             }),
             QuiesceChoice::Buffer => {
                 let max_size =
-                    self.required(&self.buffer_size, IngestIngestorDraftError::BufferSize)?;
+                    self.required(&self.buffer_size, IngestorEntityDraftError::BufferSize)?;
                 // An endpoint holds what arrives in a bounded buffer and has no older message to
                 // drop, so its buffer names no overflow.
                 if self.reads_endpoint() {
@@ -573,7 +573,7 @@ impl IngestIngestorDraft {
                 } else {
                     let overflow = self
                         .overflow
-                        .ok_or_else(|| Report::new(IngestIngestorDraftError::Overflow))?;
+                        .ok_or_else(|| Report::new(IngestorEntityDraftError::Overflow))?;
                     Ok(IngestQuiesceMode::Buffer { max_size, overflow })
                 }
             }
@@ -582,14 +582,14 @@ impl IngestIngestorDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub(super) enum IngestIngestorDraftError {
-    #[error("Choose an ingestor source type")]
+pub(super) enum IngestorEntityDraftError {
+    #[error("Choose an ingestor entity type")]
     Kind,
-    #[error("A client ingestor reads the batches applications publish and is created in NSPL")]
-    ClientSource,
-    #[error("Choose a source client or endpoint")]
+    #[error("A client ingestor reads the batches applications publish and is created in Plexus")]
+    ClientInput,
+    #[error("Choose an ingestor client or endpoint")]
     Reference,
-    #[error("The selected source belongs to a changed context; select it again")]
+    #[error("The selected ingestor input belongs to a changed context; select it again")]
     ReferenceChanged,
     #[error("Enter a valid topic or topic filter")]
     Topic,
@@ -661,15 +661,15 @@ mod tests {
     };
     use nervix_nspl::statement::parse_statement;
 
-    use super::{DeliveryChoice, IngestIngestorDraft, OffsetChoice, QuiesceChoice};
+    use super::{DeliveryChoice, IngestorEntityDraft, OffsetChoice, QuiesceChoice};
     use crate::create_dialog::{
         SelectedReference,
         ingestor_draft::{IngestorDraft, TimestampDraft},
         ingestor_route_draft::{FlushDraft, InheritDraft, MessageErrorDraft},
     };
 
-    fn complete(kind: IngestorEntityKind) -> IngestIngestorDraft {
-        let mut draft = IngestIngestorDraft::default();
+    fn complete(kind: IngestorEntityKind) -> IngestorEntityDraft {
+        let mut draft = IngestorEntityDraft::default();
         draft.choose_kind(kind);
         let reference_kind = kind.capabilities().reference.model_kind();
         draft.select_reference(&NodeRef::new(
@@ -815,7 +815,7 @@ mod tests {
             .expect_err("a Pulsar source declares who owns its subscription");
         assert_eq!(
             error.current_context(),
-            &super::IngestIngestorDraftError::SubscriptionOwnership
+            &super::IngestorEntityDraftError::SubscriptionOwnership
         );
         for ownership in [
             PulsarSubscriptionOwnership::Ingestor,

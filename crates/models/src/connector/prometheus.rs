@@ -242,7 +242,7 @@ impl PrometheusQueryIngestor {
 }
 
 /// What the connector of a PROMETHEUS QUERY holds and how long it waits.
-const PROMETHEUS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const PROMETHEUS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
             holds: "the query response",
@@ -313,7 +313,7 @@ impl IngestorDeclaration for PrometheusQueryIngestor {
                 },
             },
         ],
-        bounds: PROMETHEUS_SOURCE_BOUNDS,
+        bounds: PROMETHEUS_INGESTOR_BOUNDS,
     };
 }
 
@@ -357,7 +357,7 @@ connector_ingestors! {
     /// What a Prometheus source reads.
     pub enum PrometheusIngestor;
     /// The alterations of the ingestors that read a Prometheus entity.
-    pub enum PrometheusIngestorAlteration;
+    pub enum PrometheusQueryIngestorAlteration;
     /// The entities a Prometheus source reads.
     pub enum PrometheusIngestorEntity {
         Query(PrometheusQueryIngestor) = "QUERY", "Prometheus";

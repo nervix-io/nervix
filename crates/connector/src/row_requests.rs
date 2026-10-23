@@ -1,15 +1,15 @@
-//! How a row sink or a row request sink divides mapped rows into the requests its destination
+//! How a row emitter or a row request emitter divides mapped rows into the requests its destination
 //! takes.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The limits one request of such a sink stays within — the emitter's `BATCH` limits,
+//! - **Owns.** The limits one request of such an emitter stays within — the emitter's `BATCH` limits,
 //!   narrowed by what the destination accepts in one request — the division rule, and the
 //!   rejection of a row whose own request exceeds a limit: candidates in packing order hold at
 //!   most the row limit, a candidate whose measured request exceeds the byte limit is halved and
 //!   measured again, and a single row that still exceeds it is reported alone, naming the limit.
-//! - **Depends on.** The vocabulary's batching policy and the sink contract's rejected record.
-//! - **Must not know.** What a request carries, how a sink encodes, measures or writes it, or
+//! - **Depends on.** The vocabulary's batching policy and the emitter contract's rejected record.
+//! - **Must not know.** What a request carries, how an emitter encodes, measures or writes it, or
 //!   which destination a narrower limit comes from.
 
 #![cfg_attr(
@@ -30,9 +30,9 @@ use nervix_models::{EmitterBatchPolicy, PayloadSizeLimit, Timestamp};
 
 use crate::emitter::RejectedEmitterMember;
 
-/// The most rows and measured bytes one request of a row or row request sink carries.
+/// The most rows and measured bytes one request of a row or row request emitter carries.
 ///
-/// They start as the emitter's `BATCH MAX MESSAGES` and `MAX SIZE`, and a sink narrows them to what
+/// They start as the emitter's `BATCH MAX MESSAGES` and `MAX SIZE`, and an emitter narrows them to what
 /// its destination accepts in one request, such as the placeholders one MySQL statement binds or
 /// the bytes one Postgres protocol message holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,12 +56,12 @@ impl From<EmitterBatchPolicy> for RowRequestLimits {
     }
 }
 
-/// One candidate's request, as the sink measured it.
+/// One candidate's request, as the emitter measured it.
 #[derive(Debug)]
 pub struct MeasuredRequest<P> {
-    /// The exact byte size of what the request carries, as the sink defines its measured payload.
+    /// The exact byte size of what the request carries, as the emitter defines its measured payload.
     pub size: u64,
-    /// Whatever the sink built to measure the request, handed back when the request is written.
+    /// Whatever the emitter built to measure the request, handed back when the request is written.
     pub request: P,
 }
 
@@ -82,11 +82,11 @@ pub enum ExceededLimit {
 }
 
 impl RowOversize {
-    /// The rejection of the row, which `request` names as the sink measures it, such as
+    /// The rejection of the row, which `request` names as the emitter measures it, such as
     /// `Postgres insert`.
     ///
     /// A row over `MAX SIZE` is a `validation` error of the `encode` operation, as it is for every
-    /// sink. A row within `MAX SIZE` that its destination could never accept is the destination's
+    /// emitter. A row within `MAX SIZE` that its destination could never accept is the destination's
     /// definitive rejection of it. Neither message quotes a value the row carries.
     pub fn rejected<Id>(
         self,
@@ -171,7 +171,7 @@ impl RowRequestLimits {
     /// A candidate is the longest run from the front of what remains that holds at most the row
     /// limit. `measure` reports the exact size of the request that would carry a candidate. A
     /// candidate that measures more than the byte limit is halved — its first half becomes the new
-    /// candidate and the rest returns to the front — and measured again, so a sink whose encoding
+    /// candidate and the rest returns to the front — and measured again, so an emitter whose encoding
     /// does not grow with its members is never trusted to shrink. A single member that still
     /// exceeds the limit is oversize and the division continues after it. A candidate of `n`
     /// members is therefore measured at most `⌈log2(n)⌉ + 1` times.

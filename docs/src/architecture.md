@@ -34,7 +34,7 @@ emitter plans, processor programs, and message-error routes. The runtime binds l
 executes that revision without reading a Model. [Execution Plans](./execution-plans.md) follows
 construction, publication, incremental application, rebuilds, and recovery end to end.
 
-Each declared layer module carries a gated `nervix::layer` ingestor contract alongside its ownership
+Each declared layer module carries a gated `nervix::layer` source contract alongside its ownership
 documentation. The compiler uses that semantic owner through aliases, re-exports and source moves.
 Configuration Models cannot enter data-plane interfaces or bodies; connector engines explicitly
 declare that they consume plans. General infrastructure, including consensus persistence, may

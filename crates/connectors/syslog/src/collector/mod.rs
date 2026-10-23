@@ -1,4 +1,4 @@
-//! Syslog sink transport.
+//! Syslog emitter transport.
 //!
 //! Layer: engines and infrastructure.
 //!
@@ -48,13 +48,13 @@ use crate::config::{
 
 const SYSLOG: &str = "syslog";
 
-/// What one Syslog sink sends through: the entries its client declares its transport with.
-pub struct SyslogEmitterConfig {
+/// What one Syslog emitter sends through: the entries its client declares its transport with.
+pub struct SyslogCollectorEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub dns: DnsResolver,
 }
 
-pub struct SyslogEmitter {
+pub struct SyslogCollectorEmitter {
     config: SyslogClientConfig,
     sender: SyslogSender,
     /// The client's `timeout_ms`, which bounds writing and flushing each frame, where it sets one.
@@ -81,8 +81,11 @@ enum SyslogPayloadError {
     NonTransparentLf,
 }
 
-impl SyslogEmitter {
-    pub async fn new(config: SyslogEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+impl SyslogCollectorEmitter {
+    pub async fn new(
+        config: SyslogCollectorEmitterConfig,
+        _host: EmitterHost,
+    ) -> EmitterStartResult<Self> {
         let client = Self::client_config(&config.config)?;
         let connect_timeout = Self::connect_timeout(&config.config)?;
         let write_timeout = Self::write_timeout(&config.config)?;
@@ -107,7 +110,7 @@ impl SyslogEmitter {
         Ok(())
     }
 
-    /// The deadline the client's `connect_timeout_ms` sets on opening the sink's connection.
+    /// The deadline the client's `connect_timeout_ms` sets on opening the emitter's connection.
     fn connect_timeout(config: &[ClientConfigEntry]) -> EmitterStartResult<ConfiguredDeadline> {
         ConfiguredDeadline::connect(config)
             .change_context(EmitterOpenError::InvalidConfiguration { connector: SYSLOG })
@@ -123,7 +126,7 @@ impl SyslogEmitter {
     }
 
     /// Why no connection was opened, with each address attempt's failure. When the attempts ran
-    /// out of the client's `connect_timeout_ms`, the failure names it beneath the sink's, and its
+    /// out of the client's `connect_timeout_ms`, the failure names it beneath the emitter's, and its
     /// message is attached last, so it leads the report the emitter shows.
     fn unconnected(
         budget: &OperationBudget,
@@ -352,7 +355,7 @@ impl SyslogEmitter {
         Ok(())
     }
 
-    fn config_error(error: Report<super::config::SyslogConfigError>) -> Report<EmitterOpenError> {
+    fn config_error(error: Report<crate::config::SyslogConfigError>) -> Report<EmitterOpenError> {
         // A configuration value that does not parse keeps its parser's error as the frame beneath
         // it, so the reason is the whole chain.
         let reason = format!("{error:#}");
@@ -377,8 +380,17 @@ impl SyslogEmitter {
     }
 }
 
+impl SyslogCollectorEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::Syslog(nervix_models::SyslogEmitterEntity::Collector);
+}
+
 #[async_trait]
-impl EmitterLifecycle for SyslogEmitter {
+impl EmitterLifecycle for SyslogCollectorEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// Each frame is written and flushed to the socket before the publish returns, so the
     /// sender holds nothing.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
@@ -387,7 +399,7 @@ impl EmitterLifecycle for SyslogEmitter {
 }
 
 #[async_trait]
-impl RecordEmitter for SyslogEmitter {
+impl RecordEmitter for SyslogCollectorEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         // A socket that accepted a frame has not delivered it, so a write failure leaves every
@@ -433,24 +445,27 @@ async fn write_stream_frame(
             stream
                 .write_all(prefix.as_bytes())
                 .await
-                .map_err(SyslogEmitter::publish_error)?;
+                .map_err(SyslogCollectorEmitter::publish_error)?;
             stream
                 .write_all(payload)
                 .await
-                .map_err(SyslogEmitter::publish_error)?;
+                .map_err(SyslogCollectorEmitter::publish_error)?;
         }
         SyslogFraming::NonTransparent => {
             stream
                 .write_all(payload)
                 .await
-                .map_err(SyslogEmitter::publish_error)?;
+                .map_err(SyslogCollectorEmitter::publish_error)?;
             stream
                 .write_all(b"\n")
                 .await
-                .map_err(SyslogEmitter::publish_error)?;
+                .map_err(SyslogCollectorEmitter::publish_error)?;
         }
     }
-    stream.flush().await.map_err(SyslogEmitter::publish_error)
+    stream
+        .flush()
+        .await
+        .map_err(SyslogCollectorEmitter::publish_error)
 }
 
 #[cfg(test)]
@@ -498,7 +513,7 @@ mod tests {
     fn startup_keeps_the_typed_syslog_configuration_failure() {
         let failure = SyslogClientConfig::parse(&[], SyslogDirection::Emit)
             .expect_err("a client needs a protocol");
-        let report = SyslogEmitter::config_error(failure);
+        let report = SyslogCollectorEmitter::config_error(failure);
         assert!(report.contains::<SyslogConfigError>());
         assert_eq!(
             report.current_context(),
@@ -522,7 +537,7 @@ mod tests {
         let failure = SyslogClientConfig::parse(&entries, SyslogDirection::Emit)
             .expect_err("a message size must be a positive integer");
 
-        let report = SyslogEmitter::config_error(failure);
+        let report = SyslogCollectorEmitter::config_error(failure);
 
         let mut descriptions = Vec::new();
         for frame in report.frames() {
@@ -539,7 +554,7 @@ mod tests {
         );
     }
 
-    async fn connector(config: SyslogClientConfig) -> SyslogEmitter {
+    async fn connector(config: SyslogClientConfig) -> SyslogCollectorEmitter {
         let receiver = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("test UDP receiver must bind");
@@ -554,7 +569,7 @@ mod tests {
             )
             .await
             .expect("test UDP sender must connect");
-        SyslogEmitter {
+        SyslogCollectorEmitter {
             config,
             sender: SyslogSender::Udp(sender),
             write_timeout: None,
@@ -640,7 +655,7 @@ mod tests {
         );
         let config = endpoint_config("tcp", &format!("syslog.nervix.test:{port}"));
         let SyslogSender::Tcp(mut sender) =
-            SyslogEmitter::connect(&config, default_connect_timeout(), &fixture.resolver)
+            SyslogCollectorEmitter::connect(&config, default_connect_timeout(), &fixture.resolver)
                 .await
                 .assured("the second DNS answer has a listener")
         else {
@@ -670,7 +685,7 @@ mod tests {
         let address = receiver.local_addr().assured("the UDP receiver is bound");
         let config = endpoint_config("udp", &address.to_string());
         let SyslogSender::Udp(sender) =
-            SyslogEmitter::connect(&config, default_connect_timeout(), &fixture.resolver)
+            SyslogCollectorEmitter::connect(&config, default_connect_timeout(), &fixture.resolver)
                 .await
                 .assured("the literal IPv6 address can be connected")
         else {
@@ -706,9 +721,10 @@ mod tests {
             .assured("the listener is bound")
             .port();
         let config = endpoint_config("tcp", &format!("listed.nervix.test:{port}"));
-        let sender = SyslogEmitter::connect(&config, default_connect_timeout(), &fixture.resolver)
-            .await
-            .assured("the hosts-file address has a listener");
+        let sender =
+            SyslogCollectorEmitter::connect(&config, default_connect_timeout(), &fixture.resolver)
+                .await
+                .assured("the hosts-file address has a listener");
         assert!(matches!(sender, SyslogSender::Tcp(_)));
         listener
             .accept()
@@ -727,10 +743,11 @@ mod tests {
             },
         );
         let config = endpoint_config("tcp", "missing.nervix.test:6514");
-        let failure = SyslogEmitter::connect(&config, default_connect_timeout(), &fixture.resolver)
-            .await
-            .err()
-            .assured("the fixture name has no address");
+        let failure =
+            SyslogCollectorEmitter::connect(&config, default_connect_timeout(), &fixture.resolver)
+                .await
+                .err()
+                .assured("the fixture name has no address");
         assert!(matches!(
             failure.current_context(),
             EmitterOpenError::Initialize { connector: SYSLOG }
@@ -768,10 +785,10 @@ mod tests {
         let config = SyslogClientConfig::parse(&entries, SyslogDirection::Emit)
             .assured("the test endpoint is a valid Syslog client");
         let connect_timeout =
-            SyslogEmitter::connect_timeout(&entries).assured("200 ms is a valid deadline");
+            SyslogCollectorEmitter::connect_timeout(&entries).assured("200 ms is a valid deadline");
         let failure = nervix_primitives::time::timeout(
             Duration::from_secs(10),
-            SyslogEmitter::connect(&config, connect_timeout, &fixture.resolver),
+            SyslogCollectorEmitter::connect(&config, connect_timeout, &fixture.resolver),
         )
         .await
         .assured("connect_timeout_ms bounds the connection")
@@ -788,7 +805,7 @@ mod tests {
         assert_eq!(elapsed.key, DeadlineKey::ConnectTimeout);
         assert_eq!(elapsed.bound, Duration::from_millis(200));
         assert!(format!("{failure:#}").contains("within connect_timeout_ms 200ms"));
-        // The emitter shows the last message a sink attached, and the deadline leads.
+        // The emitter shows the last message an emitter attached, and the deadline leads.
         let leading = failure
             .frames()
             .find_map(|frame| frame.downcast_ref::<String>())
@@ -819,7 +836,7 @@ mod tests {
                         value: value.to_string(),
                     },
                 ];
-                let failure = SyslogEmitter::check_client_config(&entries)
+                let failure = SyslogCollectorEmitter::check_client_config(&entries)
                     .err()
                     .assured("an invalid deadline fails the check");
                 assert!(
@@ -862,7 +879,7 @@ mod tests {
         }])
         .assured("two seconds is a valid deadline")
         .assured("the entry sets timeout_ms");
-        let mut connector = SyslogEmitter {
+        let mut connector = SyslogCollectorEmitter {
             config: endpoint_config("tcp", &address.to_string()),
             sender: SyslogSender::Tcp(stream),
             write_timeout: Some(write_timeout),
@@ -886,7 +903,7 @@ mod tests {
             .assured("the elapsed deadline stays beneath the publish failure");
         assert_eq!(elapsed.key, DeadlineKey::Timeout);
         assert_eq!(elapsed.bound, Duration::from_secs(2));
-        // The emitter shows the last message a sink attached, and the deadline leads.
+        // The emitter shows the last message an emitter attached, and the deadline leads.
         let leading = failure
             .frames()
             .find_map(|frame| frame.downcast_ref::<String>())
@@ -907,7 +924,7 @@ mod tests {
             .await
             .assured("the listener accepts connections");
         let (mut server, _) = listener.accept().await.assured("the connection arrives");
-        let mut connector = SyslogEmitter {
+        let mut connector = SyslogCollectorEmitter {
             config: endpoint_config("tcp", &address.to_string()),
             sender: SyslogSender::Tcp(stream),
             write_timeout: None,
@@ -953,7 +970,7 @@ mod tests {
         }])
         .assured("thirty seconds is a valid deadline")
         .assured("the entry sets timeout_ms");
-        let mut connector = SyslogEmitter {
+        let mut connector = SyslogCollectorEmitter {
             config: endpoint_config("tcp", &address.to_string()),
             sender: SyslogSender::Tcp(stream),
             write_timeout: Some(write_timeout),
@@ -1011,7 +1028,7 @@ mod tests {
 
     #[test]
     fn octet_count_prefix_has_at_most_ten_digits() {
-        assert!(SyslogEmitter::validate_octet_count_size(9_999_999_999).is_ok());
-        assert!(SyslogEmitter::validate_octet_count_size(10_000_000_000).is_err());
+        assert!(SyslogCollectorEmitter::validate_octet_count_size(9_999_999_999).is_ok());
+        assert!(SyslogCollectorEmitter::validate_octet_count_size(10_000_000_000).is_err());
     }
 }

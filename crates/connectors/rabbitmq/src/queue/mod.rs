@@ -1,9 +1,9 @@
-//! RabbitMQ source and sink connector.
+//! RabbitMQ ingestor and emitter connector.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The AMQP connection and channel a client configures, queue declaration,
-//!   the consumer and prefetch window a source reads through, AMQP headers in both
+//!   the consumer and prefetch window an ingestor reads through, AMQP headers in both
 //!   directions, per-delivery acknowledgement and requeue, publisher confirms, the channel round
 //!   trip that completes a `NO ACK` write and the client `timeout_ms` that bounds it,
 //!   returned-message classification, and the broker's refusal of a message above its
@@ -16,17 +16,17 @@
 //! # A message the broker refuses
 //!
 //! RabbitMQ's `max_message_size` is a broker setting that AMQP 0-9-1 never tells a client, so the
-//! sink cannot measure a message against it before writing. The broker refuses a larger body by
+//! emitter cannot measure a message against it before writing. The broker refuses a larger body by
 //! closing the channel the message arrived on, and it discards every message written on that
 //! channel after the refused one. The `channel_closure` module reads the broker's reason for every
-//! channel the sink loses. When the reason is that refusal, the first message of the write the
-//! broker had not answered whose body exceeds the limit it names is the one it refused: the sink
+//! channel the emitter loses. When the reason is that refusal, the first message of the write the
+//! broker had not answered whose body exceeds the limit it names is the one it refused: the emitter
 //! rejects it, settles the messages before it, and writes the messages after it again on a new
 //! channel of the same connection, which the refusal left open. A message the broker answered
 //! first stays answered, and an unanswered message written before the refused one leaves the write
 //! to the host's retry, because it may have reached its queue.
 //!
-//! The sink does not remember the limit a refusal named, and checks no later message against it:
+//! The emitter does not remember the limit a refusal named, and checks no later message against it:
 //! the broker's setting may change, and a message is rejected only on the broker's own answer.
 
 #![cfg_attr(
@@ -54,8 +54,8 @@ pub use connection::RabbitMqConnectError;
 use error_stack::Report;
 use futures_util::FutureExt;
 pub use ingestor::{
-    RabbitMqDeliveryHeaders, RabbitMqIngestor, RabbitMqIngestorError, RabbitMqIngestorMessage,
-    RabbitMqIngestorPlan, RabbitMqIngestorPosition,
+    RabbitMqDeliveryHeaders, RabbitMqQueueIngestor, RabbitMqQueueIngestorError,
+    RabbitMqQueueIngestorMessage, RabbitMqQueueIngestorPlan, RabbitMqQueueIngestorPosition,
 };
 use lapin::{
     Confirmation, PublisherConfirm,
@@ -77,21 +77,21 @@ use thiserror::Error;
 
 const RABBITMQ: &str = "rabbitmq";
 
-/// What one RabbitMQ sink publishes through: its client entries, the node resolver its broker host
+/// What one RabbitMQ emitter publishes through: its client entries, the node resolver its broker host
 /// resolves through, its queue and its publishing mode.
-pub struct RabbitMqEmitterConfig {
+pub struct RabbitMqQueueEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub dns: DnsResolver,
     pub queue: RabbitMqQueueName,
     pub mode: BrokerPublishingMode,
 }
 
-pub struct RabbitMqEmitter {
-    /// The connection the sink's channels run on. The broker's refusal of a message closes only
-    /// the channel, so the sink opens the next channel on the same connection.
+pub struct RabbitMqQueueEmitter {
+    /// The connection the emitter's channels run on. The broker's refusal of a message closes only
+    /// the channel, so the emitter opens the next channel on the same connection.
     connection: lapin::Connection,
-    /// Why the broker closed each channel the sink loses. Its event stream is `Send` but not
-    /// `Sync`, so the methods that await while they borrow the sink borrow it mutably.
+    /// Why the broker closed each channel the emitter loses. Its event stream is `Send` but not
+    /// `Sync`, so the methods that await while they borrow the emitter borrow it mutably.
     closures: ChannelClosures,
     channel: lapin::Channel,
     queue: RabbitMqQueueName,
@@ -101,7 +101,7 @@ pub struct RabbitMqEmitter {
     round_trip: Option<ConfiguredDeadline>,
 }
 
-/// Why the broker refused one message the sink wrote.
+/// Why the broker refused one message the emitter wrote.
 #[derive(Debug, Error)]
 enum RabbitMqRecordError {
     #[error(
@@ -110,7 +110,7 @@ enum RabbitMqRecordError {
     AboveMaxMessageSize { body_bytes: usize, limit: usize },
 }
 
-/// One message written on a channel in confirm mode whose publisher confirm the sink has not read.
+/// One message written on a channel in confirm mode whose publisher confirm the emitter has not read.
 struct PendingRabbitMqConfirmation {
     /// The whole record, because the broker may discard the message and it is then written again.
     record: EmitterRecord,
@@ -136,7 +136,7 @@ enum ConfirmedAnswer {
 
 /// Why a `NO ACK` write stopped before the broker answered its round trip.
 enum UnconfirmedStop {
-    /// The channel is gone, as the failure the sink saw shows. The messages written on it stay
+    /// The channel is gone, as the failure the emitter saw shows. The messages written on it stay
     /// unresolved until the loss is settled.
     ChannelLost(lapin::Error),
     /// The broker did not answer the round trip within the client's `timeout_ms`. The messages the
@@ -149,16 +149,16 @@ enum ConfirmedStop {
     /// The write failed for a reason other than a lost channel: a nack, a return that does not
     /// reject the message itself, or `ACK TIMEOUT`. What the broker answered meanwhile is settled.
     Failed(Report<EmitterWriteError>),
-    /// The channel is gone, as the failure the sink saw shows. The messages written on it stay in
+    /// The channel is gone, as the failure the emitter saw shows. The messages written on it stay in
     /// the confirmation window.
     ChannelLost(lapin::Error),
 }
 
-impl RabbitMqEmitter {
-    /// Connects, opens the channel the sink publishes through and checks that its queue exists,
+impl RabbitMqQueueEmitter {
+    /// Connects, opens the channel the emitter publishes through and checks that its queue exists,
     /// every step within the client's `connect_timeout_ms`.
     pub async fn new(
-        config: RabbitMqEmitterConfig,
+        config: RabbitMqQueueEmitterConfig,
         _host: EmitterHost,
     ) -> EmitterStartResult<Self> {
         let mode = config.mode;
@@ -261,7 +261,7 @@ impl RabbitMqEmitter {
     }
 
     /// `MODE NO ACK`: the channel is not in confirm mode, so the broker answers no message on its
-    /// own. Once the messages are written, the sink asks the channel for one round trip, which the
+    /// own. Once the messages are written, the emitter asks the channel for one round trip, which the
     /// broker answers only after it has taken every message written before the request, and that
     /// answer delivers them. A write therefore costs one round trip, however many messages it
     /// carries. A channel lost on the way is settled by [`Self::settle_unconfirmed_loss`], and a
@@ -742,7 +742,7 @@ impl RabbitMqEmitter {
             .attach_printable(message)
     }
 
-    /// A client configuration key the sink cannot read as a configuration failure, with its chain
+    /// A client configuration key the emitter cannot read as a configuration failure, with its chain
     /// leading the report.
     fn configuration_error(report: Report<ClientConfigError>) -> Report<EmitterOpenError> {
         let message = format!("{report:#}");
@@ -754,7 +754,7 @@ impl RabbitMqEmitter {
     }
 
     /// A failed connection as a start failure: the client's configuration when it is at fault,
-    /// otherwise the sink's initialization, which the host retries. The connection failure is kept
+    /// otherwise the emitter's initialization, which the host retries. The connection failure is kept
     /// as the typed cause, and its chain, down to a `connect_timeout_ms` it ran out of, leads the
     /// report.
     fn connect_error(report: Report<RabbitMqConnectError>) -> Report<EmitterOpenError> {
@@ -784,8 +784,17 @@ impl RabbitMqEmitter {
     }
 }
 
+impl RabbitMqQueueEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::RabbitMq(nervix_models::RabbitMqEmitterEntity::Queue);
+}
+
 #[async_trait]
-impl EmitterLifecycle for RabbitMqEmitter {
+impl EmitterLifecycle for RabbitMqQueueEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// A `NO ACK` write ends with a round trip the broker answers only after it took every
     /// message written before it, and a confirmed write awaits each confirm, so the channel holds
     /// nothing once a publish returns.
@@ -795,7 +804,7 @@ impl EmitterLifecycle for RabbitMqEmitter {
 }
 
 #[async_trait]
-impl RecordEmitter for RabbitMqEmitter {
+impl RecordEmitter for RabbitMqQueueEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let unsent = VecDeque::from(records);
@@ -894,7 +903,7 @@ mod tests {
         let mut unsent = VecDeque::from([record(4, 10)]);
         let mut outcome = PerRecordOutcome::empty();
 
-        RabbitMqEmitter::settle_unconfirmed_loss(
+        RabbitMqQueueEmitter::settle_unconfirmed_loss(
             size_refusal(),
             written,
             &mut unsent,
@@ -918,7 +927,7 @@ mod tests {
             let mut unsent = VecDeque::from([record(2, 10)]);
             let mut outcome = PerRecordOutcome::empty();
 
-            let settled_loss = RabbitMqEmitter::settle_unconfirmed_loss(
+            let settled_loss = RabbitMqQueueEmitter::settle_unconfirmed_loss(
                 closure,
                 written,
                 &mut unsent,
@@ -949,8 +958,13 @@ mod tests {
         let mut unsent = VecDeque::from([record(4, 10)]);
         let mut outcome = PerRecordOutcome::empty();
 
-        RabbitMqEmitter::settle_confirmed_loss(size_refusal(), answered, &mut unsent, &mut outcome)
-            .assured("every message ahead of the refused one was answered");
+        RabbitMqQueueEmitter::settle_confirmed_loss(
+            size_refusal(),
+            answered,
+            &mut unsent,
+            &mut outcome,
+        )
+        .assured("every message ahead of the refused one was answered");
 
         assert_eq!(ids(&unsent), vec![3, 4]);
         assert_eq!(
@@ -985,7 +999,7 @@ mod tests {
             let mut unsent = VecDeque::from([record(3, 10)]);
             let mut outcome = PerRecordOutcome::empty();
 
-            let settled_loss = RabbitMqEmitter::settle_confirmed_loss(
+            let settled_loss = RabbitMqQueueEmitter::settle_confirmed_loss(
                 size_refusal(),
                 answered,
                 &mut unsent,
@@ -1012,7 +1026,7 @@ mod tests {
             let mut unsent = VecDeque::from([record(2, 10)]);
             let mut outcome = PerRecordOutcome::empty();
 
-            let settled_loss = RabbitMqEmitter::settle_confirmed_loss(
+            let settled_loss = RabbitMqQueueEmitter::settle_confirmed_loss(
                 closure,
                 answered,
                 &mut unsent,
@@ -1028,13 +1042,13 @@ mod tests {
     #[test]
     fn publisher_confirms_deliver_reject_or_fail_their_message() {
         let message = record(0, 10);
-        let delivered = RabbitMqEmitter::confirmed_answer(&message, Confirmation::Ack(None));
+        let delivered = RabbitMqQueueEmitter::confirmed_answer(&message, Confirmation::Ack(None));
         assert!(matches!(delivered, ConfirmedAnswer::Delivered));
         for rejection in [
             Confirmation::Ack(Some(returned_message(311, "CONTENT_TOO_LARGE"))),
             Confirmation::Nack(Some(returned_message(311, "CONTENT_TOO_LARGE"))),
         ] {
-            let answer = RabbitMqEmitter::confirmed_answer(&message, rejection);
+            let answer = RabbitMqQueueEmitter::confirmed_answer(&message, rejection);
             assert!(matches!(answer, ConfirmedAnswer::Rejected(_)));
         }
         for failure in [
@@ -1042,15 +1056,16 @@ mod tests {
             Confirmation::Nack(None),
             Confirmation::NotRequested,
         ] {
-            let answer = RabbitMqEmitter::confirmed_answer(&message, failure);
+            let answer = RabbitMqQueueEmitter::confirmed_answer(&message, failure);
             assert!(matches!(answer, ConfirmedAnswer::Failed(_)));
         }
     }
 
     #[test]
     fn connection_failures_start_as_configuration_or_initialization_failures() {
-        let invalid =
-            RabbitMqEmitter::connect_error(Report::new(RabbitMqConnectError::InvalidCaCertificate));
+        let invalid = RabbitMqQueueEmitter::connect_error(Report::new(
+            RabbitMqConnectError::InvalidCaCertificate,
+        ));
         assert!(matches!(
             invalid.current_context(),
             EmitterOpenError::InvalidConfiguration {
@@ -1059,7 +1074,7 @@ mod tests {
         ));
 
         let unresolved =
-            RabbitMqEmitter::connect_error(Report::new(RabbitMqConnectError::Resolve {
+            RabbitMqQueueEmitter::connect_error(Report::new(RabbitMqConnectError::Resolve {
                 host: "rabbitmq.nervix.test".to_string(),
                 failure: DnsLookupFailure::NameNotFound,
             }));
@@ -1080,7 +1095,7 @@ mod tests {
 
         let connect_timeout = nervix_connector::ConfiguredDeadline::connect(&[])
             .expect("a client without the key takes the default");
-        let stalled = RabbitMqEmitter::connect_error(
+        let stalled = RabbitMqQueueEmitter::connect_error(
             Report::new(connect_timeout.elapsed("the TLS handshake with the RabbitMQ broker"))
                 .change_context(RabbitMqConnectError::TlsHandshake {
                     host: "rabbitmq.nervix.test".to_string(),
@@ -1112,7 +1127,7 @@ mod tests {
             .assured("the entries set timeout_ms");
 
         let stalled =
-            RabbitMqEmitter::answered_within(Some(deadline), std::future::pending()).await;
+            RabbitMqQueueEmitter::answered_within(Some(deadline), std::future::pending()).await;
         let Err(UnconfirmedStop::RoundTripElapsed(elapsed)) = stalled else {
             panic!("a round trip the broker never answers runs out of timeout_ms");
         };
@@ -1120,7 +1135,7 @@ mod tests {
             (elapsed.key, elapsed.bound),
             (DeadlineKey::Timeout, Duration::from_millis(50))
         );
-        let report = RabbitMqEmitter::round_trip_error(elapsed);
+        let report = RabbitMqQueueEmitter::round_trip_error(elapsed);
         assert!(matches!(
             report.current_context(),
             EmitterWriteError::Publish {
@@ -1143,10 +1158,11 @@ mod tests {
         );
 
         for deadline in [Some(deadline), None] {
-            let answered = RabbitMqEmitter::answered_within(deadline, async { Ok(()) }).await;
+            let answered = RabbitMqQueueEmitter::answered_within(deadline, async { Ok(()) }).await;
             assert!(matches!(answered, Ok(())));
             let lost =
-                RabbitMqEmitter::answered_within(deadline, async { Err(lost_channel()) }).await;
+                RabbitMqQueueEmitter::answered_within(deadline, async { Err(lost_channel()) })
+                    .await;
             assert!(matches!(lost, Err(UnconfirmedStop::ChannelLost(_))));
         }
     }
@@ -1156,7 +1172,7 @@ mod tests {
         let Err(invalid) = ConfiguredDeadline::timeout(&timeout_ms("0")) else {
             panic!("zero milliseconds is not a deadline");
         };
-        let report = RabbitMqEmitter::configuration_error(invalid);
+        let report = RabbitMqQueueEmitter::configuration_error(invalid);
         assert!(matches!(
             report.current_context(),
             EmitterOpenError::InvalidConfiguration {
@@ -1185,14 +1201,14 @@ mod tests {
 
     #[test]
     fn content_too_large_return_is_a_record_rejection() {
-        assert!(RabbitMqEmitter::is_returned_record_rejection(
+        assert!(RabbitMqQueueEmitter::is_returned_record_rejection(
             &returned_message(311, "CONTENT_TOO_LARGE")
         ));
     }
 
     #[test]
     fn no_route_return_remains_an_infrastructure_failure() {
-        assert!(!RabbitMqEmitter::is_returned_record_rejection(
+        assert!(!RabbitMqQueueEmitter::is_returned_record_rejection(
             &returned_message(312, "NO_ROUTE")
         ));
     }

@@ -1,4 +1,4 @@
-//! PULSAR connector for the topic entity.
+//! PulsarTopicIngestor, PulsarTopicEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public topic connector implementation surface.

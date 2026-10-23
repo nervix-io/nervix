@@ -8,9 +8,9 @@ use std::{num::NonZeroU64, ptr, slice, time::Duration};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
     ArchiveDigest, BackupArchiveSummary, BackupDownloadError, BackupResources, ClientError,
-    CommandDisposition, CommandExecutionReference, CommandOutcome, Diagnostic, IngestorSpan,
-    LeaderRedirect, OutcomeOrigin, RestoreArchive, RestoreMode, RestoreReport, RestoreStep,
-    RestoreStepOutcome, RestoreStepReport, RestoredDomain, RowSchema, SubscriptionEvent,
+    CommandDisposition, CommandExecutionReference, CommandOutcome, Diagnostic, LeaderRedirect,
+    OutcomeOrigin, RestoreArchive, RestoreMode, RestoreReport, RestoreStep, RestoreStepOutcome,
+    RestoreStepReport, RestoredDomain, RowSchema, SourceSpan, SubscriptionEvent,
     SubscriptionHandle, SubscriptionInterruption, SubscriptionOpened,
     SubscriptionRestorationFailure, SubscriptionRowsEvent, UnknownOutcomeCause,
     wire::{
@@ -779,7 +779,7 @@ fn command_outcome(disposition: CommandDisposition, subscription: bool) -> Comma
         diagnostics: vec![
             Diagnostic {
                 message: "here".to_string(),
-                span: Some(IngestorSpan::new(3, 9).assured("an ordered span")),
+                span: Some(SourceSpan::new(3, 9).assured("an ordered span")),
             },
             Diagnostic {
                 message: "nowhere".to_string(),

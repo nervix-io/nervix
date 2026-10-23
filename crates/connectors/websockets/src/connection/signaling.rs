@@ -3,10 +3,10 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Compiled wire formats and ordered jaq clauses, handshake state and timeout, frame
-//!   encoding and matching, and accepted-data delivery through the caller's sink.
+//!   encoding and matching, and accepted-data delivery through the caller's emitter.
 //! - **Depends on.** The connector contract, typed signaling plans and host services, vocabulary
 //!   values, jaq, protobuf reflection, execution primitives, WebSocket transport, and contextual errors.
-//! - **Must not know.** Configuration Models, NSPL, registry or resource-store state, graph
+//! - **Must not know.** Configuration Models, Plexus, registry or resource-store state, graph
 //!   routing, relays, collectors, endpoint selection, or host intake and retry policy.
 //!
 //! Current boundary violation: `compile_parts` takes `SignalingWireFormat` and
@@ -535,13 +535,13 @@ impl SessionState {
 
 /// Receives payload frames as the handshake streams them to the relay.
 ///
-/// A trait rather than a closure: the returned future borrows the sink under one concrete
+/// A trait rather than a closure: the returned future borrows the emitter under one concrete
 /// lifetime, which keeps it `Send` inside the spawned connection tasks that drive signaling.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "the selected sink accepts each admitted signaling payload"
+        reason = "the selected emitter accepts each admitted signaling payload"
     )
 )]
 pub trait SignalingDataEmitter {
@@ -567,7 +567,7 @@ impl WebsocketSignalingSession {
         Self { protocol }
     }
 
-    /// Run the handshake, streaming payload frames to `sink` once `ACCEPT DATA` opens the relay.
+    /// Run the handshake, streaming payload frames to `emitter` once `ACCEPT DATA` opens the relay.
     ///
     /// Steps run strictly in order. Frames that arrive before the relay is open are not payload
     /// yet and are dropped, so nothing accumulates in memory and nothing reaches the relay from a

@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The table sink Model with its storage backend, catalog and commit policy, the
-//!   object-store and catalog client Models it writes and commits through, and what the sink
+//! - **Owns.** The table emitter Model with its storage backend, catalog and commit policy, the
+//!   object-store and catalog client Models it writes and commits through, and what the emitter
 //!   declares.
-//! - **Depends on.** The shared sink declarations and the names a body references.
+//! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The Iceberg, object-store or catalog drivers, their configuration keys, or
 //!   how data files are staged and committed.
 
@@ -222,11 +222,11 @@ impl EmitterEntityBody for IcebergTableEmitter {
 
 connector_emitters! {
     connector Iceberg = "ICEBERG";
-    /// What an Iceberg sink writes.
+    /// What an Iceberg emitter writes.
     pub enum IcebergEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum IcebergEmitterMode;
-    /// The entities an Iceberg sink writes.
+    pub enum IcebergTableEmitterMode;
+    /// The entities an Iceberg emitter writes.
     pub enum IcebergEmitterEntity {
         Table(IcebergTableEmitter, IcebergTablePublishingMode) = "TABLE";
     }

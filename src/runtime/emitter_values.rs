@@ -1,13 +1,13 @@
-//! The host projection every row sink writes from.
+//! The host projection every row emitter writes from.
 //!
 //! Layer: data plane.
 //! - **Owns.** Binding one emitter's lowered `VALUES` mapping once, evaluating it once per batch
 //!   into an Arrow batch of mapped columns, the rows each batch still has to write, handing a row
-//!   sink every run of successive projected batches of one source relay and concrete branch in one
-//!   write, and handing a row request sink each projected batch to prepare requests from, whose
-//!   prepared requests the emitter retains and hands back until the sink answers for them.
+//!   emitter every run of successive projected batches of one source relay and concrete branch in one
+//!   write, and handing a row request emitter each projected batch to prepare requests from, whose
+//!   prepared requests the emitter retains and hands back until the emitter answers for them.
 //! - **Depends on.** The VM's compile and execute API, Arrow batches, the connector contract's row
-//!   sink, row request sink and mapped-carrier value types, and the retained payloads and checked
+//!   emitter, row request emitter and mapped-carrier value types, and the retained payloads and checked
 //!   answers a write is resolved through.
 //! - **Must not know.** Which external system consumes the mapped rows, how it divides a write into
 //!   requests, or how it encodes them.
@@ -27,7 +27,7 @@ use nervix_connector::{
 use super::*;
 
 /// Why an emitter's `VALUES` mapping did not compile. The VM's own failure is beneath, and the
-/// emitter that starts the sink names itself and its domain in the contexts above.
+/// emitter that starts the emitter names itself and its domain in the contexts above.
 #[derive(Debug, Error)]
 pub(in crate::runtime) enum MappedValuesError {
     #[error("the {label} VALUES of emitter '{emitter}' failed type inference")]
@@ -57,9 +57,9 @@ pub(in crate::runtime) enum MappedValuesError {
     },
 }
 
-/// A row sink and the host projection whose mapped columns it writes.
+/// A row emitter and the host projection whose mapped columns it writes.
 ///
-/// The mapping is evaluated here, once per batch, so the sink receives Arrow columns and the rows
+/// The mapping is evaluated here, once per batch, so the emitter receives Arrow columns and the rows
 /// it must write and never learns what produced them.
 pub(in crate::runtime) struct MappedRowEmitter {
     connector: Box<dyn RowEmitter>,
@@ -88,10 +88,10 @@ impl EmitterConnector for MappedRowEmitter {
         &mut *self.connector
     }
 
-    /// Writes every buffered batch, projecting each once and handing the sink each run of
+    /// Writes every buffered batch, projecting each once and handing the emitter each run of
     /// successive batches of one source relay and concrete branch in one call.
     ///
-    /// A row sink answers for each mapped row by its position, so a row it left unresolved is
+    /// A row emitter answers for each mapped row by its position, so a row it left unresolved is
     /// projected again by the next attempt and nothing is retained between attempts.
     async fn publish_batches(
         &mut self,
@@ -100,7 +100,7 @@ impl EmitterConnector for MappedRowEmitter {
     ) -> EmitterRuntimeResult<()> {
         let EmitterPublication { batches, .. } = publication;
         let acknowledgements = match self.connector.retains_acknowledgements() {
-            true => DeliveredAcknowledgements::Sink,
+            true => DeliveredAcknowledgements::Connector,
             false => DeliveredAcknowledgements::Host,
         };
         let mut open_run: Option<ProjectedRun> = None;
@@ -162,7 +162,7 @@ impl EmitterConnector for MappedRowEmitter {
 }
 
 impl MappedRowEmitter {
-    /// Hands the sink one write of every carrier in `run`, then applies its answers.
+    /// Hands the emitter one write of every carrier in `run`, then applies its answers.
     async fn publish_run(
         &mut self,
         context: &EmitterConnectorContext,
@@ -173,10 +173,10 @@ impl MappedRowEmitter {
         let mut carriers = Vec::with_capacity(run.carriers.len());
         let mut rows = 0_usize;
         for projected in &run.carriers {
-            // A sink that resolves acknowledgements on its own commit boundary takes the ones its
+            // A emitter that resolves acknowledgements on its own commit boundary takes the ones its
             // write carries, so the host stops owning them the moment the write accepts the rows.
             let retained = match acknowledgements {
-                DeliveredAcknowledgements::Sink => {
+                DeliveredAcknowledgements::Connector => {
                     let batch = &batches[projected.batch_index];
                     Some(EmitterRecordAcknowledgements::new(
                         batch.acks_for_rows(projected.selected_rows()),
@@ -225,10 +225,10 @@ impl ProjectedRun {
     }
 }
 
-/// A row request sink and the host projection whose mapped columns it prepares requests from.
+/// A row request emitter and the host projection whose mapped columns it prepares requests from.
 ///
-/// The mapping is evaluated here, once per batch, and the sink prepares each request once. The
-/// emitter retains every prepared request with the rows it carries until the sink answers for it,
+/// The mapping is evaluated here, once per batch, and the emitter prepares each request once. The
+/// emitter retains every prepared request with the rows it carries until the emitter answers for it,
 /// so a request whose outcome the emitter did not learn is sent again exactly as it was prepared,
 /// and its rows are never mapped or prepared again.
 pub(in crate::runtime) struct MappedRequestEmitter {
@@ -260,7 +260,7 @@ impl EmitterConnector for MappedRequestEmitter {
 
     /// Prepares requests from every row no retained request carries yet, one projection and one
     /// preparation per batch, and sends every retained request in one write: the ones earlier
-    /// attempts prepared and the sink left unanswered, exactly as they were first sent, followed by
+    /// attempts prepared and the emitter left unanswered, exactly as they were first sent, followed by
     /// the ones prepared now.
     async fn publish_batches(
         &mut self,
@@ -298,7 +298,7 @@ impl EmitterConnector for MappedRequestEmitter {
             if projected.is_empty() {
                 continue;
             }
-            // The host checks and retains what the sink prepared batch by batch, so each
+            // The host checks and retains what the emitter prepared batch by batch, so each
             // preparation is handed exactly one carrier.
             let carrier = projected.emitter_carrier(None);
             let occurred_at = carrier.occurred_at;
@@ -472,9 +472,9 @@ fn compile_sql_values_program(
 
 /// What one emitter's `VALUES` mapping is compiled from.
 pub(in crate::runtime) struct MappedValuesProjectionInit<'a> {
-    /// How this sink names itself in diagnostics, such as `ClickHouse`.
+    /// How this emitter names itself in diagnostics, such as `ClickHouse`.
     pub(in crate::runtime) label: &'static str,
-    /// The expression scope this sink's mapped columns are written through, such as `clickhouse`.
+    /// The expression scope this emitter's mapped columns are written through, such as `clickhouse`.
     pub(in crate::runtime) namespace: &'static str,
     pub(in crate::runtime) emitter: &'a EmitterName,
     pub(in crate::runtime) mapping: &'a MappedValuesPlan,
@@ -485,11 +485,11 @@ pub(in crate::runtime) struct MappedValuesProjectionInit<'a> {
 /// One emitter's `VALUES` mapping, compiled once at start and evaluated once per batch.
 ///
 /// The mapping is evaluated column by column: the VM writes one output column per mapped value,
-/// and the projection hands those columns to the sink under their target names together with the
+/// and the projection hands those columns to the emitter under their target names together with the
 /// rows it must write. No row of the mapped batch is ever materialized as a scalar here.
 pub(in crate::runtime) struct MappedValuesProjection {
     program: CompiledSqlValuesProgram,
-    /// The mapped columns a row sink reads, named by their target columns in mapping order and
+    /// The mapped columns a row emitter reads, named by their target columns in mapping order and
     /// nullable because a mapped expression may evaluate to a typed null.
     mapped_schema: StdArc<arrow_schema::Schema>,
     target_columns: Vec<String>,
@@ -533,7 +533,7 @@ impl MappedValuesProjection {
         })
     }
 
-    /// The mapped columns this projection produces, for a sink that validates their exact types
+    /// The mapped columns this projection produces, for an emitter that validates their exact types
     /// before its first batch arrives.
     pub(in crate::runtime) fn mapped_schema(&self) -> &StdArc<arrow_schema::Schema> {
         &self.mapped_schema
@@ -544,10 +544,10 @@ impl MappedValuesProjection {
         &self.target_columns
     }
 
-    /// Evaluates the mapping once for `batch` and selects the rows the sink still has to write.
+    /// Evaluates the mapping once for `batch` and selects the rows the emitter still has to write.
     ///
     /// A row whose mapping failed carries a side error instead of a value, so it is rejected here
-    /// with the structured message error its expression produced and never reaches the sink.
+    /// with the structured message error its expression produced and never reaches the emitter.
     pub(in crate::runtime) async fn project(
         &self,
         executor: &Executor,
@@ -666,7 +666,7 @@ impl MappedValuesProjection {
     }
 }
 
-/// One batch of mapped columns, with the rows a row sink writes and the rows it never sees.
+/// One batch of mapped columns, with the rows a row emitter writes and the rows it never sees.
 pub(in crate::runtime) struct ProjectedValueRows {
     batch_index: usize,
     batch: RecordBatch,
@@ -686,7 +686,7 @@ impl ProjectedValueRows {
     }
 
     /// The rows this write carries, which the host reads to hand their acknowledgements over to a
-    /// sink that resolves them on its own commit boundary.
+    /// emitter that resolves them on its own commit boundary.
     pub(in crate::runtime) fn selected_rows(&self) -> &[usize] {
         &self.selected_rows
     }
@@ -728,7 +728,7 @@ mod tests {
         runtime_schema::test_runtime_row,
     };
 
-    /// One carrier of a write a row sink received: its buffered batch and the rows it selected.
+    /// One carrier of a write a row emitter received: its buffered batch and the rows it selected.
     #[derive(Debug, PartialEq, Eq)]
     struct RecordedCarrier {
         batch_index: usize,
@@ -742,13 +742,17 @@ mod tests {
         }
     }
 
-    /// A row sink that delivers every row it is handed and records the carriers of each write.
+    /// A row emitter that delivers every row it is handed and records the carriers of each write.
     struct RecordingRowEmitter {
         writes: StdArc<nervix_primitives::sync::blocking::Mutex<Vec<Vec<RecordedCarrier>>>>,
     }
 
     #[async_trait]
     impl EmitterLifecycle for RecordingRowEmitter {
+        fn kind(&self) -> nervix_models::EmitterEntityKind {
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
+        }
+
         async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
             Ok(EmitterFinish::NothingHeld)
         }
@@ -1058,15 +1062,15 @@ mod tests {
         );
     }
 
-    /// How the scripted row request sink answers one write.
+    /// How the scripted row request emitter answers one write.
     enum RequestAnswer {
-        /// The first request is delivered, and the sink fails before it answers for the rest.
+        /// The first request is delivered, and the emitter fails before it answers for the rest.
         DeliverFirstThenFail,
         /// Every request of the write is delivered.
         DeliverAll,
     }
 
-    /// One request the scripted sink was handed: its identity and its bytes.
+    /// One request the scripted emitter was handed: its identity and its bytes.
     #[derive(Debug, PartialEq, Eq)]
     struct HandedRequest {
         id: usize,
@@ -1082,7 +1086,7 @@ mod tests {
         }
     }
 
-    /// A row request sink that prepares one request for each pair of rows, whose bytes name the
+    /// A row request emitter that prepares one request for each pair of rows, whose bytes name the
     /// rows and the preparation that made them, and answers every write from a script.
     struct ScriptedRequestEmitter {
         preparations: Arc<AtomicUsize>,
@@ -1092,6 +1096,10 @@ mod tests {
 
     #[async_trait]
     impl EmitterLifecycle for ScriptedRequestEmitter {
+        fn kind(&self) -> nervix_models::EmitterEntityKind {
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
+        }
+
         async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
             Ok(EmitterFinish::NothingHeld)
         }
@@ -1197,7 +1205,7 @@ mod tests {
         .expect("the test VALUES mapping should compile")
     }
 
-    /// A scripted row request sink paired with its projection, and what the test reads back from
+    /// A scripted row request emitter paired with its projection, and what the test reads back from
     /// it: how many preparations it made, and every write it was handed.
     struct ScriptedRequests {
         connector: MappedRequestEmitter,
@@ -1248,7 +1256,7 @@ mod tests {
                 },
             )
             .await
-            .expect_err("the sink failed before answering for its second request");
+            .expect_err("the emitter failed before answering for its second request");
         assert!(emitter_publish_error_is_retryable(&failed));
         assert_eq!(batches[0].resolved_rows(), vec![true, true, false]);
         assert!(
@@ -1299,11 +1307,15 @@ mod tests {
         }
     }
 
-    /// A row request sink whose preparation answers for a row it was never handed.
+    /// A row request emitter whose preparation answers for a row it was never handed.
     struct ForeignRowEmitter;
 
     #[async_trait]
     impl EmitterLifecycle for ForeignRowEmitter {
+        fn kind(&self) -> nervix_models::EmitterEntityKind {
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
+        }
+
         async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
             Ok(EmitterFinish::NothingHeld)
         }

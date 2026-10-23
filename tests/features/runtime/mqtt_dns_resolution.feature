@@ -1,6 +1,6 @@
 Feature: MQTT name resolution
 
-  An MQTT source or sink resolves the host of its client's `addr` through the node's resolver every
+  An MQTT source or emitter resolves the host of its client's `addr` through the node's resolver every
   time its client connects to the broker, first and after every lost connection, dials the answers
   in order, and verifies an `mqtts` broker's certificate against that host. These scenarios point
   every node at a DNS fixture the scenario controls.

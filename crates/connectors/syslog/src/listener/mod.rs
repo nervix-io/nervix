@@ -1,13 +1,13 @@
-//! Syslog listener source transport.
+//! Syslog listener ingestor transport.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Syslog UDP, TCP and TLS listeners, RFC 6587 stream framing, peer metadata, the
-//!   deadlines of the connections they accept, dropping an oversized datagram, and source
+//!   deadlines of the connections they accept, dropping an oversized datagram, and ingestor
 //!   lifecycle operations.
-//! - **Depends on.** The connector source contract and its client deadlines, connector-owned
+//! - **Depends on.** The connector ingestor contract and its client deadlines, connector-owned
 //!   Syslog configuration, Tokio sockets and timers, `memchr`, and rustls.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -54,13 +54,13 @@ const MAX_OCTET_COUNT_DIGITS: usize = 10;
 const STREAM_READ_CHUNK: usize = 8_192;
 
 #[derive(Clone)]
-pub struct SyslogIngestorPlan {
+pub struct SyslogListenerIngestorPlan {
     config: SyslogClientConfig,
     bind_addr: String,
     connections: ConnectionDeadlines,
 }
 
-impl SyslogIngestorPlan {
+impl SyslogListenerIngestorPlan {
     pub fn new(
         entries: Vec<ClientConfigEntry>,
         bind_addr: impl FnOnce(&str) -> String,
@@ -99,14 +99,14 @@ impl ConnectionDeadlines {
     }
 }
 
-pub struct SyslogIngestorMessage {
+pub struct SyslogListenerIngestorMessage {
     payload: Vec<u8>,
     peer_addr: SocketAddr,
     position: (),
     headers: NoIngestHeaders,
 }
 
-impl SyslogIngestorMessage {
+impl SyslogListenerIngestorMessage {
     fn new(payload: Vec<u8>, peer_addr: SocketAddr) -> Self {
         Self {
             payload,
@@ -117,7 +117,7 @@ impl SyslogIngestorMessage {
     }
 }
 
-impl IngestorMessage for SyslogIngestorMessage {
+impl IngestorMessage for SyslogListenerIngestorMessage {
     type Position = ();
 
     fn payload(&self) -> &[u8] {
@@ -146,7 +146,7 @@ struct ReceivedSyslogFrame {
 
 /// What one receive took from a listener's transport.
 enum SyslogReceived {
-    Message(SyslogIngestorMessage),
+    Message(SyslogListenerIngestorMessage),
     /// A datagram larger than `max_message_size`, which the listener dropped.
     OversizedDatagram,
 }
@@ -169,7 +169,7 @@ struct SyslogStreamListener {
     paused: watch::Sender<bool>,
 }
 
-pub struct SyslogIngestor {
+pub struct SyslogListenerIngestor {
     config: SyslogClientConfig,
     bind_addr: String,
     connections: ConnectionDeadlines,
@@ -246,8 +246,11 @@ pub enum SyslogFrameError {
 }
 
 #[async_trait]
-impl IngestorConnector for SyslogIngestor {
-    type Plan = SyslogIngestorPlan;
+impl IngestorConnector for SyslogListenerIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Syslog(nervix_models::SyslogIngestorEntity::Listener);
+
+    type Plan = SyslogListenerIngestorPlan;
 
     async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
         let tls_acceptor = if plan.config.protocol == SyslogProtocol::Tls {
@@ -301,8 +304,8 @@ impl IngestorConnector for SyslogIngestor {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for SyslogIngestor {
-    type Message = SyslogIngestorMessage;
+impl BrokerIngestorConnector for SyslogListenerIngestor {
+    type Message = SyslogListenerIngestorMessage;
     type Position = ();
 
     async fn next_batch(
@@ -351,7 +354,7 @@ impl BrokerIngestorConnector for SyslogIngestor {
     }
 }
 
-impl SyslogIngestor {
+impl SyslogListenerIngestor {
     async fn bind_listener(&self) -> error_stack::Result<SyslogListener, SyslogListenerError> {
         match self.config.protocol {
             SyslogProtocol::Udp => {
@@ -417,7 +420,7 @@ impl SyslogUdpListener {
             );
             return Ok(SyslogReceived::OversizedDatagram);
         }
-        Ok(SyslogReceived::Message(SyslogIngestorMessage::new(
+        Ok(SyslogReceived::Message(SyslogListenerIngestorMessage::new(
             self.datagram[..size].to_vec(),
             peer_addr,
         )))
@@ -481,7 +484,7 @@ impl SyslogStreamListener {
                     let Some(frame) = frame else {
                         return Err(Report::new(SyslogListenerError::IntakeQueueClosed));
                     };
-                    return Ok(SyslogReceived::Message(SyslogIngestorMessage::new(
+                    return Ok(SyslogReceived::Message(SyslogListenerIngestorMessage::new(
                         frame.payload,
                         frame.peer_addr,
                     )));
@@ -847,5 +850,4 @@ pub fn frame_stream(
 }
 
 #[cfg(test)]
-#[path = "ingestor_tests.rs"]
 mod tests;

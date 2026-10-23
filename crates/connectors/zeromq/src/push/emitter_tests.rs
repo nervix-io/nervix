@@ -1,7 +1,7 @@
-//! The deadlines a ZeroMQ client's keys set on its PUSH sink: connecting to the peer within
+//! The deadlines a ZeroMQ client's keys set on its PUSH emitter: connecting to the peer within
 //! `connect_timeout_ms`, and each send within `timeout_ms`.
 //!
-//! Each test drives the production sink against a loopback peer: a port that refuses every
+//! Each test drives the production emitter against a loopback peer: a port that refuses every
 //! connection, a listener that takes a connection and never greets it, or a PULL socket that
 //! completes the ZMTP handshake and then reads a connection only while something receives from it.
 
@@ -21,14 +21,14 @@ use nervix_primitives::{
 };
 use zeromq::{PullSocket, Socket as _, SocketRecv as _};
 
-use super::{ZEROMQ, ZeroMqEmitter};
+use super::{ZEROMQ, ZeroMqPushEmitter};
 
 /// How long a test waits for an open or a publish before it reports that nothing bounded the
 /// wait. On a paused clock it passes as soon as nothing else is pending.
 const UNBOUNDED_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// One message larger than every buffer between the sink and a peer that reads nothing: the
-/// sink's socket send buffer, which Linux grows to at most 4 MiB unless `net.ipv4.tcp_wmem` says
+/// One message larger than every buffer between the emitter and a peer that reads nothing: the
+/// emitter's socket send buffer, which Linux grows to at most 4 MiB unless `net.ipv4.tcp_wmem` says
 /// otherwise, and the receive buffer of a peer that never reads, which keeps its initial size.
 const LARGER_THAN_THE_CONNECTION: usize = 16 * 1024 * 1024;
 
@@ -68,10 +68,10 @@ async fn pull_peer() -> (PullSocket, String) {
     (peer, endpoint.to_string())
 }
 
-/// Opens a sink with the client entries `config` lists, and fails the test if nothing bounds the
+/// Opens an emitter with the client entries `config` lists, and fails the test if nothing bounds the
 /// open.
-async fn open(config: &[(&str, &str)]) -> EmitterStartResult<ZeroMqEmitter> {
-    let opened = timeout(UNBOUNDED_WAIT, ZeroMqEmitter::open(&entries(config))).await;
+async fn open(config: &[(&str, &str)]) -> EmitterStartResult<ZeroMqPushEmitter> {
+    let opened = timeout(UNBOUNDED_WAIT, ZeroMqPushEmitter::open(&entries(config))).await;
     let Ok(opened) = opened else {
         panic!("nothing bounded the open, which still waited after {UNBOUNDED_WAIT:?}");
     };
@@ -80,7 +80,7 @@ async fn open(config: &[(&str, &str)]) -> EmitterStartResult<ZeroMqEmitter> {
 
 /// Publishes one record of `size` bytes, and fails the test if nothing bounds the publish.
 async fn publish(
-    connector: &mut ZeroMqEmitter,
+    connector: &mut ZeroMqPushEmitter,
     size: usize,
 ) -> PerRecordOutcomeParts<EmitterRecordId> {
     let record = EmitterRecord::new(
@@ -121,7 +121,7 @@ async fn an_open_whose_peer_refuses_every_connection_fails_at_connect_timeout_ms
     let failure = open(&[("addr", &address), ("connect_timeout_ms", "1000")])
         .await
         .err()
-        .assured("a peer that refuses every connection never accepts the sink");
+        .assured("a peer that refuses every connection never accepts the emitter");
 
     assert_eq!(started.elapsed(), Duration::from_secs(1));
     assert!(matches!(
@@ -145,12 +145,12 @@ async fn an_open_whose_peer_never_answers_its_handshake_fails_at_connect_timeout
         "tcp://{}",
         listener.local_addr().assured("the listener is bound")
     );
-    // The peer takes the sink's connection and never sends its ZMTP greeting.
+    // The peer takes the emitter's connection and never sends its ZMTP greeting.
     let peer = spawn(async move {
         let (connection, _) = listener
             .accept()
             .await
-            .assured("the sink connects to the peer");
+            .assured("the emitter connects to the peer");
         connection
     });
     let started = Instant::now();
@@ -158,7 +158,7 @@ async fn an_open_whose_peer_never_answers_its_handshake_fails_at_connect_timeout
     let failure = open(&[("addr", &address), ("connect_timeout_ms", "1000")])
         .await
         .err()
-        .assured("a peer that never greets the sink never completes the handshake");
+        .assured("a peer that never greets the emitter never completes the handshake");
 
     assert_eq!(started.elapsed(), Duration::from_secs(1));
     assert!(matches!(
@@ -184,7 +184,7 @@ async fn an_open_without_connect_timeout_ms_takes_the_default_deadline() {
     let failure = open(&[("addr", &address)])
         .await
         .err()
-        .assured("a peer that refuses every connection never accepts the sink");
+        .assured("a peer that refuses every connection never accepts the emitter");
 
     assert_eq!(started.elapsed(), DEFAULT_CONNECT_TIMEOUT);
     assert_elapsed(
@@ -223,7 +223,7 @@ async fn a_send_to_a_peer_that_stops_reading_fails_at_timeout_ms() {
     let mut connector = open(&[("addr", &address), ("timeout_ms", "2000")])
         .await
         .assured("the peer completes the handshake");
-    // The send fills every buffer between the sink and the peer and then waits for room, which
+    // The send fills every buffer between the emitter and the peer and then waits for room, which
     // the peer never makes; the clock stops so the deadline is measured exactly.
     pause();
     let started = Instant::now();

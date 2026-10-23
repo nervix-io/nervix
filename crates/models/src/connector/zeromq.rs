@@ -2,9 +2,9 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The ZeroMQ client Model, the pull source and push sink Models with their delivery
+//! - **Owns.** The ZeroMQ client Model, the pull source and push emitter Models with their delivery
 //!   mode, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The ZeroMQ driver, its configuration keys, or how a socket is bound,
 //!   connected, read or written.
 
@@ -46,7 +46,7 @@ pub struct ZeroMqPullIngestor {
 }
 
 /// What the connector of a ZEROMQ PULL holds and how long it waits.
-const ZEROMQ_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const ZEROMQ_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "the frame a peer is sending",
         bound: BufferBound::Unbounded,
@@ -69,7 +69,7 @@ const ZEROMQ_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a ZEROMQ PUSH holds and how long it waits.
-const ZEROMQ_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+const ZEROMQ_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "bytes queued for a peer",
         bound: BufferBound::Unbounded,
@@ -109,7 +109,7 @@ impl IngestorDeclaration for ZeroMqPullIngestor {
         ],
         locator: None,
         options: &[],
-        bounds: ZEROMQ_SOURCE_BOUNDS,
+        bounds: ZEROMQ_INGESTOR_BOUNDS,
     };
 }
 
@@ -151,7 +151,7 @@ connector_ingestors! {
     /// What a ZeroMQ source reads.
     pub enum ZeroMqIngestor;
     /// The alterations of the ingestors that read a ZeroMQ entity.
-    pub enum ZeroMqIngestorAlteration;
+    pub enum ZeroMqPullIngestorAlteration;
     /// The entities a ZeroMQ source reads.
     pub enum ZeroMqIngestorEntity {
         Pull(ZeroMqPullIngestor) = "PULL", "ZeroMQ";
@@ -179,7 +179,7 @@ impl EmitterDeclaration for ZeroMqPushEmitter {
         options: &[],
         envelope: &[],
         properties: &[],
-        bounds: ZEROMQ_SINK_BOUNDS,
+        bounds: ZEROMQ_EMITTER_BOUNDS,
     };
 }
 
@@ -198,11 +198,11 @@ impl EmitterEntityBody for ZeroMqPushEmitter {
 
 connector_emitters! {
     connector ZeroMq = "ZEROMQ";
-    /// What a ZeroMQ sink writes.
+    /// What a ZeroMQ emitter writes.
     pub enum ZeroMqEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum ZeroMqEmitterMode;
-    /// The entities a ZeroMQ sink writes.
+    pub enum ZeroMqPushEmitterMode;
+    /// The entities a ZeroMQ emitter writes.
     pub enum ZeroMqEmitterEntity {
         Push(ZeroMqPushEmitter, ZeroMqPushPublishingMode) = "PUSH";
     }

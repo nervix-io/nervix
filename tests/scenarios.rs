@@ -13068,7 +13068,7 @@ async fn when_emitter_leaves_fault_mode(world: &mut ScenarioWorld, emitter: Stri
     world.cluster().clear_emitter_fault_on_all_nodes(&emitter);
 }
 
-#[when(expr = "sink client for emitter {string} enters unavailable fault mode")]
+#[when(expr = "emitter client for emitter {string} enters unavailable fault mode")]
 async fn when_emitter_client_enters_unavailable_fault_mode(
     world: &mut ScenarioWorld,
     emitter: String,
@@ -13079,8 +13079,8 @@ async fn when_emitter_client_enters_unavailable_fault_mode(
         .fail_emitter_client_unavailable_on_all_nodes(&emitter);
 }
 
-#[when(expr = "sink client for emitter {string} leaves fault mode")]
-#[then(expr = "sink client for emitter {string} leaves fault mode")]
+#[when(expr = "emitter client for emitter {string} leaves fault mode")]
+#[then(expr = "emitter client for emitter {string} leaves fault mode")]
 async fn when_emitter_client_leaves_fault_mode(world: &mut ScenarioWorld, emitter: String) {
     let emitter = expand_placeholders(world, &emitter);
     world
@@ -13088,11 +13088,11 @@ async fn when_emitter_client_leaves_fault_mode(world: &mut ScenarioWorld, emitte
         .clear_emitter_client_fault_on_all_nodes(&emitter);
 }
 
-/// The sink still writes every record of the emitter's next write, but the emitter receives the
+/// The emitter still writes every record of the emitter's next write, but the emitter receives the
 /// answers for only the first `resolved` of them, as from a broker that stops answering after it
 /// accepted the rest, and retries the write as one whose outcome it never learned.
 #[when(
-    expr = "the sink of emitter {string} stalls after resolving {int} record(s) of its next \
+    expr = "the emitter of emitter {string} stalls after resolving {int} record(s) of its next \
             publish"
 )]
 async fn when_emitter_connector_stalls_after_resolving(

@@ -1,4 +1,4 @@
-//! Validation of the source and sink contracts.
+//! Validation of the source and emitter contracts.
 //!
 //! Layer: test harness.
 //!
@@ -849,11 +849,11 @@ fn emitter_header_invocations_are_rejected_for_unsupported_emitters() {
     .expect("Kafka emitters must accept write_header");
 }
 
-/// A sink that keeps one value per header name refuses an `INVOKE` clause that writes one literal
-/// name twice, naming the header as the sink records it and both calls, because the later write
-/// would replace the earlier one on every record. Names compare as the sink's header model records
-/// them, a sink that keeps every value accepts the repeat, and a name an expression computes is
-/// left to the sink at run time.
+/// A emitter that keeps one value per header name refuses an `INVOKE` clause that writes one literal
+/// name twice, naming the header as the emitter records it and both calls, because the later write
+/// would replace the earlier one on every record. Names compare as the emitter's header model records
+/// them, an emitter that keeps every value accepts the repeat, and a name an expression computes is
+/// left to the emitter at run time.
 #[test]
 fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_per_name() {
     let domain = DomainName::parse("default").expect("valid domain");
@@ -994,7 +994,7 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
         "x-route",
     );
 
-    // Names that differ in letter case are two names where a sink keeps them exactly.
+    // Names that differ in letter case are two names where an emitter keeps them exactly.
     *emitter.connector = EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
         mode: nervix_models::PulsarTopicPublishingMode::NoAck {
             retry_policy: nervix_models::RetryPolicy {
@@ -1007,7 +1007,7 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
     }));
     validate(&emitter).expect("X-Route and x-route are two Pulsar property names");
 
-    // A sink that keeps every value of a name publishes both writes.
+    // A emitter that keeps every value of a name publishes both writes.
     emitter.construction = nervix_nspl::parse_route_construction(
         "INHERIT ALL INVOKE write_header('route', 'a'), write_header('route', 'b')",
     )
@@ -1035,7 +1035,7 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
     }));
     validate(&emitter).expect("a NATS message keeps both values of the name");
 
-    // A name an expression computes is the sink's to settle at run time.
+    // A name an expression computes is the emitter's to settle at run time.
     emitter.construction = nervix_nspl::parse_route_construction(
         "INHERIT ALL INVOKE write_header(input.tenant, 'a'), write_header(input.tenant, 'b')",
     )
@@ -1790,12 +1790,12 @@ fn emitter_accepts_same_schema_inputs_from_different_named_branches() {
         .edges
         .iter()
         .find(|edge| edge.target == "client_emitter:broker_out")
-        .expect("emitter sink edge must exist");
+        .expect("emitter emitter edge must exist");
     assert_eq!(
         emitter_edge
             .metric
             .as_ref()
-            .expect("emitter sink edge must carry a metric")
+            .expect("emitter emitter edge must carry a metric")
             .relay,
         None,
         "multi-input sent metrics must aggregate without a misleading relay label"

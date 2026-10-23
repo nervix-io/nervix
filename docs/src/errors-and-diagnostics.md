@@ -101,7 +101,7 @@ connection error.
 Attachments are not contexts, and the rendered chain does not show them. A printable attachment
 carries the description a connector or a task gives its own failure, and one reader uses it: an
 emitter shows the first printable attachment of a failure as its transient error, and only without
-one the outermost context. A typed attachment carries a value for one consumer, as a emitter attaches
+one the outermost context. A typed attachment carries a value for one consumer, as an emitter attaches
 the retry delay its receiver stated for the emitter host to read. Neither replaces a context: a
 caller decides from contexts and typed fields.
 
@@ -126,7 +126,7 @@ provides.
 | Session transaction binding | `SessionTransactionBindingError` as the current context | The `TransactionTakenOver` or `TransactionDetached` disposition |
 | Postgres, MySQL and ClickHouse emitters | The driver's SQLSTATE, code or named rejection in the current context | Whether the destination refused rows for good or the attempt failed as infrastructure |
 | Connectors that resolve through a driver's DNS hook | `DnsLookupError::find_in` over the causes the driver wraps around the lookup | Keep the typed lookup failure beneath the connection failure |
-| Emitter host | The retry delay a emitter attached to its publish failure | Lengthen the retry schedule to the delay the receiver stated |
+| Emitter host | The retry delay an emitter attached to its publish failure | Lengthen the retry schedule to the delay the receiver stated |
 | WASM runtime | The saved-state verdict of the guest-call failure, an invalid emission, or an exhausted execution limit | The stage the failure is reported under, whether rejected-state recovery starts, and whether the instance is discarded |
 | Restore conversion | An execution admission or staging refusal among the report's contexts | Release what the conversion holds and convert again within its wait for room |
 
@@ -566,7 +566,7 @@ request is not an attempt failure: it is a record rejection with code `external`
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the emitter.
 
-A Prometheus query that fails is a `PrometheusIngestorError` beneath `IngestorError::Read`: a request
+A Prometheus query that fails is a `PrometheusQueryIngestorError` beneath `IngestorError::Read`: a request
 that could not be sent, a status other than success, a response whose announced length or body
 exceeds the ingestor's `MAX BODY SIZE`, a body that could not be read, a payload that does not
 decode, a query Prometheus answers with an error status, or a result that is not a vector. The
@@ -661,7 +661,7 @@ cause of its connection error. The connector finds it there and reports
 and the `DnsLookupError` beneath it. Any other failure keeps the driver's own description, such as
 an address that refused the connection, a failed TLS handshake, including a certificate that does
 not name the configured host, or a refused MQTT handshake. A source keeps the error beneath
-`MqttIngestorError::Connect` while it connects and `MqttIngestorError::Receive` while it reads, and
+`MqttTopicIngestorError::Connect` while it connects and `MqttTopicIngestorError::Receive` while it reads, and
 those beneath `IngestorError`, so `DESCRIBE INGESTOR` shows the deepest cause: the resolver's lookup
 error or the driver's description. A emitter's event loop records the connection error's message as
 the emitter's transient error, which `DESCRIBE EMITTER` shows, and reconnects on the emitter's
@@ -671,8 +671,8 @@ leaves a record unresolved, beneath `EmitterWriteError::Publish`, each with the 
 description of the failure for the emitter's transient error. A missed `ACK TIMEOUT` is the
 confirmation window's `ConfirmationWindowError`, which the window describes the same way.
 
-MQTT input retirement reports `RuntimeError::RetireIngestorSource`, naming its domain and
-ingestor, above the connector's `MqttIngestorError::RetireInstance` and instance index. The report
+MQTT input retirement reports `RuntimeError::RetireIngestorEntity`, naming its domain and
+ingestor, above the connector's `MqttTopicIngestorError::RetireInstance` and instance index. The report
 keeps typed client and connection causes, an unsubscribe refusal's reason codes, or the cleanup
 deadline's budget. Invalid endpoint URLs retain their parse cause, and client construction keeps
 its driver cause. Cleanup failures at the preceding endpoint are rendered once into runtime error
@@ -680,18 +680,18 @@ events and do not fail a drop or prevent moving to another reachable endpoint. F
 the replacement's changed sessions remains an installation failure. Neither path rejects a record
 or confirms payload delivery.
 
-Pulsar input retirement reports `RuntimeError::RetireIngestorSource` above the connector's
-`PulsarIngestorError::RemoveSubscription`, which names the subscription and its qualified topic.
+Pulsar input retirement reports `RuntimeError::RetireIngestorEntity` above the connector's
+`PulsarTopicIngestorError::RemoveSubscription`, which names the subscription and its qualified topic.
 Beneath it is the step that failed: the client's connection failure, `JoinSubscription` or
 `Unsubscribe` above the driver's `pulsar::Error`, which keeps a refusal's server error and reason,
 or `RemovalDeadline` with the connection budget it exceeded. A client whose configuration does not
 resolve keeps `IngestorConnectorStartError::ClientConfiguration` beneath the retirement context instead. Each
 report is rendered once into runtime error events and never fails the drop or replacement.
-Comparing a replacement's subscription retains URL parse causes beneath `PulsarIngestorError::ClientConfig`,
+Comparing a replacement's subscription retains URL parse causes beneath `PulsarTopicIngestorError::ClientConfig`,
 or uses `InvalidServiceAddress` for an unsupported service scheme or missing host, beneath the
 retirement context. A comparison failure preserves the subscription and is reported separately
 from any failure to start the replacement. A provisioned
-subscription that does not exist is `PulsarIngestorError::MissingSubscription` beneath the source's
+subscription that does not exist is `PulsarTopicIngestorError::MissingSubscription` beneath the source's
 resume context, which the ingestor's transient status shows by its subscription and topic; a check
 that could not learn whether the subscription exists is `VerifySubscription` above the driver's
 error.
@@ -718,21 +718,21 @@ that gives up only after every record's report was served is no failure. A flush
 otherwise, or whose blocking task does not complete, keeps that cause beneath
 `EmitterFinishError::Flush`.
 
-A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaIngestorError::CommitOffset`, which names
+A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaTopicIngestorError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
-does not answer within thirty seconds is `KafkaIngestorError::CommitUnanswered`, and a blocking-pool
-job that ends without the answer keeps its `JoinError` beneath `KafkaIngestorError::CommitTask`. The
+does not answer within thirty seconds is `KafkaTopicIngestorError::CommitUnanswered`, and a blocking-pool
+job that ends without the answer keeps its `JoinError` beneath `KafkaTopicIngestorError::CommitTask`. The
 commit of an acknowledged batch fails beneath `IngestorError::Acknowledge`, so the ingestor's
 transient status in `DESCRIBE INGESTOR` shows the deepest cause, such as the driver's description of
 the refusal, and the host rejects the batch's positions, which the source reads again. The commit a
 `MODE NO ACK` consumer makes as it leaves its group fails beneath `IngestorError::Suspend` or
 `IngestorError::Close`, which the source loop reports as a runtime event. None rejects a record.
 
-Kafka control-call admission keeps `AdmissionError` beneath `KafkaIngestorError::ControlAdmission`,
+Kafka control-call admission keeps `AdmissionError` beneath `KafkaTopicIngestorError::ControlAdmission`,
 and a refused queue or failed admitted worker keeps `ExecutionError` beneath
-`KafkaIngestorError::ControlExecution`. These are transient failures of resume, rejection or
+`KafkaTopicIngestorError::ControlExecution`. These are transient failures of resume, rejection or
 acknowledgement, rather than failures to decode a record. A control call that exhausts its native
-`socket.timeout.ms` budget reports `KafkaIngestorError::ControlTimeout` with that bound. Metadata,
+`socket.timeout.ms` budget reports `KafkaTopicIngestorError::ControlTimeout` with that bound. Metadata,
 watermark, timestamp and seek failures preserve the driver's typed cause beneath the operation
 that failed.
 
@@ -741,9 +741,9 @@ driver the resolver's `DnsLookupError` as the failure of the lookup. The driver 
 cause of its connection error, and the connector finds it there by type and keeps it as the context
 beneath its existing infrastructure failure: `EmitterWriteError::Publish` for a ClickHouse insert or
 an SQS send, `EmitterOpenError::Initialize` while an SQS emitter looks up its queue, and the
-`SqsIngestorError` of looking its queue up, receiving or deleting beneath the source's `IngestorError`.
+`SqsQueueIngestorError` of looking its queue up, receiving or deleting beneath the source's `IngestorError`.
 An SQS source looks its queue up when an instance resumes, so that failure is `IngestorError::Resume`
-above the typed lookup failure: a queue the service does not have is `SqsIngestorError::MissingQueue`,
+above the typed lookup failure: a queue the service does not have is `SqsQueueIngestorError::MissingQueue`,
 which names it, and the source host shows the deepest cause as the source's transient error and
 retries it. The failure's message names the host and the lookup failure, which `DESCRIBE EMITTER`
 and `DESCRIBE INGESTOR` show. Any other failure to reach the service, such as a refused connection
@@ -752,7 +752,7 @@ connection error, which describes the connection and carries neither credentials
 response from the service keeps its existing description. None is a record rejection, and none
 acknowledges input. A source read the host cancelled still waits for its receive in flight, and a
 service that has not answered it within 10 seconds of the cancellation ends the read with
-`SqsIngestorError::CancelledReceiveUnanswered`, which names that budget, beneath `IngestorError::Read`.
+`SqsQueueIngestorError::CancelledReceiveUnanswered`, which names that budget, beneath `IngestorError::Read`.
 The host shows it as the source's transient error; nothing is rejected or acknowledged, and a message
 the receive was returning stays invisible until its visibility timeout.
 
@@ -780,7 +780,7 @@ driver failure beneath it when present. An unanswered receipt leaves delivery un
 than proving that the broker did not store the message.
 
 A Pulsar source classifies an acknowledgement or a redelivery request that did not take effect in
-`PulsarIngestorError`, beneath `IngestorError::Acknowledge` or `IngestorError::Reject`. An
+`PulsarTopicIngestorError`, beneath `IngestorError::Acknowledge` or `IngestorError::Reject`. An
 acknowledgement the broker answered with a server error is `AcknowledgementRefused`, whose typed
 `PulsarRefusal` keeps the server error, absent for a code the client does not know, and the reason
 the broker gave. An acknowledgement nothing answered is `AcknowledgementUnconfirmed`, and a
@@ -792,8 +792,8 @@ client failure the source does not classify keeps the driver's error as the type
 shows.
 
 A NATS source whose client loses its connection to the server reports
-`NatsIngestorError::ConnectionLost` beneath `IngestorError::Read` once it has handed over what the client
-received, and each reconnect that fails reports `NatsIngestorError::Connect` beneath
+`NatsSubjectIngestorError::ConnectionLost` beneath `IngestorError::Read` once it has handed over what the client
+received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath
 `IngestorError::Resume`; the source host shows the deepest cause as the ingestor's transient error. A
 NATS JetStream publish keeps the driver's `PublishError` beneath `EmitterWriteError::Publish` when the
 client does not take a record within `ACK TIMEOUT` and when a record's `PubAck` fails, each with the
@@ -801,7 +801,7 @@ connector's description of the failure for the emitter's transient error. A mess
 server's `max_payload` becomes a record rejection with code `external` and operation `publish`, and a
 missed `ACK TIMEOUT` is the confirmation window's `ConfirmationWindowError`.
 
-A ZeroMQ source keeps the driver's `ZmqError` as the typed cause of its `ZeroMqIngestorError`. `Bind`
+A ZeroMQ source keeps the driver's `ZmqError` as the typed cause of its `ZeroMqPullIngestorError`. `Bind`
 and `Connect` name the configured address and sit beneath `IngestorError::Resume`, and `Receive` sits
 beneath `IngestorError::Read`. The rendered chain therefore names both the address and the driver's
 cause, and the source host shows the deepest cause as the ingestor's transient error, such as the
@@ -1080,8 +1080,8 @@ the byte-size parser's reason in its message. The node that declares the setting
 context above it, so the setting's error does not repeat the node: `GeneratorError::FlushPolicy`
 names the output relay, `EmitterStartError::CollectPolicy` the emitter's input collection, and
 `MessageErrorHandlingError::FlushPolicy` the message-error route and its relay. An emitter's
-`VALUES` mapping that does not compile is a `MappedValuesError` naming the emitter and the emitter, with
-the VM's failure beneath, under the emitter's emitter initialization failure.
+`VALUES` mapping that does not compile is a `MappedValuesError` naming the connector and the emitter, with
+the VM's failure beneath, under the emitter's connector initialization failure.
 
 Stopping an emitter's task to swap it fails as a `ScheduledEmitterStopFailure`, which keeps the
 task running beside a `ScheduledEmitterStopError` report: the task was unavailable, did not accept
@@ -2103,7 +2103,7 @@ is where a key's other field values are read.
 The fingerprint is a plain digest of the key text, computed without a secret. It hides a key only
 as far as the key's values are hard to guess: someone who can guess a sensitive key value can
 compute its fingerprint and confirm the guess against a diagnostic. The rule also governs only text
-that names a branch in a failure, an event, a log or a statistic. A statement or a emitter that an
+that names a branch in a failure, an event, a log or a statistic. A statement or an emitter that an
 operator directs at branch data follows its own contract: `SHOW RELAY <relay> MATERIALIZED STATE`
 prints each entry's key and payload ([Relay](./relay.md)), and an SQS emitter's `FROM BRANCH` group
 is the record's branch key ([Emitters](./emitters.md)).
@@ -2258,7 +2258,7 @@ actionable fields, context across boundaries and the public diagnostic or recove
 path. That classification preserves branch and sensitivity rules.
 ### Tooling And Diagnostic Runs
 
-The compiler architecture gate owns typed tooling failures for invalid ingestor contracts,
+The compiler architecture gate owns typed tooling failures for invalid source contracts,
 conflicting findings and incomplete compiler passes. `ContractProblem` retains the specific
 argument, kind or missing contract coordinate inside an `error-stack` report until the Rust
 diagnostic boundary formats it. Reports preserve source location, resolved receiver/operation,
@@ -2364,7 +2364,7 @@ failed output/recording and a recording deadline are diagnostic execution failur
 cancellable ten-second deadline for each finding. Expiry exits without another write, because the
 same descriptor may be blocked. No error is returned to the code whose locks deadlocked. Nothing
 logs protected application values or uploads artifacts. The detector callback performs bounded
-handoff rather than reporting I/O; a emitter panic aborts so a swallowed callback failure cannot look
+handoff rather than reporting I/O; an emitter panic aborts so a swallowed callback failure cannot look
 clean. A tracked constructor before installation panics with a configuration failure.
 
 `nervix-deadlock` owns `EvidenceError` and review refusals: unsupported format version, malformed or
@@ -2500,3 +2500,10 @@ The shipped code falls short of the model in these places:
   to a statement is reported at line 1.
 - **A literal canonical NSPL cannot spell.** A float literal too large for `F64` reads as infinity,
   which canonical rendering then refuses.
+
+Connector terminology follows entity ownership: `IngestorError` and `EmitterOpenError` /
+`EmitterWriteError` retain typed transport causes until their existing reporting boundaries.
+`RejectedEmitterMember` remains the fixed per-record outcome, distinct from the host's rejected
+record. Renaming and grouping entity owners changes neither retry classification nor what is
+rendered at the boundary. The ingestor planner's input identity/kind errors cover client, endpoint
+and native schema references before composition.

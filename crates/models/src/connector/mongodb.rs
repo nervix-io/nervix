@@ -2,9 +2,9 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The MongoDB client Model with its connection pool, the collection sink Model with
+//! - **Owns.** The MongoDB client Model with its connection pool, the collection emitter Model with
 //!   its conflict action, and what it declares.
-//! - **Depends on.** The shared sink declarations and the names a body references.
+//! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The MongoDB driver, its configuration keys, or how documents are written.
 
 #![cfg_attr(
@@ -134,11 +134,11 @@ impl EmitterEntityBody for MongoDbCollectionEmitter {
 
 connector_emitters! {
     connector MongoDb = "MONGODB";
-    /// What a MongoDB sink writes.
+    /// What a MongoDB emitter writes.
     pub enum MongoDbEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum MongoDbEmitterMode;
-    /// The entities a MongoDB sink writes.
+    pub enum MongoDbCollectionEmitterMode;
+    /// The entities a MongoDB emitter writes.
     pub enum MongoDbEmitterEntity {
         Collection(MongoDbCollectionEmitter, MongoDbCollectionPublishingMode) = "COLLECTION";
     }

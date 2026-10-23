@@ -457,7 +457,7 @@ impl SectionVisitor for ModelsCollector {
         content: &mut SectionReader<'_>,
     ) -> Result<(), error_stack::Report<nervix_backup::ArchiveReadError>> {
         if entry.content != SectionContent::Nspl {
-            let mut connector = std::io::connector();
+            let mut connector = std::io::sink();
             std::io::copy(content, &mut connector).expect("a section can be read through");
             return Ok(());
         }

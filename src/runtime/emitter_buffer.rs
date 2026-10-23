@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** The emitter's buffer of released batches with their source relay and branch, the
 //!   request an HTTP emitter admitted each row with and what a later rejection of the row reads,
-//!   message and byte accounting, where every row stands in its publication and which rows its sink
+//!   message and byte accounting, where every row stands in its publication and which rows its emitter
 //!   delivered, what a flush reports as sent, the batch payloads, HTTP requests and prepared row
 //!   requests retained for the rows they carry, and flush cadence.
 //! - **Depends on.** Relay batches and their acknowledgements, the emitter's flush policy, and the
@@ -20,7 +20,7 @@ use error_stack::ResultExt as _;
 
 use super::*;
 
-/// What one emitter still holds: the batches its own buffer collected, and the rows a sink that
+/// What one emitter still holds: the batches its own buffer collected, and the rows an emitter that
 /// publishes on its commit boundary staged out of that buffer.
 #[derive(Debug)]
 pub(super) struct EmitterBufferedMessages {
@@ -48,7 +48,7 @@ impl EmitterBufferedMessages {
         self.report_total();
     }
 
-    /// Reports that the emitter holds nothing: its buffer and the rows its sink staged are gone
+    /// Reports that the emitter holds nothing: its buffer and the rows its emitter staged are gone
     /// with its task.
     fn clear(&self) {
         self.buffered.store(0, Ordering::Release);
@@ -84,7 +84,7 @@ pub(super) struct EmitterPublishBatch {
     /// The ordering group of every row, absent when the emitter declares none.
     ordering_groups: Option<OrderingGroups>,
     /// The request every row was admitted with, present only for an emitter that publishes through
-    /// an HTTP sink.
+    /// an HTTP emitter.
     http_requests: Option<AdmittedHttpRequests>,
     /// Where every row stands in its publication.
     rows: Vec<BufferedRow>,
@@ -94,15 +94,15 @@ pub(super) struct EmitterPublishBatch {
 /// of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BufferedRow {
-    /// No attempt has prepared the row for its sink yet, or the attempt that did left it for the
+    /// No attempt has prepared the row for its emitter yet, or the attempt that did left it for the
     /// next one.
     Pending,
     /// A batch payload, HTTP request or prepared row request the emitter retains carries the row,
-    /// so only the sink's answer for it resolves the row.
+    /// so only the emitter's answer for it resolves the row.
     Prepared,
-    /// The sink delivered the row, which the emitter's sent counters count once.
+    /// The emitter delivered the row, which the emitter's sent counters count once.
     Delivered,
-    /// A sink that publishes on its own commit accepted the row and took its acknowledgements, so
+    /// A emitter that publishes on its own commit accepted the row and took its acknowledgements, so
     /// that commit, not this buffer, counts it as sent.
     Staged,
     /// The row was rejected once its message error was delivered.
@@ -321,7 +321,7 @@ impl EmitterPublishBatch {
         bytes
     }
 
-    /// The rows of this batch its sink delivered, in row order.
+    /// The rows of this batch its emitter delivered, in row order.
     fn delivered_rows(&self) -> Vec<usize> {
         let mut delivered = Vec::with_capacity(self.rows.len());
         for (row, state) in self.rows.iter().enumerate() {
@@ -332,9 +332,9 @@ impl EmitterPublishBatch {
         delivered
     }
 
-    /// What this batch adds to its emitter's sent counters: every row its sink delivered, counted
-    /// once however many attempts it took, and the payload bytes those rows carry. A row the sink
-    /// rejected is not sent, and a row a sink staged is counted by its commit, so a batch the sink
+    /// What this batch adds to its emitter's sent counters: every row its emitter delivered, counted
+    /// once however many attempts it took, and the payload bytes those rows carry. A row the emitter
+    /// rejected is not sent, and a row an emitter staged is counted by its commit, so a batch the emitter
     /// delivered none of reports nothing.
     pub(super) fn delivered_report(&self) -> Option<PublishReport> {
         let delivered = self.delivered_rows();
@@ -455,7 +455,7 @@ impl EmitterPublishBatch {
                 acks.ack_success();
                 BufferedRow::Delivered
             }
-            DeliveredAcknowledgements::Sink => BufferedRow::Staged,
+            DeliveredAcknowledgements::Connector => BufferedRow::Staged,
         };
         *state = resolved;
         Ok(())
@@ -476,7 +476,7 @@ impl EmitterPublishBatch {
     }
 
     /// Records that a retained batch payload, HTTP request or prepared row request carries `row`,
-    /// which only the sink's answer for it resolves from now on.
+    /// which only the emitter's answer for it resolves from now on.
     pub(super) fn mark_prepared(&mut self, row: usize) -> EmitterRuntimeResult<()> {
         let row_count = self.rows.len();
         let state = self.rows.get_mut(row).ok_or_else(|| {
@@ -489,7 +489,7 @@ impl EmitterPublishBatch {
         Ok(())
     }
 
-    /// Returns a row whose payload the sink definitively rejected to the rows still pending, until
+    /// Returns a row whose payload the emitter definitively rejected to the rows still pending, until
     /// its own message error is delivered.
     ///
     /// No payload carries the row any more, so a delivery the emitter's stop deadline cuts short
@@ -539,7 +539,7 @@ impl EmitterPublishBatch {
         pending
     }
 
-    /// The acknowledgements of `rows`, for a sink that takes them with the write.
+    /// The acknowledgements of `rows`, for an emitter that takes them with the write.
     pub(super) fn acks_for_rows(&self, rows: &[usize]) -> AckSet {
         AckSet::merged(
             rows.iter()
@@ -562,8 +562,8 @@ pub(super) enum RowToPack {
 pub(super) enum DeliveredAcknowledgements {
     /// The host resolves them as the write returns.
     Host,
-    /// The sink took them with the rows and resolves them when its own commit succeeds.
-    Sink,
+    /// The emitter took them with the rows and resolves them when its own commit succeeds.
+    Connector,
 }
 
 pub(in crate::runtime) struct PublishReport {
@@ -610,21 +610,21 @@ impl PublishReport {
 ///
 /// The buffer is the one owner of everything a failed attempt leaves behind: the batches, whose
 /// acknowledgements the retry keeps alive, where each of their rows stands, and the batch payloads,
-/// HTTP requests or prepared row requests an attempt already offered to the sink without learning
+/// HTTP requests or prepared row requests an attempt already offered to the emitter without learning
 /// their outcome. Its connector may be reopened between attempts, so none of that lives with the
 /// connector.
 #[derive(Default)]
 pub(super) struct EmitterBatchBuffer {
     flush_policy: Option<RuntimeFlushPolicy>,
     pending: Vec<EmitterPublishBatch>,
-    /// The batch payloads a record sink was handed and has not answered for.
+    /// The batch payloads a record emitter was handed and has not answered for.
     payloads: PreparedPayloads<EncodedPayload>,
     /// Native Arrow IPC payloads retained with their members until application ACK.
     client_payloads: PreparedPayloads<ClientPayload>,
-    /// The requests an HTTP sink was handed and has not answered for.
+    /// The requests an HTTP emitter was handed and has not answered for.
     requests: PreparedPayloads<PreparedHttpRequest>,
-    /// The requests a row request sink prepared and has not answered for. An emitter publishes
-    /// through one sink, so at most one of the three holds anything.
+    /// The requests a row request emitter prepared and has not answered for. An emitter publishes
+    /// through one emitter, so at most one of the three holds anything.
     row_requests: PreparedPayloads<RowRequestBody>,
     pending_messages: u64,
     pending_bytes: u64,
@@ -632,7 +632,7 @@ pub(super) struct EmitterBatchBuffer {
     buffered_messages: Arc<EmitterBufferedMessages>,
 }
 
-/// What one flush hands the emitter's sink: the buffered batches, and the batch payloads, HTTP
+/// What one flush hands the emitter's emitter: the buffered batches, and the batch payloads, HTTP
 /// requests or row requests earlier attempts prepared from their rows and retained.
 pub(super) struct EmitterPublication<'a> {
     pub(super) batches: &'a mut [EmitterPublishBatch],
@@ -667,7 +667,7 @@ impl EmitterBatchBuffer {
             .set_buffered(self.pending_messages.arch_into());
     }
 
-    /// Publishes what a sink that commits separately still holds, which a drain reads together
+    /// Publishes what an emitter that commits separately still holds, which a drain reads together
     /// with this buffer's own pending batches.
     pub(super) fn report_staged_messages(&self, messages: u64) {
         self.buffered_messages.set_staged(messages.arch_into());
@@ -851,9 +851,9 @@ impl EmitterBatchBuffer {
         self.update_buffered_messages();
     }
 
-    /// What a flush that just completed published: every row its sink delivered while this buffer
+    /// What a flush that just completed published: every row its emitter delivered while this buffer
     /// held it, over every attempt the flush took, each counted once, and the payload bytes they
-    /// carry. Absent when the sink delivered none of them.
+    /// carry. Absent when the emitter delivered none of them.
     pub(super) fn delivered_report(&self) -> Option<PublishReport> {
         let mut report = None;
         for batch in &self.pending {
@@ -865,7 +865,7 @@ impl EmitterBatchBuffer {
 
 impl Drop for EmitterBatchBuffer {
     /// The buffer lives as long as its emitter task, so dropping it ends what the task held: the
-    /// buffered batches, and the rows its sink staged, which the sink's own end abandons.
+    /// buffered batches, and the rows its emitter staged, which the emitter's own end abandons.
     fn drop(&mut self) {
         self.pending_acks().no_ack("emitter dropped buffered batch");
         self.buffered_messages.clear();
@@ -1490,7 +1490,7 @@ mod tests {
         assert_eq!(buffer.pending_messages, 3);
         assert!(
             buffer.delivered_report().is_none(),
-            "nothing is sent before the sink delivers it"
+            "nothing is sent before the emitter delivers it"
         );
         for batch in &mut buffer.pending {
             for row in 0..batch.rows.len() {
@@ -1678,7 +1678,7 @@ mod tests {
 
         let retained = batch.acks_for_rows(&[0]);
         batch
-            .mark_delivered(0, DeliveredAcknowledgements::Sink)
+            .mark_delivered(0, DeliveredAcknowledgements::Connector)
             .expect("a staged row must be marked delivered");
         batch
             .mark_delivered(1, DeliveredAcknowledgements::Host)
@@ -1686,11 +1686,11 @@ mod tests {
 
         assert!(batch.pending_record_rows().is_empty());
         assert_eq!(batch.resolved_rows(), vec![true, true]);
-        // The sink's commit counts the staged row as sent, so the batch counts only the other.
+        // The emitter's commit counts the staged row as sent, so the batch counts only the other.
         let report = batch.delivered_report().expect("the published row is sent");
         assert_eq!(report.messages, 1);
         assert_eq!(second_completion.wait().await, AckOutcome::Ack);
-        // The staged row is the sink's until its commit resolves it, so the host left it alone.
+        // The staged row is the emitter's until its commit resolves it, so the host left it alone.
         retained.ack_alive();
         assert_eq!(
             first_completion.wait_for_progress().await,
@@ -1715,7 +1715,7 @@ mod tests {
         assert_eq!(reported.load(Ordering::Acquire), 0);
     }
 
-    /// A sink that commits on its own cadence still holds staged messages when its emitter task is
+    /// A emitter that commits on its own cadence still holds staged messages when its emitter task is
     /// torn down. Nothing holds them once the task is gone, so the count drains read for the
     /// emitter drops to zero instead of keeping them until a restarted task first changes its
     /// buffer.
@@ -1734,7 +1734,7 @@ mod tests {
         assert_eq!(
             reported_messages.load(Ordering::Acquire),
             0,
-            "a torn-down emitter still reports the messages its sink had staged"
+            "a torn-down emitter still reports the messages its emitter had staged"
         );
     }
 

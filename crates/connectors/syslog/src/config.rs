@@ -1,4 +1,4 @@
-//! Syslog client configuration shared by the source and sink transports.
+//! Syslog client configuration shared by the ingestor and emitter transports.
 //!
 //! Layer: engines and infrastructure.
 //!

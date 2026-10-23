@@ -16,7 +16,7 @@ use super::*;
 /// must never repeat never arrives, so the re-read only strengthens the assertion.
 const STABLE_READ_DELAY: Duration = Duration::from_millis(500);
 
-/// The database a batch scenario writes to, named as its `<sink>` examples column spells it.
+/// The database a batch scenario writes to, named as its `<emitter>` examples column spells it.
 #[derive(Debug, Clone, Copy)]
 enum DatabaseEmitter {
     ClickHouse,
@@ -43,7 +43,7 @@ impl DatabaseEmitter {
             "Postgres" => Self::Postgres,
             "MySQL" => Self::MySql,
             "MongoDB" => Self::MongoDb,
-            other => panic!("unknown database batch sink {other:?}"),
+            other => panic!("unknown database batch emitter {other:?}"),
         }
     }
 

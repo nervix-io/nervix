@@ -1,14 +1,14 @@
-//! SQS source transport.
+//! SQS ingestor transport.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The SQS client a source configuration declares, the queue-URL lookup each instance
+//! - **Owns.** The SQS client an ingestor configuration declares, the queue-URL lookup each instance
 //!   makes when it resumes, long polling and how a receive in flight completes when the host
 //!   cancels a read, message attributes as ingest headers, and deleting a message once it is
 //!   acknowledged.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   Tokio, the node resolver, and the AWS SQS SDK.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -71,10 +71,10 @@ const CANCELLED_RECEIVE_BUDGET: Duration = match LONG_POLL.checked_add(RECEIVE_A
 /// The JSON protocol's error type for a queue the service does not have.
 const QUEUE_DOES_NOT_EXIST: &str = "QueueDoesNotExist";
 
-/// Why an SQS source could not build its client, look its queue up, receive from it, or delete a
+/// Why an SQS ingestor could not build its client, look its queue up, receive from it, or delete a
 /// message.
 #[derive(Debug, Error)]
-pub enum SqsIngestorError {
+pub enum SqsQueueIngestorError {
     #[error("invalid SQS client configuration")]
     ClientConfig,
     #[error("failed to build SQS TLS context")]
@@ -95,27 +95,27 @@ pub enum SqsIngestorError {
     Delete,
 }
 
-type SqsIngestorResult<T> = Result<T, Report<SqsIngestorError>>;
+type SqsQueueIngestorResult<T> = Result<T, Report<SqsQueueIngestorError>>;
 
-/// One SQS source's client and the queue every instance polls.
+/// One SQS ingestor's client and the queue every instance polls.
 ///
 /// The client is built once, from configuration and TLS material alone, and each instance polls
 /// through a clone. Building the plan sends no request: each instance looks the queue up when it
 /// resumes.
 #[derive(Clone)]
-pub struct SqsIngestorPlan {
+pub struct SqsQueueIngestorPlan {
     client: SqsClient,
     queue: SqsQueueName,
 }
 
-impl SqsIngestorPlan {
+impl SqsQueueIngestorPlan {
     /// The client `config` declares, whose every connection resolves the endpoint host through
     /// `dns`, polling `queue`.
     pub async fn new(
         config: &[ClientConfigEntry],
         queue: SqsQueueName,
         dns: DnsResolver,
-    ) -> SqsIngestorResult<Self> {
+    ) -> SqsQueueIngestorResult<Self> {
         let client = Self::client_from_config(config, dns).await?;
         Ok(Self { client, queue })
     }
@@ -123,9 +123,9 @@ impl SqsIngestorPlan {
     async fn client_from_config(
         config: &[ClientConfigEntry],
         dns: DnsResolver,
-    ) -> SqsIngestorResult<SqsClient> {
+    ) -> SqsQueueIngestorResult<SqsClient> {
         let endpoint = client_config_value(config, "endpoint", "SQS")
-            .change_context(SqsIngestorError::ClientConfig)?;
+            .change_context(SqsQueueIngestorError::ClientConfig)?;
         let region = optional_client_config_value(config, "region")
             .unwrap_or("us-east-1")
             .to_string();
@@ -139,8 +139,8 @@ impl SqsIngestorPlan {
         let trust = match client_tls_paths(config).ca_file.as_ref() {
             Some(ca_file) => {
                 let ca_pem = read_tls_file(ca_file, "TLS CA certificate")
-                    .change_context(SqsIngestorError::ClientConfig)?;
-                SqsTrust::ca(ca_pem).change_context(SqsIngestorError::BuildTlsContext)?
+                    .change_context(SqsQueueIngestorError::ClientConfig)?;
+                SqsTrust::ca(ca_pem).change_context(SqsQueueIngestorError::BuildTlsContext)?
             }
             None => SqsTrust::Platform,
         };
@@ -166,7 +166,7 @@ impl SqsIngestorPlan {
 /// A message the service returned without one cannot be deleted and reappears after its
 /// visibility timeout.
 #[derive(Debug, Clone)]
-pub struct SqsIngestorPosition {
+pub struct SqsQueueIngestorPosition {
     receipt_handle: Option<String>,
 }
 
@@ -214,14 +214,14 @@ impl IngestMessageHeaders for SqsMessageAttributes {
     }
 }
 
-pub struct SqsIngestorMessage {
+pub struct SqsQueueIngestorMessage {
     attributes: SqsMessageAttributes,
-    position: SqsIngestorPosition,
+    position: SqsQueueIngestorPosition,
 }
 
-impl SqsIngestorMessage {
+impl SqsQueueIngestorMessage {
     fn new(message: SqsMessage) -> Self {
-        let position = SqsIngestorPosition {
+        let position = SqsQueueIngestorPosition {
             receipt_handle: message.receipt_handle().map(ToOwned::to_owned),
         };
         Self {
@@ -231,8 +231,8 @@ impl SqsIngestorMessage {
     }
 }
 
-impl IngestorMessage for SqsIngestorMessage {
-    type Position = SqsIngestorPosition;
+impl IngestorMessage for SqsQueueIngestorMessage {
+    type Position = SqsQueueIngestorPosition;
 
     fn payload(&self) -> &[u8] {
         self.attributes
@@ -257,8 +257,8 @@ impl IngestorMessage for SqsIngestorMessage {
     }
 }
 
-/// One SQS source instance polling the shared client's queue.
-pub struct SqsIngestor {
+/// One SQS ingestor instance polling the shared client's queue.
+pub struct SqsQueueIngestor {
     client: SqsClient,
     queue: SqsQueueName,
     /// The URL every receive and deletion addresses: absent until `resume` looks the queue up, and
@@ -266,9 +266,9 @@ pub struct SqsIngestor {
     queue_url: Option<String>,
 }
 
-impl SqsIngestor {
+impl SqsQueueIngestor {
     /// The URL of `queue`, which must already exist.
-    async fn queue_url(client: &SqsClient, queue: &str) -> SqsIngestorResult<String> {
+    async fn queue_url(client: &SqsClient, queue: &str) -> SqsQueueIngestorResult<String> {
         let response = match client.get_queue_url().queue_name(queue).send().await {
             Ok(response) => response,
             Err(error) => return Err(Self::queue_lookup_error(queue, &error)),
@@ -279,19 +279,19 @@ impl SqsIngestor {
     fn queue_lookup_error<R: Debug + 'static>(
         queue: &str,
         error: &SdkError<GetQueueUrlError, R>,
-    ) -> Report<SqsIngestorError> {
+    ) -> Report<SqsQueueIngestorError> {
         let failure = FailedRequest::new(error);
         let missing = error
             .as_service_error()
             .is_some_and(Self::names_a_missing_queue);
         if missing {
-            return Report::new(SqsIngestorError::MissingQueue {
+            return Report::new(SqsQueueIngestorError::MissingQueue {
                 queue: queue.to_string(),
             })
             .attach_printable(failure.description());
         }
         failure.report(
-            SqsIngestorError::ResolveQueue {
+            SqsQueueIngestorError::ResolveQueue {
                 queue: queue.to_string(),
             },
             "SQS GetQueueUrl failed",
@@ -308,10 +308,10 @@ impl SqsIngestor {
         error.meta().code() == Some(QUEUE_DOES_NOT_EXIST)
     }
 
-    fn require_queue_url(queue: &str, queue_url: Option<String>) -> SqsIngestorResult<String> {
+    fn require_queue_url(queue: &str, queue_url: Option<String>) -> SqsQueueIngestorResult<String> {
         match queue_url {
             Some(queue_url) => Ok(queue_url),
-            None => Err(Report::new(SqsIngestorError::MissingQueueUrl {
+            None => Err(Report::new(SqsQueueIngestorError::MissingQueueUrl {
                 queue: queue.to_string(),
             })),
         }
@@ -323,7 +323,7 @@ impl SqsIngestor {
     async fn read_batch<Q: QueueReceive>(
         queue: &Q,
         cancellation: &IngestorReadCancellation,
-    ) -> IngestorResult<IngestorBatch<SqsIngestorMessage>> {
+    ) -> IngestorResult<IngestorBatch<SqsQueueIngestorMessage>> {
         loop {
             nervix_primitives::task::consume_budget().await;
             if cancellation.is_cancelled() {
@@ -339,7 +339,7 @@ impl SqsIngestor {
             }
             let mut messages = Vec::with_capacity(received.len());
             for message in received {
-                messages.push(SqsIngestorMessage::new(message));
+                messages.push(SqsQueueIngestorMessage::new(message));
             }
             return Ok(IngestorBatch::Messages(messages));
         }
@@ -354,9 +354,9 @@ impl SqsIngestor {
     async fn complete_receive<F>(
         receive: F,
         cancellation: &IngestorReadCancellation,
-    ) -> SqsIngestorResult<Vec<SqsMessage>>
+    ) -> SqsQueueIngestorResult<Vec<SqsMessage>>
     where
-        F: Future<Output = SqsIngestorResult<Vec<SqsMessage>>>,
+        F: Future<Output = SqsQueueIngestorResult<Vec<SqsMessage>>>,
     {
         let mut receive = pin!(receive);
         if let Some(received) = cancellation.unless_cancelled(&mut receive).await {
@@ -365,7 +365,7 @@ impl SqsIngestor {
         match timeout(CANCELLED_RECEIVE_BUDGET, receive).await {
             Ok(received) => received,
             Err(elapsed) => Err(Report::new(elapsed).change_context(
-                SqsIngestorError::CancelledReceiveUnanswered {
+                SqsQueueIngestorError::CancelledReceiveUnanswered {
                     budget: CANCELLED_RECEIVE_BUDGET,
                 },
             )),
@@ -373,29 +373,29 @@ impl SqsIngestor {
     }
 }
 
-/// One long-polling receive from a queue: the request a source instance sends through its SDK
+/// One long-polling receive from a queue: the request an ingestor instance sends through its SDK
 /// client, and a fake service in the checks of how a read meets the host's cancellation.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "each steady poll of a source's read sends its receives through its queue"
+        reason = "each steady poll of an ingestor's read sends its receives through its queue"
     )
 )]
 trait QueueReceive: Sync {
     /// Asks the queue for one message with all of its attributes, waiting up to the long poll for
     /// one to arrive, and returns the messages the service answered with, possibly none.
-    fn receive(&self) -> impl Future<Output = SqsIngestorResult<Vec<SqsMessage>>> + Send;
+    fn receive(&self) -> impl Future<Output = SqsQueueIngestorResult<Vec<SqsMessage>>> + Send;
 }
 
-/// The queue a source instance receives from through its SDK client.
+/// The queue an ingestor instance receives from through its SDK client.
 struct SdkQueue<'a> {
     client: &'a SqsClient,
     url: &'a str,
 }
 
 impl QueueReceive for SdkQueue<'_> {
-    fn receive(&self) -> impl Future<Output = SqsIngestorResult<Vec<SqsMessage>>> + Send {
+    fn receive(&self) -> impl Future<Output = SqsQueueIngestorResult<Vec<SqsMessage>>> + Send {
         let request = self
             .client
             .receive_message()
@@ -408,15 +408,18 @@ impl QueueReceive for SdkQueue<'_> {
             match request.await {
                 Ok(response) => Ok(response.messages.unwrap_or_default()),
                 Err(error) => Err(FailedRequest::new(&error)
-                    .report(SqsIngestorError::Receive, "SQS ReceiveMessage failed")),
+                    .report(SqsQueueIngestorError::Receive, "SQS ReceiveMessage failed")),
             }
         }
     }
 }
 
 #[async_trait]
-impl IngestorConnector for SqsIngestor {
-    type Plan = SqsIngestorPlan;
+impl IngestorConnector for SqsQueueIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Sqs(nervix_models::SqsIngestorEntity::Queue);
+
+    type Plan = SqsQueueIngestorPlan;
 
     async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
         Ok(Self {
@@ -432,7 +435,7 @@ impl IngestorConnector for SqsIngestor {
 
     /// Looks the queue up the first time the instance resumes. A service that cannot be reached
     /// and a queue the service does not have both fail the resume, which the host retries on the
-    /// source's policy; neither creates the queue.
+    /// ingestor's policy; neither creates the queue.
     async fn resume(&mut self) -> IngestorResult<IngestorResume> {
         if self.queue_url.is_some() {
             return Ok(IngestorResume::Ready);
@@ -446,9 +449,9 @@ impl IngestorConnector for SqsIngestor {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for SqsIngestor {
-    type Message = SqsIngestorMessage;
-    type Position = SqsIngestorPosition;
+impl BrokerIngestorConnector for SqsQueueIngestor {
+    type Message = SqsQueueIngestorMessage;
+    type Position = SqsQueueIngestorPosition;
 
     /// Long-polls until the service returns at least one message. Every request asks for one
     /// message with all of its attributes.
@@ -486,7 +489,7 @@ impl BrokerIngestorConnector for SqsIngestor {
                 .await;
             if let Err(error) = deleted {
                 let failure = FailedRequest::new(&error)
-                    .report(SqsIngestorError::Delete, "SQS DeleteMessage failed");
+                    .report(SqsQueueIngestorError::Delete, "SQS DeleteMessage failed");
                 return Err(failure.change_context(IngestorError::Acknowledge { connector: SQS }));
             }
         }
@@ -519,10 +522,10 @@ mod tests {
             GetQueueUrlError::QueueDoesNotExist(QueueDoesNotExist::builder().build()),
             (),
         );
-        let missing = SqsIngestor::queue_lookup_error("missing-queue", &missing);
+        let missing = SqsQueueIngestor::queue_lookup_error("missing-queue", &missing);
         assert!(matches!(
             missing.current_context(),
-            SqsIngestorError::MissingQueue { queue } if queue == "missing-queue"
+            SqsQueueIngestorError::MissingQueue { queue } if queue == "missing-queue"
         ));
         assert!(format!("{missing:?}").contains("service error"));
 
@@ -535,28 +538,29 @@ mod tests {
             ),
             (),
         );
-        let missing_by_type = SqsIngestor::queue_lookup_error("missing-queue", &missing_by_type);
+        let missing_by_type =
+            SqsQueueIngestor::queue_lookup_error("missing-queue", &missing_by_type);
         assert!(matches!(
             missing_by_type.current_context(),
-            SqsIngestorError::MissingQueue { queue } if queue == "missing-queue"
+            SqsQueueIngestorError::MissingQueue { queue } if queue == "missing-queue"
         ));
         let denied = SdkError::<GetQueueUrlError, ()>::service_error(
             GetQueueUrlError::generic(ErrorMetadata::builder().code("AccessDenied").build()),
             (),
         );
-        let denied = SqsIngestor::queue_lookup_error("orders", &denied);
+        let denied = SqsQueueIngestor::queue_lookup_error("orders", &denied);
         assert!(matches!(
             denied.current_context(),
-            SqsIngestorError::ResolveQueue { queue } if queue == "orders"
+            SqsQueueIngestorError::ResolveQueue { queue } if queue == "orders"
         ));
 
         let refused = SdkError::<GetQueueUrlError, ()>::dispatch_failure(ConnectorError::io(
             "connection refused".into(),
         ));
-        let connection = SqsIngestor::queue_lookup_error("orders", &refused);
+        let connection = SqsQueueIngestor::queue_lookup_error("orders", &refused);
         assert!(matches!(
             connection.current_context(),
-            SqsIngestorError::ResolveQueue { queue } if queue == "orders"
+            SqsQueueIngestorError::ResolveQueue { queue } if queue == "orders"
         ));
         assert!(format!("{connection:?}").contains("connection refused"));
 
@@ -569,10 +573,10 @@ mod tests {
         let unresolved = SdkError::<GetQueueUrlError, ()>::dispatch_failure(ConnectorError::io(
             Box::new(carried),
         ));
-        let unresolved = SqsIngestor::queue_lookup_error("orders", &unresolved);
+        let unresolved = SqsQueueIngestor::queue_lookup_error("orders", &unresolved);
         assert!(matches!(
             unresolved.current_context(),
-            SqsIngestorError::ResolveQueue { queue } if queue == "orders"
+            SqsQueueIngestorError::ResolveQueue { queue } if queue == "orders"
         ));
         assert_eq!(
             format!("{unresolved:#}"),
@@ -581,15 +585,15 @@ mod tests {
         );
 
         assert_eq!(
-            SqsIngestor::require_queue_url("orders", Some("queue-url".to_string()))
+            SqsQueueIngestor::require_queue_url("orders", Some("queue-url".to_string()))
                 .expect("a returned queue URL should be accepted"),
             "queue-url"
         );
-        let no_url = SqsIngestor::require_queue_url("orders", None)
+        let no_url = SqsQueueIngestor::require_queue_url("orders", None)
             .expect_err("a successful response without a queue URL must fail");
         assert!(matches!(
             no_url.current_context(),
-            SqsIngestorError::MissingQueueUrl { queue } if queue == "orders"
+            SqsQueueIngestorError::MissingQueueUrl { queue } if queue == "orders"
         ));
     }
 

@@ -1,6 +1,6 @@
 Feature: RabbitMQ name resolution
 
-  A RabbitMQ source or sink resolves the host of its client's `addr` through the node's resolver
+  A RabbitMQ source or emitter resolves the host of its client's `addr` through the node's resolver
   each time it opens a connection, dials the answers in order, and verifies an `amqps` broker's
   certificate against that host. These scenarios point every node at a DNS fixture the scenario
   controls, and provision every queue explicitly.

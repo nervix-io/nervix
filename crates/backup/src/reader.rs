@@ -218,7 +218,7 @@ pub fn read_archive<R: Read>(
             offset,
         };
         visitor.section(section, &mut content)?;
-        if let Err(error) = io::copy(&mut content, &mut io::connector()) {
+        if let Err(error) = io::copy(&mut content, &mut io::sink()) {
             return Err(Report::new(error).change_context(ArchiveReadError::Read));
         }
         let read = content.digester.length();

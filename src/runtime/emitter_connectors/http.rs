@@ -12,16 +12,21 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    HttpRequestEmitter::KIND,
+    nervix_models::EmitterEntityKind::Http(nervix_models::HttpEmitterEntity::Request)
+));
+
 impl EmitterConnectorStarter {
     pub(super) fn http(
-        connector: &HttpEmitterPlan,
+        connector: &HttpRequestEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
     ) -> EmitterRuntimeResult<Box<dyn EmitterConnector>> {
         let opened = Self::http_request(
             codec,
-            HttpEmitter::new(
-                HttpEmitterConfig {
+            HttpRequestEmitter::new(
+                HttpRequestEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     dns: context.dns()?,
                 },

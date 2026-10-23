@@ -299,7 +299,7 @@ name again for every new connection it opens.
 | Syslog UDP, TCP and TLS senders | The connector resolves and dials each new sender | The client's `connect_timeout_ms`, 30 seconds by default, shared with socket setup, or with the attempts and TLS | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
 | WebSocket `ws` and `wss` client sources | The connector resolves and dials each connection and resume | The client's `connect_timeout_ms`, 30 seconds by default, shared with the attempts, TLS and the upgrade | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
 | ClickHouse emitters, with and without TLS entries | Hyper's resolver service on `hyper-util`'s `HttpConnector` | The insert's `timeout_ms` when it is set, otherwise the thirty-second hook budget | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
-| SQS sources and emitters, with and without a custom CA | Smithy's `ResolveDns`, installed with `build_with_resolver` | The SDK's 3.1-second connect timeout, which encloses the lookup, and a emitter's `timeout_ms` as its attempt and operation timeouts | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
+| SQS sources and emitters, with and without a custom CA | Smithy's `ResolveDns`, installed with `build_with_resolver` | The SDK's 3.1-second connect timeout, which encloses the lookup, and an emitter's `timeout_ms` as its attempt and operation timeouts | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
 | The node's own OTLP trace export | Tonic 0.14's lazy custom connector, which waits for the node resolver installed during startup | The OTLP export timeout, ten seconds by default, enclosing DNS and TCP attempts after resolver installation; the same timeout bounds the request | [Node Trace Export](#node-trace-export) |
 | OTEL gRPC emitters | Tonic 0.14's lazy channel over `hyper-util`'s `HttpConnector` with Hyper's resolver service | `timeout_ms` when it is set, as the connection and request timeout; otherwise the thirty-second hook budget alone | [DNS for OTEL gRPC](./connector-contract.md#dns-for-otel-grpc) |
 | Redis command pools | Redis's `AsyncConnectionConfig::set_dns_resolver`, installed for every new physical `bb8` connection | The thirty-second hook budget, inside the connection timeout the pool sets on the driver and its checkout from the client's `connect_timeout_ms`, 30 seconds by default | [DNS for Redis](./connector-contract.md#dns-for-redis) |
@@ -377,7 +377,7 @@ the identity of the connection, whichever address accepted it:
 A failed lookup is a connection failure of the path that asked, reported through that owner's
 existing error and handled by its existing policy. It never rejects a record, never acknowledges or
 commits input, and never marks a message delivered: a source that cannot connect holds no delivery,
-and a emitter that cannot connect confirms nothing, so the input stays unacknowledged until a later
+and an emitter that cannot connect confirms nothing, so the input stays unacknowledged until a later
 connection delivers it.
 
 | Owner | What a failed lookup does | What tries again |

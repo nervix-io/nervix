@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Redis client Model with its connection pool, the Pub/Sub source and sink
+//! - **Owns.** The Redis client Model with its connection pool, the Pub/Sub source and emitter
 //!   Models with their delivery mode, the channel name a source subscribes to with the rule it
 //!   follows, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The Redis driver, its configuration keys, or how a channel is subscribed
 //!   or published to.
 
@@ -62,7 +62,7 @@ pub struct RedisPubSubIngestor {
 }
 
 /// What the connector of a REDIS PUBSUB ingestor holds and how long it waits.
-const REDIS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const REDIS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "messages the driver reads ahead of the host",
         bound: BufferBound::Unbounded,
@@ -84,7 +84,7 @@ const REDIS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a REDIS PUBSUB emitter holds and how long it waits.
-const REDIS_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+const REDIS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "connections the command pool holds",
         bound: BufferBound::Bounded {
@@ -124,7 +124,7 @@ impl IngestorDeclaration for RedisPubSubIngestor {
             name: LocatorName::External(RedisChannelName::DECLARATION),
         }),
         options: &[],
-        bounds: REDIS_SOURCE_BOUNDS,
+        bounds: REDIS_INGESTOR_BOUNDS,
     };
 }
 
@@ -198,7 +198,7 @@ impl EmitterDeclaration for RedisPubSubEmitter {
         options: &[],
         envelope: &[],
         properties: &[],
-        bounds: REDIS_SINK_BOUNDS,
+        bounds: REDIS_EMITTER_BOUNDS,
     };
 }
 
@@ -217,11 +217,11 @@ impl EmitterEntityBody for RedisPubSubEmitter {
 
 connector_emitters! {
     connector Redis = "REDIS";
-    /// What a Redis sink writes.
+    /// What a Redis emitter writes.
     pub enum RedisEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum RedisEmitterMode;
-    /// The entities a Redis sink writes.
+    pub enum RedisPubSubEmitterMode;
+    /// The entities a Redis emitter writes.
     pub enum RedisEmitterEntity {
         PubSub(RedisPubSubEmitter, RedisPubSubPublishingMode) = "PUBSUB";
     }

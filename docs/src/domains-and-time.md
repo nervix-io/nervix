@@ -224,7 +224,7 @@ physical and run before route-local flushing. Connector retry and backoff timers
 physical controls; none of these operational waits is projected through the domain clock.
 
 An emitter's publish cadence and its publish attempts are separate state. Retry backoff, the
-acknowledgement keepalive that holds an upstream `MODE ACK` source open while a emitter is
+acknowledgement keepalive that holds an upstream `MODE ACK` source open while an emitter is
 unavailable, the emitter acknowledgement timeout, the stop and drain deadlines, and an HTTP
 `Retry-After` a server returns are all physical: a paced domain never shortens or lengthens the
 real wait an external system asked for. A failed attempt keeps the emitter's pending batches, their

@@ -11,7 +11,7 @@ use nervix_models::{
     AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
     AlterWireSchema, AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope,
-    ClientSourceEntity, CordonNode, CreateDomain, CreateResource, CreateStatement, CreateUser,
+    ClientIngestorEntity, CordonNode, CreateDomain, CreateResource, CreateStatement, CreateUser,
     DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
     DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
@@ -1127,7 +1127,7 @@ impl Arbitrary<'_> {
     /// alter it.
     pub fn ingestor_alteration(&mut self) -> IngestorAlteration {
         match self.ingest_source_kind() {
-            IngestorEntityKind::Client(ClientSourceEntity::Producer) => self
+            IngestorEntityKind::Client(ClientIngestorEntity::Producer) => self
                 .operations(|arbitrary| {
                     arbitrary.alter_ingestor_operation(Self::client_producer_source)
                 })

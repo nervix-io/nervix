@@ -5,8 +5,8 @@
 //! - **Owns.** Waiting on one broker read, flushing the ingest group while the read waits,
 //!   cancelling the read when a quiesce change or a stop needs the loop back, and telling the loop
 //!   how the read ended, which decides whether a retry delay still applies after it.
-//! - **Depends on.** The connector source contract and the flush, quiesce and stop signals of the
-//!   source host.
+//! - **Depends on.** The connector ingestor contract and the flush, quiesce and stop signals of the
+//!   ingestor host.
 //! - **Must not know.** A broker driver, or how the loop takes in a batch and settles its
 //!   positions.
 
@@ -26,7 +26,7 @@ use super::*;
 pub(super) enum ReadEnd {
     /// The read returned without the host cancelling it.
     Returned,
-    /// The host cancelled the read because the source stops. The loop ends once it has taken in
+    /// The host cancelled the read because the ingestor stops. The loop ends once it has taken in
     /// what the read returned.
     Stopping,
     /// The host cancelled the read because the ingestor's quiesce state changed, or its stop
@@ -77,8 +77,8 @@ pub(super) struct BrokerRead<M> {
 
 /// What the loop does with a read once it returned.
 pub(super) enum ReadOutcome<M> {
-    /// The messages to take in: none when the source returned an empty batch, a cancelled read
-    /// had gathered nothing, or the source dropped what it read for its size.
+    /// The messages to take in: none when the ingestor returned an empty batch, a cancelled read
+    /// had gathered nothing, or the ingestor dropped what it read for its size.
     TakeIn(Vec<M>),
     ResumeRequired,
     Closed,
@@ -86,9 +86,9 @@ pub(super) enum ReadOutcome<M> {
 }
 
 impl<M> BrokerRead<M> {
-    /// What the loop does with this read. A batch the source contract forbids, an empty one or an
+    /// What the loop does with this read. A batch the ingestor contract forbids, an empty one or an
     /// interruption the host did not ask for, is reported, and what it carries is still taken in.
-    /// Payloads the source dropped for their size are counted, and the loop reads again.
+    /// Payloads the ingestor dropped for their size are counted, and the loop reads again.
     pub(super) fn into_outcome(self, host: &IngestorHost) -> ReadOutcome<M> {
         match self.batch {
             Ok(IngestorBatch::Messages(messages)) => {
@@ -116,11 +116,11 @@ impl<M> BrokerRead<M> {
     }
 }
 
-/// Reads the next batch from `source` and awaits the read to completion.
+/// Reads the next batch from `ingestor` and awaits the read to completion.
 ///
-/// A flush that falls due while the read waits needs nothing from the source, so the host flushes
+/// A flush that falls due while the read waits needs nothing from the ingestor, so the host flushes
 /// and keeps waiting. A quiesce change or a stop needs the loop back: the host cancels the read and
-/// still awaits it, so every message the source already took from its transport reaches the loop
+/// still awaits it, so every message the ingestor already took from its transport reaches the loop
 /// rather than being dropped with the read.
 pub(super) async fn read_batch<C>(
     source: &mut C,

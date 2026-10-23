@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The MQTT client Model, the topic source and sink Models with their session,
+//! - **Owns.** The MQTT client Model, the topic source and emitter Models with their session,
 //!   quality-of-service and delivery modes, the topic filter a source subscribes to with the rules
 //!   MQTT holds it to, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The MQTT driver, its configuration keys, or how a topic filter is
 //!   subscribed or published to.
 
@@ -121,7 +121,7 @@ const _: () = assert!(
 );
 
 /// What the connector of a MQTT TOPIC ingestor holds and how long it waits.
-const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
             holds: "each incoming packet, whose bound every CONNECT advertises as its Maximum \
@@ -160,7 +160,7 @@ const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a MQTT TOPIC emitter holds and how long it waits.
-const MQTT_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+const MQTT_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "publishes queued for the driver",
         bound: BufferBound::Bounded {
@@ -246,7 +246,7 @@ impl IngestorDeclaration for MqttTopicIngestor {
                 ]),
             },
         ],
-        bounds: MQTT_SOURCE_BOUNDS,
+        bounds: MQTT_INGESTOR_BOUNDS,
     };
 }
 
@@ -413,7 +413,7 @@ connector_ingestors! {
     /// What an MQTT source reads.
     pub enum MqttIngestor;
     /// The alterations of the ingestors that read an MQTT entity.
-    pub enum MqttIngestorAlteration;
+    pub enum MqttTopicIngestorAlteration;
     /// The entities an MQTT source reads.
     pub enum MqttIngestorEntity {
         Topic(MqttTopicIngestor) = "TOPIC", "MQTT";
@@ -445,7 +445,7 @@ impl EmitterDeclaration for MqttTopicEmitter {
         options: &[],
         envelope: &[],
         properties: &[],
-        bounds: MQTT_SINK_BOUNDS,
+        bounds: MQTT_EMITTER_BOUNDS,
     };
 }
 
@@ -464,11 +464,11 @@ impl EmitterEntityBody for MqttTopicEmitter {
 
 connector_emitters! {
     connector Mqtt = "MQTT";
-    /// What an MQTT sink writes.
+    /// What an MQTT emitter writes.
     pub enum MqttEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum MqttEmitterMode;
-    /// The entities an MQTT sink writes.
+    pub enum MqttTopicEmitterMode;
+    /// The entities an MQTT emitter writes.
     pub enum MqttEmitterEntity {
         Topic(MqttTopicEmitter, MqttTopicPublishingMode) = "TOPIC";
     }

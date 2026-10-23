@@ -12,8 +12,8 @@ use meticulous::ResultExt as _;
 use nervix_client_wire::{
     self as wire, AttachDisposition, AttachOutcome, CommandDisposition, Diagnostic,
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
-    DomainClockDetachOutcome, IngestorSpan, InspectionOutcome, LeaderRedirect, OutcomeOrigin,
-    RestoreUploadFailure, StatementOutcome, SubscribeDisposition, SubscribeOutcome,
+    DomainClockDetachOutcome, InspectionOutcome, LeaderRedirect, OutcomeOrigin,
+    RestoreUploadFailure, SourceSpan, StatementOutcome, SubscribeDisposition, SubscribeOutcome,
     SubscriptionOpened, UnsubscribeDisposition, UnsubscribeOutcome, UploadDisposition,
     UploadFailure, UploadReply,
 };
@@ -328,11 +328,11 @@ impl From<DomainClockDetachOutcome> for CommandOutcome {
 
 /// `span` moved `offset` bytes later, or `None` when an end of the moved span passes the largest
 /// offset a span holds.
-fn shifted_span(span: IngestorSpan, offset: usize) -> Option<IngestorSpan> {
+fn shifted_span(span: SourceSpan, offset: usize) -> Option<SourceSpan> {
     let offset = u32::try_from(offset).ok()?;
     let start = span.start().checked_add(offset)?;
     let end = span.end().checked_add(offset)?;
-    let shifted = IngestorSpan::new(start, end).assured(
+    let shifted = SourceSpan::new(start, end).assured(
         "a span starts at or before its end, and moving both ends by one offset keeps that order",
     );
     Some(shifted)

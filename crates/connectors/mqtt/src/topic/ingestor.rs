@@ -1,8 +1,8 @@
-//! MQTT source transport.
+//! MQTT ingestor transport.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The MQTT client and event loop each source instance subscribes through, its
+//! - **Owns.** The MQTT client and event loop each ingestor instance subscribes through, its
 //!   session and quality-of-service settings, the Maximum Packet Size every connection advertises
 //!   and the refusal of a larger packet, the shared subscription every instance joins, the client
 //!   identity each instance connects with, the batches a read gathers and how a read ends when the
@@ -62,9 +62,9 @@ const MQTT: &str = "mqtt";
 /// under its own identity.
 const MQTT_INSTANCE_PLACEHOLDER: &str = "{{instance}}";
 
-/// Why an MQTT source could not build its client, subscribe, receive, or acknowledge.
+/// Why an MQTT ingestor could not build its client, subscribe, receive, or acknowledge.
 #[derive(Debug, Error)]
-pub enum MqttIngestorError {
+pub enum MqttTopicIngestorError {
     #[error("invalid MQTT client configuration")]
     ClientConfig,
     #[error("MQTT TLS requires client config key 'tls_ca_file'")]
@@ -83,9 +83,9 @@ pub enum MqttIngestorError {
     MissingPort,
     #[error("instance {instance} has no MQTT client configuration")]
     MissingInstance { instance: u64 },
-    #[error("failed to connect MQTT source to its broker")]
+    #[error("failed to connect MQTT ingestor to its broker")]
     Connect,
-    #[error("failed to subscribe MQTT source")]
+    #[error("failed to subscribe MQTT ingestor")]
     Subscribe,
     #[error("the MQTT broker refused the subscription")]
     SubscriptionRefused,
@@ -111,13 +111,13 @@ pub enum MqttIngestorError {
     Disconnect,
     #[error("{connector} session cleanup exceeded its connection budget of {budget:?}", connector = ConnectorKind::Mqtt)]
     RetirementDeadline { budget: Duration },
-    #[error("failed to retire {connector} source instance {instance}", connector = ConnectorKind::Mqtt)]
+    #[error("failed to retire {connector} ingestor instance {instance}", connector = ConnectorKind::Mqtt)]
     RetireInstance { instance: u64 },
 }
 
-type MqttIngestorResult<T> = Result<T, Report<MqttIngestorError>>;
+type MqttTopicIngestorResult<T> = Result<T, Report<MqttTopicIngestorError>>;
 
-impl MqttIngestorError {
+impl MqttTopicIngestorError {
     /// The failure of a read whose connection the client's event loop ended with `error`: a packet
     /// above the advertised Maximum Packet Size, which the client refused with a `DISCONNECT`, or
     /// any other lost connection.
@@ -144,9 +144,9 @@ impl MqttIngestorError {
     }
 }
 
-/// Why the declared client identity cannot serve every instance of a source.
+/// Why the declared client identity cannot serve every instance of an ingestor.
 ///
-/// A source with this conflict stays declared but never subscribes: each instance reports it as
+/// A ingestor with this conflict stays declared but never subscribes: each instance reports it as
 /// the reason it cannot resume until the declaration changes.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MqttClientIdError {
@@ -161,7 +161,7 @@ pub enum MqttClientIdError {
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct MqttIngestorAddr {
+struct MqttTopicIngestorAddr {
     host: String,
     port: u16,
     tls: bool,
@@ -170,17 +170,17 @@ struct MqttIngestorAddr {
 /// A broker's session namespace and the client identity within it.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct MqttSessionIdentity {
-    broker: MqttIngestorAddr,
+    broker: MqttTopicIngestorAddr,
     client_id: String,
 }
 
-/// The validated broker identities of a source plan, with one representative per broker session.
-pub struct MqttIngestorSessions<'a> {
-    plan: &'a MqttIngestorPlan,
+/// The validated broker identities of an ingestor plan, with one representative per broker session.
+pub struct MqttTopicIngestorSessions<'a> {
+    plan: &'a MqttTopicIngestorPlan,
     identities: BTreeMap<MqttSessionIdentity, u64>,
 }
 
-impl MqttIngestorSessions<'_> {
+impl MqttTopicIngestorSessions<'_> {
     /// The sessions this plan uses that the other plan does not keep with the same subscription.
     /// The instance indices are unique and ordered, including when a conflicting declaration
     /// repeats an explicit client identity.
@@ -208,8 +208,8 @@ impl MqttIngestorSessions<'_> {
     }
 }
 
-/// What one MQTT source subscribes with.
-pub struct MqttIngestorSettings {
+/// What one MQTT ingestor subscribes with.
+pub struct MqttTopicIngestorSettings {
     /// The client entries every instance connects with, rendered for that instance.
     pub instances: Vec<Vec<ClientConfigEntry>>,
     /// Why the declared client identity cannot serve every instance, if it cannot.
@@ -221,17 +221,17 @@ pub struct MqttIngestorSettings {
     pub topic: String,
     pub session: MqttSession,
     pub qos: MqttQos,
-    /// Whether the source acknowledges each publish itself once the host accepted it, rather
+    /// Whether the ingestor acknowledges each publish itself once the host accepted it, rather
     /// than the client acknowledging on receipt.
     pub manual_acks: bool,
     /// The node resolver every instance resolves its broker host through when it connects.
     pub dns: DnsResolver,
 }
 
-/// One MQTT source's subscription settings, the client entries of each of its instances, and the
+/// One MQTT ingestor's subscription settings, the client entries of each of its instances, and the
 /// node resolver they connect through.
 #[derive(Clone)]
-pub struct MqttIngestorPlan {
+pub struct MqttTopicIngestorPlan {
     instances: Vec<Vec<ClientConfigEntry>>,
     default_client_id: String,
     subscribe_filter: String,
@@ -248,7 +248,7 @@ struct MqttConnection {
     eventloop: EventLoop,
 }
 
-/// The publishes a source instance reads from its broker connection: the event loop of its
+/// The publishes an ingestor instance reads from its broker connection: the event loop of its
 /// client, and a fake event loop in the checks of how a read meets the host's cancellation.
 ///
 /// A read stops waiting for the next publish when the host cancels it or its batch timeout
@@ -259,30 +259,31 @@ struct MqttConnection {
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "each steady poll of a source's read takes its publishes through its connection"
+        reason = "each steady poll of an ingestor's read takes its publishes through its \
+                  connection"
     )
 )]
 trait PublishRead: Send {
     /// Polls the connection until it yields its next publish.
-    fn next_publish(&mut self) -> impl Future<Output = MqttIngestorResult<Publish>> + Send;
+    fn next_publish(&mut self) -> impl Future<Output = MqttTopicIngestorResult<Publish>> + Send;
 }
 
 impl PublishRead for MqttConnection {
-    async fn next_publish(&mut self) -> MqttIngestorResult<Publish> {
+    async fn next_publish(&mut self) -> MqttTopicIngestorResult<Publish> {
         loop {
             nervix_primitives::task::consume_budget().await;
             match self.eventloop.poll().await {
                 Ok(Event::Incoming(Incoming::Publish(publish))) => return Ok(publish),
                 Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
-                Err(error) => return Err(MqttIngestorError::lost_connection(error)),
+                Err(error) => return Err(MqttTopicIngestorError::lost_connection(error)),
             }
         }
     }
 }
 
-impl MqttIngestorPlan {
-    pub fn new(settings: MqttIngestorSettings) -> Self {
-        let MqttIngestorSettings {
+impl MqttTopicIngestorPlan {
+    pub fn new(settings: MqttTopicIngestorSettings) -> Self {
+        let MqttTopicIngestorSettings {
             instances,
             client_id_conflict,
             default_client_id,
@@ -327,9 +328,9 @@ impl MqttIngestorPlan {
         })
     }
 
-    fn client(&self, instance_index: u64) -> MqttIngestorResult<MqttConnection> {
+    fn client(&self, instance_index: u64) -> MqttTopicIngestorResult<MqttConnection> {
         let Some(instance) = self.instances.get(instance_index.arch_into()) else {
-            return Err(Report::new(MqttIngestorError::MissingInstance {
+            return Err(Report::new(MqttTopicIngestorError::MissingInstance {
                 instance: instance_index,
             }));
         };
@@ -352,14 +353,17 @@ impl MqttIngestorPlan {
         }
     }
 
-    fn session_identity(&self, instance_index: u64) -> MqttIngestorResult<MqttSessionIdentity> {
+    fn session_identity(
+        &self,
+        instance_index: u64,
+    ) -> MqttTopicIngestorResult<MqttSessionIdentity> {
         let Some(instance) = self.instances.get(instance_index.arch_into()) else {
-            return Err(Report::new(MqttIngestorError::MissingInstance {
+            return Err(Report::new(MqttTopicIngestorError::MissingInstance {
                 instance: instance_index,
             }));
         };
         let address = client_config_value(instance, "addr", ConnectorKind::Mqtt.into())
-            .change_context(MqttIngestorError::ClientConfig)?;
+            .change_context(MqttTopicIngestorError::ClientConfig)?;
         let client_id = match optional_client_config_value(instance, "client_id") {
             Some(client_id) => client_id.to_owned(),
             None => self.default_instance_client_id(instance_index),
@@ -371,20 +375,22 @@ impl MqttIngestorPlan {
     }
 
     /// Validates the external identity of every configured instance once before comparing inputs.
-    pub fn sessions(&self) -> error_stack::Result<MqttIngestorSessions<'_>, MqttIngestorError> {
+    pub fn sessions(
+        &self,
+    ) -> error_stack::Result<MqttTopicIngestorSessions<'_>, MqttTopicIngestorError> {
         let mut identities = BTreeMap::new();
         for (instance_index, _) in (0_u64..).zip(&self.instances) {
             let identity = self.session_identity(instance_index)?;
             identities.entry(identity).or_insert(instance_index);
         }
-        Ok(MqttIngestorSessions {
+        Ok(MqttTopicIngestorSessions {
             plan: self,
             identities,
         })
     }
 
     /// Releases one retired input after the host stopped its execution. A clean connection also
-    /// clears a session left by an already-stopped or suspended source, without restoring any
+    /// clears a session left by an already-stopped or suspended ingestor, without restoring any
     /// in-memory protocol state. Its ordinary connection budget bounds the entire cleanup.
     #[cfg_attr(
         nervix_lint,
@@ -393,7 +399,10 @@ impl MqttIngestorPlan {
             reason = "the host retires an obsolete input after its execution stopped"
         )
     )]
-    pub async fn retire(&self, instance_index: u64) -> error_stack::Result<(), MqttIngestorError> {
+    pub async fn retire(
+        &self,
+        instance_index: u64,
+    ) -> error_stack::Result<(), MqttTopicIngestorError> {
         let retirement = async {
             let mut connection = self.client(instance_index)?;
             connection
@@ -403,23 +412,26 @@ impl MqttIngestorPlan {
             let budget = connection.eventloop.options.connect_timeout();
             match timeout(budget, self.retire_connection(&mut connection)).await {
                 Ok(result) => result,
-                Err(_) => Err(Report::new(MqttIngestorError::RetirementDeadline {
+                Err(_) => Err(Report::new(MqttTopicIngestorError::RetirementDeadline {
                     budget,
                 })),
             }
         };
         retirement
             .await
-            .change_context(MqttIngestorError::RetireInstance {
+            .change_context(MqttTopicIngestorError::RetireInstance {
                 instance: instance_index,
             })
     }
 
-    async fn retire_connection(&self, connection: &mut MqttConnection) -> MqttIngestorResult<()> {
+    async fn retire_connection(
+        &self,
+        connection: &mut MqttConnection,
+    ) -> MqttTopicIngestorResult<()> {
         loop {
             nervix_primitives::task::consume_budget().await;
             let event = connection.eventloop.poll().await.map_err(|error| {
-                MqttConnectionError::report(error).change_context(MqttIngestorError::Connect)
+                MqttConnectionError::report(error).change_context(MqttTopicIngestorError::Connect)
             })?;
             if let Event::Incoming(Incoming::ConnAck(_)) = event {
                 break;
@@ -429,7 +441,9 @@ impl MqttIngestorPlan {
             .client
             .unsubscribe(self.subscribe_filter.as_str())
             .await
-            .map_err(|error| Report::new(error).change_context(MqttIngestorError::Unsubscribe))?;
+            .map_err(|error| {
+                Report::new(error).change_context(MqttTopicIngestorError::Unsubscribe)
+            })?;
         let unsubscribe = Self::confirm_unsubscribe(connection).await;
         // Even a refused unsubscribe must not keep this session alive. The clean connection's
         // zero expiry already makes dropping it terminal if the peer stops answering.
@@ -445,11 +459,14 @@ impl MqttIngestorPlan {
                 },
             )
             .await
-            .map_err(|error| Report::new(error).change_context(MqttIngestorError::Disconnect))?;
+            .map_err(|error| {
+                Report::new(error).change_context(MqttTopicIngestorError::Disconnect)
+            })?;
         loop {
             nervix_primitives::task::consume_budget().await;
             let event = connection.eventloop.poll().await.map_err(|error| {
-                MqttConnectionError::report(error).change_context(MqttIngestorError::Disconnect)
+                MqttConnectionError::report(error)
+                    .change_context(MqttTopicIngestorError::Disconnect)
             })?;
             if let Event::Outgoing(Outgoing::Disconnect) = event {
                 return unsubscribe;
@@ -457,11 +474,12 @@ impl MqttIngestorPlan {
         }
     }
 
-    async fn confirm_unsubscribe(connection: &mut MqttConnection) -> MqttIngestorResult<()> {
+    async fn confirm_unsubscribe(connection: &mut MqttConnection) -> MqttTopicIngestorResult<()> {
         loop {
             nervix_primitives::task::consume_budget().await;
             let event = connection.eventloop.poll().await.map_err(|error| {
-                MqttConnectionError::report(error).change_context(MqttIngestorError::Unsubscribe)
+                MqttConnectionError::report(error)
+                    .change_context(MqttTopicIngestorError::Unsubscribe)
             })?;
             if let Event::Incoming(Incoming::UnsubAck(answer)) = event {
                 if answer.reasons.iter().all(|reason| {
@@ -472,7 +490,7 @@ impl MqttIngestorPlan {
                 }) {
                     return Ok(());
                 }
-                return Err(Report::new(MqttIngestorError::UnsubscribeRefused {
+                return Err(Report::new(MqttTopicIngestorError::UnsubscribeRefused {
                     reasons: answer.reasons,
                 }));
             }
@@ -485,9 +503,9 @@ impl MqttIngestorPlan {
         session: MqttSession,
         manual_acks: bool,
         dns: DnsResolver,
-    ) -> MqttIngestorResult<(AsyncClient, EventLoop)> {
+    ) -> MqttTopicIngestorResult<(AsyncClient, EventLoop)> {
         let addr = client_config_value(config, "addr", ConnectorKind::Mqtt.into())
-            .change_context(MqttIngestorError::ClientConfig)?;
+            .change_context(MqttTopicIngestorError::ClientConfig)?;
         let client_id = match optional_client_config_value(config, "client_id") {
             Some(client_id) => client_id.to_owned(),
             None => default_client_id.to_string(),
@@ -520,20 +538,20 @@ impl MqttIngestorPlan {
             let tls = client_tls_paths(config);
             let ca = if let Some(ca_file) = tls.ca_file.as_ref() {
                 read_tls_file(ca_file, "TLS CA certificate")
-                    .change_context(MqttIngestorError::ClientConfig)?
+                    .change_context(MqttTopicIngestorError::ClientConfig)?
             } else {
-                return Err(Report::new(MqttIngestorError::MissingTlsCa));
+                return Err(Report::new(MqttTopicIngestorError::MissingTlsCa));
             };
             let client_auth = match (&tls.cert_file, &tls.key_file) {
                 (Some(cert_file), Some(key_file)) => Some((
                     read_tls_file(cert_file, "TLS certificate")
-                        .change_context(MqttIngestorError::ClientConfig)?,
+                        .change_context(MqttTopicIngestorError::ClientConfig)?,
                     read_tls_file(key_file, "TLS private key")
-                        .change_context(MqttIngestorError::ClientConfig)?,
+                        .change_context(MqttTopicIngestorError::ClientConfig)?,
                 )),
                 (None, None) => None,
                 _ => {
-                    return Err(Report::new(MqttIngestorError::IncompleteTlsIdentity));
+                    return Err(Report::new(MqttTopicIngestorError::IncompleteTlsIdentity));
                 }
             };
             options.set_transport(MqttTransport::Tls(TlsConfiguration::Simple {
@@ -546,19 +564,19 @@ impl MqttIngestorPlan {
         AsyncClient::builder(options)
             .capacity(1024)
             .try_build()
-            .map_err(|error| Report::new(error).change_context(MqttIngestorError::BuildClient))
+            .map_err(|error| Report::new(error).change_context(MqttTopicIngestorError::BuildClient))
     }
 
-    fn parse_addr(addr: &str) -> MqttIngestorResult<MqttIngestorAddr> {
+    fn parse_addr(addr: &str) -> MqttTopicIngestorResult<MqttTopicIngestorAddr> {
         let url = Url::parse(addr).map_err(|source| {
-            Report::new(source).change_context(MqttIngestorError::InvalidAddress)
+            Report::new(source).change_context(MqttTopicIngestorError::InvalidAddress)
         })?;
         let tls = if url.scheme() == "mqtt" {
             false
         } else if url.scheme() == "mqtts" {
             true
         } else {
-            return Err(Report::new(MqttIngestorError::UnsupportedScheme {
+            return Err(Report::new(MqttTopicIngestorError::UnsupportedScheme {
                 scheme: url.scheme().to_string(),
             }));
         };
@@ -569,12 +587,12 @@ impl MqttIngestorPlan {
             None => String::new(),
         };
         if host.is_empty() {
-            return Err(Report::new(MqttIngestorError::MissingHost));
+            return Err(Report::new(MqttTopicIngestorError::MissingHost));
         }
         let Some(port) = url.port() else {
-            return Err(Report::new(MqttIngestorError::MissingPort));
+            return Err(Report::new(MqttTopicIngestorError::MissingPort));
         };
-        Ok(MqttIngestorAddr { host, port, tls })
+        Ok(MqttTopicIngestorAddr { host, port, tls })
     }
 
     /// Drives the event loop until the broker confirms the subscription.
@@ -585,7 +603,7 @@ impl MqttIngestorPlan {
     async fn establish_subscription(
         &self,
         connection: &mut MqttConnection,
-    ) -> MqttIngestorResult<()> {
+    ) -> MqttTopicIngestorResult<()> {
         loop {
             nervix_primitives::task::consume_budget().await;
             match connection.eventloop.poll().await {
@@ -598,7 +616,7 @@ impl MqttIngestorPlan {
                         .subscribe(self.subscribe_filter.as_str(), self.qos)
                         .await
                         .map_err(|error| {
-                            Report::new(MqttIngestorError::Subscribe)
+                            Report::new(MqttTopicIngestorError::Subscribe)
                                 .attach_printable(error.to_string())
                         })?;
                 }
@@ -612,13 +630,13 @@ impl MqttIngestorPlan {
                     if granted {
                         return Ok(());
                     }
-                    return Err(Report::new(MqttIngestorError::SubscriptionRefused)
+                    return Err(Report::new(MqttTopicIngestorError::SubscriptionRefused)
                         .attach_printable(format!("{suback:?}")));
                 }
                 Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
                 Err(error) => {
                     return Err(MqttConnectionError::report(error)
-                        .change_context(MqttIngestorError::Connect));
+                        .change_context(MqttTopicIngestorError::Connect));
                 }
             }
         }
@@ -628,27 +646,27 @@ impl MqttIngestorPlan {
 /// The publish one acknowledgement settles, kept whole because a rejected publish is delivered
 /// again from here and an acknowledged one is confirmed by its packet identifier.
 #[derive(Debug, Clone)]
-pub struct MqttIngestorPosition {
+pub struct MqttTopicIngestorPosition {
     publish: Publish,
 }
 
 /// One received publish. MQTT carries no headers into the ingest namespace.
-pub struct MqttIngestorMessage {
-    position: MqttIngestorPosition,
+pub struct MqttTopicIngestorMessage {
+    position: MqttTopicIngestorPosition,
     headers: NoIngestHeaders,
 }
 
-impl MqttIngestorMessage {
+impl MqttTopicIngestorMessage {
     fn new(publish: Publish) -> Self {
         Self {
-            position: MqttIngestorPosition { publish },
+            position: MqttTopicIngestorPosition { publish },
             headers: NoIngestHeaders,
         }
     }
 }
 
-impl IngestorMessage for MqttIngestorMessage {
-    type Position = MqttIngestorPosition;
+impl IngestorMessage for MqttTopicIngestorMessage {
+    type Position = MqttTopicIngestorPosition;
 
     fn payload(&self) -> &[u8] {
         &self.position.publish.payload
@@ -677,16 +695,16 @@ enum Gathered {
     Cancelled,
 }
 
-/// One MQTT source instance: its connection, absent while suspended or reconnecting, and the
+/// One MQTT ingestor instance: its connection, absent while suspended or reconnecting, and the
 /// publishes the host rejected that it delivers again before polling the broker.
-pub struct MqttIngestor {
-    plan: MqttIngestorPlan,
+pub struct MqttTopicIngestor {
+    plan: MqttTopicIngestorPlan,
     instance_index: u64,
     connection: Option<MqttConnection>,
     replay: VecDeque<Publish>,
 }
 
-impl MqttIngestor {
+impl MqttTopicIngestor {
     /// Drops the connection, and with it every rejected publish, whose packet identifiers belong
     /// to the session that ends here. A persistent session delivers them again on resume.
     fn disconnect(&mut self) {
@@ -705,7 +723,7 @@ impl MqttIngestor {
         publishes: &mut P,
         request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
-    ) -> MqttIngestorResult<IngestorBatch<MqttIngestorMessage>> {
+    ) -> MqttTopicIngestorResult<IngestorBatch<MqttTopicIngestorMessage>> {
         let Some(first) = cancellation
             .unless_cancelled(publishes.next_publish())
             .await
@@ -716,7 +734,7 @@ impl MqttIngestor {
         };
         let first = first?;
         let mut messages = Vec::with_capacity(request.max_messages.get());
-        messages.push(MqttIngestorMessage::new(first));
+        messages.push(MqttTopicIngestorMessage::new(first));
         if request.max_messages == NonZeroUsize::MIN {
             return Ok(IngestorBatch::Messages(messages));
         }
@@ -724,7 +742,7 @@ impl MqttIngestor {
             return Ok(IngestorBatch::Messages(messages));
         };
         let Some(deadline) = Instant::now().checked_add(batch_timeout) else {
-            return Err(Report::new(MqttIngestorError::BatchDeadline));
+            return Err(Report::new(MqttTopicIngestorError::BatchDeadline));
         };
         let gathering = Self::gather(publishes, &mut messages, request.max_messages, cancellation);
         let gathered = timeout_at(deadline, gathering).await;
@@ -741,10 +759,10 @@ impl MqttIngestor {
     /// `max_messages` or the host cancels the read while it waits for the next publish.
     async fn gather<P: PublishRead>(
         publishes: &mut P,
-        messages: &mut Vec<MqttIngestorMessage>,
+        messages: &mut Vec<MqttTopicIngestorMessage>,
         max_messages: NonZeroUsize,
         cancellation: &IngestorReadCancellation,
-    ) -> MqttIngestorResult<Gathered> {
+    ) -> MqttTopicIngestorResult<Gathered> {
         while messages.len() < max_messages.get() {
             nervix_primitives::task::consume_budget().await;
             let Some(next) = cancellation
@@ -754,28 +772,34 @@ impl MqttIngestor {
                 return Ok(Gathered::Cancelled);
             };
             let publish = next?;
-            messages.push(MqttIngestorMessage::new(publish));
+            messages.push(MqttTopicIngestorMessage::new(publish));
         }
         Ok(Gathered::Full)
     }
 
-    fn replayed_batch(&mut self, max_messages: NonZeroUsize) -> Option<Vec<MqttIngestorMessage>> {
+    fn replayed_batch(
+        &mut self,
+        max_messages: NonZeroUsize,
+    ) -> Option<Vec<MqttTopicIngestorMessage>> {
         let first = self.replay.pop_front()?;
         let mut messages = Vec::with_capacity(max_messages.get());
-        messages.push(MqttIngestorMessage::new(first));
+        messages.push(MqttTopicIngestorMessage::new(first));
         while messages.len() < max_messages.get() {
             let Some(publish) = self.replay.pop_front() else {
                 break;
             };
-            messages.push(MqttIngestorMessage::new(publish));
+            messages.push(MqttTopicIngestorMessage::new(publish));
         }
         Some(messages)
     }
 }
 
 #[async_trait]
-impl IngestorConnector for MqttIngestor {
-    type Plan = MqttIngestorPlan;
+impl IngestorConnector for MqttTopicIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Mqtt(nervix_models::MqttIngestorEntity::Topic);
+
+    type Plan = MqttTopicIngestorPlan;
 
     async fn open(plan: &Self::Plan, instance_index: u64) -> IngestorResult<Self> {
         Ok(Self {
@@ -823,9 +847,9 @@ impl IngestorConnector for MqttIngestor {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for MqttIngestor {
-    type Message = MqttIngestorMessage;
-    type Position = MqttIngestorPosition;
+impl BrokerIngestorConnector for MqttTopicIngestor {
+    type Message = MqttTopicIngestorMessage;
+    type Position = MqttTopicIngestorPosition;
 
     async fn next_batch(
         &mut self,
@@ -842,7 +866,7 @@ impl BrokerIngestorConnector for MqttIngestor {
             Ok(batch) => Ok(batch),
             Err(error) => {
                 // A read that loses its connection drops it, and with it every publish the read
-                // took, which a persistent session delivers again once the source resumes.
+                // took, which a persistent session delivers again once the ingestor resumes.
                 if error.current_context().ends_connection() {
                     self.disconnect();
                 }
@@ -856,7 +880,7 @@ impl BrokerIngestorConnector for MqttIngestor {
             return Ok(());
         }
         let Some(connection) = self.connection.as_ref() else {
-            return Err(Report::new(MqttIngestorError::Disconnected)
+            return Err(Report::new(MqttTopicIngestorError::Disconnected)
                 .change_context(IngestorError::Acknowledge { connector: MQTT }));
         };
         for position in positions {
@@ -866,7 +890,8 @@ impl BrokerIngestorConnector for MqttIngestor {
                 .ack(&position.publish)
                 .await
                 .map_err(|error| {
-                    Report::new(MqttIngestorError::Acknowledge).attach_printable(error.to_string())
+                    Report::new(MqttTopicIngestorError::Acknowledge)
+                        .attach_printable(error.to_string())
                 })
                 .change_context(IngestorError::Acknowledge { connector: MQTT })?;
         }
@@ -909,12 +934,12 @@ mod tests {
     }
 
     fn retiring_instances(
-        plan: &MqttIngestorPlan,
-        replacement: Option<&MqttIngestorPlan>,
+        plan: &MqttTopicIngestorPlan,
+        replacement: Option<&MqttTopicIngestorPlan>,
     ) -> Vec<u64> {
         let sessions = plan
             .sessions()
-            .assured("the source fixture has valid session identities");
+            .assured("the ingestor fixture has valid session identities");
         let replacement = replacement.map(|replacement| {
             replacement
                 .sessions()
@@ -925,9 +950,9 @@ mod tests {
 
     async fn build_client(
         config: &[ClientConfigEntry],
-    ) -> MqttIngestorResult<(AsyncClient, EventLoop)> {
+    ) -> MqttTopicIngestorResult<(AsyncClient, EventLoop)> {
         let fixture = DnsFixture::start().await;
-        MqttIngestorPlan::client_from_config(
+        MqttTopicIngestorPlan::client_from_config(
             config,
             "default-client",
             MqttSession::Clean,
@@ -939,16 +964,16 @@ mod tests {
     async fn build_client_error(
         config: &[ClientConfigEntry],
         expectation: &str,
-    ) -> Report<MqttIngestorError> {
+    ) -> Report<MqttTopicIngestorError> {
         match build_client(config).await {
             Ok(_) => panic!("{expectation}"),
             Err(error) => error,
         }
     }
 
-    /// The settings of one source instance subscribing to `events` through `addr` and `dns`.
-    fn settings(addr: &str, session: MqttSession, dns: DnsResolver) -> MqttIngestorSettings {
-        MqttIngestorSettings {
+    /// The settings of one ingestor instance subscribing to `events` through `addr` and `dns`.
+    fn settings(addr: &str, session: MqttSession, dns: DnsResolver) -> MqttTopicIngestorSettings {
+        MqttTopicIngestorSettings {
             instances: vec![vec![entry("addr", addr)]],
             client_id_conflict: None,
             default_client_id: "client".to_string(),
@@ -968,7 +993,7 @@ mod tests {
             entry("client_id", "persistent-client"),
         ];
         let fixture = DnsFixture::start().await;
-        let (_, eventloop) = MqttIngestorPlan::client_from_config(
+        let (_, eventloop) = MqttTopicIngestorPlan::client_from_config(
             &config,
             "fallback",
             MqttSession::Persistent,
@@ -989,7 +1014,7 @@ mod tests {
         for session in [MqttSession::Clean, MqttSession::Persistent] {
             nervix_primitives::task::consume_budget().await;
             let fixture = DnsFixture::start().await;
-            let (_, eventloop) = MqttIngestorPlan::client_from_config(
+            let (_, eventloop) = MqttTopicIngestorPlan::client_from_config(
                 &config,
                 "bounded",
                 session,
@@ -1009,7 +1034,7 @@ mod tests {
     #[test]
     fn explicit_multi_instance_client_id_uses_instance_template() {
         assert_eq!(
-            MqttIngestorPlan::client_id_conflict(
+            MqttTopicIngestorPlan::client_id_conflict(
                 &config_with_client_id("fixed-client"),
                 nonzero!(2u64)
             ),
@@ -1019,18 +1044,18 @@ mod tests {
             })
         );
         assert_eq!(
-            MqttIngestorPlan::client_id_conflict(&[], nonzero!(2u64)),
+            MqttTopicIngestorPlan::client_id_conflict(&[], nonzero!(2u64)),
             None
         );
         assert_eq!(
-            MqttIngestorPlan::client_id_conflict(
+            MqttTopicIngestorPlan::client_id_conflict(
                 &config_with_client_id("templated-{{instance}}"),
                 nonzero!(2u64)
             ),
             None
         );
         assert_eq!(
-            MqttIngestorPlan::client_id_conflict(&[], nonzero!(1u64)),
+            MqttTopicIngestorPlan::client_id_conflict(&[], nonzero!(1u64)),
             None
         );
     }
@@ -1044,11 +1069,11 @@ mod tests {
             fixture.dns.clone(),
         );
         declared.default_client_id = "domain~events".to_string();
-        let singleton = MqttIngestorPlan::new(declared);
+        let singleton = MqttTopicIngestorPlan::new(declared);
         assert_eq!(
             singleton
                 .client(0)
-                .assured("the source plan is valid")
+                .assured("the ingestor plan is valid")
                 .eventloop
                 .options
                 .client_id(),
@@ -1062,7 +1087,7 @@ mod tests {
         assert_eq!(
             parallel
                 .client(0)
-                .assured("the source plan is valid")
+                .assured("the ingestor plan is valid")
                 .eventloop
                 .options
                 .client_id(),
@@ -1071,7 +1096,7 @@ mod tests {
         assert_eq!(
             parallel
                 .client(1)
-                .assured("the source plan is valid")
+                .assured("the ingestor plan is valid")
                 .eventloop
                 .options
                 .client_id(),
@@ -1118,7 +1143,7 @@ mod tests {
         for reason in [0x00, 0x11, 0x87] {
             nervix_primitives::task::consume_budget().await;
             let broker = ScriptedBroker::start().await;
-            let plan = MqttIngestorPlan::new(settings(
+            let plan = MqttTopicIngestorPlan::new(settings(
                 &broker.addr(),
                 MqttSession::Persistent,
                 fixture.dns.clone(),
@@ -1153,9 +1178,9 @@ mod tests {
                 };
                 assert!(matches!(
                     error.current_context(),
-                    MqttIngestorError::RetireInstance { instance: 0 }
+                    MqttTopicIngestorError::RetireInstance { instance: 0 }
                 ));
-                assert!(error.frames().any(|frame| matches!(frame.downcast_ref::<MqttIngestorError>(), Some(MqttIngestorError::UnsubscribeRefused { reasons }) if reasons == &[UnsubAckReason::NotAuthorized])));
+                assert!(error.frames().any(|frame| matches!(frame.downcast_ref::<MqttTopicIngestorError>(), Some(MqttTopicIngestorError::UnsubscribeRefused { reasons }) if reasons == &[UnsubAckReason::NotAuthorized])));
             } else {
                 result.assured("the broker released the subscription");
             }
@@ -1170,14 +1195,14 @@ mod tests {
 
         let fixture = DnsFixture::start().await;
         let broker = ScriptedBroker::start().await;
-        let plan = MqttIngestorPlan::new(settings(
+        let plan = MqttTopicIngestorPlan::new(settings(
             &broker.addr(),
             MqttSession::Persistent,
             fixture.dns.clone(),
         ));
         let budget = plan
             .client(0)
-            .assured("the source plan is valid")
+            .assured("the ingestor plan is valid")
             .eventloop
             .options
             .connect_timeout();
@@ -1201,7 +1226,7 @@ mod tests {
             panic!("a broker that never answers cannot complete session cleanup");
         };
         assert!(started.elapsed() >= budget);
-        let cleanup_timeout = error.frames().any(|frame| matches!(frame.downcast_ref::<MqttIngestorError>(), Some(MqttIngestorError::RetirementDeadline { budget: actual }) if *actual == budget));
+        let cleanup_timeout = error.frames().any(|frame| matches!(frame.downcast_ref::<MqttTopicIngestorError>(), Some(MqttTopicIngestorError::RetirementDeadline { budget: actual }) if *actual == budget));
         let connect_timeout = error.frames().any(|frame| {
             matches!(
                 frame.downcast_ref::<MqttConnectionError>(),
@@ -1219,9 +1244,9 @@ mod tests {
     #[nervix_primitives::test]
     async fn a_shared_client_id_names_the_conflict_as_the_resume_failure() {
         let fixture = DnsFixture::start().await;
-        let plan = MqttIngestorPlan::new(MqttIngestorSettings {
+        let plan = MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
             instances: vec![Vec::new(), Vec::new()],
-            client_id_conflict: MqttIngestorPlan::client_id_conflict(
+            client_id_conflict: MqttTopicIngestorPlan::client_id_conflict(
                 &config_with_client_id("fixed-client"),
                 nonzero!(2u64),
             ),
@@ -1250,42 +1275,44 @@ mod tests {
     #[test]
     fn parse_addr_handles_valid_and_invalid_inputs() {
         assert_eq!(
-            MqttIngestorPlan::parse_addr("mqtt://user:pass@broker.example.com:1883/topic")
+            MqttTopicIngestorPlan::parse_addr("mqtt://user:pass@broker.example.com:1883/topic")
                 .expect("must parse"),
-            MqttIngestorAddr {
+            MqttTopicIngestorAddr {
                 host: "broker.example.com".to_string(),
                 port: 1883,
                 tls: false,
             }
         );
         assert_eq!(
-            MqttIngestorPlan::parse_addr("mqtts://broker.example.com:8883").expect("must parse"),
-            MqttIngestorAddr {
+            MqttTopicIngestorPlan::parse_addr("mqtts://broker.example.com:8883")
+                .expect("must parse"),
+            MqttTopicIngestorAddr {
                 host: "broker.example.com".to_string(),
                 port: 8883,
                 tls: true,
             }
         );
         assert_eq!(
-            MqttIngestorPlan::parse_addr("mqtt://[2001:db8::1]:1883/topic").expect("must parse"),
-            MqttIngestorAddr {
+            MqttTopicIngestorPlan::parse_addr("mqtt://[2001:db8::1]:1883/topic")
+                .expect("must parse"),
+            MqttTopicIngestorAddr {
                 host: "2001:db8::1".to_string(),
                 port: 1883,
                 tls: false,
             }
         );
         assert_eq!(
-            MqttIngestorPlan::parse_addr("mqtt://broker.example.com:1883?keep_alive=30")
+            MqttTopicIngestorPlan::parse_addr("mqtt://broker.example.com:1883?keep_alive=30")
                 .expect("must parse"),
-            MqttIngestorAddr {
+            MqttTopicIngestorAddr {
                 host: "broker.example.com".to_string(),
                 port: 1883,
                 tls: false,
             }
         );
-        assert!(MqttIngestorPlan::parse_addr("http://broker.example.com:1883").is_err());
-        assert!(MqttIngestorPlan::parse_addr("mqtt://broker.example.com").is_err());
-        assert!(MqttIngestorPlan::parse_addr("mqtt://:1883").is_err());
+        assert!(MqttTopicIngestorPlan::parse_addr("http://broker.example.com:1883").is_err());
+        assert!(MqttTopicIngestorPlan::parse_addr("mqtt://broker.example.com").is_err());
+        assert!(MqttTopicIngestorPlan::parse_addr("mqtt://:1883").is_err());
     }
 
     #[nervix_primitives::test]
@@ -1306,7 +1333,7 @@ mod tests {
         let error = build_client_error(&[], "missing mqtt addr").await;
         assert!(matches!(
             error.current_context(),
-            MqttIngestorError::ClientConfig
+            MqttTopicIngestorError::ClientConfig
         ));
         assert!(
             matches!(
@@ -1329,7 +1356,7 @@ mod tests {
         .await;
         assert!(matches!(
             error.current_context(),
-            MqttIngestorError::InvalidAddress
+            MqttTopicIngestorError::InvalidAddress
         ));
 
         let error = build_client_error(
@@ -1339,7 +1366,7 @@ mod tests {
         .await;
         assert!(matches!(
             error.current_context(),
-            MqttIngestorError::MissingTlsCa
+            MqttTopicIngestorError::MissingTlsCa
         ));
 
         let root = tempfile::tempdir().expect("temporary MQTT TLS directory should open");
@@ -1359,25 +1386,25 @@ mod tests {
         .await;
         assert!(matches!(
             error.current_context(),
-            MqttIngestorError::IncompleteTlsIdentity
+            MqttTopicIngestorError::IncompleteTlsIdentity
         ));
     }
 
     #[nervix_primitives::test]
     async fn rejected_publishes_replay_in_order_before_the_broker_is_polled() {
         let fixture = DnsFixture::start().await;
-        let plan = MqttIngestorPlan::new(settings(
+        let plan = MqttTopicIngestorPlan::new(settings(
             "mqtt://127.0.0.1:1",
             MqttSession::Persistent,
             fixture.dns.clone(),
         ));
-        let mut source = MqttIngestor::open(&plan, 0)
+        let mut source = MqttTopicIngestor::open(&plan, 0)
             .await
-            .expect("an MQTT source opens without connecting");
-        let first = MqttIngestorPosition {
+            .expect("an MQTT ingestor opens without connecting");
+        let first = MqttTopicIngestorPosition {
             publish: Publish::new("events", QoS::AtLeastOnce, b"1".to_vec(), None),
         };
-        let second = MqttIngestorPosition {
+        let second = MqttTopicIngestorPosition {
             publish: Publish::new("events", QoS::AtLeastOnce, b"2".to_vec(), None),
         };
         source
@@ -1412,14 +1439,14 @@ mod tests {
     async fn a_broker_whose_name_does_not_resolve_fails_the_resume_with_the_lookup() {
         let fixture = DnsFixture::start().await;
         fixture.deny("missing.nervix.test");
-        let plan = MqttIngestorPlan::new(settings(
+        let plan = MqttTopicIngestorPlan::new(settings(
             "mqtt://missing.nervix.test:1883",
             MqttSession::Clean,
             fixture.dns.clone(),
         ));
-        let mut source = MqttIngestor::open(&plan, 0)
+        let mut source = MqttTopicIngestor::open(&plan, 0)
             .await
-            .expect("an MQTT source opens without connecting");
+            .expect("an MQTT ingestor opens without connecting");
 
         let resumed = source.resume().await;
         let Err(error) = resumed else {
@@ -1431,8 +1458,8 @@ mod tests {
             IngestorError::Resume { connector: MQTT }
         ));
         assert!(matches!(
-            error.downcast_ref::<MqttIngestorError>(),
-            Some(MqttIngestorError::Connect)
+            error.downcast_ref::<MqttTopicIngestorError>(),
+            Some(MqttTopicIngestorError::Connect)
         ));
         assert!(
             matches!(

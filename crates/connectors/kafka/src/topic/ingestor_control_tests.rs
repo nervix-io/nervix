@@ -1,7 +1,7 @@
-//! The Kafka source yields its async worker while a broker holds a control request.
+//! The Kafka ingestor yields its async worker while a broker holds a control request.
 //!
 //! Outside the layer order: a harness.
-//! - **Owns.** Causal driver-wait and cancelled-commit regressions through the production source.
+//! - **Owns.** Causal driver-wait and cancelled-commit regressions through the production ingestor.
 //! - **Depends on.** The connector contract, bounded executor and librdkafka's mock broker.
 //! - **Must not know.** Runtime graph ownership, registry Models or cluster placement.
 
@@ -24,8 +24,9 @@ use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext};
 
 use super::{
     GroupCommitRequest, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
-    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaGroupCommit, KafkaIngestor,
-    KafkaIngestorError, KafkaIngestorOffsetMode, KafkaIngestorPlan, KafkaOffsetPosition,
+    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaGroupCommit, KafkaOffsetPosition,
+    KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode,
+    KafkaTopicIngestorPlan,
     commit_tests::{cluster, plan as group_plan, publish, read_positions, subscribed_source},
 };
 
@@ -38,14 +39,14 @@ async fn rejecting_a_delivered_record_admits_its_seek_and_reads_that_offset_agai
     let executor = Executor::default();
     let mut plan = group_plan(&broker, KafkaGroupCommit::EachAcknowledgedBatch);
     plan.executor = executor.clone();
-    let mut source = KafkaIngestor::open(&plan, 0)
+    let mut source = KafkaTopicIngestor::open(&plan, 0)
         .await
-        .assured("the source accepts its group and broker configuration");
+        .assured("the ingestor accepts its group and broker configuration");
     assert!(matches!(
         source
             .resume()
             .await
-            .assured("the source subscribes to its topic"),
+            .assured("the ingestor subscribes to its topic"),
         nervix_connector::IngestorResume::Ready
     ));
     let positions = read_positions(&mut source).await;
@@ -128,7 +129,7 @@ async fn a_domain_resume_yields_while_the_broker_holds_its_metadata() {
     let first_poll = poll_fn(|context| Poll::Ready(resume.as_mut().poll(context))).await;
     broker
         .broker_round_trip_time(1, Duration::ZERO)
-        .assured("the broker releases its replies before the test drops its source");
+        .assured("the broker releases its replies before the test drops its ingestor");
 
     assert!(
         first_poll.is_pending(),
@@ -139,9 +140,9 @@ async fn a_domain_resume_yields_while_the_broker_holds_its_metadata() {
 async fn domain_source(
     broker: &MockCluster<'static, DefaultProducerContext>,
     executor: Executor,
-) -> KafkaIngestor {
+) -> KafkaTopicIngestor {
     let (_rebalance, receiver) = watch::channel(1);
-    let plan = KafkaIngestorPlan {
+    let plan = KafkaTopicIngestorPlan {
         executor,
         config: vec![
             ClientConfigEntry {
@@ -154,15 +155,15 @@ async fn domain_source(
             },
         ],
         topic: KafkaTopicName::parse("orders").assured("orders is a valid Kafka topic"),
-        offset_mode: KafkaIngestorOffsetMode::Domain {
+        offset_mode: KafkaTopicIngestorOffsetMode::Domain {
             group_id: "metadata-worker-yield".to_string(),
             offsets: KafkaDomainOffsetHost::new(UnreachedOffsets),
             rebalance: receiver,
         },
     };
-    KafkaIngestor::open(&plan, 0)
+    KafkaTopicIngestor::open(&plan, 0)
         .await
-        .assured("the source accepts the test broker's configuration")
+        .assured("the ingestor accepts the test broker's configuration")
 }
 
 #[nervix_primitives::test]
@@ -179,8 +180,8 @@ async fn a_control_memory_refusal_preserves_its_typed_admission_cause() {
         .await
         .expect_err("a full command budget refuses the metadata job");
     assert!(matches!(
-        report.downcast_ref::<KafkaIngestorError>(),
-        Some(KafkaIngestorError::ControlAdmission)
+        report.downcast_ref::<KafkaTopicIngestorError>(),
+        Some(KafkaTopicIngestorError::ControlAdmission)
     ));
     assert!(matches!(
         report.downcast_ref::<AdmissionError>(),
@@ -254,7 +255,7 @@ async fn control_admission_preserves_refusals_and_uses_the_client_deadline_while
     let report = result.expect_err("a full connector queue refuses the next operation");
     assert!(matches!(
         report.current_context(),
-        KafkaIngestorError::ControlExecution
+        KafkaTopicIngestorError::ControlExecution
     ));
     assert!(matches!(
         report.downcast_ref::<ExecutionError>(),
@@ -265,7 +266,7 @@ async fn control_admission_preserves_refusals_and_uses_the_client_deadline_while
     ));
     let report = expired.expect_err("the configured deadline includes waiting for a worker");
     assert!(matches!(report.current_context(),
-        KafkaIngestorError::ControlTimeout { timeout } if *timeout == Duration::from_secs(1)));
+        KafkaTopicIngestorError::ControlTimeout { timeout } if *timeout == Duration::from_secs(1)));
     assert_eq!(executor.snapshot().commands_memory.reserved_bytes, 0);
 }
 

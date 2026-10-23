@@ -1,4 +1,4 @@
-//! The confirmation window a brokered sink publishes through in `MODE ACK`.
+//! The confirmation window a brokered emitter publishes through in `MODE ACK`.
 //!
 //! Layer: engines and infrastructure.
 //!
@@ -6,11 +6,11 @@
 //!   oldest first and at most the declared `MAX` at once; each record's deadline, `ACK TIMEOUT`
 //!   after its own hand-over; the wait for the oldest answer until that deadline; and the publish
 //!   outcome the answers settle, including every answer a failure finds already given.
-//! - **Depends on.** The sink contract's outcome, record identity and failure types, the
+//! - **Depends on.** The emitter contract's outcome, record identity and failure types, the
 //!   boundary's monotonic clock and deadline-bounded wait, and the futures through which a
 //!   connector's driver answers.
 //! - **Must not know.** Any broker driver or how a connector classifies its driver's answers, the
-//!   host's retry, buffer or backoff, or the source acknowledgements a record carries.
+//!   host's retry, buffer or backoff, or the ingestor acknowledgements a record carries.
 
 #![cfg_attr(
     nervix_lint,
@@ -86,11 +86,11 @@ pub enum ConfirmationWindowError {
 /// The records a confirmed publish handed its broker and awaits answers for, and the outcome
 /// their answers settle.
 ///
-/// A brokered sink in `MODE ACK` hands its records to the driver one after another and receives,
+/// A brokered emitter in `MODE ACK` hands its records to the driver one after another and receives,
 /// for each, a future that resolves to the broker's [`BrokerAnswer`] for it. The window takes each
 /// record with that future, oldest first. A record's deadline is `ACK TIMEOUT` after its own
 /// hand-over. While the window holds `MAX` records it waits for the oldest answer, until the
-/// oldest's deadline and no longer, before the sink hands over another record, so at most `MAX`
+/// oldest's deadline and no longer, before the emitter hands over another record, so at most `MAX`
 /// records await their answers at once. `ACK SEQUENTIAL` is a window of one. A driver whose queue
 /// fills below `MAX` can request the oldest answer through [`ConfirmationWindow::settle_next`].
 ///
@@ -111,7 +111,7 @@ pub enum ConfirmationWindowError {
 /// at-least-once delivery `MODE ACK` promises.
 #[must_use = "a confirmed publish reports its outcome only through `finish` or `fail`"]
 pub struct ConfirmationWindow<A> {
-    /// The sink a failure of the window is reported for.
+    /// The emitter a failure of the window is reported for.
     connector: &'static str,
     settings: AckConfirmation,
     /// The records awaiting their answers, oldest first.
@@ -173,7 +173,7 @@ impl<A> ConfirmationWindow<A>
 where
     A: Future<Output = BrokerAnswer> + Unpin,
 {
-    /// An empty window for a publish of `records` records through `sink`, which awaits answers for
+    /// An empty window for a publish of `records` records through `emitter`, which awaits answers for
     /// at most `settings.max_in_flight` of them at once and for each until `settings.timeout` after
     /// its hand-over.
     pub fn new(connector: &'static str, settings: AckConfirmation, records: usize) -> Self {

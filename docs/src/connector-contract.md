@@ -51,6 +51,31 @@ it resolves through the node's resolver, as the sections below describe, and a d
 inside itself is one of the residual paths [Residual
 Resolution](./name-resolution.md#residual-resolution) lists.
 
+### Entity implementations and composition
+
+The vocabulary owns `IngestorEntityKind` and `EmitterEntityKind`. Each connector crate exposes one
+concrete implementation and configuration per entity in an entity module: for example
+`kafka::topic::KafkaTopicIngestor` and `KafkaTopicEmitter`, Redis `pubsub`, Syslog `listener` and
+`collector`, and ZeroMQ `pull` and `push`. An implementation does not select its entity with a mode
+flag. OTEL exposes `OtelLogsEmitter`, `OtelTracesEmitter` and `OtelMetricsEmitter` with distinct
+configurations; only their private OTLP encoder shares signal-dependent encoding and transport.
+
+`IngestorConnector::KIND` is the concrete ingestor's compile-time vocabulary declaration.
+`EmitterLifecycle::kind()` returns the emitter's declaration through the object-safe lifecycle
+contract; concrete emitters expose the same declaration as `KIND`. The server composition modules
+assert each concrete declaration against the entity their plan arm constructs. Plans nest connector
+then entity, such as `IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(...))` and
+`EmitterConnectorPlan::Otel(OtelEmitterPlan::Logs(...))`. Matching is exhaustive at each boundary.
+Per-connector modules compose these plans; they preserve constructor parameters and transport,
+acknowledgement, retry and finish behavior.
+
+HTTP request and WebSockets connection ingestors live in their connector crates. Their endpoint
+entities are concrete host-owned ingestors over the shared private intake binding mechanism. The
+binding still ends its exact intake lifetime before withdrawal, including when an ingestor drops.
+Native client producer and consumer entities also remain host-owned. Connector labels derive from
+the vocabulary declaration and are resolved once for the running task, outside batch publication.
+No server table defines another spelling or case for a connector.
+
 ### Connector hygiene standard
 
 The following standard applies to each connector crate, its declarations, and the server paths
@@ -81,7 +106,7 @@ paths.
   algorithm, header and metadata mapping, and acknowledgement operation through its production
   owner. Include successful delivery and the supported rejection, transient and unanswered
   outcomes, partial confirmations, ordering and bounds where the path has those states. Exercise
-  source polling, reads and close when the connector owns them, and a emitter's finish where its
+  source polling, reads and close when the connector owns them, and an emitter's finish where its
   client can hold records once a publish returns. A path the connector does not
   implement needs no fictional test. Unit tests complement the public Cucumber scenarios and
   concurrency checks required by the behavior; they do not replace them.
@@ -138,7 +163,7 @@ including a path another feature adds or changes. Each rule names the section th
   [Interrupted reads](#interrupted-reads).
 - **Every emitter finishes.** `finish` has no default. It sends what the emitter's client still holds by
   the deadline the host gives it, or reports what it could not send; see
-  [Finishing a emitter](#finishing-a-emitter).
+  [Finishing an emitter](#finishing-a-emitter).
 - **A brokered emitter never resends what its broker confirmed.** A record emitter that awaits its
   broker's answers in `MODE ACK` does so through the contract's `ConfirmationWindow`, which settles
   every answer already given before a failure ends the publish; see [Emitter boundary](#emitter-boundary).
@@ -219,7 +244,7 @@ policy and do not create application-level probes or acknowledgements.
 
 Composition also passes the node resolver into every RabbitMQ source plan and emitter configuration.
 The connector reads the client's `addr` as an AMQP URI and takes its host from the URL grammar,
-because Lapin's own grammar substitutes `localhost` for an IPv6 literal host. Every connection resolves that host again through the node resolver: a emitter's start, its
+because Lapin's own grammar substitutes `localhost` for an IPv6 literal host. Every connection resolves that host again through the node resolver: an emitter's start, its
 reopening after a failed publish, and each source instance's resume. A literal IPv4 or IPv6 address
 is its own answer. The connector tries the answers in resolution order, each within an equal share
 of what remains of the client's `connect_timeout_ms`, 30 seconds by default, and for `amqps`
@@ -249,7 +274,7 @@ source's or emitter's own context for that step, with the elapsed deadline as it
 reports the failure as a resume failure and retries on its declared `RETRY POLICY`. A emitter reports
 an invalid address, CA file or deadline key as a configuration failure and every other connection
 failure as an initialization failure, and the emitter host reopens it on its backoff. Neither path
-acknowledges undelivered data: a source that cannot connect holds no delivery, and a emitter that
+acknowledges undelivered data: a source that cannot connect holds no delivery, and an emitter that
 cannot connect confirms nothing, so the input stays unacknowledged until a later connection
 delivers it.
 
@@ -304,7 +329,7 @@ connect through `rumqttc`'s event loop, which asks a socket connector for the TC
 connection it opens: the first, and each one after a connection is lost. Each client installs its
 own connector with `MqttOptions::set_socket_connector` in place of the driver's default, which
 resolves with Tokio's `lookup_host`. On every call the installed connector resolves the host the
-driver names, the host of the client's `addr`, through the node resolver, so a emitter's event loop
+driver names, the host of the client's `addr`, through the node resolver, so an emitter's event loop
 resolves again on each reconnection and a source instance on each resume; a literal IPv4 or IPv6
 address is its own answer. It dials the answers in resolution order with the driver's own
 per-address dialer, `connect_socket_addr`, which applies the driver's `NetworkOptions` to each
@@ -358,7 +383,7 @@ proxy resolves the service. With `tls_ca_file` it trusts that CA alone and uses 
 The SDK signs each request with SigV4 for the configured endpoint before the connector resolves its
 host, so the signature, the `Host` header and the certificate check all name that host, whichever
 address accepted the connection. The SDK's default 3.1-second connect timeout, and the operation and
-attempt timeouts a emitter's `timeout_ms` sets, include the lookup. The client names static credentials
+attempt timeouts an emitter's `timeout_ms` sets, include the lookup. The client names static credentials
 and its region, so `aws-config` never consults the default credential or region chains that could
 reach IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for
 a token because it signs with SigV4; the loader receives the same HTTP client, so that chain would
@@ -374,7 +399,7 @@ failure. An SQS source plan builds its client from configuration and TLS materia
 instance looks its queue up when it first resumes and keeps the queue's URL. A failure there, a
 lookup failure included, is a resume failure, which the host shows as the source's transient error
 and retries on the source's retry policy. A queue the service does not have is the typed
-`SqsIngestorError::MissingQueue`, which names it, whether the service answers with AWS's
+`SqsQueueIngestorError::MissingQueue`, which names it, whether the service answers with AWS's
 query-compatible code `AWS.SimpleQueueService.NonExistentQueue` or, as ElasticMQ does, only with the
 JSON protocol's error type `QueueDoesNotExist`. Any other failure to reach the service, including a
 certificate that does not name the configured host, is described by every cause of the driver's
@@ -576,7 +601,7 @@ how clients connect, pool or execute.
 A mode or a quiesce mode that needs an option choice declares it: an MQTT topic's `ACK` modes and its
 `SUSPEND` require `SESSION PERSISTENT` and `QOS 1`, the session a broker keeps messages for, and the
 source answers which choices its statement made. Whether a source can honor a quiesce mode, whether
-a emitter accepts a publishing mode, whether its body needs a codec, and the batching contract with its
+an emitter accepts a publishing mode, whether its body needs a codec, and the batching contract with its
 maximum and its refusal for an emitter that cannot batch are all read from the declaration. The
 registry, the planner and the console keep their own copies of some of these facts until the work
 that owns those layers reads the declaration instead.
@@ -1145,7 +1170,7 @@ retains the successful preparation with its source members for both single-row a
 retries and reopened connectors receive those same bytes without re-encoding or preparing again.
 A **row emitter** receives a run of host-projected Arrow
 carriers of one source relay and concrete branch, the target columns their mapped columns are
-written to, and each carrier's selected rows, execution time and, for a emitter that retains them,
+written to, and each carrier's selected rows, execution time and, for an emitter that retains them,
 acknowledgements; it encodes its external representation from those columns. A **row request
 emitter** receives the same projected columns one carrier at a time and prepares requests from them
 once: each prepared request is the exact bytes the connector will send and the source positions of
@@ -1160,7 +1185,7 @@ map enters the connector. Each publish is one call per write, never a virtual ca
 
 The host compiles a row or row request emitter's `VALUES` projection before opening that emitter. A failed VM
 inference or compilation retains its typed VM report beneath a `MappedValuesError` that names the
-emitter and the emitter, then the emitter-initialization context. The emitter follows its existing
+connector and the emitter, then the emitter-initialization context. The emitter follows its existing
 initialization retry policy; the connector never receives a partially compiled mapping.
 
 The ClickHouse row emitter uses the shared columnar JSON writer for `JSONEachRow`. It prepares typed
@@ -1204,7 +1229,7 @@ publish failure when reopening it would discard staged work or a persistent sess
 HTTP request emitter does, when it holds nothing between attempts and reopening it would clear the
 transient failure its pending work is still waiting out.
 
-### Finishing a emitter
+### Finishing an emitter
 
 Every emitter implements `finish`, and no emitter inherits a default. A publish reports a record
 delivered at the completion point its mode declares, and for `NO ACK` on Kafka, Pulsar and MQTT
@@ -1637,7 +1662,7 @@ fields, any other text, a number beyond 64 bits, a date after 2262, or a delay t
 waits for the longer of this delay and its backoff on its monotonic clock, so the domain's
 `TIME RATE` never shortens it.
 
-For a emitter that stages writes, the lifecycle reports what it holds for its next commit, either rows
+For an emitter that stages writes, the lifecycle reports what it holds for its next commit, either rows
 that wait for a domain-logical commit cadence or rows that reached its maximum commit size, together
 with a staged-message count, pending ACKs, and a commit operation. The host owns the cadence. It
 arms the cadence's logical deadline at the first cadence check that finds rows staged, which follows
@@ -1995,23 +2020,25 @@ drain boundary. This chapter does not redefine those output formats.
    driver configuration raw only where pass-through is its intentional contract.
 2. Validate schema, reference, branch, header, quiesce, delivery, and external contract rules in
    the registry. Convert the validated Model into one typed start-plan variant before execution;
-   a source's variant belongs to the registry's ingestor planner.
+   an ingestor's variant belongs to the registry's ingestor planner and nests connector then entity.
 3. Add one crate under `crates/connectors/` with its ownership header, driver dependencies, and
-   source or emitter contract implementation. A brokered emitter that awaits its broker's answers in
-   `MODE ACK` does so through the contract's `ConfirmationWindow`, never a window of its own. A
+   ingestor or emitter contract implementation, with one entity module, concrete type and named
+   configuration per entity. Declare `IngestorConnector::KIND` or `EmitterLifecycle::kind()`, and
+   add the plan-to-implementation compile-time witness in its server composition module. A brokered emitter that awaits its broker's answers in
+   `MODE ACK` does so through the contract's `ConfirmationWindow`, never a window of its own. An
    emitter answers `finish` for what its client can still hold once a publish returns, as
-   [Finishing a emitter](#finishing-a-emitter) describes, and adds its row to that table. A broker
+   [Finishing an emitter](#finishing-a-emitter) describes, and adds its row to that table. A broker
    source ends a read the host cancels with every message it already took, as
    [Interrupted reads](#interrupted-reads) describes, and adds its row to that table. Its
    `acknowledge` returns at the confirmation its entity declares. The
    [connector delivery standard](#connector-delivery-standard) lists the remaining rules. Add its
    composition mapping in the server; do not teach the contract or registry about the driver.
-4. Add unit coverage for transport behavior and feature scenarios through NSPL, including
+4. Add unit coverage for transport behavior and feature scenarios through Plexus, including
    three-node execution and failure paths, and register the scenarios that observe each declared
    capability in the [capability inventory](#capability-inventory). Confirm the crate boundary and
    run the repository's validation and connector tests.
 5. Update the [Ingestors](./ingestors.md) or [Emitters](./emitters.md) manual, relevant client and
-   metric documentation, and the [NSPL skill](https://github.com/nervix-io/nervix/blob/main/.agents/skills/nspl/SKILL.md) routing when its
+   metric documentation, and the [Plexus skill](https://github.com/nervix-io/nervix/blob/main/.agents/skills/nspl/SKILL.md) routing when its
    user-facing guidance changes. Regenerate the book.
 
 The connector split was functionally qualified across 46 integration feature files and 359

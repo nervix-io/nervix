@@ -1,12 +1,12 @@
-//! ZeroMQ source transport.
+//! ZeroMQ ingestor transport.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The PULL socket a source configuration declares, whether it binds or connects, the
+//! - **Owns.** The PULL socket an ingestor configuration declares, whether it binds or connects, the
 //!   first frame of each message as the payload, and reopening the socket after a receive failure.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   Tokio and `zeromq`.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -34,10 +34,10 @@ use zeromq::{PullSocket, Socket, SocketRecv, ZmqError, ZmqMessage};
 
 const ZEROMQ: &str = "zeromq";
 
-/// Why a ZeroMQ source could not open or read its socket. Each driver failure stays the source of
+/// Why a ZeroMQ ingestor could not open or read its socket. Each driver failure stays the ingestor of
 /// its variant, so a rendered report carries the cause, such as another socket holding the address.
 #[derive(Debug, Error)]
-pub enum ZeroMqIngestorError {
+pub enum ZeroMqPullIngestorError {
     #[error("invalid ZeroMQ client configuration")]
     ClientConfig,
     #[error("failed to bind ZeroMQ client to '{addr}'")]
@@ -59,32 +59,32 @@ pub enum ZeroMqIngestorError {
     },
 }
 
-type ZeroMqIngestorResult<T> = Result<T, Report<ZeroMqIngestorError>>;
+type ZeroMqPullIngestorResult<T> = Result<T, Report<ZeroMqPullIngestorError>>;
 
-/// The client entries one ZeroMQ source opens its PULL socket from.
+/// The client entries one ZeroMQ ingestor opens its PULL socket from.
 #[derive(Clone)]
-pub struct ZeroMqIngestorPlan {
+pub struct ZeroMqPullIngestorPlan {
     config: Vec<ClientConfigEntry>,
 }
 
-impl ZeroMqIngestorPlan {
+impl ZeroMqPullIngestorPlan {
     pub fn new(config: Vec<ClientConfigEntry>) -> Self {
         Self { config }
     }
 
-    async fn pull_socket(&self) -> ZeroMqIngestorResult<PullSocket> {
+    async fn pull_socket(&self) -> ZeroMqPullIngestorResult<PullSocket> {
         let addr = Self::addr_from_config(&self.config)?;
         let mut socket = PullSocket::new();
         if Self::binds(&self.config) {
             socket.bind(&addr).await.map_err(|source| {
-                Report::new(ZeroMqIngestorError::Bind {
+                Report::new(ZeroMqPullIngestorError::Bind {
                     addr: addr.clone(),
                     source,
                 })
             })?;
         } else {
             socket.connect(&addr).await.map_err(|source| {
-                Report::new(ZeroMqIngestorError::Connect {
+                Report::new(ZeroMqPullIngestorError::Connect {
                     addr: addr.clone(),
                     source,
                 })
@@ -93,9 +93,9 @@ impl ZeroMqIngestorPlan {
         Ok(socket)
     }
 
-    fn addr_from_config(config: &[ClientConfigEntry]) -> ZeroMqIngestorResult<String> {
+    fn addr_from_config(config: &[ClientConfigEntry]) -> ZeroMqPullIngestorResult<String> {
         client_config_value(config, "addr", "ZeroMQ")
-            .change_context(ZeroMqIngestorError::ClientConfig)
+            .change_context(ZeroMqPullIngestorError::ClientConfig)
     }
 
     fn binds(config: &[ClientConfigEntry]) -> bool {
@@ -107,13 +107,13 @@ impl ZeroMqIngestorPlan {
 }
 
 /// One received message, whose first frame is the payload. ZeroMQ carries no headers.
-pub struct ZeroMqIngestorMessage {
+pub struct ZeroMqPullIngestorMessage {
     message: ZmqMessage,
     position: (),
     headers: NoIngestHeaders,
 }
 
-impl IngestorMessage for ZeroMqIngestorMessage {
+impl IngestorMessage for ZeroMqPullIngestorMessage {
     type Position = ();
 
     fn payload(&self) -> &[u8] {
@@ -138,15 +138,18 @@ impl IngestorMessage for ZeroMqIngestorMessage {
     }
 }
 
-/// One ZeroMQ source instance: its PULL socket, absent until it opens or after a receive failure.
-pub struct ZeroMqIngestor {
-    plan: ZeroMqIngestorPlan,
+/// One ZeroMQ ingestor instance: its PULL socket, absent until it opens or after a receive failure.
+pub struct ZeroMqPullIngestor {
+    plan: ZeroMqPullIngestorPlan,
     socket: Option<PullSocket>,
 }
 
 #[async_trait]
-impl IngestorConnector for ZeroMqIngestor {
-    type Plan = ZeroMqIngestorPlan;
+impl IngestorConnector for ZeroMqPullIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::ZeroMq(nervix_models::ZeroMqIngestorEntity::Pull);
+
+    type Plan = ZeroMqPullIngestorPlan;
 
     async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
         Ok(Self {
@@ -184,8 +187,8 @@ impl IngestorConnector for ZeroMqIngestor {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for ZeroMqIngestor {
-    type Message = ZeroMqIngestorMessage;
+impl BrokerIngestorConnector for ZeroMqPullIngestor {
+    type Message = ZeroMqPullIngestorMessage;
     type Position = ();
 
     /// Reads until a message with a first frame arrives; a message without frames carries nothing
@@ -209,14 +212,14 @@ impl BrokerIngestorConnector for ZeroMqIngestor {
                 Ok(message) => message,
                 Err(source) => {
                     self.socket = None;
-                    return Err(Report::new(ZeroMqIngestorError::Receive { source })
+                    return Err(Report::new(ZeroMqPullIngestorError::Receive { source })
                         .change_context(IngestorError::Read { connector: ZEROMQ }));
                 }
             };
             if message.get(0).is_none() {
                 continue;
             }
-            return Ok(IngestorBatch::Messages(vec![ZeroMqIngestorMessage {
+            return Ok(IngestorBatch::Messages(vec![ZeroMqPullIngestorMessage {
                 message,
                 position: (),
                 headers: NoIngestHeaders,
@@ -256,19 +259,19 @@ mod tests {
     fn client_config_extractors_handle_defaults_and_missing_keys() {
         let config = [entry("addr", "tcp://127.0.0.1:5555"), entry("bind", "TRUE")];
         assert_eq!(
-            ZeroMqIngestorPlan::addr_from_config(&config).expect("addr"),
+            ZeroMqPullIngestorPlan::addr_from_config(&config).expect("addr"),
             "tcp://127.0.0.1:5555"
         );
-        assert!(ZeroMqIngestorPlan::binds(&config));
-        assert!(!ZeroMqIngestorPlan::binds(&[entry(
+        assert!(ZeroMqPullIngestorPlan::binds(&config));
+        assert!(!ZeroMqPullIngestorPlan::binds(&[entry(
             "addr",
             "tcp://127.0.0.1:5555"
         )]));
 
-        let error = ZeroMqIngestorPlan::addr_from_config(&[]).expect_err("missing zeromq addr");
+        let error = ZeroMqPullIngestorPlan::addr_from_config(&[]).expect_err("missing zeromq addr");
         assert!(matches!(
             error.current_context(),
-            ZeroMqIngestorError::ClientConfig
+            ZeroMqPullIngestorError::ClientConfig
         ));
         assert!(
             format!("{error:?}").contains("missing ZeroMQ client config key 'addr'"),
@@ -290,14 +293,14 @@ mod tests {
             Err(refusal) => refusal,
         };
         let addr = format!("tcp://{taken}");
-        let plan = ZeroMqIngestorPlan::new(vec![entry("addr", &addr), entry("bind", "true")]);
+        let plan = ZeroMqPullIngestorPlan::new(vec![entry("addr", &addr), entry("bind", "true")]);
 
         let error = match plan.pull_socket().await {
             Ok(_) => panic!("the PULL socket bound {addr} while another socket listens on it"),
             Err(error) => error,
         };
 
-        let ZeroMqIngestorError::Bind { addr: refused, .. } = error.current_context() else {
+        let ZeroMqPullIngestorError::Bind { addr: refused, .. } = error.current_context() else {
             panic!("a refused bind reports a bind failure: {error:?}");
         };
         assert_eq!(refused, &addr);
@@ -313,14 +316,14 @@ mod tests {
     async fn a_connect_the_driver_refuses_names_the_address_and_keeps_the_cause() {
         // The driver refuses an endpoint whose port it cannot read before it dials anything.
         let addr = "tcp://127.0.0.1:not-a-port".to_string();
-        let plan = ZeroMqIngestorPlan::new(vec![entry("addr", &addr)]);
+        let plan = ZeroMqPullIngestorPlan::new(vec![entry("addr", &addr)]);
 
         let error = match plan.pull_socket().await {
             Ok(_) => panic!("the PULL socket connected to {addr}"),
             Err(error) => error,
         };
 
-        let ZeroMqIngestorError::Connect {
+        let ZeroMqPullIngestorError::Connect {
             addr: refused,
             source,
         } = error.current_context()

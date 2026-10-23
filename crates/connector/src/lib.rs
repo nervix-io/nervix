@@ -8,7 +8,7 @@
 //!   mounts they read files from, the deadline keys read from them with the one meaning every
 //!   connector gives them, the TLS material and HTTP client settings built from those entries,
 //!   service URL parsing, the parsed retry policy, physical deadlines and the actual-UTC
-//!   read a ingestor stamps arrival with, the transport-header trait a ingestor message implements,
+//!   read an ingestor stamps arrival with, the transport-header trait an ingestor message implements,
 //!   the typed ingest metadata row with its Kafka, syslog and header scopes, and the confirmation
 //!   window a brokered emitter awaits its broker's answers through.
 //! - **Depends on.** The vocabulary, Arrow, `error-stack` and Tokio, the node's bounded executor a

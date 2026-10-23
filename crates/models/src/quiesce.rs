@@ -1490,7 +1490,7 @@ mod tests {
                             max_backoff: "30s".to_string(),
                         },
                     },
-                    client: named("sink"),
+                    client: named("emitter"),
                 },
             ))),
             batch: None,
@@ -1879,7 +1879,7 @@ mod tests {
                         max_backoff: "30s".to_string(),
                     },
                 },
-                client: named("sink"),
+                client: named("emitter"),
                 subject: named("events"),
             },
         )));

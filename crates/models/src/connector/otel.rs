@@ -2,9 +2,9 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The OTEL client Model, the logs, traces and metrics sink Models with the value
-//!   mappings they share and the metric a metrics sink declares, and what each entity declares.
-//! - **Depends on.** The shared sink declarations and the names a body references.
+//! - **Owns.** The OTEL client Model, the logs, traces and metrics emitter Models with the value
+//!   mappings they share and the metric a metrics emitter declares, and what each entity declares.
+//! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The OTLP encoding, the client's configuration keys, or how a signal is
 //!   exported.
 
@@ -36,7 +36,7 @@ configured_client!(Otel: unpooled, config Nervix, CreateClientOtel => OtelConfig
 
 pub type OtelValueMapping = EmitterValueMapping;
 
-/// What every OTEL sink maps a record to, whichever signal it exports: the signal's own fields,
+/// What every OTEL emitter maps a record to, whichever signal it exports: the signal's own fields,
 /// its attributes, the attributes of the resource that produced it, and the instrumentation scope.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -171,7 +171,7 @@ const SCOPE: OptionDeclaration = OptionDeclaration {
 };
 
 /// `METRIC '<name>' UNIT '<unit>' [DESCRIPTION '<description>'] <kind>`: the one metric a metrics
-/// sink exports, chosen by its kind.
+/// emitter exports, chosen by its kind.
 const METRIC: OptionDeclaration = OptionDeclaration {
     keywords: "METRIC",
     presence: OptionPresence::Required,
@@ -210,7 +210,7 @@ const OTEL_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["gRPC responses above 4 MiB are refused."],
 };
 
-/// What every OTEL sink declares: an export is one request the collector answers, and its fields
+/// What every OTEL emitter declares: an export is one request the collector answers, and its fields
 /// are mapped directly rather than encoded by a codec.
 const fn otel_capabilities(
     publishing_modes: &'static [crate::EmitterPublishingModeKind],
@@ -232,13 +232,13 @@ const fn otel_capabilities(
 }
 
 macro_rules! otel_emitter_declarations {
-    ($($Sink:ident($Mode:ident) => $options:expr),+ $(,)?) => {
+    ($($Emitter:ident($Mode:ident) => $options:expr),+ $(,)?) => {
         $(
-            impl EmitterDeclaration for $Sink {
+            impl EmitterDeclaration for $Emitter {
                 const CAPABILITIES: EmitterEntityCapabilities = otel_capabilities($Mode::KINDS, $options);
             }
 
-            impl EmitterEntityBody for $Sink {
+            impl EmitterEntityBody for $Emitter {
                 fn reference(&self) -> EmitterReference<'_> {
                     EmitterReference::Client(EmitterClientReference {
                         client: &self.client,
@@ -266,11 +266,11 @@ otel_emitter_declarations!(
 
 connector_emitters! {
     connector Otel = "OTEL";
-    /// What an OTEL sink writes.
+    /// What an OTEL emitter writes.
     pub enum OtelEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum OtelEmitterMode;
-    /// The entities an OTEL sink writes: one per signal.
+    /// The entities an OTEL emitter writes: one per signal.
     pub enum OtelEmitterEntity {
         Logs(OtelLogsEmitter, OtelLogsPublishingMode) = "LOGS";
         Traces(OtelTracesEmitter, OtelTracesPublishingMode) = "TRACES";

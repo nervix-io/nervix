@@ -1,4 +1,4 @@
-//! ClickHouse sink connector.
+//! ClickHouse emitter connector.
 //!
 //! Layer: engines and infrastructure.
 //!
@@ -68,8 +68,8 @@ const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 /// idle HTTP connection after three seconds, so the client stops reusing one a second earlier.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// What one ClickHouse emitter inserts through, from its typed sink plan.
-pub struct ClickHouseEmitterConfig {
+/// What one ClickHouse emitter inserts through, from its typed emitter plan.
+pub struct ClickHouseTableEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub table: ClickHouseTableName,
     /// The node resolver every connection of the client resolves the host of `addr` through.
@@ -78,8 +78,8 @@ pub struct ClickHouseEmitterConfig {
     pub batch: EmitterBatchPolicy,
 }
 
-/// The ClickHouse sink, which encodes each mapped row as one `JSONEachRow` line.
-pub struct ClickHouseEmitter {
+/// The ClickHouse emitter, which encodes each mapped row as one `JSONEachRow` line.
+pub struct ClickHouseTableEmitter {
     client: ClickHouseClient,
     request_timeout: Option<Duration>,
     table: ClickHouseTableName,
@@ -266,9 +266,15 @@ impl EncodedLines {
     }
 }
 
-impl ClickHouseEmitter {
-    pub fn new(config: ClickHouseEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
-        let ClickHouseEmitterConfig {
+impl ClickHouseTableEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::ClickHouse(nervix_models::ClickHouseEmitterEntity::Table);
+
+    pub fn new(
+        config: ClickHouseTableEmitterConfig,
+        _host: EmitterHost,
+    ) -> EmitterStartResult<Self> {
+        let ClickHouseTableEmitterConfig {
             config,
             table,
             dns,
@@ -372,7 +378,11 @@ impl ClickHouseEmitter {
 }
 
 #[async_trait::async_trait]
-impl EmitterLifecycle for ClickHouseEmitter {
+impl EmitterLifecycle for ClickHouseTableEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// Each insert is answered before the publish returns, so the client holds nothing.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
         Ok(EmitterFinish::NothingHeld)
@@ -380,7 +390,7 @@ impl EmitterLifecycle for ClickHouseEmitter {
 }
 
 #[async_trait::async_trait]
-impl RowEmitter for ClickHouseEmitter {
+impl RowEmitter for ClickHouseTableEmitter {
     /// Writes the rows of every carrier in inserts of at most `MAX MESSAGES` rows whose body is at
     /// most `MAX SIZE` bytes.
     async fn publish(
@@ -620,7 +630,7 @@ mod tests {
             "tags".to_string(),
         ];
 
-        let specs = ClickHouseEmitter::column_specs(&columns);
+        let specs = ClickHouseTableEmitter::column_specs(&columns);
         let mapped = JsonColumns::new(&batch, &specs, NestedNulls::Write)
             .assured("the test columns have supported Arrow types");
 
@@ -659,7 +669,7 @@ mod tests {
         ]));
         let batch = RecordBatch::try_new(schema, vec![StdArc::new(pairs), StdArc::new(raw)])
             .expect("the mapped batch should build");
-        let specs = ClickHouseEmitter::column_specs(&["pair".to_string(), "raw".to_string()]);
+        let specs = ClickHouseTableEmitter::column_specs(&["pair".to_string(), "raw".to_string()]);
         let mapped = JsonColumns::new(&batch, &specs, NestedNulls::Write)
             .expect("fixed-size arrays and bytes are supported");
 
@@ -687,7 +697,7 @@ mod tests {
             vec![StdArc::new(Int64Array::from(vec![Some(1), Some(22), None]))],
         )
         .expect("the mapped batch should build");
-        let specs = ClickHouseEmitter::column_specs(&["id".to_string()]);
+        let specs = ClickHouseTableEmitter::column_specs(&["id".to_string()]);
         let mapped = [JsonColumns::new(&batch, &specs, NestedNulls::Write)
             .expect("the test column has a supported Arrow type")];
         let members = [
@@ -718,7 +728,7 @@ mod tests {
     async fn client_rejects_an_invalid_request_timeout() {
         let fixture = Fixture::start().await;
         for value in ["later", "0"] {
-            let error = match ClickHouseEmitter::client_from_config(
+            let error = match ClickHouseTableEmitter::client_from_config(
                 &client_config("http://127.0.0.1:8123", value),
                 fixture.dns(),
             ) {
@@ -741,7 +751,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn client_parses_the_request_timeout() {
         let fixture = Fixture::start().await;
-        let (_, request_timeout) = ClickHouseEmitter::client_from_config(
+        let (_, request_timeout) = ClickHouseTableEmitter::client_from_config(
             &client_config("http://127.0.0.1:8123", "275"),
             fixture.dns(),
         )
@@ -763,12 +773,12 @@ mod tests {
                 .expect("test listener should have an address")
         );
         let (client, request_timeout) =
-            ClickHouseEmitter::client_from_config(&client_config(addr, "30"), fixture.dns())
+            ClickHouseTableEmitter::client_from_config(&client_config(addr, "30"), fixture.dns())
                 .expect("ClickHouse client config should be valid");
 
         let result = nervix_primitives::time::timeout(
             Duration::from_millis(250),
-            ClickHouseEmitter::insert(
+            ClickHouseTableEmitter::insert(
                 &client,
                 "events",
                 Bytes::from_static(b"{\"id\":1}\n"),
@@ -795,7 +805,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn clickhouse_client_config_validates_tls_ca_file() {
         let fixture = Fixture::start().await;
-        let error = match ClickHouseEmitter::client_from_config(
+        let error = match ClickHouseTableEmitter::client_from_config(
             &[
                 ClientConfigEntry {
                     key: "addr".to_string(),

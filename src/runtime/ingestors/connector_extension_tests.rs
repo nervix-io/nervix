@@ -2,11 +2,11 @@
 //! take now.
 //!
 //! Layer: test harness.
-//! - **Owns.** Driving the production source host's poll and batch intake into a full extension
-//!   class, and the delivery, refusal and accounting each source's contract promises.
-//! - **Depends on.** The production source host, the endpoint ingestor fixture that installs the
+//! - **Owns.** Driving the production ingestor host's poll and batch intake into a full extension
+//!   class, and the delivery, refusal and accounting each ingestor's contract promises.
+//! - **Depends on.** The production ingestor host, the endpoint ingestor fixture that installs the
 //!   domain, and a single-worker executor.
-//! - **Must not know.** Broker drivers or the source loops that call the host.
+//! - **Must not know.** Broker drivers or the ingestor loops that call the host.
 
 #![cfg_attr(
     nervix_lint,
@@ -23,19 +23,19 @@ use nervix_models::{
 use super::*;
 use crate::runtime::ingestors::endpoint::tests::{start_endpoint_ingestor, unfolding_wire_format};
 
-/// How a test host takes in what its source hands it.
+/// How a test host takes in what its ingestor hands it.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct HostIntake {
     /// What an unacknowledged payload does when the extension workers have no room for it.
     admission: QueueAdmission,
-    /// Whether what the source reads while quiesced passes through the quiesce control.
+    /// Whether what the ingestor reads while quiesced passes through the quiesce control.
     buffered: bool,
     /// Whether the host flushes the ingest group after each payload it takes in, rather than
-    /// leaving the group to its source loop's flush.
+    /// leaving the group to its ingestor loop's flush.
     flush_each_intake: bool,
 }
 
-/// The intake of a source whose loop may be held while its payload waits for the extension
+/// The intake of a ingestor whose loop may be held while its payload waits for the extension
 /// workers.
 pub(super) const WAITING_INTAKE: HostIntake = HostIntake {
     admission: QueueAdmission::WaitForPlace,
@@ -43,7 +43,7 @@ pub(super) const WAITING_INTAKE: HostIntake = HostIntake {
     flush_each_intake: true,
 };
 
-/// The intake of a source whose transport a held loop would cost its connection or unbounded
+/// The intake of a ingestor whose transport a held loop would cost its connection or unbounded
 /// memory.
 const REFUSING_INTAKE: HostIntake = HostIntake {
     admission: QueueAdmission::RefuseWhenFull,
@@ -51,7 +51,7 @@ const REFUSING_INTAKE: HostIntake = HostIntake {
     flush_each_intake: true,
 };
 
-/// The intake a paced source's host has: its polls wait for the extension workers, and its loop,
+/// The intake a paced ingestor's host has: its polls wait for the extension workers, and its loop,
 /// not each intake, flushes the ingest group.
 pub(super) const PACED_INTAKE: HostIntake = HostIntake {
     admission: QueueAdmission::WaitForPlace,
@@ -122,8 +122,8 @@ impl UnfoldingDomain {
             .await;
     }
 
-    /// A second host for the fixture's ingestor, beside the endpoint source the fixture runs, which
-    /// takes in what a source hands it through `quiesce` as `intake` says, and stops when
+    /// A second host for the fixture's ingestor, beside the endpoint ingestor the fixture runs, which
+    /// takes in what a ingestor hands it through `quiesce` as `intake` says, and stops when
     /// `shutdown` turns true.
     pub(super) async fn host(
         &mut self,
@@ -254,7 +254,7 @@ fn poll_of(user_id: i64) -> IngestorPoll {
     }
 }
 
-/// A paced source has already moved past the poll it hands the host, so when the extension
+/// A paced ingestor has already moved past the poll it hands the host, so when the extension
 /// workers cannot take the poll's unfolding, the poll waits for them instead of being refused and
 /// lost. Once they have room, it is delivered.
 #[nervix_primitives::test]
@@ -300,7 +300,7 @@ async fn a_poll_waits_for_the_extension_workers_when_the_node_cannot_unfold_it()
     fixture.finish().await;
 }
 
-/// A source whose transport stays connected while its loop waits hands the host an unacknowledged
+/// A ingestor whose transport stays connected while its loop waits hands the host an unacknowledged
 /// batch it cannot present again, so when the extension workers cannot take the batch's
 /// unfolding, the batch waits for them instead of being refused and lost.
 #[nervix_primitives::test]
@@ -376,7 +376,7 @@ pub(super) fn quiesce_control(
     Arc::new(IngestorQuiesceControl::new(mode, metrics, labels))
 }
 
-/// A source whose transport a held loop would cost its connection or unbounded memory refuses an
+/// A ingestor whose transport a held loop would cost its connection or unbounded memory refuses an
 /// unacknowledged batch the extension workers cannot unfold now. The refusal is reported and
 /// counted, and the next batch is delivered once the workers have room.
 #[nervix_primitives::test]
@@ -552,7 +552,7 @@ async fn a_new_dropping_quiesce_drops_a_batch_waiting_for_the_extension_workers(
     fixture.finish().await;
 }
 
-/// A new quiesce that suspends the source still lets a payload it already handed over dispatch,
+/// A new quiesce that suspends the ingestor still lets a payload it already handed over dispatch,
 /// so a poll waiting for the extension workers waits on through it and is delivered once they
 /// have room.
 #[nervix_primitives::test]
@@ -588,8 +588,8 @@ async fn a_poll_waiting_for_the_extension_workers_waits_on_through_a_suspending_
     fixture.finish().await;
 }
 
-/// A refusing source's payload read while a suspension is engaged still dispatches, and the
-/// extension workers refuse it as they refuse the source's live payloads: it is reported and
+/// A refusing ingestor's payload read while a suspension is engaged still dispatches, and the
+/// extension workers refuse it as they refuse the ingestor's live payloads: it is reported and
 /// counted, and nothing of it stays behind.
 #[nervix_primitives::test]
 async fn a_refusing_sources_payload_read_while_suspended_is_refused_and_counted() {
@@ -663,7 +663,7 @@ async fn a_new_buffering_quiesce_retains_a_poll_waiting_for_the_extension_worker
     fixture.finish().await;
 }
 
-/// A source whose input bypasses the quiesce control dispatches what it already read whatever
+/// A ingestor whose input bypasses the quiesce control dispatches what it already read whatever
 /// the quiesce decides, so a batch waiting for the extension workers waits again through a new
 /// quiesce and is delivered once they have room.
 #[nervix_primitives::test]
@@ -720,7 +720,7 @@ async fn take_in_acknowledged(
     .await
 }
 
-/// An acknowledged batch the extension workers cannot unfold now fails, so its source rejects it
+/// An acknowledged batch the extension workers cannot unfold now fails, so its ingestor rejects it
 /// and presents it again; the refusal is not counted as a payload lost. Once the workers have room
 /// the batch is delivered and acknowledged.
 #[nervix_primitives::test]
@@ -760,7 +760,7 @@ async fn an_acknowledged_batch_is_refused_for_redelivery_when_the_extension_work
     fixture.finish().await;
 }
 
-/// A suspension lets an acknowledged batch the source already read dispatch, with its
+/// A suspension lets an acknowledged batch the ingestor already read dispatch, with its
 /// acknowledgement, as it would unquiesced.
 #[nervix_primitives::test]
 async fn an_acknowledged_batch_read_while_suspended_dispatches_with_its_acknowledgement() {
@@ -789,7 +789,7 @@ async fn an_acknowledged_batch_read_while_suspended_dispatches_with_its_acknowle
 }
 
 /// An acknowledged batch the graph acknowledged stays outstanding work of its ingestor until its
-/// source drops the batch acknowledgement, which the loop does once the transport has confirmed
+/// ingestor drops the batch acknowledgement, which the loop does once the transport has confirmed
 /// the batch's positions, so a drain or an ownership handoff that waits for the ingestor's roots
 /// also waits for that confirmation.
 #[nervix_primitives::test]

@@ -1,4 +1,4 @@
-//! Iceberg sink connector.
+//! Iceberg emitter connector.
 //!
 //! Layer: engines and infrastructure.
 //!
@@ -14,7 +14,7 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 //!
-//! Local staging is not an acknowledgement boundary. The sink completion point for `MODE ACK` is
+//! Local staging is not an acknowledgement boundary. The emitter completion point for `MODE ACK` is
 //! the successful catalog commit, and an appended row is never idempotent, as
 //! [Emitters](docs/src/emitters.md) documents.
 
@@ -116,8 +116,8 @@ impl IcebergCommitPolicy {
     }
 }
 
-/// What one Iceberg emitter stages and commits through, from its typed sink plan.
-pub struct IcebergEmitterConfig {
+/// What one Iceberg emitter stages and commits through, from its typed emitter plan.
+pub struct IcebergTableEmitterConfig {
     pub backend: IcebergStorageBackend,
     pub dns: DnsResolver,
     pub storage_config: Vec<ClientConfigEntry>,
@@ -138,10 +138,10 @@ pub struct IcebergEmitterConfig {
 /// the file, so the charge only admits the write onto the filesystem workers.
 const STAGED_WRITE_RESERVATION_BYTES: u64 = 1;
 
-/// The Iceberg sink, which stages each mapped batch as a local Arrow IPC file and appends every
+/// The Iceberg emitter, which stages each mapped batch as a local Arrow IPC file and appends every
 /// staged file to its table in one catalog commit.
-pub struct IcebergEmitter {
-    client: IcebergEmitterClient,
+pub struct IcebergTableEmitter {
+    client: IcebergTableEmitterClient,
     commit_state: IcebergCommitState,
     /// The exact Arrow schema every staged file is written and read back with, which is the host's
     /// mapped schema with datetime columns narrowed to the microsecond resolution Iceberg stores.
@@ -165,7 +165,7 @@ struct IcebergStagedBatch {
     domain_timestamp: Timestamp,
 }
 
-/// Every acknowledgement this sink retained, as one handle the host keeps alive while it waits.
+/// Every acknowledgement this emitter retained, as one handle the host keeps alive while it waits.
 struct RetainedAcknowledgements(Vec<EmitterRecordAcknowledgements>);
 
 impl EmitterRecordAcknowledgementServices for RetainedAcknowledgements {
@@ -193,7 +193,7 @@ impl EmitterRecordAcknowledgementServices for RetainedAcknowledgements {
 }
 
 /// The catalog and table one emitter commits through, and the sequence its data files are named by.
-struct IcebergEmitterClient {
+struct IcebergTableEmitterClient {
     catalog: StdArc<dyn Catalog>,
     table: Table,
     file_name_prefix: String,
@@ -301,7 +301,7 @@ impl IcebergCommitPreparation {
     }
 }
 
-/// What the sink's commits carry from one attempt to the next.
+/// What the emitter's commits carry from one attempt to the next.
 #[derive(Default)]
 struct IcebergCommitState {
     /// The commit in progress, absent between commits.
@@ -312,18 +312,18 @@ struct IcebergCommitState {
 }
 
 impl IcebergCommitState {
-    /// Adds `published` to what this sink published and has not reported yet.
+    /// Adds `published` to what this emitter published and has not reported yet.
     fn record_published(&mut self, published: EmitterCommitReport) {
         let merged = match self.unreported.take() {
             Some(earlier) => EmitterCommitReport {
                 messages: earlier
                     .messages
                     .checked_add(published.messages)
-                    .assured("the total counts rows this sink already staged on disk"),
+                    .assured("the total counts rows this emitter already staged on disk"),
                 bytes: earlier
                     .bytes
                     .checked_add(published.bytes)
-                    .assured("the total counts bytes this sink already staged on disk"),
+                    .assured("the total counts bytes this emitter already staged on disk"),
                 domain_timestamp: earlier.domain_timestamp.max(published.domain_timestamp),
             },
             None => published,
@@ -349,13 +349,13 @@ impl IcebergLoadGroup {
         for staged in unwritten {
             let with_file = bytes
                 .checked_add(staged.bytes)
-                .assured("the total counts bytes this sink already staged on disk");
+                .assured("the total counts bytes this emitter already staged on disk");
             if files > 0 && with_file > capacity {
                 break;
             }
             files = files
                 .checked_add(1)
-                .assured("a group counts files this sink already staged");
+                .assured("a group counts files this emitter already staged");
             bytes = with_file;
         }
         let charge = if bytes > capacity {
@@ -452,9 +452,15 @@ impl IcebergStorageBackendExt for IcebergStorageBackend {
     }
 }
 
-impl IcebergEmitter {
-    pub async fn new(config: IcebergEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
-        let IcebergEmitterConfig {
+impl IcebergTableEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::Iceberg(nervix_models::IcebergEmitterEntity::Table);
+
+    pub async fn new(
+        config: IcebergTableEmitterConfig,
+        host: EmitterHost,
+    ) -> EmitterStartResult<Self> {
+        let IcebergTableEmitterConfig {
             backend,
             dns,
             storage_config,
@@ -510,7 +516,7 @@ impl IcebergEmitter {
         }
         Self::validate_table_schema(&staged_schema, loaded.metadata().current_schema())?;
         Ok(Self {
-            client: IcebergEmitterClient {
+            client: IcebergTableEmitterClient {
                 catalog,
                 table: loaded,
                 file_name_prefix: format!(
@@ -737,7 +743,7 @@ impl IcebergEmitter {
         Ok(url)
     }
 
-    /// The staged columns of one carrier: the rows the host selected, in this sink's exact staged
+    /// The staged columns of one carrier: the rows the host selected, in this emitter's exact staged
     /// types.
     fn staged_batch(&self, rows: &MappedEmitterCarrier<'_>) -> EmitterWriteResult<RecordBatch> {
         let row_count = rows.batch.num_rows();
@@ -972,7 +978,7 @@ impl IcebergEmitter {
     /// The charge is taken only when the class has room for it now: a place in the class's queue
     /// would take every byte the class frees until it was satisfied, holding the node's other bulk
     /// work behind this commit. The read waits for a place among the filesystem workers instead of
-    /// being refused, because nothing could present again the rows the sink already accepted.
+    /// being refused, because nothing could present again the rows the emitter already accepted.
     async fn load_group(
         executor: &Executor,
         schema: StdArc<arrow_schema::Schema>,
@@ -1021,7 +1027,7 @@ impl IcebergEmitter {
             .change_context(EmitterWriteError::Commit { connector: ICEBERG })?
     }
 
-    /// Every acknowledgement this sink still holds, newest staged batch last.
+    /// Every acknowledgement this emitter still holds, newest staged batch last.
     fn retained_acknowledgements(&self) -> Vec<EmitterRecordAcknowledgements> {
         self.staged_batches
             .iter()
@@ -1030,7 +1036,7 @@ impl IcebergEmitter {
     }
 }
 
-impl Drop for IcebergEmitter {
+impl Drop for IcebergTableEmitter {
     fn drop(&mut self) {
         for acknowledgements in self.retained_acknowledgements() {
             acknowledgements.reject("Iceberg emitter dropped staged batch".to_string());
@@ -1039,9 +1045,13 @@ impl Drop for IcebergEmitter {
 }
 
 #[async_trait::async_trait]
-impl EmitterLifecycle for IcebergEmitter {
+impl EmitterLifecycle for IcebergTableEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// The catalog and object-store clients hold nothing between writes. Rows wait staged for
-    /// the commit, which a stop asks for before it finishes the sink.
+    /// the commit, which a stop asks for before it finishes the emitter.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
         Ok(EmitterFinish::NothingHeld)
     }
@@ -1097,7 +1107,7 @@ impl EmitterLifecycle for IcebergEmitter {
 }
 
 #[async_trait::async_trait]
-impl RowEmitter for IcebergEmitter {
+impl RowEmitter for IcebergTableEmitter {
     /// Stages the rows of every carrier of the write, one staged file per carrier.
     async fn publish(
         &mut self,
@@ -1115,7 +1125,7 @@ impl RowEmitter for IcebergEmitter {
     }
 }
 
-impl IcebergEmitter {
+impl IcebergTableEmitter {
     /// Stages one carrier's selected rows as one file, retaining the acknowledgements the carrier
     /// hands over until the commit that publishes it.
     async fn stage(
@@ -1137,11 +1147,11 @@ impl IcebergEmitter {
         self.staged_rows = self
             .staged_rows
             .checked_add(staged_rows)
-            .assured("both counts total rows this sink already staged on disk");
+            .assured("both counts total rows this emitter already staged on disk");
         self.staged_bytes = self
             .staged_bytes
             .checked_add(staged_bytes)
-            .assured("both counts total bytes this sink already staged on disk");
+            .assured("both counts total bytes this emitter already staged on disk");
         for row in carrier.selected_rows {
             outcome.deliver(EmitterRecordPosition {
                 batch_index: carrier.batch_index,
@@ -1203,10 +1213,10 @@ impl IcebergEmitter {
         for batch in &committed {
             messages = messages
                 .checked_add(batch.rows)
-                .assured("the total counts rows this sink already staged on disk");
+                .assured("the total counts rows this emitter already staged on disk");
             bytes = bytes
                 .checked_add(batch.bytes)
-                .assured("the total counts bytes this sink already staged on disk");
+                .assured("the total counts bytes this emitter already staged on disk");
         }
         let domain_timestamp = committed
             .iter()
@@ -1244,7 +1254,7 @@ impl IcebergEmitter {
     }
 }
 
-impl IcebergEmitterClient {
+impl IcebergTableEmitterClient {
     /// Installs catalog metadata while retaining the emitter's initialized storage. Catalog loads
     /// supply a fresh lazy FileIO; replacing ours would initialize another operator on each commit.
     fn install_table(&mut self, table: Table) -> EmitterWriteResult<()> {
@@ -1748,7 +1758,7 @@ mod tests {
         rejected: AtomicUsize,
     }
 
-    /// One acknowledgement handover the sink holds, recording into the shared counters.
+    /// One acknowledgement handover the emitter holds, recording into the shared counters.
     struct RecordedHandover(StdArc<RecordedAcknowledgements>);
 
     impl EmitterRecordAcknowledgementServices for RecordedHandover {
@@ -1797,7 +1807,7 @@ mod tests {
             .build()
             .expect("valid in-memory table");
 
-        let single_attempt = IcebergEmitterClient::single_attempt_table(&table)
+        let single_attempt = IcebergTableEmitterClient::single_attempt_table(&table)
             .expect("single-attempt table must build");
 
         assert_eq!(
@@ -1883,7 +1893,7 @@ mod tests {
             )
             .await
             .assured("the fixture catalog has a warehouse");
-        let mut client = IcebergEmitterClient {
+        let mut client = IcebergTableEmitterClient {
             catalog: StdArc::new(catalog),
             table,
             file_name_prefix: "fixture".to_string(),
@@ -2063,7 +2073,7 @@ mod tests {
             true,
         )]);
 
-        let staged = IcebergEmitter::staged_arrow_schema(&mapped)
+        let staged = IcebergTableEmitter::staged_arrow_schema(&mapped)
             .expect("a mapped datetime column must narrow to microseconds");
 
         assert_eq!(
@@ -2085,7 +2095,7 @@ mod tests {
             Field::new("user_id", DataType::Int64, true),
         ]);
 
-        let error = IcebergEmitter::staged_arrow_schema(&mapped)
+        let error = IcebergTableEmitter::staged_arrow_schema(&mapped)
             .expect_err("a column written twice has no single staged value");
 
         assert_eq!(
@@ -2113,12 +2123,12 @@ mod tests {
                 true,
             ),
         ]);
-        IcebergEmitter::validate_table_schema(&compatible, &table)
+        IcebergTableEmitter::validate_table_schema(&compatible, &table)
             .assured("column order and field IDs do not change the schema contract");
 
         let wrong_type =
             arrow_schema::Schema::new(vec![Field::new("user_id", DataType::Utf8, true)]);
-        let error = IcebergEmitter::validate_table_schema(&wrong_type, &table)
+        let error = IcebergTableEmitter::validate_table_schema(&wrong_type, &table)
             .expect_err("a mapped type the table cannot write fails at open");
         assert_eq!(
             *error.current_context(),
@@ -2129,7 +2139,7 @@ mod tests {
         ));
 
         let missing = arrow_schema::Schema::new(vec![Field::new("unknown", DataType::Int64, true)]);
-        let error = IcebergEmitter::validate_table_schema(&missing, &table)
+        let error = IcebergTableEmitter::validate_table_schema(&missing, &table)
             .expect_err("a column absent from the table fails at open");
         assert_eq!(
             *error.current_context(),
@@ -2177,7 +2187,7 @@ mod tests {
             ),
             observed,
         ]);
-        IcebergEmitter::validate_table_schema(&reordered, &table)
+        IcebergTableEmitter::validate_table_schema(&reordered, &table)
             .assured("matching nested names and types are independent of generated field IDs");
 
         let mismatches = [
@@ -2210,7 +2220,7 @@ mod tests {
         for field in mismatches {
             let name = field.name().clone();
             let mapped = arrow_schema::Schema::new(vec![field]);
-            let error = IcebergEmitter::validate_table_schema(&mapped, &table)
+            let error = IcebergTableEmitter::validate_table_schema(&mapped, &table)
                 .expect_err("an incompatible nested column must fail before staging");
             assert_eq!(
                 *error.current_context(),
@@ -2232,7 +2242,7 @@ mod tests {
         let unsupported =
             arrow_schema::Schema::new(vec![Field::new("user_id", DataType::Null, true)]);
 
-        let error = IcebergEmitter::validate_table_schema(&unsupported, &table)
+        let error = IcebergTableEmitter::validate_table_schema(&unsupported, &table)
             .expect_err("an unsupported mapped type fails at open");
 
         assert_eq!(
@@ -2249,7 +2259,7 @@ mod tests {
                 .with_timezone_utc(),
         );
 
-        let staged = IcebergEmitter::staged_column(
+        let staged = IcebergTableEmitter::staged_column(
             &values,
             &DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
         )
@@ -2285,10 +2295,11 @@ mod tests {
         );
         let mapped =
             arrow_schema::Schema::new(vec![Field::new("event", source.data_type().clone(), true)]);
-        let staged_schema = IcebergEmitter::staged_arrow_schema(&mapped)
+        let staged_schema = IcebergTableEmitter::staged_arrow_schema(&mapped)
             .assured("datetime in a struct narrows in staged schema");
-        let staged = IcebergEmitter::staged_column(&source, staged_schema.field(0).data_type())
-            .assured("datetime in a struct narrows in staged values");
+        let staged =
+            IcebergTableEmitter::staged_column(&source, staged_schema.field(0).data_type())
+                .assured("datetime in a struct narrows in staged values");
         assert_eq!(staged.data_type(), staged_schema.field(0).data_type());
         let observed = staged
             .as_any()
@@ -2317,9 +2328,9 @@ mod tests {
                 source.data_type().clone(),
                 true,
             )]);
-            let schema = IcebergEmitter::staged_arrow_schema(&mapped)
+            let schema = IcebergTableEmitter::staged_arrow_schema(&mapped)
                 .assured("nested datetime schema stages as microseconds");
-            let staged = IcebergEmitter::staged_column(source, schema.field(0).data_type())
+            let staged = IcebergTableEmitter::staged_column(source, schema.field(0).data_type())
                 .assured("nested datetime values stage as microseconds");
             assert_eq!(staged.data_type(), schema.field(0).data_type());
             staged
@@ -2395,7 +2406,7 @@ mod tests {
             .assured("map values are microsecond datetimes");
         assert_eq!(values.value(0), -1);
 
-        let error = IcebergEmitter::staged_column(&source, &DataType::Utf8)
+        let error = IcebergTableEmitter::staged_column(&source, &DataType::Utf8)
             .expect_err("an unplanned staged type must fail publication");
         assert_eq!(
             *error.current_context(),
@@ -2438,10 +2449,10 @@ mod tests {
                     true,
                 )]);
 
-                let staged_schema = IcebergEmitter::staged_arrow_schema(&mapped)
+                let staged_schema = IcebergTableEmitter::staged_arrow_schema(&mapped)
                     .assured("nested datetime schema stages as microseconds");
                 let staged =
-                    IcebergEmitter::staged_column(&source, staged_schema.field(0).data_type())
+                    IcebergTableEmitter::staged_column(&source, staged_schema.field(0).data_type())
                         .assured("nested datetime values stage as microseconds");
                 assert_eq!(staged.data_type(), staged_schema.field(0).data_type());
                 let staged_outer = staged
@@ -2526,10 +2537,10 @@ mod tests {
         )
         .assured("the column matches the schema");
 
-        let written = IcebergEmitter::write_ipc_batch(&executor, path.clone(), batch.clone())
+        let written = IcebergTableEmitter::write_ipc_batch(&executor, path.clone(), batch.clone())
             .await
             .assured("the filesystem workers write the staged file");
-        let IcebergLoadedGroup { batches, charge } = IcebergEmitter::load_group(
+        let IcebergLoadedGroup { batches, charge } = IcebergTableEmitter::load_group(
             &executor,
             schema,
             vec![path],

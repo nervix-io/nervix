@@ -5,8 +5,8 @@ use crate::{
     AckWindow, AlterGenerator, AlterGeneratorError, AlterGeneratorOperation, AlterIngestor,
     AlterIngestorError, AlterIngestorOperation, AlterPlacement, AlterPlacementError,
     AlterPlacementOperation, AlterRelay, AlterRelayError, AlterRelayOperation,
-    AlterTransportIngestorOperation, BranchSelection, ClientIngestMode, ClientProducerIngestor,
-    ClientSourceEntity, CodecBatchContainer, CodecJaqFormat, CodecJaqTransformations,
+    AlterTransportIngestorOperation, BranchSelection, ClientIngestMode, ClientIngestorEntity,
+    ClientProducerIngestor, CodecBatchContainer, CodecJaqFormat, CodecJaqTransformations,
     CodecProtobufConfig, CodecWireFormat, CreateGenerator, CreateIngestor, CreatePlacement,
     CreateRelay, EndpointIngestMode, Expression, FlushPolicy, GeneralErrorPolicy,
     HttpEndpointIngestor, HttpIngestorEntity, IngestQuiesceMode, IngestorAlteration,
@@ -533,7 +533,7 @@ fn client_producer_alter_sets_its_source_and_honors_only_suspension() {
     assert_eq!(candidate.input, crate::IngestorInput::Client(replacement));
     assert_eq!(
         candidate.input.entity_kind(),
-        IngestorEntityKind::Client(ClientSourceEntity::Producer)
+        IngestorEntityKind::Client(ClientIngestorEntity::Producer)
     );
 
     let mut candidate = base.clone();
@@ -705,7 +705,7 @@ fn placement_alter_applies_operations_in_order_and_is_atomic() {
                 },
                 AlterPlacementOperation::SetMembers {
                     from: vec![named("source"), named("source")],
-                    to: vec![named("sink")],
+                    to: vec![named("emitter")],
                 },
                 AlterPlacementOperation::RenameTo {
                     name: named("critical"),
@@ -718,7 +718,7 @@ fn placement_alter_applies_operations_in_order_and_is_atomic() {
     assert_eq!(placement.rank, Some(nonzero!(1u64)));
     assert_eq!(placement.policy, PlacementPolicy::RequireColocation);
     assert_eq!(placement.from, vec![named("source")]);
-    assert_eq!(placement.to, vec![named("sink")]);
+    assert_eq!(placement.to, vec![named("emitter")]);
 
     let before = placement.clone();
     assert_eq!(

@@ -758,7 +758,7 @@ acknowledged source redelivers the record after the restart.
 
 An emitter reaches the emitter completion point its `MODE` declares, and the drain waits for it. An
 emitter whose buffer cannot drain by its configured deadline reports
-`emitter '<name>' did not drain before its configured deadline`. When a emitter's finish answers that
+`emitter '<name>' did not drain before its configured deadline`. When an emitter's finish answers that
 it still holds records at that deadline, an emitter swap reports the emitter's own outcome and count;
 a finish that does not answer within half the supervisor's response grace reports the stop deadline.
 The emitter receives the original deadline, and a failed swap keeps the emitter task running. A
@@ -806,11 +806,11 @@ finish deadline for its client's event loop to write and flush the publishes the
 a failed flush or publishes still unflushed when it ends fail its finish, which reports the failure
 or their count. Every other emitter
 holds nothing once a publish returns, so the publish itself is the
-completion point. [Finishing a emitter](./connector-contract.md#finishing-a-emitter) lists what each emitter
+completion point. [Finishing an emitter](./connector-contract.md#finishing-a-emitter) lists what each emitter
 holds and does.
 
 A emitter that stages what it accepts and publishes it later reaches its completion point at its
-commit instead. After the buffered batches are written into such a emitter, the drain calls the emitter
+commit instead. After the buffered batches are written into such an emitter, the drain calls the emitter
 contract's commit hook and forces it, so the commit runs whatever its commit cadence says and
 without reading the domain clock, which a stopped domain no longer has. Until that commit succeeds
 the emitter holds the acknowledgements of every row it staged, and the drain counts those rows as work
@@ -869,7 +869,7 @@ every generator and reingestor caught in such a call outlasts the grace at the s
 kind owns state that the node persists or replicates, so the waits of one kind run together. Each
 task still has the whole grace to release what its routes buffered, and a domain's generators cost
 its teardown one grace and its reingestors one more, however many of them a stopping peer holds up.
-The other kinds persist or replicate state they own, or drain a emitter, as they stop, and are waited
+The other kinds persist or replicate state they own, or drain an emitter, as they stop, and are waited
 for one after another, each with a grace of its own.
 
 Once every domain's tasks have ended, runtime teardown tells the snapshot task of every
@@ -1304,7 +1304,7 @@ Start from the outcome on each phase record.
   timeout. Read the drain-timeout record for the domain counts, and raise `--shutdown-timeout`
   together with the deployment grace period if the workload legitimately needs longer.
 - **`local graph drain timed out with admitted work outstanding`.** Read the counts. Non-zero
-  publishing emitters or buffered emitter messages mean a emitter is not accepting; non-zero
+  publishing emitters or buffered emitter messages mean an emitter is not accepting; non-zero
   outstanding acknowledgements mean an ACK chain has not resolved; non-zero pending `REQUIRED WAIT`
   records are expected and do not hold the drain.
 - **`local graph drain timed out before confirming that no admitted work is still moving`.** A peer

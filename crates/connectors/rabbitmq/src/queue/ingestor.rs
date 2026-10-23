@@ -1,13 +1,13 @@
-//! RabbitMQ source transport.
+//! RabbitMQ ingestor transport.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The AMQP connection, channel and consumer each source instance reads through, its
+//! - **Owns.** The AMQP connection, channel and consumer each ingestor instance reads through, its
 //!   one-delivery prefetch window, AMQP headers as ingest headers, and per-delivery
 //!   acknowledgement and requeue.
 //! - **Depends on.** The connector contract, typed client configuration entries, the crate's
 //!   broker connection, `error-stack`, Tokio and `lapin`.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -45,10 +45,10 @@ use crate::queue::connection::RabbitMqBroker;
 
 const RABBITMQ: &str = "rabbitmq";
 
-/// Why a RabbitMQ source could not connect, consume, or settle a delivery.
+/// Why a RabbitMQ ingestor could not connect, consume, or settle a delivery.
 #[derive(Debug, Error)]
-pub enum RabbitMqIngestorError {
-    /// The source could not open a connection; the [`crate::queue::RabbitMqConnectError`] beneath it
+pub enum RabbitMqQueueIngestorError {
+    /// The ingestor could not open a connection; the [`crate::queue::RabbitMqConnectError`] beneath it
     /// says why.
     #[error("failed to connect RabbitMQ client")]
     Connect,
@@ -70,13 +70,13 @@ pub enum RabbitMqIngestorError {
     DeliverySettled,
 }
 
-type RabbitMqIngestorResult<T> = Result<T, Report<RabbitMqIngestorError>>;
+type RabbitMqQueueIngestorResult<T> = Result<T, Report<RabbitMqQueueIngestorError>>;
 
-/// What one RabbitMQ source consumes: its resolved client entries, the node resolver its broker
+/// What one RabbitMQ ingestor consumes: its resolved client entries, the node resolver its broker
 /// host resolves through, the queue, and the consumer tag each instance registers under, suffixed
 /// with its instance index.
 #[derive(Clone)]
-pub struct RabbitMqIngestorPlan {
+pub struct RabbitMqQueueIngestorPlan {
     config: Vec<ClientConfigEntry>,
     dns: DnsResolver,
     queue: RabbitMqQueueName,
@@ -91,7 +91,7 @@ struct RabbitMqConsumer {
     consumer: Consumer,
 }
 
-impl RabbitMqIngestorPlan {
+impl RabbitMqQueueIngestorPlan {
     pub fn new(
         config: Vec<ClientConfigEntry>,
         dns: DnsResolver,
@@ -108,27 +108,27 @@ impl RabbitMqIngestorPlan {
 
     /// Connects and starts the consumer of one instance, every step within the client's
     /// `connect_timeout_ms`.
-    async fn consume(&self, instance_index: u64) -> RabbitMqIngestorResult<RabbitMqConsumer> {
+    async fn consume(&self, instance_index: u64) -> RabbitMqQueueIngestorResult<RabbitMqConsumer> {
         let broker = RabbitMqBroker::from_config(&self.config, self.dns.clone())
-            .change_context(RabbitMqIngestorError::Connect)?;
+            .change_context(RabbitMqQueueIngestorError::Connect)?;
         let opening = broker
             .connect()
             .await
-            .change_context(RabbitMqIngestorError::Connect)?;
+            .change_context(RabbitMqQueueIngestorError::Connect)?;
         let channel = opening
             .within_budget(
                 "opening the RabbitMQ consumer's channel",
                 opening.connection().create_channel(),
             )
             .await
-            .map_err(|failure| failure.beneath(RabbitMqIngestorError::Channel))?;
+            .map_err(|failure| failure.beneath(RabbitMqQueueIngestorError::Channel))?;
         opening
             .within_budget(
                 "setting the RabbitMQ prefetch window",
                 channel.basic_qos(1, BasicQosOptions::default()),
             )
             .await
-            .map_err(|failure| failure.beneath(RabbitMqIngestorError::Qos))?;
+            .map_err(|failure| failure.beneath(RabbitMqQueueIngestorError::Qos))?;
         let consumer = opening
             .within_budget(
                 "starting the RabbitMQ consumer",
@@ -141,7 +141,7 @@ impl RabbitMqIngestorPlan {
             )
             .await
             .map_err(|failure| {
-                failure.beneath(RabbitMqIngestorError::Consume {
+                failure.beneath(RabbitMqQueueIngestorError::Consume {
                     queue: self.queue.as_str().to_string(),
                 })
             })?;
@@ -155,7 +155,7 @@ impl RabbitMqIngestorPlan {
 
 /// The acknowledgement handle of one delivery, which settles it on the channel it arrived on.
 #[derive(Debug, Clone)]
-pub struct RabbitMqIngestorPosition {
+pub struct RabbitMqQueueIngestorPosition {
     acker: Acker,
 }
 
@@ -218,14 +218,14 @@ impl IngestMessageHeaders for RabbitMqDeliveryHeaders {
     }
 }
 
-pub struct RabbitMqIngestorMessage {
+pub struct RabbitMqQueueIngestorMessage {
     headers: RabbitMqDeliveryHeaders,
-    position: RabbitMqIngestorPosition,
+    position: RabbitMqQueueIngestorPosition,
 }
 
-impl RabbitMqIngestorMessage {
+impl RabbitMqQueueIngestorMessage {
     fn new(delivery: Delivery) -> Self {
-        let position = RabbitMqIngestorPosition {
+        let position = RabbitMqQueueIngestorPosition {
             acker: delivery.acker.clone(),
         };
         Self {
@@ -235,8 +235,8 @@ impl RabbitMqIngestorMessage {
     }
 }
 
-impl IngestorMessage for RabbitMqIngestorMessage {
-    type Position = RabbitMqIngestorPosition;
+impl IngestorMessage for RabbitMqQueueIngestorMessage {
+    type Position = RabbitMqQueueIngestorPosition;
 
     fn payload(&self) -> &[u8] {
         &self.headers.delivery.data
@@ -257,16 +257,19 @@ impl IngestorMessage for RabbitMqIngestorMessage {
     }
 }
 
-/// One RabbitMQ source instance: its AMQP session, absent while suspended or reconnecting.
-pub struct RabbitMqIngestor {
-    plan: RabbitMqIngestorPlan,
+/// One RabbitMQ ingestor instance: its AMQP session, absent while suspended or reconnecting.
+pub struct RabbitMqQueueIngestor {
+    plan: RabbitMqQueueIngestorPlan,
     instance_index: u64,
     consumer: Option<RabbitMqConsumer>,
 }
 
 #[async_trait]
-impl IngestorConnector for RabbitMqIngestor {
-    type Plan = RabbitMqIngestorPlan;
+impl IngestorConnector for RabbitMqQueueIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::RabbitMq(nervix_models::RabbitMqIngestorEntity::Queue);
+
+    type Plan = RabbitMqQueueIngestorPlan;
 
     async fn open(plan: &Self::Plan, instance_index: u64) -> IngestorResult<Self> {
         Ok(Self {
@@ -308,9 +311,9 @@ impl IngestorConnector for RabbitMqIngestor {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for RabbitMqIngestor {
-    type Message = RabbitMqIngestorMessage;
-    type Position = RabbitMqIngestorPosition;
+impl BrokerIngestorConnector for RabbitMqQueueIngestor {
+    type Message = RabbitMqQueueIngestorMessage;
+    type Position = RabbitMqQueueIngestorPosition;
 
     /// The prefetch window admits one delivery at a time, so a batch holds one delivery whatever
     /// the request asks for.
@@ -331,12 +334,12 @@ impl BrokerIngestorConnector for RabbitMqIngestor {
             });
         };
         match received {
-            Some(Ok(delivery)) => Ok(IngestorBatch::Messages(vec![RabbitMqIngestorMessage::new(
-                delivery,
-            )])),
+            Some(Ok(delivery)) => Ok(IngestorBatch::Messages(vec![
+                RabbitMqQueueIngestorMessage::new(delivery),
+            ])),
             Some(Err(error)) => {
                 self.consumer = None;
-                Err(Report::new(RabbitMqIngestorError::Receive)
+                Err(Report::new(RabbitMqQueueIngestorError::Receive)
                     .attach_printable(error.to_string())
                     .change_context(IngestorError::Read {
                         connector: RABBITMQ,
@@ -345,7 +348,7 @@ impl BrokerIngestorConnector for RabbitMqIngestor {
             None => {
                 self.consumer = None;
                 Err(
-                    Report::new(RabbitMqIngestorError::ConsumerClosed).change_context(
+                    Report::new(RabbitMqQueueIngestorError::ConsumerClosed).change_context(
                         IngestorError::Read {
                             connector: RABBITMQ,
                         },
@@ -363,20 +366,17 @@ impl BrokerIngestorConnector for RabbitMqIngestor {
                 .ack(BasicAckOptions::default())
                 .await
                 .map_err(|source| {
-                    Report::new(RabbitMqIngestorError::Acknowledge)
+                    Report::new(RabbitMqQueueIngestorError::Acknowledge)
                         .attach_printable(source.to_string())
                 })
                 .change_context(IngestorError::Acknowledge {
                     connector: RABBITMQ,
                 })?;
             if !settled {
-                return Err(
-                    Report::new(RabbitMqIngestorError::DeliverySettled).change_context(
-                        IngestorError::Acknowledge {
-                            connector: RABBITMQ,
-                        },
-                    ),
-                );
+                return Err(Report::new(RabbitMqQueueIngestorError::DeliverySettled)
+                    .change_context(IngestorError::Acknowledge {
+                        connector: RABBITMQ,
+                    }));
             }
         }
         Ok(())
@@ -395,19 +395,17 @@ impl BrokerIngestorConnector for RabbitMqIngestor {
                 })
                 .await
                 .map_err(|source| {
-                    Report::new(RabbitMqIngestorError::Requeue).attach_printable(source.to_string())
+                    Report::new(RabbitMqQueueIngestorError::Requeue)
+                        .attach_printable(source.to_string())
                 })
                 .change_context(IngestorError::Reject {
                     connector: RABBITMQ,
                 })?;
             if !settled {
-                return Err(
-                    Report::new(RabbitMqIngestorError::DeliverySettled).change_context(
-                        IngestorError::Reject {
-                            connector: RABBITMQ,
-                        },
-                    ),
-                );
+                return Err(Report::new(RabbitMqQueueIngestorError::DeliverySettled)
+                    .change_context(IngestorError::Reject {
+                        connector: RABBITMQ,
+                    }));
             }
         }
         Ok(())
@@ -460,7 +458,7 @@ mod tests {
             ("not a url".to_string(), true),
         ];
         for (addr, configuration) in cases {
-            let plan = RabbitMqIngestorPlan::new(
+            let plan = RabbitMqQueueIngestorPlan::new(
                 vec![ClientConfigEntry {
                     key: "addr".to_string(),
                     value: addr.clone(),
@@ -469,9 +467,9 @@ mod tests {
                 RabbitMqQueueName::parse("orders").expect("a fixed queue name is valid"),
                 "orders".to_string(),
             );
-            let mut source = RabbitMqIngestor::open(&plan, 0)
+            let mut source = RabbitMqQueueIngestor::open(&plan, 0)
                 .await
-                .expect("opening a RabbitMQ source connects nothing");
+                .expect("opening a RabbitMQ ingestor connects nothing");
             let error = source
                 .resume()
                 .await
@@ -483,12 +481,12 @@ mod tests {
                 }
             ));
             assert!(matches!(
-                error.downcast_ref::<RabbitMqIngestorError>(),
-                Some(RabbitMqIngestorError::Connect)
+                error.downcast_ref::<RabbitMqQueueIngestorError>(),
+                Some(RabbitMqQueueIngestorError::Connect)
             ));
             let cause = error
                 .downcast_ref::<crate::queue::RabbitMqConnectError>()
-                .expect("the connection failure stays beneath the source failure");
+                .expect("the connection failure stays beneath the ingestor failure");
             assert_eq!(cause.is_configuration(), configuration, "{addr}");
             assert!(source.needs_resume(), "{addr}");
         }
@@ -514,7 +512,7 @@ mod tests {
     }
 
     /// Both RabbitMQ QUEUE sides declare sorted by name with exact names: the AMQP field table a
-    /// sink writes keeps one value per name, the last one written, and a reader of the published
+    /// emitter writes keeps one value per name, the last one written, and a reader of the published
     /// message visits the names in ascending byte order, names that differ in letter case staying
     /// two names.
     #[test]
@@ -529,7 +527,7 @@ mod tests {
             written.push((name.to_string(), value.to_string()));
         }
         let mut delivery = Delivery::mock(0, "".into(), "orders".into(), false, Vec::new());
-        delivery.properties = crate::queue::RabbitMqEmitter::properties(&written);
+        delivery.properties = crate::queue::RabbitMqQueueEmitter::properties(&written);
         let headers = RabbitMqDeliveryHeaders { delivery };
         let mut visited = Vec::new();
         headers.visit(&mut |name, value| visited.push(format!("{name}={value}")));

@@ -1,13 +1,13 @@
-//! NATS source transport.
+//! NATS ingestor transport.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The core NATS connection and queue subscription each source instance reads
+//! - **Owns.** The core NATS connection and queue subscription each ingestor instance reads
 //!   through, its TLS options, the end of that subscription when the connection is lost, and
 //!   message headers as ingest headers.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   the boundary's channels and `async-nats`.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -37,9 +37,9 @@ use thiserror::Error;
 
 const NATS: &str = "nats";
 
-/// Why a NATS source could not connect or subscribe.
+/// Why a NATS ingestor could not connect or subscribe.
 #[derive(Debug, Error)]
-pub enum NatsIngestorError {
+pub enum NatsSubjectIngestorError {
     #[error("invalid NATS client configuration")]
     ClientConfig,
     #[error("NATS TLS client authentication requires both 'tls_cert_file' and 'tls_key_file'")]
@@ -56,12 +56,12 @@ pub enum NatsIngestorError {
     ConnectionLost,
 }
 
-type NatsIngestorResult<T> = Result<T, Report<NatsIngestorError>>;
+type NatsSubjectIngestorResult<T> = Result<T, Report<NatsSubjectIngestorError>>;
 
-/// What one NATS source subscribes to: its resolved client entries, the subject, and the queue
+/// What one NATS ingestor subscribes to: its resolved client entries, the subject, and the queue
 /// group every instance joins.
 #[derive(Clone)]
-pub struct NatsIngestorPlan {
+pub struct NatsSubjectIngestorPlan {
     config: Vec<ClientConfigEntry>,
     subject: NatsSubjectName,
     queue_group: NatsQueueGroupName,
@@ -105,7 +105,7 @@ impl NatsSubscription {
     }
 }
 
-impl NatsIngestorPlan {
+impl NatsSubjectIngestorPlan {
     pub fn new(
         config: Vec<ClientConfigEntry>,
         subject: NatsSubjectName,
@@ -118,7 +118,7 @@ impl NatsIngestorPlan {
         }
     }
 
-    async fn subscribe(&self) -> NatsIngestorResult<NatsSubscription> {
+    async fn subscribe(&self) -> NatsSubjectIngestorResult<NatsSubscription> {
         // One pending signal is enough: the instance ends its subscription on the first.
         let (lost, connection_lost) = mpsc::channel(1);
         let client = Self::client_from_config(&self.config, lost).await?;
@@ -129,13 +129,13 @@ impl NatsIngestorPlan {
             )
             .await
             .map_err(|source| {
-                Report::new(NatsIngestorError::Subscribe {
+                Report::new(NatsSubjectIngestorError::Subscribe {
                     subject: self.subject.as_str().to_string(),
                 })
                 .attach_printable(source.to_string())
             })?;
         client.flush().await.map_err(|source| {
-            Report::new(NatsIngestorError::Flush).attach_printable(source.to_string())
+            Report::new(NatsSubjectIngestorError::Flush).attach_printable(source.to_string())
         })?;
         Ok(NatsSubscription {
             _client: client,
@@ -153,9 +153,9 @@ impl NatsIngestorPlan {
     async fn client_from_config(
         config: &[ClientConfigEntry],
         lost: mpsc::Sender<()>,
-    ) -> NatsIngestorResult<NatsClient> {
+    ) -> NatsSubjectIngestorResult<NatsClient> {
         let addr = client_config_value(config, "addr", "NATS")
-            .change_context(NatsIngestorError::ClientConfig)?;
+            .change_context(NatsSubjectIngestorError::ClientConfig)?;
         let mut options = async_nats::ConnectOptions::new()
             .max_reconnects(1)
             .event_callback(move |event| {
@@ -176,17 +176,17 @@ impl NatsIngestorPlan {
             }
             (None, None) => {}
             _ => {
-                return Err(Report::new(NatsIngestorError::IncompleteTlsIdentity));
+                return Err(Report::new(NatsSubjectIngestorError::IncompleteTlsIdentity));
             }
         }
         if ServiceUrl::new(&addr, "NATS addr")
             .has_scheme("tls")
-            .change_context(NatsIngestorError::ClientConfig)?
+            .change_context(NatsSubjectIngestorError::ClientConfig)?
         {
             options = options.require_tls(true);
         }
         options.connect(addr).await.map_err(|source| {
-            Report::new(NatsIngestorError::Connect).attach_printable(source.to_string())
+            Report::new(NatsSubjectIngestorError::Connect).attach_printable(source.to_string())
         })
     }
 
@@ -221,12 +221,12 @@ impl IngestMessageHeaders for NatsMessageHeaders {
     }
 }
 
-pub struct NatsIngestorMessage {
+pub struct NatsSubjectIngestorMessage {
     headers: NatsMessageHeaders,
     position: (),
 }
 
-impl IngestorMessage for NatsIngestorMessage {
+impl IngestorMessage for NatsSubjectIngestorMessage {
     type Position = ();
 
     fn payload(&self) -> &[u8] {
@@ -248,15 +248,18 @@ impl IngestorMessage for NatsIngestorMessage {
     }
 }
 
-/// One NATS source instance: its queue subscription, absent while suspended or reconnecting.
-pub struct NatsIngestor {
-    plan: NatsIngestorPlan,
+/// One NATS ingestor instance: its queue subscription, absent while suspended or reconnecting.
+pub struct NatsSubjectIngestor {
+    plan: NatsSubjectIngestorPlan,
     subscription: Option<NatsSubscription>,
 }
 
 #[async_trait]
-impl IngestorConnector for NatsIngestor {
-    type Plan = NatsIngestorPlan;
+impl IngestorConnector for NatsSubjectIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Nats(nervix_models::NatsIngestorEntity::Subject);
+
+    type Plan = NatsSubjectIngestorPlan;
 
     async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
         Ok(Self {
@@ -293,8 +296,8 @@ impl IngestorConnector for NatsIngestor {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for NatsIngestor {
-    type Message = NatsIngestorMessage;
+impl BrokerIngestorConnector for NatsSubjectIngestor {
+    type Message = NatsSubjectIngestorMessage;
     type Position = ();
 
     async fn next_batch(
@@ -317,10 +320,10 @@ impl BrokerIngestorConnector for NatsIngestor {
             // The subscription ended with its connection. The host shows the loss as a transient
             // status and resumes the instance on its reconnect cadence, which connects again.
             self.subscription = None;
-            return Err(Report::new(NatsIngestorError::ConnectionLost)
+            return Err(Report::new(NatsSubjectIngestorError::ConnectionLost)
                 .change_context(IngestorError::Read { connector: NATS }));
         };
-        Ok(IngestorBatch::Messages(vec![NatsIngestorMessage {
+        Ok(IngestorBatch::Messages(vec![NatsSubjectIngestorMessage {
             headers: NatsMessageHeaders { message },
             position: (),
         }]))
@@ -348,8 +351,8 @@ mod tests {
     use super::*;
     use crate::subject::scripted_server::ScriptedServer;
 
-    /// How long a check waits for the source to observe what the stand-in server did. It bounds a
-    /// wait for an event that follows at once on a loopback connection, so only a source that
+    /// How long a check waits for the ingestor to observe what the stand-in server did. It bounds a
+    /// wait for an event that follows at once on a loopback connection, so only an ingestor that
     /// never observes it reaches the bound.
     const OBSERVATION_BOUND: Duration = Duration::from_secs(30);
 
@@ -378,7 +381,7 @@ mod tests {
             // The connection stays open until the test has read the delivery.
             connection
         });
-        let plan = NatsIngestorPlan::new(
+        let plan = NatsSubjectIngestorPlan::new(
             vec![entry("addr", &addr)],
             NatsSubjectName::try_from("events".to_string()).expect("a valid subject"),
             NatsQueueGroupName::try_from("members".to_string()).expect("a valid queue group"),
@@ -387,13 +390,13 @@ mod tests {
             max_messages: NonZeroUsize::MIN,
             batch_timeout: None,
         };
-        let mut source = NatsIngestor::open(&plan, 0)
+        let mut source = NatsSubjectIngestor::open(&plan, 0)
             .await
-            .expect("opening a NATS source does not connect");
+            .expect("opening a NATS ingestor does not connect");
         source
             .resume()
             .await
-            .expect("the source subscribes through the stand-in server");
+            .expect("the ingestor subscribes through the stand-in server");
 
         let cancellation = IngestorReadCancellation::new();
         cancellation.cancel();
@@ -414,10 +417,10 @@ mod tests {
             source.next_batch(request, &IngestorReadCancellation::new()),
         )
         .await
-        .expect("the delivered message reaches the source")
+        .expect("the delivered message reaches the ingestor")
         .expect("the delivered message is read");
         let IngestorBatch::Messages(messages) = batch else {
-            panic!("the source reads the delivered message as a batch");
+            panic!("the ingestor reads the delivered message as a batch");
         };
         let payloads = messages
             .iter()
@@ -437,7 +440,7 @@ mod tests {
         let script = nervix_primitives::task::spawn(async move {
             let mut connection = server.accept(1024 * 1024).await;
             let subscription = connection.expect_subscription().await;
-            // The source flushes once it subscribed, so the subscription exists once that ping is
+            // The ingestor flushes once it subscribed, so the subscription exists once that ping is
             // answered.
             connection.answer_ping().await;
             connection
@@ -447,7 +450,7 @@ mod tests {
             // to reconnect.
             connection.end().await;
         });
-        let plan = NatsIngestorPlan::new(
+        let plan = NatsSubjectIngestorPlan::new(
             vec![entry("addr", &addr)],
             NatsSubjectName::try_from("events".to_string()).expect("a valid subject"),
             NatsQueueGroupName::try_from("members".to_string()).expect("a valid queue group"),
@@ -456,17 +459,17 @@ mod tests {
             max_messages: NonZeroUsize::MIN,
             batch_timeout: None,
         };
-        let mut source = NatsIngestor::open(&plan, 0)
+        let mut source = NatsSubjectIngestor::open(&plan, 0)
             .await
-            .expect("opening a NATS source does not connect");
+            .expect("opening a NATS ingestor does not connect");
         assert!(
             source.needs_resume(),
-            "an opened source has not subscribed yet"
+            "an opened ingestor has not subscribed yet"
         );
         let resumed = source
             .resume()
             .await
-            .expect("the source subscribes through the stand-in server");
+            .expect("the ingestor subscribes through the stand-in server");
         assert_eq!(resumed, IngestorResume::Ready);
 
         let batch = timeout(
@@ -474,10 +477,10 @@ mod tests {
             source.next_batch(request, &IngestorReadCancellation::new()),
         )
         .await
-        .expect("the delivered message reaches the source")
+        .expect("the delivered message reaches the ingestor")
         .expect("the delivered message is read");
         let IngestorBatch::Messages(messages) = batch else {
-            panic!("the source reads the delivered message as a batch");
+            panic!("the ingestor reads the delivered message as a batch");
         };
         let payloads = messages
             .iter()
@@ -500,12 +503,12 @@ mod tests {
             IngestorError::Read { connector: NATS }
         ));
         assert!(matches!(
-            error.downcast_ref::<NatsIngestorError>(),
-            Some(NatsIngestorError::ConnectionLost)
+            error.downcast_ref::<NatsSubjectIngestorError>(),
+            Some(NatsSubjectIngestorError::ConnectionLost)
         ));
         assert!(
             source.needs_resume(),
-            "the host reconnects a source whose subscription ended through its resume"
+            "the host reconnects an ingestor whose subscription ended through its resume"
         );
 
         let error = source
@@ -513,8 +516,8 @@ mod tests {
             .await
             .expect_err("the server is down, so the next resume cannot connect");
         assert!(matches!(
-            error.downcast_ref::<NatsIngestorError>(),
-            Some(NatsIngestorError::Connect)
+            error.downcast_ref::<NatsSubjectIngestorError>(),
+            Some(NatsSubjectIngestorError::Connect)
         ));
     }
 
@@ -523,8 +526,8 @@ mod tests {
     #[test]
     fn a_lost_connection_is_signalled_once_and_not_after_the_instance_stopped_listening() {
         let (lost, mut connection_lost) = mpsc::channel(1);
-        NatsIngestorPlan::signal_connection_lost(&lost);
-        NatsIngestorPlan::signal_connection_lost(&lost);
+        NatsSubjectIngestorPlan::signal_connection_lost(&lost);
+        NatsSubjectIngestorPlan::signal_connection_lost(&lost);
         assert!(
             connection_lost.try_recv().is_ok(),
             "the first loss is signalled"
@@ -534,7 +537,7 @@ mod tests {
             "a loss signalled while one is pending is not signalled again"
         );
         drop(connection_lost);
-        NatsIngestorPlan::signal_connection_lost(&lost);
+        NatsSubjectIngestorPlan::signal_connection_lost(&lost);
         assert!(
             lost.is_closed(),
             "the instance no longer listens for its end"
@@ -544,15 +547,15 @@ mod tests {
     #[nervix_primitives::test]
     async fn client_configuration_failures_keep_typed_context() {
         let (lost, _connection_lost) = mpsc::channel(1);
-        let error = NatsIngestorPlan::client_from_config(&[], lost.clone())
+        let error = NatsSubjectIngestorPlan::client_from_config(&[], lost.clone())
             .await
             .expect_err("a missing NATS address must fail");
         assert!(matches!(
             error.current_context(),
-            NatsIngestorError::ClientConfig
+            NatsSubjectIngestorError::ClientConfig
         ));
 
-        let error = NatsIngestorPlan::client_from_config(
+        let error = NatsSubjectIngestorPlan::client_from_config(
             &[
                 entry("addr", "tls://127.0.0.1:1"),
                 entry("tls_cert_file", "client.pem"),
@@ -563,7 +566,7 @@ mod tests {
         .expect_err("a client certificate without a key must fail");
         assert!(matches!(
             error.current_context(),
-            NatsIngestorError::IncompleteTlsIdentity
+            NatsSubjectIngestorError::IncompleteTlsIdentity
         ));
     }
 
@@ -588,7 +591,7 @@ mod tests {
         assert_eq!(visited, vec!["trace=a", "trace=b"]);
     }
 
-    /// Both NATS entities declare repeats by name with exact names: the header map a sink writes
+    /// Both NATS entities declare repeats by name with exact names: the header map an emitter writes
     /// keeps every value of a name together under it in write order, so a reader of the published
     /// message finds each name's values together and in that order, while names that differ in
     /// letter case stay two names.
@@ -609,7 +612,7 @@ mod tests {
                 subject: "events".into(),
                 reply: None,
                 payload: bytes::Bytes::new(),
-                headers: Some(crate::subject::NatsEmitter::header_map(&written)),
+                headers: Some(crate::subject::NatsSubjectEmitter::header_map(&written)),
                 status: None,
                 description: None,
                 length: 0,

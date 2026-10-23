@@ -2,7 +2,7 @@ Feature: Fixed-format emitter batch envelopes
   Syslog frames, Sentry events, and OTLP exports carry their source members in the container
   defined by each protocol. The optional batch policy bounds the complete encoded unit.
 
-  @emitter_batch_fixed_sinks @sentry_batch_event
+  @emitter_batch_fixed_emitters @sentry_batch_event
   Scenario Outline: Sentry accepts one event whose extra field preserves every batch member
     Given Sentry is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -41,16 +41,16 @@ Feature: Fixed-format emitter batch envelopes
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    And sink client for emitter "batched_sentry" enters unavailable fault mode
+    And emitter client for emitter "batched_sentry" enters unavailable fault mode
     When http payload is posted to host "sentry-{{test_id}}.example.com" path "/errors"
       """
       <payload>
       """
     Then within "5s" DESCRIBE EMITTER "batched_sentry" on the leader node contains
       """
-      transient error: sink fault injector returned an unavailable client
+      transient error: emitter fault injector returned an unavailable client
       """
-    And sink client for emitter "batched_sentry" leaves fault mode
+    And emitter client for emitter "batched_sentry" leaves fault mode
     Then Sentry eventually receives an event
       """
       {"message":"batched errors","environment":"{{test_id}}","extra":{"records":<payload>}}
@@ -63,7 +63,7 @@ Feature: Fixed-format emitter batch envelopes
       | 1            | [{"message":"singleton","environment":"{{test_id}}"}]                                              |
       | 3            | [{"message":"singleton","environment":"{{test_id}}"}]                                              |
 
-  @emitter_batch_fixed_sinks @sentry_native_limit
+  @emitter_batch_fixed_emitters @sentry_native_limit
   Scenario Outline: Sentry rejects a batched event above its decompressed native limit
     Given Sentry is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -123,7 +123,7 @@ Feature: Fixed-format emitter batch envelopes
       | 1            |
       | 3            |
 
-  @emitter_batch_fixed_sinks @syslog_batch_frame
+  @emitter_batch_fixed_emitters @syslog_batch_frame
   Scenario Outline: A Syslog UDP receiver accepts a single frame containing its source messages
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And Syslog UDP emission endpoint "{{syslog_emit_addr}}" is observed
@@ -185,7 +185,7 @@ Feature: Fixed-format emitter batch envelopes
       | 1            |
       | 3            |
 
-  @emitter_batch_fixed_sinks @syslog_udp_native_limit
+  @emitter_batch_fixed_emitters @syslog_udp_native_limit
   Scenario Outline: A Syslog UDP emitter rejects a batched frame above the datagram limit
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And Syslog UDP emission endpoint "{{syslog_emit_addr}}" is observed
@@ -242,7 +242,7 @@ Feature: Fixed-format emitter batch envelopes
       | 1            |
       | 3            |
 
-  @emitter_batch_fixed_sinks @syslog_batch_stream
+  @emitter_batch_fixed_emitters @syslog_batch_stream
   Scenario Outline: A Syslog TCP receiver sees one batched frame with the declared framing
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -309,7 +309,7 @@ Feature: Fixed-format emitter batch envelopes
       | 1            | non-transparent |
       | 3            | non-transparent |
 
-  @emitter_batch_fixed_sinks @syslog_batch_tls
+  @emitter_batch_fixed_emitters @syslog_batch_tls
   Scenario Outline: A Syslog TLS receiver sees one batched RFC 5425 frame
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -391,7 +391,7 @@ Feature: Fixed-format emitter batch envelopes
       | 1            |
       | 3            |
 
-  @emitter_batch_fixed_sinks @otel_batch_limit
+  @emitter_batch_fixed_emitters @otel_batch_limit
   Scenario Outline: An OTEL export rejects a singleton larger than its encoded request limit
     Given OpenTelemetry Collector is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"

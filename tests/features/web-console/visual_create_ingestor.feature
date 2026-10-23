@@ -77,7 +77,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-name" has value "incomplete_source"
     When selector ".create-ingestor-source [data-source='http-endpoint']" is clicked
     And selector ".create-submit" is clicked
-    Then selector ".create-validation" contains "source client or endpoint"
+    Then selector ".create-validation" contains "ingestor client or endpoint"
 
   @visual_ingestor_scope
   Scenario: Changing the ingestor draft domain invalidates its selected source and codec

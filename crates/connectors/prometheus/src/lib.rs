@@ -1,4 +1,4 @@
-//! PROMETHEUS connector for the query entity.
+//! PrometheusQueryIngestor connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public query connector implementation surface.

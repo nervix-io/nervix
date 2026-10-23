@@ -55,7 +55,7 @@ exists, so it fails to load with an error naming it and is recreated rather than
   succeeded. Records rejected before that point are never members.
 - **Candidate.** The run of members the emitter offers to the encoder for one batch, taken in
   publication order and bounded by the declared maximum message count.
-- **Batch payload.** The bytes the encoder produced for a candidate, or — for a emitter that writes
+- **Batch payload.** The bytes the encoder produced for a candidate, or — for an emitter that writes
   through a driver rather than a codec — the request that carries the candidate.
 - **Batch container.** The shape the batch payload has in the target's own format: a JSON array, a
   CBOR array, an Avro array datum, a protobuf batch message, an `INSERT` carrying many rows, an
@@ -91,7 +91,7 @@ CREATE [IF NOT EXISTS] [ATTACHED | DETACHED] EMITTER <name>
 `BATCH MAX MESSAGES` and `MAX SIZE` are composed keyword phrases. `<n>` is a positive integer
 literal and `<bytes>` is a byte-size literal in the form `MAX BATCH SIZE` already uses, such as
 `1MiB`. Completion offers `BATCH MAX MESSAGES` wherever the clause may begin, and offers it before
-`FLUSH EACH` and `FLUSH IMMEDIATE` for a emitter that requires it.
+`FLUSH EACH` and `FLUSH IMMEDIATE` for an emitter that requires it.
 
 ### Where the clause is required
 
@@ -139,7 +139,7 @@ input and pending emitter output are drained, the emitter task is replaced, and 
 released. This is the classification emitter, publishing-mode and codec changes already use, and it is
 what keeps a payload that was prepared under the old limits from being retried under new ones.
 `SET TO <emitter clause>` no longer carries a database maximum batch and therefore never changes
-batching; changing a emitter to one that requires the clause fails when the clause is absent.
+batching; changing an emitter to one that requires the clause fails when the clause is absent.
 
 ### Rendering
 
@@ -526,7 +526,7 @@ second is valid and simply means every commit publishes one data file.
 One successful external confirmation acknowledges every member of the batch it confirms. Native
 per-member outcomes apply only where the external contract names the member, which is MongoDB's
 per-document write result. Everywhere else the batch is the smallest unit the destination can
-speak about, and record-specific isolation — where a emitter already has it — is a failure path that
+speak about, and record-specific isolation — where an emitter already has it — is a failure path that
 runs after the batch failed, not a second way to publish.
 
 ## Interaction with existing policies

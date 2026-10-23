@@ -1,5 +1,5 @@
 //! What an Iceberg commit charges the bulk memory class for, and which staged files it publishes,
-//! driven through the sink against Iceberg's in-memory catalog.
+//! driven through the emitter against Iceberg's in-memory catalog.
 
 use ::iceberg::{
     MemoryCatalog, Namespace, TableCommit, TableCreation,
@@ -36,7 +36,7 @@ impl RecordedAcknowledgements {
     }
 }
 
-/// One acknowledgement handover the sink holds, recording how it was resolved.
+/// One acknowledgement handover the emitter holds, recording how it was resolved.
 struct RecordedHandover(StdArc<RecordedAcknowledgements>);
 
 impl EmitterRecordAcknowledgementServices for RecordedHandover {
@@ -181,7 +181,7 @@ fn table_ident() -> TableIdent {
     )
 }
 
-/// The table the fixture sink appends to, with the mapped columns `user_id` and `action`.
+/// The table the fixture emitter appends to, with the mapped columns `user_id` and `action`.
 async fn create_table(catalog: &dyn Catalog) -> Table {
     let namespace = NamespaceIdent::new(NAMESPACE.to_string());
     catalog
@@ -214,18 +214,18 @@ fn mapped_schema() -> StdArc<arrow_schema::Schema> {
     ]))
 }
 
-/// A sink over `catalog`'s fixture table that stages through `executor`.
-async fn fixture_emitter(catalog: StdArc<dyn Catalog>, executor: Executor) -> IcebergEmitter {
+/// A emitter over `catalog`'s fixture table that stages through `executor`.
+async fn fixture_emitter(catalog: StdArc<dyn Catalog>, executor: Executor) -> IcebergTableEmitter {
     let table = create_table(catalog.as_ref()).await;
-    IcebergEmitter {
-        client: IcebergEmitterClient {
+    IcebergTableEmitter {
+        client: IcebergTableEmitterClient {
             catalog,
             table,
             file_name_prefix: "commit-memory".to_string(),
             data_file_sequence: 0,
         },
         commit_state: IcebergCommitState::default(),
-        staged_schema: IcebergEmitter::staged_arrow_schema(&mapped_schema())
+        staged_schema: IcebergTableEmitter::staged_arrow_schema(&mapped_schema())
             .assured("the fixture's mapped columns are distinct"),
         commit_policy: IcebergCommitPolicy {
             interval: Duration::from_secs(60),
@@ -240,9 +240,9 @@ async fn fixture_emitter(catalog: StdArc<dyn Catalog>, executor: Executor) -> Ic
     }
 }
 
-/// Stage the rows `user_ids` as one carrier, handing the sink `acknowledgements` to resolve.
+/// Stage the rows `user_ids` as one carrier, handing the emitter `acknowledgements` to resolve.
 async fn stage(
-    connector: &mut IcebergEmitter,
+    connector: &mut IcebergTableEmitter,
     user_ids: &[i64],
     acknowledgements: &StdArc<RecordedAcknowledgements>,
 ) {
@@ -272,7 +272,7 @@ async fn stage(
         .await;
     assert!(
         !outcome.has_infrastructure_error(),
-        "the sink stages every row it is handed"
+        "the emitter stages every row it is handed"
     );
 }
 
@@ -301,7 +301,7 @@ async fn committed_user_ids(catalog: &dyn Catalog) -> Vec<i64> {
     for batch in batches {
         let column = batch
             .column_by_name("user_id")
-            .assured("every row the sink appends has a user_id column");
+            .assured("every row the emitter appends has a user_id column");
         let column = column
             .as_any()
             .downcast_ref::<Int64Array>()

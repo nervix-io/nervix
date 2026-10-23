@@ -1,4 +1,4 @@
-//! HTTP connector for the request entity.
+//! HttpRequestIngestor, HttpRequestEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public request connector implementation surface.

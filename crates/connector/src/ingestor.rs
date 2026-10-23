@@ -1,11 +1,11 @@
-//! Source operations and host services shared by connector families.
+//! Ingestor operations and host services shared by connector families.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The typed source plan, broker and paced-polling connector traits, source messages,
-//!   acknowledgement policies, lifecycle operations, typed source failures, the cancellation
+//! - **Owns.** The typed ingestor plan, broker and paced-polling connector traits, ingestor messages,
+//!   acknowledgement policies, lifecycle operations, typed ingestor failures, the cancellation
 //!   through which the host ends a broker read in flight, and the opaque host handle through which
-//!   a source delivers messages and reports lifecycle state.
+//!   an ingestor delivers messages and reports lifecycle state.
 //! - **Depends on.** Typed ingest metadata, the vocabulary's metadata scopes and timestamps,
 //!   `error-stack`, and the primitive boundary's monotonic clock and cancellation token.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, ACK-tree
@@ -34,7 +34,7 @@ use thiserror::Error;
 
 use crate::{IngestMessageHeaders, IngestMetadataRow, ParsedRetryPolicy, RetainedIngestHeaders};
 
-/// The acknowledgement behavior a source transport supports for the selected plan.
+/// The acknowledgement behavior an ingestor transport supports for the selected plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestorAcknowledgementSupport {
     None,
@@ -42,7 +42,7 @@ pub enum IngestorAcknowledgementSupport {
     Parallel,
 }
 
-/// Capabilities resolved from the source vocabulary before a connector starts.
+/// Capabilities resolved from the ingestor vocabulary before a connector starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngestorCapabilities {
     reads_headers: bool,
@@ -92,16 +92,16 @@ impl IngestorCapabilities {
         self.acknowledgement
     }
 
-    /// What the source's positions mean once the connection that delivered them is gone, as its
+    /// What the ingestor's positions mean once the connection that delivered them is gone, as its
     /// entity declares.
     ///
     /// The host reads it to decide, once, what to do with an acknowledgement or a rejection a
-    /// broker source could not complete:
+    /// broker ingestor could not complete:
     ///
-    /// - [`PositionClass::Replayable`]: the host suspends and resumes the source, then retries the
+    /// - [`PositionClass::Replayable`]: the host suspends and resumes the ingestor, then retries the
     ///   same rejection before it reads another batch. The retried rejection never depends on a
-    ///   poll, because the source can seek to its positions on any connection.
-    /// - [`PositionClass::BrokerRedelivered`]: the host suspends and resumes the source, then
+    ///   poll, because the ingestor can seek to its positions on any connection.
+    /// - [`PositionClass::BrokerRedelivered`]: the host suspends and resumes the ingestor, then
     ///   discards the pending positions and counts them as transport redeliveries. The broker
     ///   redelivers every delivery the lost connection did not acknowledge, so nothing is retried
     ///   against a connection that no longer exists. An acknowledgement that was in flight when
@@ -149,7 +149,7 @@ impl IngestorAckPolicy {
     }
 }
 
-/// The complete host and connector plan for one source node.
+/// The complete host and connector plan for one ingestor node.
 pub struct IngestorPlan<P> {
     pub connector: P,
     pub capabilities: IngestorCapabilities,
@@ -163,17 +163,17 @@ pub struct IngestorBatchRequest {
     pub batch_timeout: Option<Duration>,
 }
 
-/// One source poll result.
+/// One ingestor poll result.
 pub enum IngestorBatch<M> {
     Messages(Vec<M>),
     /// The read ended early because the host cancelled it. `gathered` holds every message the
-    /// source had already taken from its transport for this batch, possibly none, and the host
+    /// ingestor had already taken from its transport for this batch, possibly none, and the host
     /// takes them in before it acts on what made it cancel.
     Interrupted {
         gathered: Vec<M>,
     },
     /// The read took `payloads` payloads from its transport that exceed the size bound of the
-    /// source's client, and dropped each of them alone, leaving the transport's next payload
+    /// ingestor's client, and dropped each of them alone, leaving the transport's next payload
     /// intact. The host counts them and reads again at once.
     Oversized {
         payloads: NonZeroUsize,
@@ -216,7 +216,7 @@ impl IngestorReadCancellation {
     ///
     /// A read that is ready completes even after the host cancelled, so a message its transport
     /// already delivered is taken rather than left behind. A read still waiting when the host
-    /// cancels is dropped, and anything it holds is dropped with it, so a source passes only a read
+    /// cancels is dropped, and anything it holds is dropped with it, so an ingestor passes only a read
     /// that holds nothing it took from its transport while it waits.
     pub async fn unless_cancelled<F>(&self, read: F) -> Option<F::Output>
     where
@@ -230,7 +230,7 @@ impl IngestorReadCancellation {
     }
 }
 
-/// A source message whose transport values remain owned by its connector.
+/// A ingestor message whose transport values remain owned by its connector.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -248,35 +248,35 @@ pub trait IngestorMessage: Send {
     fn metadata(&self) -> IngestMetadataRow<'_>;
 }
 
-/// Whether a resumed source is ready to poll or is waiting for an external assignment.
+/// Whether a resumed ingestor is ready to poll or is waiting for an external assignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestorResume {
     Ready,
     Waiting { retry_after: Duration },
 }
 
-/// Why a connector could not complete a source operation.
+/// Why a connector could not complete an ingestor operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum IngestorError {
-    #[error("failed to open {connector} source")]
+    #[error("failed to open {connector} ingestor")]
     Open { connector: &'static str },
-    #[error("failed to read from {connector} source")]
+    #[error("failed to read from {connector} ingestor")]
     Read { connector: &'static str },
-    #[error("failed to acknowledge {connector} source positions")]
+    #[error("failed to acknowledge {connector} ingestor positions")]
     Acknowledge { connector: &'static str },
-    #[error("failed to reject {connector} source positions")]
+    #[error("failed to reject {connector} ingestor positions")]
     Reject { connector: &'static str },
-    #[error("failed to suspend {connector} source")]
+    #[error("failed to suspend {connector} ingestor")]
     Suspend { connector: &'static str },
-    #[error("failed to resume {connector} source")]
+    #[error("failed to resume {connector} ingestor")]
     Resume { connector: &'static str },
-    #[error("failed to close {connector} source")]
+    #[error("failed to close {connector} ingestor")]
     Close { connector: &'static str },
 }
 
 pub type IngestorResult<T> = Result<T, Report<IngestorError>>;
 
-/// Lifecycle operations common to every source family.
+/// Lifecycle operations common to every ingestor family.
 #[async_trait]
 #[cfg_attr(
     nervix_lint,
@@ -287,13 +287,16 @@ pub type IngestorResult<T> = Result<T, Report<IngestorError>>;
     )
 )]
 pub trait IngestorConnector: Send + Sized + 'static {
+    /// The vocabulary entity implemented by this concrete connector.
+    const KIND: nervix_models::IngestorEntityKind;
+
     type Plan: Send + Sync;
 
     #[cfg_attr(
         nervix_lint,
         nervix::context(
             lifecycle,
-            reason = "the host installs one driver before admitting source work"
+            reason = "the host installs one driver before admitting ingestor work"
         )
     )]
     async fn open(plan: &Self::Plan, instance_index: u64) -> IngestorResult<Self>;
@@ -314,7 +317,7 @@ pub trait IngestorConnector: Send + Sized + 'static {
         nervix_lint,
         nervix::context(
             lifecycle,
-            reason = "the host ends the exact source lifetime after intake has stopped"
+            reason = "the host ends the exact ingestor lifetime after intake has stopped"
         )
     )]
     async fn close(&mut self) -> IngestorResult<()> {
@@ -322,7 +325,7 @@ pub trait IngestorConnector: Send + Sized + 'static {
     }
 }
 
-/// Broker operations the host drives between source lifecycle transitions.
+/// Broker operations the host drives between ingestor lifecycle transitions.
 #[async_trait]
 #[cfg_attr(
     nervix_lint,
@@ -341,7 +344,7 @@ pub trait BrokerIngestorConnector: IngestorConnector {
     /// The host awaits every read to completion, so a read never loses what it took from its
     /// transport to a dropped future. Once the host cancels `cancellation`, the read ends as soon
     /// as it can and returns [`IngestorBatch::Interrupted`] with every message it had already taken.
-    /// A source that gathers several messages observes the cancellation between its transport
+    /// A ingestor that gathers several messages observes the cancellation between its transport
     /// reads, and a read it cannot interrupt without losing what that read returns completes
     /// within its own bounded wait first.
     async fn next_batch(
@@ -352,13 +355,13 @@ pub trait BrokerIngestorConnector: IngestorConnector {
 
     /// Settles `positions` as processed on the transport.
     ///
-    /// Returns once the transport has confirmed them as far as the source's entity declares in its
+    /// Returns once the transport has confirmed them as far as the ingestor's entity declares in its
     /// [`AcknowledgementConfirmation`](nervix_models::AcknowledgementConfirmation): the broker
     /// answered the acknowledgement or the commit, or, where the protocol has no answer, the
-    /// acknowledgement was written to the connection. A source that returns before that declares
+    /// acknowledgement was written to the connection. A ingestor that returns before that declares
     /// so rather than reporting a confirmation it did not get. A confirmation that fails returns
     /// [`IngestorError::Acknowledge`]: the host shows it as the ingestor's transient status and
-    /// rejects the positions, which the source's [`PositionClass`] then handles.
+    /// rejects the positions, which the ingestor's [`PositionClass`] then handles.
     ///
     /// Until this returns the host reports no progress for the positions: drains and ownership
     /// handoffs keep waiting for them, and the ingestor's transient status stays as it was.
@@ -373,7 +376,7 @@ pub struct IngestorPollMessage {
     pub headers: RetainedIngestHeaders,
 }
 
-/// The result of one host-scheduled source poll.
+/// The result of one host-scheduled ingestor poll.
 ///
 /// `failures` contains individual records a connector could not materialize while allowing the
 /// other messages from the same external response to continue through intake.
@@ -383,7 +386,7 @@ pub struct IngestorPoll {
     pub observed_at: Timestamp,
 }
 
-/// A source whose transport operation is scheduled by a host-owned domain cadence.
+/// A ingestor whose transport operation is scheduled by a host-owned domain cadence.
 #[async_trait]
 #[cfg_attr(
     nervix_lint,
@@ -397,20 +400,20 @@ pub trait PacedIngestorConnector: IngestorConnector {
     async fn poll(&mut self, scheduled_at: Timestamp) -> IngestorResult<IngestorPoll>;
 }
 
-/// One borrowed source message crossing into host-owned decoding and dispatch.
+/// One borrowed ingestor message crossing into host-owned decoding and dispatch.
 pub struct IngestorIntakeMessage<'a> {
     pub payload: &'a [u8],
     pub metadata: IngestMetadataRow<'a>,
 }
 
-/// Why host-owned source intake could not accept a batch.
+/// Why host-owned ingestor intake could not accept a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum IngestorIntakeError {
-    #[error("failed to retain a source batch during quiesce")]
+    #[error("failed to retain an ingestor batch during quiesce")]
     Retain,
-    #[error("failed to dispatch a source batch")]
+    #[error("failed to dispatch an ingestor batch")]
     Dispatch,
-    #[error("failed to flush a source batch")]
+    #[error("failed to flush an ingestor batch")]
     Flush,
 }
 
@@ -445,7 +448,7 @@ pub trait IngestorBatchAcknowledgementServices: Send + 'static {
 ///
 /// The host counts the batch's work as outstanding, which drains and ownership handoffs wait for,
 /// until this handle drops, also once its wait has returned. The loop therefore keeps it until the
-/// source has confirmed or rejected the batch's positions on its transport.
+/// ingestor has confirmed or rejected the batch's positions on its transport.
 pub struct IngestorBatchAcknowledgement {
     services: Box<dyn IngestorBatchAcknowledgementServices>,
 }
@@ -462,7 +465,7 @@ impl IngestorBatchAcknowledgement {
     }
 }
 
-/// Every runtime service exposed through one source host handle.
+/// Every runtime service exposed through one ingestor host handle.
 #[async_trait]
 #[cfg_attr(
     nervix_lint,
@@ -479,7 +482,7 @@ pub trait IngestorHostServices: Send + 'static {
         messages: Vec<IngestorIntakeMessage<'_>>,
     ) -> IngestorIntakeResult<()>;
 
-    /// Takes in a batch whose positions the source settles once every message has been
+    /// Takes in a batch whose positions the ingestor settles once every message has been
     /// acknowledged through the graph, and returns the acknowledgement the loop waits on.
     async fn intake_acknowledged(
         &mut self,
@@ -501,14 +504,14 @@ pub trait IngestorHostServices: Send + 'static {
     fn handle_ack_failure(&self, reason: String);
     /// Counts positions the host discarded after a reconnect because the broker redelivers them.
     fn record_transport_redeliveries(&self, positions: usize);
-    /// Counts payloads the source dropped because they exceed the size bound of its client.
+    /// Counts payloads the ingestor dropped because they exceed the size bound of its client.
     fn record_oversized_payloads(&self, payloads: NonZeroUsize);
-    /// Reports that the source stopped before its transport confirmed `positions` it had read,
+    /// Reports that the ingestor stopped before its transport confirmed `positions` it had read,
     /// which the transport presents again by its own redelivery contract.
     fn record_unconfirmed_stop(&self, positions: usize);
 }
 
-/// Task-local host services a source loop drives without exposing a runtime type.
+/// Task-local host services an ingestor loop drives without exposing a runtime type.
 pub struct IngestorHost {
     services: Box<dyn IngestorHostServices>,
 }

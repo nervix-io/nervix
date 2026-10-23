@@ -3692,7 +3692,7 @@ fn otel_metric_reference(metric: &OtelMetric) -> String {
     )
 }
 
-/// The `ON CONFLICT` clause the row-insert emitters share, absent when the sink declares none.
+/// The `ON CONFLICT` clause the row-insert emitters share, absent when the emitter declares none.
 fn conflict_clauses(conflict_action: String) -> Vec<Clause> {
     let mut clauses = Vec::new();
     if !conflict_action.trim().is_empty() {

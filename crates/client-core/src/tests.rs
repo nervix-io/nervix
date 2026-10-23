@@ -36,10 +36,10 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     AttachDisposition, AttachOutcome, ClientFrame, ClientMessage, ClientRequest,
     CommandDisposition, Diagnostic, DomainInfo, DomainList, DomainsObserved, EncodedFrame,
-    IngestorSpan, LeaderEndpoints, LeaderRedirect, Leadership, LeadershipObserved, NoticeLevel,
-    OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected, RequestRejection,
-    RowSchema, ServerFrame, ServerNotice, SessionEndReason, SessionEnding, SessionLimitSettings,
-    SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
+    LeaderEndpoints, LeaderRedirect, Leadership, LeadershipObserved, NoticeLevel, OutcomeOrigin,
+    Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected, RequestRejection, RowSchema,
+    ServerFrame, ServerNotice, SessionEndReason, SessionEnding, SessionLimitSettings,
+    SessionLimits, SourceSpan, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
     SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
     SubscriptionType, UnknownOutcomeCause, UnsubscribeDisposition, UnsubscribeOutcome,
     UploadDisposition, UploadFailure, UploadReply, VerifiedFrame, WireDecodeError,
@@ -1438,7 +1438,7 @@ async fn observations_keep_only_their_latest_value() {
         fixture
             .domains
             .has_changed()
-            .assured("the domain sink is alive")
+            .assured("the domain emitter is alive")
     );
     let latest = Option::clone(&fixture.domains.borrow_and_update())
         .verified("the reader published a domain list");
@@ -1481,7 +1481,7 @@ async fn the_client_reads_the_latest_observations_of_its_exchange() {
     let domains = nervix_primitives::time::timeout(DEADLINE, client.next_domain_list())
         .await
         .assured("an observed list is returned at once")
-        .assured("the client's domain sink is alive");
+        .assured("the client's domain emitter is alive");
     assert_eq!(
         domains.len(),
         2,
@@ -1573,7 +1573,7 @@ fn wire_outcomes_convert_into_public_outcomes() {
     );
     refused.diagnostics = vec![Diagnostic {
         message: "bad token".to_string(),
-        span: Some(IngestorSpan::new(3, 7).assured("the span starts before it ends")),
+        span: Some(SourceSpan::new(3, 7).assured("the span starts before it ends")),
     }];
     refused.transaction = Some(open_transaction("tx-1", 2));
     let description = ResourceDescription {
@@ -1966,7 +1966,7 @@ async fn subscription_diagnostics_address_the_query_the_caller_passed() {
                 diagnostics: vec![
                     Diagnostic {
                         message: "unknown relay".to_string(),
-                        span: Some(IngestorSpan::new(28, 33).assured("the span is ordered")),
+                        span: Some(SourceSpan::new(28, 33).assured("the span is ordered")),
                     },
                     Diagnostic {
                         message: "no location".to_string(),

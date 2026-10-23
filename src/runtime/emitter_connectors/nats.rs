@@ -12,9 +12,14 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    NatsSubjectEmitter::KIND,
+    nervix_models::EmitterEntityKind::Nats(nervix_models::NatsEmitterEntity::Subject)
+));
+
 impl EmitterConnectorStarter {
     pub(super) async fn nats(
-        connector: &NatsEmitterPlan,
+        connector: &NatsSubjectEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
         label: &str,
@@ -25,8 +30,8 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            NatsEmitter::new(
-                NatsEmitterConfig {
+            NatsSubjectEmitter::new(
+                NatsSubjectEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     subject: connector.subject.clone(),
                     mode: connector.mode,

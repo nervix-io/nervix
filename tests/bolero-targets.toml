@@ -56,7 +56,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/otel/src/__fuzz__/hex_id_properties__bolero_hex_ids_match_the_scalar_reference/corpus"
+corpus = "crates/connectors/otel/src/otlp/__fuzz__/otlp__hex_id_properties__bolero_hex_ids_match_the_scalar_reference/corpus"
 domain_version = 1
 features = []
 id = "otel-hex-ids"
@@ -65,8 +65,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 128
 package = "nervix-connector-otel"
 random_iterations = 256
-source = "crates/connectors/otel/src/hex_id_properties.rs"
-test = "hex_id_properties::bolero_hex_ids_match_the_scalar_reference"
+source = "crates/connectors/otel/src/otlp/hex_id_properties.rs"
+test = "otlp::hex_id_properties::bolero_hex_ids_match_the_scalar_reference"
 test_target = "lib"
 
 [[target]]
@@ -971,7 +971,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/syslog/src/__fuzz__/ingestor__tests__bolero_stream_framing_matches_the_reference_however_reads_split_it/corpus"
+corpus = "crates/connectors/syslog/src/listener/__fuzz__/listener__tests__bolero_stream_framing_matches_the_reference_however_reads_split_it/corpus"
 domain_version = 1
 features = []
 id = "syslog-stream-framing"
@@ -980,8 +980,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-syslog"
 random_iterations = 256
-source = "crates/connectors/syslog/src/ingestor_tests.rs"
-test = "ingestor::tests::bolero_stream_framing_matches_the_reference_however_reads_split_it"
+source = "crates/connectors/syslog/src/listener/tests.rs"
+test = "listener::tests::bolero_stream_framing_matches_the_reference_however_reads_split_it"
 test_target = "lib"
 
 [[target]]
@@ -2489,7 +2489,7 @@ corpus = "src/runtime/__fuzz__/runtime__emitter_client__properties__bolero_clien
 domain_version = 1
 features = []
 id = "client-emitter-deliveries"
-invariant = "The rows a client emitter sink writes for one delivery decode in the client library to the Arrow schema of exactly the fields the emitter declares and to every delivered row, value and null in order, with floats by their bits, and the same bytes are refused under one row more or fewer and under fields of another optionality, order or number."
+invariant = "The rows a client emitter connector writes for one delivery decode in the client library to the Arrow schema of exactly the fields the emitter declares and to every delivered row, value and null in order, with floats by their bits, and the same bytes are refused under one row more or fewer and under fields of another optionality, order or number."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"
@@ -2879,7 +2879,7 @@ corpus = "src/runtime/__fuzz__/runtime__emitter_record_writes__tests__bolero_ret
 domain_version = 1
 features = []
 id = "emitter-retained-payloads"
-invariant = "Across generated packing and write steps with delivered, rejected and unanswered records and failed writes, every write hands the sink the retained payloads in packing order with exactly the bytes, key, headers and group they were prepared with; a delivery resolves every member, a rejection rejects every member with one error and leaves them awaiting it, and an unanswered payload stays retained unchanged."
+invariant = "Across generated packing and write steps with delivered, rejected and unanswered records and failed writes, every write hands the emitter the retained payloads in packing order with exactly the bytes, key, headers and group they were prepared with; a delivery resolves every member, a rejection rejects every member with one error and leaves them awaiting it, and an unanswered payload stays retained unchanged."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-server"
@@ -3059,7 +3059,7 @@ corpus = "crates/connectors/http/src/request/emitter/__fuzz__/request__emitter__
 domain_version = 1
 features = []
 id = "http-request-heads"
-invariant = "For valid prepared requests over content-defining, contentless and extension methods in their case variants, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without Accept, and bounded bodies, the head the sink writes parses as exactly one complete HTTP/1.1 request head carrying the prepared request line, Host, Connection, the Accept default and every application field in order, and declaring a body's length, an empty length for a bodyless POST, PUT or PATCH in any ASCII case, and no length otherwise."
+invariant = "For valid prepared requests over content-defining, contentless and extension methods in their case variants, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without Accept, and bounded bodies, the head the emitter writes parses as exactly one complete HTTP/1.1 request head carrying the prepared request line, Host, Connection, the Accept default and every application field in order, and declaring a body's length, an empty length for a bodyless POST, PUT or PATCH in any ASCII case, and no length otherwise."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-http"

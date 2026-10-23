@@ -4,8 +4,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 
 use super::*;
 
-fn sites(source: &str) -> Vec<IngestorSite> {
-    scan(vec![IngestorConnectorInput {
+fn sites(source: &str) -> Vec<SourceSite> {
+    scan(vec![SourceInput {
         path: "src/fixture.rs".into(),
         source: source.into(),
     }])
@@ -63,13 +63,13 @@ enum Choice { Data { #[cfg(feature = "testing")] value: u32 } }
 
 #[test]
 fn malformed_authored_source_fails_with_its_own_location() {
-    let result = scan(vec![IngestorConnectorInput {
+    let result = scan(vec![SourceInput {
         path: "src/broken.rs".into(),
         source: "fn {".into(),
     }]);
     let error = result.expect_err("malformed authored source cannot be a clean count");
     assert!(
-        matches!(error.current_context(), IngestorError::Syntax { path, .. } if path == "src/broken.rs")
+        matches!(error.current_context(), SourceError::Syntax { path, .. } if path == "src/broken.rs")
     );
 }
 
@@ -117,14 +117,14 @@ fn bolero_source_syntax_preserves_casts_and_gates() {
             ));
         }
         source.push_str("fn r#as(r#as: u32) -> u32 { r#as }\n");
-        let input = IngestorConnectorInput {
+        let input = SourceInput {
             path: format!("src/bounded_{}.rs", seed[3]),
             source,
         };
         let bytes =
             serde_json::to_vec(&input).assured("the bounded current source is serializable");
         let decoded =
-            serde_json::from_slice::<IngestorConnectorInput>(&bytes).assured("the encoded source is valid");
+            serde_json::from_slice::<SourceInput>(&bytes).assured("the encoded source is valid");
         assert_eq!(decoded, input);
         let result = scan(vec![decoded]).assured("the generator constructs valid Rust syntax");
         assert_eq!(
@@ -144,7 +144,7 @@ fn bolero_source_syntax_preserves_casts_and_gates() {
             assert_eq!(site.line, index + 2);
         }
         let bytes = serde_json::to_vec(&result).assured("complete source sites are serializable");
-        let decoded = serde_json::from_slice::<Vec<IngestorSite>>(&bytes)
+        let decoded = serde_json::from_slice::<Vec<SourceSite>>(&bytes)
             .assured("the encoded source sites are valid");
         assert_eq!(decoded, result);
     });
@@ -219,7 +219,7 @@ fn bolero_hidden_tunables_preserve_every_policy_site() {
                     .find("std")
                     .assured("the generated call starts with std"),
             };
-            expected.push(IngestorSite {
+            expected.push(SourceSite {
                 path: path.clone(),
                 line: index + 3,
                 column,
@@ -241,10 +241,10 @@ fn bolero_hidden_tunables_preserve_every_policy_site() {
              Group;\nimpl Default for Config { fn default() -> Self { Duration::from_secs(9); \
              make() } }\n",
         );
-        let input = IngestorConnectorInput { path, source };
+        let input = SourceInput { path, source };
         let encoded =
             serde_json::to_vec(&input).assured("current source input has a JSON representation");
-        let decoded: IngestorConnectorInput =
+        let decoded: SourceInput =
             serde_json::from_slice(&encoded).assured("the encoded complete input is valid JSON");
         assert_eq!(decoded, input);
         let result = scan(vec![decoded])
@@ -252,7 +252,7 @@ fn bolero_hidden_tunables_preserve_every_policy_site() {
         assert_eq!(result, expected);
         let encoded =
             serde_json::to_vec(&result).assured("complete sites have a JSON representation");
-        let decoded: Vec<IngestorSite> =
+        let decoded: Vec<SourceSite> =
             serde_json::from_slice(&encoded).assured("the complete sites were just serialized");
         assert_eq!(decoded, result);
     });
@@ -376,16 +376,16 @@ fn invalid_constant_contracts_fail_with_the_authored_location() {
         "#[nervix::constant(fixed, reason = \"wire\")] const C: u8 = 1;",
         "#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = \"wire\"))] fn probe() {}",
     ] {
-        let error = scan(vec![IngestorConnectorInput {
+        let error = scan(vec![SourceInput {
             path: "src/invalid.rs".into(),
             source: annotation.into(),
         }])
         .expect_err("an invalid current source contract cannot authorize an exclusion");
         assert!(
-            matches!(error.current_context(), IngestorError::ConstantContract {path, line: 1, ..} if path == "src/invalid.rs")
+            matches!(error.current_context(), SourceError::ConstantContract {path, line: 1, ..} if path == "src/invalid.rs")
         );
     }
-    let result = scan(vec![IngestorConnectorInput {
+    let result = scan(vec![SourceInput {
         path: "crates/model-harness/src/probe.rs".into(),
         source: "const TEST_BUDGET: usize = 8;".into(),
     }])

@@ -336,7 +336,7 @@ fn identical_topology_produces_identical_geometry() {
 fn branch_group_bands_hold_members_and_nothing_else() {
     let items = vec![
         card("ingestor:source"),
-        card("emitter:sink"),
+        card("emitter:emitter"),
         card("emitter:other"),
         in_group(pill("relay:branched"), "by_tenant"),
         in_group(card("junction:split"), "by_tenant"),
@@ -344,7 +344,7 @@ fn branch_group_bands_hold_members_and_nothing_else() {
     let edges = vec![
         flow("ingestor:source", "relay:branched"),
         flow("relay:branched", "junction:split"),
-        flow("junction:split", "emitter:sink"),
+        flow("junction:split", "emitter:emitter"),
         flow("ingestor:source", "emitter:other"),
     ];
     let layout = TestLayout::build(&items, &edges);

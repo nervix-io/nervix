@@ -2,8 +2,8 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The ClickHouse client Model, the table sink Model, and what it declares.
-//! - **Depends on.** The shared sink declarations and the names a body references.
+//! - **Owns.** The ClickHouse client Model, the table emitter Model, and what it declares.
+//! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The ClickHouse driver, its configuration keys, or how rows are inserted.
 
 #![cfg_attr(
@@ -92,11 +92,11 @@ impl EmitterEntityBody for ClickHouseTableEmitter {
 
 connector_emitters! {
     connector ClickHouse = "CLICKHOUSE";
-    /// What a ClickHouse sink writes.
+    /// What a ClickHouse emitter writes.
     pub enum ClickHouseEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum ClickHouseEmitterMode;
-    /// The entities a ClickHouse sink writes.
+    pub enum ClickHouseTableEmitterMode;
+    /// The entities a ClickHouse emitter writes.
     pub enum ClickHouseEmitterEntity {
         Table(ClickHouseTableEmitter, ClickHouseTablePublishingMode) = "TABLE";
     }

@@ -12,9 +12,14 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    ClickHouseTableEmitter::KIND,
+    nervix_models::EmitterEntityKind::ClickHouse(nervix_models::ClickHouseEmitterEntity::Table)
+));
+
 impl EmitterConnectorStarter {
     pub(super) fn clickhouse(
-        connector: &ClickHouseEmitterPlan,
+        connector: &ClickHouseTableEmitterPlan,
         context: &EmitterConnectorContext,
         input_schema: &CompiledSchema,
     ) -> EmitterRuntimeResult<Box<dyn EmitterConnector>> {
@@ -29,8 +34,8 @@ impl EmitterConnectorStarter {
             })?;
             Self::row(
                 projection,
-                ClickHouseEmitter::new(
-                    ClickHouseEmitterConfig {
+                ClickHouseTableEmitter::new(
+                    ClickHouseTableEmitterConfig {
                         config: connector.client.config.entries.clone(),
                         table: connector.table.clone(),
                         dns: context.dns()?,

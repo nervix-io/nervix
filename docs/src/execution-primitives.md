@@ -226,7 +226,7 @@ names in any `justfile` recipe, Cargo configuration, workflow or build script. T
 unstable runtime controls belong to the Turmoil build: the check rejects `--cfg tokio_unstable` in
 any `justfile` recipe but a Turmoil one, and in Cargo configuration, a workflow or a build script.
 
-The analysis cfg of the [ingestor contracts](./data-plane-concurrency.md#source-contracts), `nervix_lint`, is tooling only and
+The analysis cfg of the [source contracts](./data-plane-concurrency.md#source-contracts), `nervix_lint`, is tooling only and
 selects nothing. Only the analysis driver sets it, for the crates it analyzes, and the analysis must
 read the code a product build compiles. The check rejects `--cfg nervix_lint` in any `justfile`
 recipe, Cargo configuration, workflow or build script, a `cfg` or `cfg!` predicate that names it,

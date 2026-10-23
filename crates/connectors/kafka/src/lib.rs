@@ -1,4 +1,4 @@
-//! KAFKA connector for the topic entity.
+//! KafkaTopicIngestor, KafkaTopicEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public topic connector implementation surface.

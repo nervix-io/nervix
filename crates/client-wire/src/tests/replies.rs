@@ -23,8 +23,8 @@ use super::{
 use crate::{
     AttachDisposition, AttachOutcome, CancelOutcome, CancelState, CancellationStage, Choice,
     ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue, DomainInfo, DomainList,
-    DomainPaceChoice, DomainSelection, IngestorSpan, InspectionOutcome, LeaderRedirect, Reply,
-    ReplyBody, RequestCancelled, RequestRejected, RequestRejection, ServerMessage,
+    DomainPaceChoice, DomainSelection, InspectionOutcome, LeaderRedirect, Reply, ReplyBody,
+    RequestCancelled, RequestRejected, RequestRejection, ServerMessage, SourceSpan,
     SubscribeDisposition, SubscribeOutcome, SubscriptionOpened, SubscriptionType, SuggestOutcome,
     Suggestion, SuggestionKind, UnsubscribeDisposition, UnsubscribeOutcome, WireDecodeError,
     WireValueError, wire,
@@ -760,7 +760,7 @@ fn replies_refuse_undeclared_bodies_and_missing_request_identity() {
     );
 }
 
-fn diagnostic_reply(span: Option<wire::IngestorSpan>, grpc_uri: &str) -> bytes::Bytes {
+fn diagnostic_reply(span: Option<wire::SourceSpan>, grpc_uri: &str) -> bytes::Bytes {
     let mut builder = FlatBufferBuilder::new();
     let node = builder.create_string("node-2");
     let uri = builder.create_string(grpc_uri);
@@ -806,8 +806,8 @@ fn diagnostic_reply(span: Option<wire::IngestorSpan>, grpc_uri: &str) -> bytes::
 
 #[test]
 fn a_span_starting_at_zero_is_a_location_distinct_from_no_span() {
-    let at_start = IngestorSpan::new(0, 0).assured("an empty span at the start is ordered");
-    let first_word = IngestorSpan::new(0, 6).assured("a span from the start is ordered");
+    let at_start = SourceSpan::new(0, 0).assured("an empty span at the start is ordered");
+    let first_word = SourceSpan::new(0, 6).assured("a span from the start is ordered");
     let mut outcome = command_outcome(crate::CommandDisposition::Failed);
     outcome.diagnostics = vec![
         crate::Diagnostic {
@@ -838,13 +838,13 @@ fn a_span_starting_at_zero_is_a_location_distinct_from_no_span() {
 #[test]
 fn spans_must_be_ordered_and_endpoints_must_be_uris() {
     let frame = raw_server(diagnostic_reply(
-        Some(wire::IngestorSpan::new(4, 4)),
+        Some(wire::SourceSpan::new(4, 4)),
         "https://node-2:7443",
     ));
     assert!(ServerMessage::decode(&frame).is_ok());
 
     let frame = raw_server(diagnostic_reply(
-        Some(wire::IngestorSpan::new(5, 4)),
+        Some(wire::SourceSpan::new(5, 4)),
         "https://node-2:7443",
     ));
     assert_eq!(
@@ -854,7 +854,7 @@ fn spans_must_be_ordered_and_endpoints_must_be_uris() {
             kind: "source span",
         }
     );
-    let error = IngestorSpan::new(5, 4).expect_err("a reversed span");
+    let error = SourceSpan::new(5, 4).expect_err("a reversed span");
     assert_eq!(
         error.current_context(),
         &WireValueError::ReversedSourceSpan { start: 5, end: 4 }

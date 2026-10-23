@@ -3,9 +3,9 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The HTTP client Model, the polled request source with its delivery mode, the source
-//!   that reads an HTTP endpoint this cluster serves, the request sink Model, and what each entity
+//!   that reads an HTTP endpoint this cluster serves, the request emitter Model, and what each entity
 //!   declares.
-//! - **Depends on.** The shared source and sink declarations, expressions, the domain clock's
+//! - **Depends on.** The shared source and emitter declarations, expressions, the domain clock's
 //!   period and the names a body references.
 //! - **Must not know.** The HTTP client library, its configuration keys, how a request is built,
 //!   sent or classified, or how an endpoint is published, routed to or served.
@@ -51,7 +51,7 @@ pub struct HttpRequestIngestor {
 }
 
 /// What the connector of a HTTP REQUEST ingestor holds and how long it waits.
-const HTTP_REQUEST_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const HTTP_REQUEST_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "the response body",
         bound: BufferBound::Unbounded,
@@ -70,7 +70,7 @@ const HTTP_REQUEST_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a HTTP ENDPOINT holds and how long it waits.
-const HTTP_ENDPOINT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const HTTP_ENDPOINT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
             holds: "a request body",
@@ -98,7 +98,7 @@ const HTTP_ENDPOINT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a HTTP REQUEST emitter holds and how long it waits.
-const HTTP_REQUEST_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+const HTTP_REQUEST_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[],
     waits: &[DeclaredWait {
         wait: "a request: name resolution within half of it, each address's connection within an \
@@ -125,7 +125,7 @@ impl IngestorDeclaration for HttpRequestIngestor {
         quiesce: &[DeclaredQuiesce::SUSPEND, DeclaredQuiesce::BUFFER],
         locator: None,
         options: &[OptionDeclaration::EVERY],
-        bounds: HTTP_REQUEST_SOURCE_BOUNDS,
+        bounds: HTTP_REQUEST_INGESTOR_BOUNDS,
     };
 }
 
@@ -189,7 +189,7 @@ impl IngestorDeclaration for HttpEndpointIngestor {
         quiesce: &[DeclaredQuiesce::REJECT, DeclaredQuiesce::ENDPOINT_BUFFER],
         locator: None,
         options: &[],
-        bounds: HTTP_ENDPOINT_SOURCE_BOUNDS,
+        bounds: HTTP_ENDPOINT_INGESTOR_BOUNDS,
     };
 }
 
@@ -216,7 +216,7 @@ connector_ingestors! {
     /// What an HTTP source reads.
     pub enum HttpIngestor;
     /// The alterations of the ingestors that read an HTTP entity.
-    pub enum HttpIngestorAlteration;
+    pub enum HttpRequestIngestorAlteration;
     /// The entities an HTTP source reads.
     pub enum HttpIngestorEntity {
         Request(HttpRequestIngestor) = "REQUEST", "HTTP polling";
@@ -269,7 +269,7 @@ impl EmitterDeclaration for HttpRequestEmitter {
         ],
         envelope: &[],
         properties: &[],
-        bounds: HTTP_REQUEST_SINK_BOUNDS,
+        bounds: HTTP_REQUEST_EMITTER_BOUNDS,
     };
 }
 
@@ -288,11 +288,11 @@ impl EmitterEntityBody for HttpRequestEmitter {
 
 connector_emitters! {
     connector Http = "HTTP";
-    /// What an HTTP sink writes.
+    /// What an HTTP emitter writes.
     pub enum HttpEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum HttpEmitterMode;
-    /// The entities an HTTP sink writes.
+    pub enum HttpRequestEmitterMode;
+    /// The entities an HTTP emitter writes.
     pub enum HttpEmitterEntity {
         Request(HttpRequestEmitter, HttpRequestPublishingMode) = "REQUEST";
     }

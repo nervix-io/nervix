@@ -1,4 +1,4 @@
-//! Emitters: the sink they publish to, how they publish, and the payload they send.
+//! Emitters: the emitter they publish to, how they publish, and the payload they send.
 
 use std::{
     collections::BTreeSet,
@@ -14,8 +14,8 @@ use crate::{Arbitrary, Domain, route::RouteShape};
 const ITEMS: usize = 3;
 
 impl Arbitrary<'_> {
-    /// An emitter publishing to any sink, in a publishing mode and with a body that sink accepts,
-    /// batching where the sink requires it and optionally where it allows it.
+    /// An emitter publishing to any emitter, in a publishing mode and with a body that emitter accepts,
+    /// batching where the emitter requires it and optionally where it allows it.
     pub fn create_emitter(&mut self) -> CreateEmitter {
         let kinds = EmitterEntityKind::all().collect::<Vec<_>>();
         let count = NonZeroUsize::new(kinds.len()).assured("the vocabulary declares emitters");
@@ -23,7 +23,7 @@ impl Arbitrary<'_> {
         self.create_emitter_to(kind)
     }
 
-    /// An emitter publishing to a sink of the requested connector and entity.
+    /// An emitter publishing to an emitter of the requested connector and entity.
     pub fn create_emitter_to(&mut self, kind: EmitterEntityKind) -> CreateEmitter {
         let connector = self.emitter_entity_of(kind);
         let body = self.emitter_body(&connector);
@@ -113,7 +113,7 @@ impl Arbitrary<'_> {
         .verified("the count is at most the largest the unit's byte count allows")
     }
 
-    /// A sink of the requested connector and entity, with every clause it declares.
+    /// A emitter of the requested connector and entity, with every clause it declares.
     ///
     /// The match is exhaustive, so a new pair does not compile until the generator is taught to
     /// build it.

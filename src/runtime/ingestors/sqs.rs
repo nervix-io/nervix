@@ -1,12 +1,12 @@
-//! SQS source runtime composition.
+//! SQS ingestor runtime composition.
 //!
 //! Layer: data plane.
 //!
 //! - **Owns.** Composing the SQS connector plan with the declared acknowledgement policy and
 //!   host-owned intake.
-//! - **Depends on.** The connector source contract, the SQS connector, the node resolver, and
+//! - **Depends on.** The connector ingestor contract, the SQS connector, the node resolver, and
 //!   pre-resolved runtime execution handles.
-//! - **Must not know.** The SQS SDK, queue polling, NSPL parsing, registry validation, or
+//! - **Must not know.** The SQS SDK, queue polling, Plexus parsing, registry validation, or
 //!   placement computation.
 
 #![cfg_attr(
@@ -15,7 +15,8 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_sqs::{SqsIngestor, SqsIngestorPlan};
+use nervix_connector::IngestorConnector as _;
+use nervix_connector_sqs::{SqsQueueIngestor, SqsQueueIngestorPlan};
 
 use super::{
     super::*,
@@ -23,13 +24,18 @@ use super::{
     connector::{BrokerIngestorStart, IngestorStart},
 };
 
-impl SqsIngestorStartPlan {
+const _: () = assert!(matches!(
+    SqsQueueIngestor::KIND,
+    nervix_models::IngestorEntityKind::Sqs(nervix_models::SqsIngestorEntity::Queue)
+));
+
+impl SqsQueueIngestorStartPlan {
     pub(super) async fn compose(
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
     ) -> error_stack::Result<IngestorStart, IngestorStartError> {
-        let SqsIngestorStartPlan {
+        let SqsQueueIngestorStartPlan {
             client,
             queue,
             instances,
@@ -44,8 +50,8 @@ impl SqsIngestorStartPlan {
             );
         };
         // The plan builds its client without a request; each instance looks the queue up when it
-        // resumes, so an unreachable service is a transient source failure, not a failed start.
-        let connector = SqsIngestorPlan::new(&resolved.entries, queue, dns.clone())
+        // resumes, so an unreachable service is a transient ingestor failure, not a failed start.
+        let connector = SqsQueueIngestorPlan::new(&resolved.entries, queue, dns.clone())
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerIngestorStart {
@@ -54,13 +60,12 @@ impl SqsIngestorStartPlan {
             acknowledgement: mode.acknowledgement(),
             buffered_intake: false,
             flush_each_intake: false,
-            // Every delivery mode of this source is acknowledged: a batch the extension workers
+            // Every delivery mode of this ingestor is acknowledged: a batch the extension workers
             // refuse is rejected and delivered again, and no payload is taken in unacknowledged.
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
-            connector_label: "sqs",
         }
-        .open::<SqsIngestor>(ingestor)
+        .open::<SqsQueueIngestor>(ingestor)
         .await
     }
 }

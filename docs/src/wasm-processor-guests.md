@@ -694,7 +694,7 @@ checkpoint was confirmed by. What that means differs for guest state, for the so
   input: a guest counts buffered input as it accepts it, a checkpoint that failed at its replicas
   stays on the owner's storage, and a replica can hold a checkpoint whose acknowledgement it sent too
   late. A guest therefore applies a redelivered input again unless it recognizes the input itself.
-- **External delivery.** Output is dispatched before its checkpoint completes, so a emitter can emit
+- **External delivery.** Output is dispatched before its checkpoint completes, so an emitter can emit
   output whose input is later negatively acknowledged and redelivered, and the redelivered input
   produces that output again. Delivery through a WASM processor is at least once; see
   [ACK Semantics And Effective Delivery](emitters.md#ack-semantics-and-effective-delivery).

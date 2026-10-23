@@ -1,12 +1,12 @@
 Feature: Emitter batching configuration
-  An emitter may declare a BATCH MAX MESSAGES and MAX SIZE clause between its sink clause and its
-  flush policy. The clause is optional for every sink except ClickHouse, Postgres, MySQL and
+  An emitter may declare a BATCH MAX MESSAGES and MAX SIZE clause between its emitter clause and its
+  flush policy. The clause is optional for every emitter except ClickHouse, Postgres, MySQL and
   MongoDB, whose writes always carry several rows. It renders in SHOW CREATE and DESCRIBE, is
-  validated where it is written and against the sink and codec it applies to, and is added,
+  validated where it is written and against the emitter and codec it applies to, and is added,
   replaced or removed by ALTER EMITTER as an entity-pause change.
 
   @emitter_batching_round_trip
-  Scenario Outline: The batching clause round-trips through SHOW CREATE and DESCRIBE for every sink
+  Scenario Outline: The batching clause round-trips through SHOW CREATE and DESCRIBE for every emitter
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -273,12 +273,12 @@ Feature: Emitter batching configuration
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE ZEROMQ CLIENT sink CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
       CREATE ZEROMQ PUSH EMITTER event_emitter FROM outgoing
-        TO sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -299,7 +299,7 @@ Feature: Emitter batching configuration
       """
       CREATE ATTACHED ZEROMQ PUSH EMITTER event_emitter
         FROM outgoing
-        TO sink
+        TO emitter
           MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL
@@ -413,7 +413,7 @@ Feature: Emitter batching configuration
       | 3            |
 
   @emitter_batching_validation
-  Scenario Outline: Batching limits and the sink and codec contracts are validated
+  Scenario Outline: Batching limits and the emitter and codec contracts are validated
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -441,13 +441,13 @@ Feature: Emitter batching configuration
     When these NSPL commands fail with "<diagnostic>"
       """
       CREATE <emitter_kind> EMITTER rejected FROM outgoing
-        TO <sink>
+        TO <connector_body>
         <batch>
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 
     Examples:
-      | cluster_size | sink                                                                                                        | batch                                      | diagnostic                                                                 | emitter_kind       |
+      | cluster_size | connector_body                                                                                              | batch                                      | diagnostic                                                                 | emitter_kind       |
       | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 0 MAX SIZE 1MiB         | BATCH MAX MESSAGES must be between 1 and 65536, found 0                    | KAFKA TOPIC        |
       | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 65537 MAX SIZE 1MiB     | BATCH MAX MESSAGES must be between 1 and 65536, found 65537                | KAFKA TOPIC        |
       | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 10 MAX SIZE 0MiB        | BATCH MAX SIZE must be greater than zero                                   | KAFKA TOPIC        |

@@ -1,6 +1,6 @@
-//! The Kafka sink's publishes against librdkafka's in-process mock cluster.
+//! The Kafka emitter's publishes against librdkafka's in-process mock cluster.
 //!
-//! Each test drives the production sink through a real librdkafka producer, so a record's answer
+//! Each test drives the production emitter through a real librdkafka producer, so a record's answer
 //! is the delivery report the producer gives for it. The mock brokers answer at once unless a test
 //! delays, refuses or removes one of them.
 
@@ -37,7 +37,7 @@ use rdkafka::{
     types::{RDKafkaApiKey, RDKafkaRespErr},
 };
 
-use super::{KafkaAnswer, KafkaEmitter, KafkaEmitterConfig, KafkaQueueWaitError};
+use super::{KafkaAnswer, KafkaQueueWaitError, KafkaTopicEmitter, KafkaTopicEmitterConfig};
 
 const TOPIC: &str = "orders";
 
@@ -53,7 +53,7 @@ const PARTITION_ONE_KEY: &str = "held-1";
 const ONE_KIB_QUEUE: (&str, &str) = ("queue.buffering.max.kbytes", "1");
 
 /// A producer that holds every record it takes for two minutes before it sends a batch, so a
-/// record a `NO ACK` publish delivered is still queued when the test finishes the sink. librdkafka
+/// record a `NO ACK` publish delivered is still queued when the test finishes the emitter. librdkafka
 /// refuses a record whose linger is not shorter than its default five-minute message timeout.
 const TWO_MINUTE_LINGER: (&str, &str) = ("linger.ms", "120000");
 
@@ -70,7 +70,7 @@ const FAST_RECONNECT: [(&str, &str); 2] = [
 /// it into that queue, and larger than a [`THOUSAND_BYTE_MESSAGES`] message.
 const OVERSIZED_PAYLOAD_BYTES: usize = 2048;
 
-/// A host that records nothing, for a sink whose publishes report everything in their outcome.
+/// A host that records nothing, for an emitter whose publishes report everything in their outcome.
 struct SilentHost;
 
 impl EmitterTransientErrorStatus for SilentHost {
@@ -163,13 +163,13 @@ fn cluster(brokers: i32, partitions: i32) -> MockCluster<'static, DefaultProduce
     cluster
 }
 
-/// A sink publishing in `mode` to the test topic of `cluster`, through a client whose entries add
+/// A emitter publishing in `mode` to the test topic of `cluster`, through a client whose entries add
 /// `entries` to the cluster's bootstrap servers.
 fn connector(
     cluster: &MockCluster<'static, DefaultProducerContext>,
     entries: &[(&str, &str)],
     mode: BrokerPublishingMode,
-) -> KafkaEmitter {
+) -> KafkaTopicEmitter {
     let mut config = vec![ClientConfigEntry {
         key: "bootstrap.servers".to_string(),
         value: cluster.bootstrap_servers(),
@@ -180,12 +180,12 @@ fn connector(
             value: (*value).to_string(),
         });
     }
-    let config = KafkaEmitterConfig {
+    let config = KafkaTopicEmitterConfig {
         config,
         topic: KafkaTopicName::parse(TOPIC).expect("the test topic is a valid topic name"),
         mode,
     };
-    KafkaEmitter::new(config, EmitterHost::new(SilentHost))
+    KafkaTopicEmitter::new(config, EmitterHost::new(SilentHost))
         .expect("librdkafka accepts the test producer configuration")
 }
 
@@ -215,9 +215,9 @@ fn ids(indexes: impl IntoIterator<Item = usize>) -> BTreeSet<EmitterRecordId> {
     indexes.into_iter().map(EmitterRecordId::new).collect()
 }
 
-/// Hands `record` to `sink`'s producer as a confirmed publish does, and returns the answer that
+/// Hands `record` to `emitter`'s producer as a confirmed publish does, and returns the answer that
 /// publish would await for it.
-fn awaited_hand_over(connector: &KafkaEmitter, record: EmitterRecord) -> KafkaAnswer {
+fn awaited_hand_over(connector: &KafkaTopicEmitter, record: EmitterRecord) -> KafkaAnswer {
     let (answer, report) = oneshot::channel();
     connector
         .hand_over(&record, Some(answer))

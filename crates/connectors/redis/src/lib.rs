@@ -1,4 +1,4 @@
-//! REDIS connector for the pubsub entity.
+//! RedisPubSubIngestor, RedisPubSubEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** The public pubsub connector implementation surface.

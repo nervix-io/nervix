@@ -1,12 +1,12 @@
-//! Redis Pub/Sub source runtime composition.
+//! Redis Pub/Sub ingestor runtime composition.
 //!
 //! Layer: data plane.
 //!
 //! - **Owns.** Composing the Redis Pub/Sub connector plan with host-owned intake, whose quiesce
 //!   buffers or drops what the subscription keeps receiving.
-//! - **Depends on.** The connector source contract, the Redis connector, and pre-resolved runtime
+//! - **Depends on.** The connector ingestor contract, the Redis connector, and pre-resolved runtime
 //!   execution handles.
-//! - **Must not know.** The Redis driver, subscription lifecycle, NSPL parsing, registry
+//! - **Must not know.** The Redis driver, subscription lifecycle, Plexus parsing, registry
 //!   validation, or placement computation.
 
 #![cfg_attr(
@@ -15,6 +15,7 @@
 )]
 
 use error_stack::ResultExt as _;
+use nervix_connector::IngestorConnector as _;
 use nervix_connector_redis::{RedisPubSubIngestor, RedisPubSubIngestorPlan};
 
 use super::{
@@ -22,6 +23,11 @@ use super::{
     IngestorConnectorStartError, IngestorStartError,
     connector::{BrokerIngestorStart, IngestorStart},
 };
+
+const _: () = assert!(matches!(
+    RedisPubSubIngestor::KIND,
+    nervix_models::IngestorEntityKind::Redis(nervix_models::RedisIngestorEntity::PubSub)
+));
 
 impl RedisPubSubIngestorStartPlan {
     pub(super) async fn compose(
@@ -54,7 +60,6 @@ impl RedisPubSubIngestorStartPlan {
             // held loop would grow the node's memory without limit.
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
-            connector_label: "redis",
         }
         .open::<RedisPubSubIngestor>(ingestor)
         .await

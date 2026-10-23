@@ -194,7 +194,7 @@ not closed merely because their DNS answer expires.
 
 ## Hickory DNS 07a acceptance
 
-Both MQTT clients, a source instance's and a emitter's, install the node resolver through the
+Both MQTT clients, a source instance's and an emitter's, install the node resolver through the
 driver's supported socket hook, `MqttOptions::set_socket_connector`, in place of its default
 connector, which resolved with Tokio's `lookup_host`. The event loop asks the hook for a TCP
 stream on every connection, first and after each lost connection, so every connection resolves

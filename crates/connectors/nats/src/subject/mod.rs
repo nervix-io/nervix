@@ -1,9 +1,9 @@
-//! NATS source and sink connector.
+//! NATS ingestor and emitter connector.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The NATS connection a client configures, its reconnect delay, the queue
-//!   subscription a source reads through, core and JetStream publication, the bound the client's
+//!   subscription an ingestor reads through, core and JetStream publication, the bound the client's
 //!   `timeout_ms` sets on a core write and the records a core client still holds unflushed, the
 //!   JetStream answer each record's `PubAck` gives the confirmation window, header mapping in both
 //!   directions, and per-record rejection classification.
@@ -48,7 +48,8 @@ use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use futures_util::SinkExt;
 pub use ingestor::{
-    NatsIngestor, NatsIngestorError, NatsIngestorMessage, NatsIngestorPlan, NatsMessageHeaders,
+    NatsMessageHeaders, NatsSubjectIngestor, NatsSubjectIngestorError, NatsSubjectIngestorMessage,
+    NatsSubjectIngestorPlan,
 };
 use meticulous::OptionExt as _;
 use nervix_connector::{
@@ -69,9 +70,9 @@ use nervix_primitives::{
 
 const NATS: &str = "nats";
 
-/// Whether a NATS sink publishes through core NATS or waits for JetStream to store each record.
+/// Whether a NATS emitter publishes through core NATS or waits for JetStream to store each record.
 ///
-/// A NATS sink publishes through its own client even without an acknowledgement, so `MODE NO ACK`
+/// A NATS emitter publishes through its own client even without an acknowledgement, so `MODE NO ACK`
 /// decides [`NatsPublishingMode::Core`] rather than a broker mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NatsPublishingMode {
@@ -79,22 +80,22 @@ pub enum NatsPublishingMode {
     JetStream(AckConfirmation),
 }
 
-/// What one NATS sink publishes through: its client entries, subject, delivery and reconnect
+/// What one NATS emitter publishes through: its client entries, subject, delivery and reconnect
 /// backoff.
-pub struct NatsEmitterConfig {
+pub struct NatsSubjectEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub subject: NatsPublishSubjectName,
     pub mode: NatsPublishingMode,
     pub retry_policy: ParsedRetryPolicy,
 }
 
-pub struct NatsEmitter {
+pub struct NatsSubjectEmitter {
     client: NatsClient,
     delivery: NatsDelivery,
     subject: Subject,
 }
 
-/// How this sink publishes, together with whatever that way of publishing needs.
+/// How this emitter publishes, together with whatever that way of publishing needs.
 ///
 /// A JetStream context exists only for `MODE ACK`, and the bound and the unflushed records of a
 /// core write only for `MODE NO ACK`, so pairing each with the mode that requires it means the
@@ -133,13 +134,13 @@ impl NatsDelivery {
     }
 }
 
-/// The core writes of one sink: the bound the client's `timeout_ms` sets on each, and the records
+/// The core writes of one emitter: the bound the client's `timeout_ms` sets on each, and the records
 /// the client took that it has not flushed to its socket.
 ///
 /// A core write hands its records to the client and delivers them once the client flushed them to
 /// its socket; the server answers nothing. A write that runs out of `timeout_ms` before its flush
 /// completes leaves its records with the client, which still sends them once its connection drains
-/// or reconnects, so the sink counts them until a flush completes.
+/// or reconnects, so the emitter counts them until a flush completes.
 struct CoreWrites {
     /// The client's `timeout_ms`, which bounds each write, the hand-over and the flush included.
     /// Without the key a write waits for its flush.
@@ -217,7 +218,7 @@ impl CoreWrites {
             let headers = if record.headers.is_empty() {
                 None
             } else {
-                Some(NatsEmitter::header_map(&record.headers))
+                Some(NatsSubjectEmitter::header_map(&record.headers))
             };
             let result = connector
                 .feed(OutboundMessage {
@@ -234,14 +235,14 @@ impl CoreWrites {
                         "the records one client holds are in memory, far fewer than u64 counts",
                     );
                 }
-                Err(error) if NatsEmitter::is_core_record_rejection(&error) => {
+                Err(error) if NatsSubjectEmitter::is_core_record_rejection(&error) => {
                     outcome.reject(RejectedEmitterMember::external(
                         record_id,
                         occurred_at,
                         format!("nats rejected record: {error}"),
                     ));
                 }
-                Err(error) => return Err(NatsEmitter::publish_error(error)),
+                Err(error) => return Err(NatsSubjectEmitter::publish_error(error)),
             }
         }
         Self::flush(client).await?;
@@ -252,11 +253,14 @@ impl CoreWrites {
     /// Flushes `client`'s connection, which writes everything handed to the client before it to
     /// the client's socket.
     async fn flush(client: &NatsClient) -> Result<(), Report<EmitterWriteError>> {
-        client.flush().await.map_err(NatsEmitter::publish_error)
+        client
+            .flush()
+            .await
+            .map_err(NatsSubjectEmitter::publish_error)
     }
 
     /// The failure of a write that ran out of the client's `timeout_ms`. An emitter shows the
-    /// message its sink attached, so the deadline leads.
+    /// message its emitter attached, so the deadline leads.
     fn elapsed(timeout: ConfiguredDeadline) -> Report<EmitterWriteError> {
         let elapsed = timeout.elapsed(CORE_WRITE);
         Report::new(elapsed)
@@ -290,8 +294,11 @@ impl CoreWrites {
     }
 }
 
-impl NatsEmitter {
-    pub async fn new(config: NatsEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
+impl NatsSubjectEmitter {
+    pub async fn new(
+        config: NatsSubjectEmitterConfig,
+        _host: EmitterHost,
+    ) -> EmitterStartResult<Self> {
         // Read before the client connects, so a value that breaks the deadline rule fails the
         // start as configuration whether or not the server answers.
         let write_timeout = Self::write_timeout(&config.config)?;
@@ -536,8 +543,17 @@ impl NatsEmitter {
     }
 }
 
+impl NatsSubjectEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::Nats(nervix_models::NatsEmitterEntity::Subject);
+}
+
 #[async_trait]
-impl EmitterLifecycle for NatsEmitter {
+impl EmitterLifecycle for NatsSubjectEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// A core write delivers its records once the client flushed them, so the client holds
     /// records only after a write ran out of `timeout_ms`, and finishing flushes them by
     /// `deadline`. JetStream answers each record, so its client holds nothing a publish reported
@@ -557,7 +573,7 @@ impl EmitterLifecycle for NatsEmitter {
 }
 
 #[async_trait]
-impl RecordEmitter for NatsEmitter {
+impl RecordEmitter for NatsSubjectEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         match &mut self.delivery {
             NatsDelivery::Core(writes) => {
@@ -607,9 +623,9 @@ mod tests {
             .expect("thirty seconds from now is within the monotonic clock's range")
     }
 
-    /// A core sink publishing to subject `events` through the server at `addr`, with the client
+    /// A core emitter publishing to subject `events` through the server at `addr`, with the client
     /// entries `config` adds to its address.
-    async fn core_emitter(addr: &str, config: &[(&str, &str)]) -> NatsEmitter {
+    async fn core_emitter(addr: &str, config: &[(&str, &str)]) -> NatsSubjectEmitter {
         let policy = ParsedRetryPolicy {
             backoff: Duration::from_millis(50),
             max_backoff: Duration::from_millis(200),
@@ -624,22 +640,22 @@ mod tests {
                 value: (*value).to_string(),
             });
         }
-        let write_timeout =
-            NatsEmitter::write_timeout(&entries).expect("the checks configure a valid timeout_ms");
-        let client = NatsEmitter::client_from_config(&entries, policy)
+        let write_timeout = NatsSubjectEmitter::write_timeout(&entries)
+            .expect("the checks configure a valid timeout_ms");
+        let client = NatsSubjectEmitter::client_from_config(&entries, policy)
             .await
-            .expect("the sink connects to the scripted server");
-        NatsEmitter {
+            .expect("the emitter connects to the scripted server");
+        NatsSubjectEmitter {
             delivery: NatsDelivery::Core(CoreWrites::new(write_timeout)),
             client,
             subject: Subject::from("events"),
         }
     }
 
-    /// A core sink whose server went down after the sink connected: the server ended the
+    /// A core emitter whose server went down after the emitter connected: the server ended the
     /// connection and refuses every one its client opens to reconnect, until it comes back.
     struct StrandedEmitter {
-        connector: NatsEmitter,
+        connector: NatsSubjectEmitter,
         server: DownServer,
     }
 
@@ -674,9 +690,9 @@ mod tests {
         );
     }
 
-    /// A JetStream sink publishing to subject `events` through the server at `addr`, with at most
+    /// A JetStream emitter publishing to subject `events` through the server at `addr`, with at most
     /// `max_in_flight` records awaiting their `PubAck` at once.
-    async fn jetstream_emitter(addr: &str, max_in_flight: usize) -> NatsEmitter {
+    async fn jetstream_emitter(addr: &str, max_in_flight: usize) -> NatsSubjectEmitter {
         let policy = ParsedRetryPolicy {
             backoff: Duration::from_millis(100),
             max_backoff: Duration::from_secs(1),
@@ -685,14 +701,14 @@ mod tests {
             key: "addr".to_string(),
             value: addr.to_string(),
         }];
-        let client = NatsEmitter::client_from_config(&config, policy)
+        let client = NatsSubjectEmitter::client_from_config(&config, policy)
             .await
-            .expect("the sink connects to the scripted server");
+            .expect("the emitter connects to the scripted server");
         let confirmation = AckConfirmation {
             max_in_flight: NonZeroUsize::new(max_in_flight).expect("a window holds a record"),
             timeout: Duration::from_secs(30),
         };
-        NatsEmitter {
+        NatsSubjectEmitter {
             delivery: NatsDelivery::jetstream(confirmation, &client),
             client,
             subject: Subject::from("events"),
@@ -985,7 +1001,7 @@ mod tests {
         );
     }
 
-    /// Finishing a core sink whose write ran out of `timeout_ms` flushes what its client still
+    /// Finishing a core emitter whose write ran out of `timeout_ms` flushes what its client still
     /// holds by the finish deadline, which sends the record once the server is back.
     #[nervix_primitives::test]
     async fn finishing_a_core_emitter_sends_what_a_stalled_write_left_with_its_client() {
@@ -1017,7 +1033,7 @@ mod tests {
         assert_eq!(message, b"held");
     }
 
-    /// Finishing a core sink whose client still holds the records of a write that ran out of
+    /// Finishing a core emitter whose client still holds the records of a write that ran out of
     /// `timeout_ms` when the finish deadline passes counts them.
     #[nervix_primitives::test]
     async fn finishing_a_core_emitter_counts_what_its_client_still_holds_at_the_deadline() {
@@ -1121,7 +1137,7 @@ mod tests {
         assert_eq!(message, b"waited");
     }
 
-    /// Finishing a core sink whose client closed while it still held a record reports the
+    /// Finishing a core emitter whose client closed while it still held a record reports the
     /// client's failure with the driver's flush error beneath.
     #[nervix_primitives::test]
     async fn finishing_a_core_emitter_whose_client_closed_reports_its_failed_flush() {
@@ -1178,7 +1194,7 @@ mod tests {
     }
 
     /// Every record of a completed core write was flushed to the client's socket, so finishing
-    /// the sink has nothing to send.
+    /// the emitter has nothing to send.
     #[nervix_primitives::test]
     async fn finishing_a_core_emitter_whose_writes_flushed_has_nothing_to_send() {
         let server = ScriptedServer::start().await;
@@ -1206,7 +1222,7 @@ mod tests {
 
     #[test]
     fn a_core_write_takes_the_bound_the_clients_timeout_ms_sets() {
-        let configured = NatsEmitter::write_timeout(&[ClientConfigEntry {
+        let configured = NatsSubjectEmitter::write_timeout(&[ClientConfigEntry {
             key: "timeout_ms".to_string(),
             value: "1500".to_string(),
         }])
@@ -1215,7 +1231,8 @@ mod tests {
         assert_eq!(configured.key(), DeadlineKey::Timeout);
         assert_eq!(configured.bound(), Duration::from_millis(1500));
 
-        let omitted = NatsEmitter::write_timeout(&[]).expect("a client may leave timeout_ms out");
+        let omitted =
+            NatsSubjectEmitter::write_timeout(&[]).expect("a client may leave timeout_ms out");
         assert_eq!(
             omitted, None,
             "without the key a core write waits for its flush"
@@ -1225,7 +1242,7 @@ mod tests {
     #[test]
     fn a_timeout_ms_that_breaks_the_deadline_rule_fails_the_start_as_configuration() {
         for value in ["0", "-1", "1.5", "1s", ""] {
-            let failure = NatsEmitter::write_timeout(&[ClientConfigEntry {
+            let failure = NatsSubjectEmitter::write_timeout(&[ClientConfigEntry {
                 key: "timeout_ms".to_string(),
                 value: value.to_string(),
             }])
@@ -1252,22 +1269,28 @@ mod tests {
         let oversized = NatsPublishError::new(NatsPublishErrorKind::MaxPayloadExceeded);
         let invalid_subject = NatsPublishError::new(NatsPublishErrorKind::InvalidSubject);
 
-        assert!(NatsEmitter::is_core_record_rejection(&oversized));
-        assert!(!NatsEmitter::is_core_record_rejection(&invalid_subject));
+        assert!(NatsSubjectEmitter::is_core_record_rejection(&oversized));
+        assert!(!NatsSubjectEmitter::is_core_record_rejection(
+            &invalid_subject
+        ));
     }
 
     #[test]
     fn missing_jetstream_is_infrastructure_not_record_rejection() {
         let error = JetStreamPublishError::new(PublishErrorKind::StreamNotFound);
-        assert!(NatsEmitter::jetstream_error_is_missing_stream(&error));
-        assert!(!NatsEmitter::is_jetstream_record_rejection(&error));
+        assert!(NatsSubjectEmitter::jetstream_error_is_missing_stream(
+            &error
+        ));
+        assert!(!NatsSubjectEmitter::is_jetstream_record_rejection(&error));
     }
 
     #[test]
     fn oversized_jetstream_payload_is_a_record_rejection() {
         let error = JetStreamPublishError::new(PublishErrorKind::MaxPayloadExceeded);
-        assert!(NatsEmitter::is_jetstream_record_rejection(&error));
-        assert!(!NatsEmitter::jetstream_error_is_missing_stream(&error));
+        assert!(NatsSubjectEmitter::is_jetstream_record_rejection(&error));
+        assert!(!NatsSubjectEmitter::jetstream_error_is_missing_stream(
+            &error
+        ));
     }
 
     /// The first printable attachment of `failure`: the description an emitter shows as its
@@ -1288,14 +1311,14 @@ mod tests {
     fn a_pub_ack_confirms_the_record() {
         let ack = serde_json::from_str::<PublishAck>(r#"{"stream":"events","seq":7}"#)
             .expect("a PubAck names its stream and sequence");
-        let answer = NatsEmitter::broker_answer(Ok(ack));
+        let answer = NatsSubjectEmitter::broker_answer(Ok(ack));
         assert!(matches!(answer, Ok(BrokerVerdict::Confirmed)));
     }
 
     #[test]
     fn an_oversized_message_is_refused_for_good() {
         let error = JetStreamPublishError::new(PublishErrorKind::MaxPayloadExceeded);
-        let answer = NatsEmitter::broker_answer(Err(error));
+        let answer = NatsSubjectEmitter::broker_answer(Err(error));
         let Ok(BrokerVerdict::Rejected { message }) = answer else {
             panic!("a message above max_payload is refused for good");
         };
@@ -1308,7 +1331,7 @@ mod tests {
     #[test]
     fn a_failed_pub_ack_leaves_the_record_unresolved_with_its_typed_cause() {
         let error = JetStreamPublishError::new(PublishErrorKind::StreamNotFound);
-        let Err(failure) = NatsEmitter::broker_answer(Err(error)) else {
+        let Err(failure) = NatsSubjectEmitter::broker_answer(Err(error)) else {
             panic!("a missing stream leaves the record's outcome unknown");
         };
         assert!(matches!(
@@ -1327,8 +1350,9 @@ mod tests {
 
     #[test]
     fn a_refused_hand_over_describes_the_client_failure() {
-        let failure =
-            NatsEmitter::refused_hand_over(JetStreamPublishError::new(PublishErrorKind::TimedOut));
+        let failure = NatsSubjectEmitter::refused_hand_over(JetStreamPublishError::new(
+            PublishErrorKind::TimedOut,
+        ));
         assert!(matches!(
             failure.current_context(),
             EmitterWriteError::Publish { connector: NATS }
@@ -1354,27 +1378,27 @@ mod tests {
         };
 
         assert_eq!(
-            NatsEmitter::connection_delay(policy, 1, false),
+            NatsSubjectEmitter::connection_delay(policy, 1, false),
             Duration::ZERO
         );
         assert_eq!(
-            NatsEmitter::connection_delay(policy, 2, false),
+            NatsSubjectEmitter::connection_delay(policy, 2, false),
             Duration::from_millis(125)
         );
         assert_eq!(
-            NatsEmitter::connection_delay(policy, 1, true),
+            NatsSubjectEmitter::connection_delay(policy, 1, true),
             Duration::from_millis(125)
         );
         assert_eq!(
-            NatsEmitter::connection_delay(policy, 2, true),
+            NatsSubjectEmitter::connection_delay(policy, 2, true),
             Duration::from_millis(250)
         );
         assert_eq!(
-            NatsEmitter::connection_delay(policy, 4, true),
+            NatsSubjectEmitter::connection_delay(policy, 4, true),
             Duration::from_secs(1)
         );
         assert_eq!(
-            NatsEmitter::connection_delay(policy, 50, true),
+            NatsSubjectEmitter::connection_delay(policy, 50, true),
             Duration::from_secs(1)
         );
     }

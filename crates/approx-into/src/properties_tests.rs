@@ -208,7 +208,7 @@ impl Exact {
 }
 
 /// An integer type the conversions read, built from the low bytes of generated bits.
-trait IngestorInteger: Copy + std::fmt::Debug {
+trait SourceInteger: Copy + std::fmt::Debug {
     fn from_raw(raw: u128) -> Self;
 
     fn exact(self) -> Exact;
@@ -216,7 +216,7 @@ trait IngestorInteger: Copy + std::fmt::Debug {
 
 macro_rules! source_integer {
     ($($native:ty),+ $(,)?) => {$(
-        impl IngestorInteger for $native {
+        impl SourceInteger for $native {
             fn from_raw(raw: u128) -> Self {
                 let bytes = raw.to_le_bytes();
                 let (low, _) = bytes.split_at(size_of::<Self>());

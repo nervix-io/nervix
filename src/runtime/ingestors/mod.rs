@@ -1,13 +1,13 @@
-//! The source composition root, and the one start path every ingestor takes.
+//! The ingestor composition root, and the one start path every ingestor takes.
 //!
 //! Layer: data plane.
 //!
 //! - **Owns.** Starting an ingestor: preparing its quiescence, refusing a second start, compiling
 //!   its dependencies, and mapping its input plan to the connector that runs a transport or to the
-//!   client source the node hosts, which is the only place an input plan's kind selects anything.
-//! - **Depends on.** Ingestor start plans, the host source launcher, every source connector, and
+//!   client ingestor the node hosts, which is the only place an input plan's kind selects anything.
+//! - **Depends on.** Ingestor start plans, the host ingestor launcher, every ingestor connector, and
 //!   the endpoint and client sources the server keeps.
-//! - **Must not know.** NSPL parsing, registry validation, or placement computation.
+//! - **Must not know.** Plexus parsing, registry validation, or placement computation.
 
 #![cfg_attr(
     nervix_lint,
@@ -32,7 +32,7 @@ pub(in crate::runtime) mod nats;
 pub(in crate::runtime) mod prometheus;
 pub(in crate::runtime) mod pulsar;
 pub(in crate::runtime) mod rabbitmq;
-pub(in crate::runtime) mod redis_pubsub;
+pub(in crate::runtime) mod redis;
 pub(in crate::runtime) mod sqs;
 pub(in crate::runtime) mod syslog;
 pub(in crate::runtime) mod websockets;
@@ -41,8 +41,8 @@ pub(in crate::runtime) mod zeromq;
 /// Why this node could not start an ingestor.
 ///
 /// Every failure names the ingestor, or the domain and codec it binds. A failure to initialize the
-/// ingestor's source is [`IngestorStartError::Initialize`], with the cause beneath it: a
-/// [`IngestorConnectorStartError`], or the report of the client configuration, connector plan, source
+/// ingestor's ingestor is [`IngestorStartError::Initialize`], with the cause beneath it: a
+/// [`IngestorConnectorStartError`], or the report of the client configuration, connector plan, ingestor
 /// instance or domain cadence that failed.
 #[derive(Debug, Error)]
 pub(crate) enum IngestorStartError {
@@ -73,9 +73,9 @@ pub(crate) enum IngestorStartError {
     },
 }
 
-/// Why an ingestor's client configuration could not resolve or its source could not be composed
+/// Why an ingestor's client configuration could not resolve or its ingestor could not be composed
 /// or opened on this node. Startup wraps it in [`IngestorStartError::Initialize`]; retirement
-/// wraps it in [`RuntimeError::RetireIngestorSource`].
+/// wraps it in [`RuntimeError::RetireIngestorEntity`].
 #[derive(Debug, Error)]
 pub(crate) enum IngestorConnectorStartError {
     #[error("failed to resolve the source's client configuration")]
@@ -125,13 +125,15 @@ impl Runtime {
             return Ok(());
         };
         match &input.source {
-            IngestorConnectorPlan::Mqtt(source) => {
+            IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) => {
                 let replacement = match retirement.replacement.as_deref() {
                     Some(IngestorStartPlan {
                         input: IngestorInputPlan::Transport(input),
                         ..
                     }) => {
-                        if let IngestorConnectorPlan::Mqtt(source) = &input.source {
+                        if let IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) =
+                            &input.source
+                        {
                             Some(source)
                         } else {
                             None
@@ -143,13 +145,16 @@ impl Runtime {
                     .retire_before(self, &retirement.previous.ingestor, replacement)
                     .await
             }
-            IngestorConnectorPlan::Pulsar(source) => {
+            IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(source)) => {
                 let replacement = match retirement.replacement.as_deref() {
                     Some(IngestorStartPlan {
                         input: IngestorInputPlan::Transport(input),
                         ..
                     }) => {
-                        if let IngestorConnectorPlan::Pulsar(source) = &input.source {
+                        if let IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(
+                            source,
+                        )) = &input.source
+                        {
                             Some(source)
                         } else {
                             None
@@ -165,24 +170,25 @@ impl Runtime {
                 }
                 Ok(())
             }
-            IngestorConnectorPlan::Http(_)
-            | IngestorConnectorPlan::Kafka(_)
-            | IngestorConnectorPlan::Nats(_)
-            | IngestorConnectorPlan::RabbitMq(_)
-            | IngestorConnectorPlan::RedisPubSub(_)
-            | IngestorConnectorPlan::Prometheus(_)
-            | IngestorConnectorPlan::ZeroMq(_)
-            | IngestorConnectorPlan::Sqs(_)
-            | IngestorConnectorPlan::Endpoint(_)
-            | IngestorConnectorPlan::Websockets(_)
-            | IngestorConnectorPlan::Syslog(_) => Ok(()),
+            IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(_))
+            | IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(_))
+            | IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(_))
+            | IngestorConnectorPlan::RabbitMq(RabbitMqIngestorStartPlan::Queue(_))
+            | IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(_))
+            | IngestorConnectorPlan::Prometheus(PrometheusIngestorStartPlan::Query(_))
+            | IngestorConnectorPlan::ZeroMq(ZeroMqIngestorStartPlan::Pull(_))
+            | IngestorConnectorPlan::Sqs(SqsIngestorStartPlan::Queue(_))
+            | IngestorConnectorPlan::Http(HttpIngestorStartPlan::Endpoint(_))
+            | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Endpoint(_))
+            | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Connection(_))
+            | IngestorConnectorPlan::Syslog(SyslogIngestorStartPlan::Listener(_)) => Ok(()),
         }
     }
 
-    /// Starts one ingestor. Every source takes this path.
+    /// Starts one ingestor. Every ingestor takes this path.
     ///
-    /// Everything that can fail comes first: the ingestor's dependencies compile and its source
-    /// plan composes into opened connector instances. Only then does the host register the source
+    /// Everything that can fail comes first: the ingestor's dependencies compile and its ingestor
+    /// plan composes into opened connector instances. Only then does the host register the ingestor
     /// and start its tasks, so an ingestor that cannot start leaves nothing running behind it.
     pub(in crate::runtime) async fn start_ingestor(
         &self,
@@ -204,26 +210,55 @@ impl Runtime {
         let (codec, source) = match input {
             BoundIngestorInput::Transport { codec, source } => (codec, source),
             BoundIngestorInput::Client { plan, generation } => {
-                self.host_client_source(ingestor, &plan, generation, quiesce, dependencies);
+                self.host_client_ingestor(ingestor, &plan, generation, quiesce, dependencies);
                 return Ok(());
             }
         };
         let source = match source {
-            IngestorConnectorPlan::Http(plan) => plan.compose(self, ingestor).await?,
-            IngestorConnectorPlan::Kafka(plan) => plan.compose(self, ingestor).await?,
-            IngestorConnectorPlan::Pulsar(plan) => plan.compose(self, ingestor).await?,
-            IngestorConnectorPlan::Mqtt(plan) => plan.compose(self, ingestor).await?,
-            IngestorConnectorPlan::Nats(plan) => plan.compose(self, ingestor).await?,
-            IngestorConnectorPlan::RabbitMq(plan) => plan.compose(self, ingestor).await?,
-            IngestorConnectorPlan::RedisPubSub(plan) => plan.compose(self, ingestor).await?,
-            IngestorConnectorPlan::Prometheus(plan) => plan.compose(self, ingestor).await?,
-            IngestorConnectorPlan::ZeroMq(plan) => plan.compose(self, ingestor).await?,
-            IngestorConnectorPlan::Sqs(plan) => plan.compose(self, ingestor).await?,
-            IngestorConnectorPlan::Endpoint(plan) => plan.compose(self, ingestor).await?,
-            IngestorConnectorPlan::Websockets(plan) => plan.compose(self, ingestor).await?,
-            IngestorConnectorPlan::Syslog(plan) => plan.compose(self, ingestor).await?,
+            IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::RabbitMq(RabbitMqIngestorStartPlan::Queue(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::Prometheus(PrometheusIngestorStartPlan::Query(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::ZeroMq(ZeroMqIngestorStartPlan::Pull(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::Sqs(SqsIngestorStartPlan::Queue(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::Http(HttpIngestorStartPlan::Endpoint(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Endpoint(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Connection(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::Syslog(SyslogIngestorStartPlan::Listener(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
         };
-        self.host_source(ingestor, quiesce, dependencies, codec, source);
+        self.host_ingestor(ingestor, quiesce, dependencies, codec, source);
         Ok(())
     }
 }
@@ -254,7 +289,7 @@ mod tests {
         T::try_from(value.to_string()).assured("the fixture name is valid")
     }
 
-    /// The entrypoint plans of a domain whose one ingestor, `source`, reads `source` through
+    /// The entrypoint plans of a domain whose one ingestor, `ingestor`, reads `ingestor` through
     /// `client_model` with a JSON codec into the relay `events`.
     fn planned_source_ingestor(
         domain: &DomainName,
@@ -537,22 +572,22 @@ mod tests {
                 panic!("the fixture ingestor reads a transport");
             };
             let result = match transport.source.clone() {
-                IngestorConnectorPlan::Http(source) => {
+                IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(source)) => {
                     source.compose(&runtime, &plan.ingestor).await
                 }
-                IngestorConnectorPlan::Prometheus(source) => {
+                IngestorConnectorPlan::Prometheus(PrometheusIngestorStartPlan::Query(source)) => {
                     source.compose(&runtime, &plan.ingestor).await
                 }
-                IngestorConnectorPlan::RabbitMq(source) => {
+                IngestorConnectorPlan::RabbitMq(RabbitMqIngestorStartPlan::Queue(source)) => {
                     source.compose(&runtime, &plan.ingestor).await
                 }
-                IngestorConnectorPlan::RedisPubSub(source) => {
+                IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(source)) => {
                     source.compose(&runtime, &plan.ingestor).await
                 }
-                IngestorConnectorPlan::Mqtt(source) => {
+                IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) => {
                     source.compose(&runtime, &plan.ingestor).await
                 }
-                IngestorConnectorPlan::Sqs(source) => {
+                IngestorConnectorPlan::Sqs(SqsIngestorStartPlan::Queue(source)) => {
                     source.compose(&runtime, &plan.ingestor).await
                 }
                 _ => panic!("the fixture only includes sources that resolve names"),
@@ -593,7 +628,7 @@ mod tests {
         }
     }
 
-    /// Composes the ZeroMQ ingestor `source` of domain `sales`, which reads `client`.
+    /// Composes the ZeroMQ ingestor `ingestor` of domain `sales`, which reads `client`.
     async fn compose_zeromq_source(
         runtime: &Runtime,
         client: CreateClientZeroMq,
@@ -611,7 +646,9 @@ mod tests {
         let IngestorInputPlan::Transport(transport) = &plan.input else {
             panic!("the fixture ingestor reads a transport");
         };
-        let IngestorConnectorPlan::ZeroMq(zeromq) = transport.source.clone() else {
+        let IngestorConnectorPlan::ZeroMq(ZeroMqIngestorStartPlan::Pull(zeromq)) =
+            transport.source.clone()
+        else {
             panic!("the fixture ingestor reads a ZeroMQ client");
         };
         zeromq.compose(runtime, &plan.ingestor).await

@@ -12,9 +12,14 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    MqttTopicEmitter::KIND,
+    nervix_models::EmitterEntityKind::Mqtt(nervix_models::MqttEmitterEntity::Topic)
+));
+
 impl EmitterConnectorStarter {
     pub(super) fn mqtt(
-        connector: &MqttEmitterPlan,
+        connector: &MqttTopicEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
         label: &str,
@@ -25,8 +30,8 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            MqttEmitter::new(
-                MqttEmitterConfig {
+            MqttTopicEmitter::new(
+                MqttTopicEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     topic: connector.topic.clone(),
                     mode: connector.mode,

@@ -20,7 +20,7 @@
 //! connect leaves time for the next. An `amqps` connection then completes its TLS handshake within
 //! what is left, verifying the broker certificate against the host the address names, whichever of
 //! its addresses was dialled. Only then does Lapin start, and it runs the AMQP handshake over that
-//! transport within what is still left. The source or sink then opens the channel it reads or
+//! transport within what is still left. The ingestor or emitter then opens the channel it reads or
 //! publishes through within the rest, so `connect_timeout_ms` bounds every step before the entity
 //! is ready, and a connection that runs out of it at any step is reported naming the key and its
 //! bound.

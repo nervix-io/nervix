@@ -73,12 +73,12 @@ Feature: Altering emitters
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ZEROMQ CLIENT sink CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
       CREATE ZEROMQ PUSH EMITTER event_emitter FROM outgoing
-        TO sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH EACH 30s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;

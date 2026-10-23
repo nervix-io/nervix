@@ -1,6 +1,6 @@
 Feature: Redis name resolution
 
-  Scenario Outline: Redis source and sink use the node DNS fixture over <scheme>
+  Scenario Outline: Redis source and emitter use the node DNS fixture over <scheme>
     Given Redis is running
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started

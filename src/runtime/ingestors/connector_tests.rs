@@ -1,9 +1,9 @@
-//! The broker and paced source loops exercised through their host contract.
+//! The broker and paced ingestor loops exercised through their host contract.
 //!
 //! Layer: test harness.
-//! - **Owns.** Source and host doubles and the source-loop policy, acknowledgement, replay,
+//! - **Owns.** Ingestor and host doubles and the ingestor-loop policy, acknowledgement, replay,
 //!   quiesce, flush and configuration-refresh regressions they drive.
-//! - **Depends on.** The production source loops and the connector source contract.
+//! - **Depends on.** The production ingestor loops and the connector ingestor contract.
 //! - **Must not know.** Broker drivers, registry validation or placement computation.
 
 #![cfg_attr(
@@ -83,7 +83,7 @@ impl IngestorMessage for FakeMessage {
     }
 }
 
-struct FakeSource {
+struct FakeIngestor {
     messages: VecDeque<FakeMessage>,
     resume_required: bool,
     resume_results: VecDeque<IngestorResult<IngestorResume>>,
@@ -97,7 +97,10 @@ struct FakeSource {
 }
 
 #[async_trait]
-impl IngestorConnector for FakeSource {
+impl IngestorConnector for FakeIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic);
+
     type Plan = ();
 
     async fn open(_plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
@@ -138,7 +141,7 @@ impl IngestorConnector for FakeSource {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for FakeSource {
+impl BrokerIngestorConnector for FakeIngestor {
     type Message = FakeMessage;
     type Position = u64;
 
@@ -383,7 +386,7 @@ async fn run_policy_with_refresh(
     resume_required: bool,
 ) -> Arc<Mutex<IngestorLoopObservations>> {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
-    let source = FakeSource {
+    let source = FakeIngestor {
         messages: three_messages(),
         resume_required,
         resume_results: VecDeque::new(),
@@ -396,7 +399,7 @@ async fn run_policy_with_refresh(
     };
     let host = IngestorHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    run_source_instance_with_retry(source, host, replayable(policy), shutdown_rx).await;
+    run_ingestor_instance_with_retry(source, host, replayable(policy), shutdown_rx).await;
     drop(shutdown_tx);
     observations
 }
@@ -412,8 +415,8 @@ fn retry_policy() -> nervix_connector::ParsedRetryPolicy {
     }
 }
 
-fn empty_source(observations: Arc<Mutex<IngestorLoopObservations>>) -> FakeSource {
-    FakeSource {
+fn empty_source(observations: Arc<Mutex<IngestorLoopObservations>>) -> FakeIngestor {
+    FakeIngestor {
         messages: VecDeque::new(),
         resume_required: false,
         resume_results: VecDeque::new(),
@@ -427,7 +430,7 @@ fn empty_source(observations: Arc<Mutex<IngestorLoopObservations>>) -> FakeSourc
 }
 
 #[async_trait]
-impl PacedIngestorConnector for FakeSource {
+impl PacedIngestorConnector for FakeIngestor {
     async fn poll(&mut self, _scheduled_at: Timestamp) -> IngestorResult<IngestorPoll> {
         panic!("the failed cadence ends the loop before its source is polled")
     }
@@ -435,12 +438,15 @@ impl PacedIngestorConnector for FakeSource {
 
 struct FailedCadence;
 
-struct FailedPacedSource {
+struct FailedPacedIngestor {
     shutdown: watch::Sender<bool>,
 }
 
 #[async_trait]
-impl IngestorConnector for FailedPacedSource {
+impl IngestorConnector for FailedPacedIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic);
+
     type Plan = ();
 
     async fn open(_plan: &(), _instance_index: u64) -> IngestorResult<Self> {
@@ -467,7 +473,7 @@ impl IngestorConnector for FailedPacedSource {
 }
 
 #[async_trait]
-impl PacedIngestorConnector for FailedPacedSource {
+impl PacedIngestorConnector for FailedPacedIngestor {
     async fn poll(&mut self, _scheduled_at: Timestamp) -> IngestorResult<IngestorPoll> {
         self.shutdown.send_replace(true);
         Err(
@@ -495,10 +501,10 @@ impl PacedIngestorCadence for SingleOccurrenceCadence {
 }
 
 #[nervix_primitives::test]
-async fn runtime_report_chain_source_lifecycle() {
+async fn runtime_report_chain_ingestor_lifecycle() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
     let (shutdown_tx, mut shutdown) = watch::channel(false);
-    let mut source = FailedPacedSource {
+    let mut source = FailedPacedIngestor {
         shutdown: shutdown_tx,
     };
     let mut host = FakeHost::running(observations.clone());
@@ -510,7 +516,7 @@ async fn runtime_report_chain_source_lifecycle() {
         PacedIngestorAction::Restart
     );
     host.suspend_intake = false;
-    run_paced_source(
+    run_paced_ingestor(
         source,
         host,
         SingleOccurrenceCadence {
@@ -524,14 +530,14 @@ async fn runtime_report_chain_source_lifecycle() {
     let observations = observations.lock();
     assert_eq!(
         observations.poll_errors,
-        ["failed to read from fake source: the connection refused the poll"]
+        ["failed to read from fake ingestor: the connection refused the poll"]
     );
     assert_eq!(
         observations.reported_errors,
         [
-            "failed to suspend fake source: could not pause the connection",
-            "failed to read from fake source: the connection refused the poll",
-            "failed to close fake source: could not finish the connection",
+            "failed to suspend fake ingestor: could not pause the connection",
+            "failed to read from fake ingestor: the connection refused the poll",
+            "failed to close fake ingestor: could not finish the connection",
         ]
     );
 }
@@ -558,7 +564,7 @@ async fn runtime_report_chain_source_cadence() {
     let host = FakeHost::running(observations.clone());
     let (_shutdown_tx, shutdown) = watch::channel(false);
 
-    run_paced_source(source, host, FailedCadence, NonZeroUsize::MIN, shutdown).await;
+    run_paced_ingestor(source, host, FailedCadence, NonZeroUsize::MIN, shutdown).await;
 
     let observations = observations.lock();
     assert_eq!(
@@ -573,7 +579,7 @@ async fn runtime_report_chain_source_cadence() {
 }
 
 #[nervix_primitives::test]
-async fn runtime_report_chain_source_resume() {
+async fn runtime_report_chain_ingestor_resume() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
     let mut source = empty_source(observations.clone());
     source
@@ -595,7 +601,7 @@ async fn runtime_report_chain_source_resume() {
     let observations = observations.lock();
     assert_eq!(
         observations.poll_errors,
-        ["failed to resume fake source: broker refused the connection"]
+        ["failed to resume fake ingestor: broker refused the connection"]
     );
     assert_eq!(observations.reported_errors, observations.poll_errors);
 }
@@ -603,7 +609,7 @@ async fn runtime_report_chain_source_resume() {
 #[nervix_primitives::test]
 async fn source_loop_replays_a_buffer_released_during_resume_before_polling() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
-    let source = FakeSource {
+    let source = FakeIngestor {
         messages: three_messages(),
         resume_required: false,
         resume_results: VecDeque::new(),
@@ -616,7 +622,7 @@ async fn source_loop_replays_a_buffer_released_during_resume_before_polling() {
     };
     let host = IngestorHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    run_source_instance_with_retry(
+    run_ingestor_instance_with_retry(
         source,
         host,
         replayable(IngestorAckPolicy::None),
@@ -650,7 +656,7 @@ async fn source_shutdown_cancels_pending_resume_and_closes_the_source() {
     source.block_resume = true;
     let host = IngestorHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let running = nervix_primitives::task::spawn(run_source_instance_with_retry(
+    let running = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
         source,
         host,
         replayable(IngestorAckPolicy::None),
@@ -661,7 +667,7 @@ async fn source_shutdown_cancels_pending_resume_and_closes_the_source() {
     nervix_primitives::time::timeout(Duration::from_secs(10), running)
         .await
         .assured("shutdown cancels the pending resume through the source-loop select")
-        .assured("the source loop exits without a task panic");
+        .assured("the ingestor loop exits without a task panic");
     assert_eq!(observations.lock().closes, 1);
 }
 
@@ -677,7 +683,7 @@ async fn source_quiesce_change_cancels_pending_resume_before_retrying() {
     fake_host.quiesce_change = Some(changed.clone());
     let host = IngestorHost::new(fake_host);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let running = nervix_primitives::task::spawn(run_source_instance_with_retry(
+    let running = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
         source,
         host,
         replayable(IngestorAckPolicy::None),
@@ -692,7 +698,7 @@ async fn source_quiesce_change_cancels_pending_resume_before_retrying() {
     nervix_primitives::time::timeout(Duration::from_secs(10), running)
         .await
         .assured("shutdown cancels the retried resume through the source-loop select")
-        .assured("the source loop exits without a task panic");
+        .assured("the ingestor loop exits without a task panic");
     let observations = observations.lock();
     assert_eq!(observations.resumes, 2);
     assert_eq!(observations.quiesce_waits, 1);
@@ -708,9 +714,9 @@ async fn request_source_loop_replays_retained_requests_and_closes_the_source_at_
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     shutdown_tx.send_replace(true);
 
-    run_request_source(source, host, shutdown_rx).await;
+    run_request_ingestor(source, host, shutdown_rx).await;
 
-    // Requests dispatch on the request path, so the loop never reads from the source: it only
+    // Requests dispatch on the request path, so the loop never reads from the ingestor: it only
     // replays what the buffer retained before it observes the shutdown.
     let observations = observations.lock();
     assert_eq!(observations.sequence, vec!["replay", "replay"]);
@@ -854,7 +860,7 @@ async fn failed_rewind_cannot_commit_past_an_unacknowledged_kafka_position() {
         IngestorAcknowledgementOutcome::Ack,
         IngestorAcknowledgementOutcome::Ack,
     ]);
-    let source = FakeSource {
+    let source = FakeIngestor {
         messages: three_messages().into_iter().take(2).collect(),
         resume_required: false,
         resume_results: VecDeque::new(),
@@ -871,7 +877,7 @@ async fn failed_rewind_cannot_commit_past_an_unacknowledged_kafka_position() {
         timeout: Duration::from_secs(1),
         retry: retry_policy(),
     };
-    run_source_instance_with_retry(source, host, replayable(policy), shutdown_rx).await;
+    run_ingestor_instance_with_retry(source, host, replayable(policy), shutdown_rx).await;
     drop(shutdown_tx);
 
     let observations = observations.lock();

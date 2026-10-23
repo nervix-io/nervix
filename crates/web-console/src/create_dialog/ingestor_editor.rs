@@ -24,7 +24,7 @@ use super::{
     event_target_value,
     ingestor_draft::TimestampDraft,
     ingestor_route_editor::IngestorRouteEditor,
-    ingestor_source_draft::{DeliveryChoice, IngestIngestorDraft, QuiesceChoice},
+    ingestor_source_draft::{DeliveryChoice, IngestorEntityDraft, QuiesceChoice},
 };
 
 #[derive(Clone, Copy)]
@@ -93,7 +93,7 @@ impl IngestorField {
         }
     }
 
-    fn value(self, source: &IngestIngestorDraft) -> &str {
+    fn value(self, source: &IngestorEntityDraft) -> &str {
         match self {
             Self::Topic => &source.topic,
             Self::Queue => &source.queue,
@@ -115,7 +115,7 @@ impl IngestorField {
         }
     }
 
-    fn set(self, source: &mut IngestIngestorDraft, value: String) {
+    fn set(self, source: &mut IngestorEntityDraft, value: String) {
         *match self {
             Self::Topic => &mut source.topic,
             Self::Queue => &mut source.queue,

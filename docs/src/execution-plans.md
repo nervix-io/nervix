@@ -84,6 +84,16 @@ plan into connector configuration without normalization. Iceberg resolves its co
 client into the S3, GCS or Azure Blob backend while constructing this plan; the runtime receives
 that resolved backend and never infers it from the statement or location.
 
+Connector plans preserve the vocabulary's connector/entity nesting. The ingestor planner emits,
+for example, `IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(...))`; the emitter planner
+emits `EmitterConnectorPlan::Otel(OtelEmitterPlan::{Logs, Traces, Metrics}(...))`. Each entity has
+its own typed leaf plan and concrete implementation. Per-connector runtime composition matches
+those leaves exhaustively and asserts the implementation's declared kind at compile time. OTEL's
+private encoder shares transport and encoding without exposing an entity selector in public
+configuration. HTTP and WebSockets endpoint plans remain distinct entities while sharing the
+host's intake lifetime mechanism. Labels are derived from declarations and retained at plan/start
+time, without an allocation per published batch.
+
 Kafka source installation also binds the node-owned executor into the connector plan. Partition
 inspectors used by scheduling and the host's partition watch use that same node executor. The
 connector interprets the effective native client deadline and admits its synchronous driver calls;
@@ -270,7 +280,7 @@ parallel window, physical ACK timeout and retry policy, maximum rows and IPC byt
 program, and attachment boundary. Registry validation rejects an incompatible schema or missing
 batch contract before the plan can run. A flush-only dynamic change keeps that delivery contract;
 a contract change replaces the endpoint and ends existing consumers. The host binds mounts and
-programs before opening a emitter; reconnects and retries reuse the typed configuration and retained
+programs before opening an emitter; reconnects and retries reuse the typed configuration and retained
 prepared write. Swaps install consumer edges from the new plan. The connector receives source or
 emitter settings and per-record outcomes, never graph placement authority, Models, ACK maps, or
 runtime state. [Connector Crates And The Connector Contract](./connector-contract.md) owns each

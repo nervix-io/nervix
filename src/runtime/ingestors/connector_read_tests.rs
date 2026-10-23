@@ -1,12 +1,12 @@
 //! The broker loop's reads, which the host may interrupt but never abandons.
 //!
 //! Layer: test harness.
-//! - **Owns.** The read-in-flight assertion the loop's source doubles share, a source double that
+//! - **Owns.** The read-in-flight assertion the loop's ingestor doubles share, a ingestor double that
 //!   gathers a batch from a channel one message at a time, a host double that records what it took
 //!   in, both of them recording into one ordered log with the check over that log, and the unit
 //!   tests of a read that a stop, a quiesce change or a due flush meets.
-//! - **Depends on.** The production broker loop and its read, and the source contract.
-//! - **Must not know.** Broker drivers, the runtime source host or the quiesce control.
+//! - **Depends on.** The production broker loop and its read, and the ingestor contract.
+//! - **Must not know.** Broker drivers, the runtime ingestor host or the quiesce control.
 
 #![cfg_attr(
     nervix_lint,
@@ -26,11 +26,11 @@ use super::{
     *,
 };
 
-/// Whether a source double has a read in flight.
+/// Whether a ingestor double has a read in flight.
 ///
 /// The host awaits every read to completion. A read whose future the host dropped leaves its flag
 /// set, so a double asked to read again, to suspend or to close while its last read is still in
-/// flight was dropped mid-read, which the source contract forbids.
+/// flight was dropped mid-read, which the ingestor contract forbids.
 #[derive(Debug, Default)]
 pub(super) struct ReadInFlight {
     in_flight: bool,
@@ -49,7 +49,7 @@ impl ReadInFlight {
         self.in_flight = false;
     }
 
-    /// Asserts that no read is in flight when the host performs `operation` on the source.
+    /// Asserts that no read is in flight when the host performs `operation` on the ingestor.
     pub(super) fn assert_none_before(&self, operation: &str) {
         assert!(
             !self.in_flight,
@@ -58,26 +58,26 @@ impl ReadInFlight {
     }
 }
 
-/// What the gathering source and the recording host did, in the order the loop drove them.
+/// What the gathering ingestor and the recording host did, in the order the loop drove them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ReadEvent {
-    /// The source took this position from its transport.
+    /// The ingestor took this position from its transport.
     Took(u64),
-    /// The host cancelled the read the source was waiting in.
+    /// The host cancelled the read the ingestor was waiting in.
     Cancelled,
     /// The host took in a batch of these positions.
     TookIn(Vec<u64>),
-    /// The source confirmed these positions on its transport.
+    /// The ingestor confirmed these positions on its transport.
     Acknowledged(Vec<u64>),
     /// The host flushed the positions it had taken in since its last flush.
     Flushed,
-    /// The host counted payloads the source dropped for their size.
+    /// The host counted payloads the ingestor dropped for their size.
     CountedOversized(NonZeroUsize),
     Suspended,
     Closed,
 }
 
-/// The ordered log the gathering source and the recording host share.
+/// The ordered log the gathering ingestor and the recording host share.
 #[derive(Clone)]
 pub(super) struct ReadLog {
     events: Arc<Mutex<Vec<ReadEvent>>>,
@@ -99,8 +99,8 @@ impl ReadLog {
     }
 }
 
-/// Checks the loop's one guarantee about interrupted reads: every position the source took reached
-/// the host's intake exactly once, and before the source was suspended or closed.
+/// Checks the loop's one guarantee about interrupted reads: every position the ingestor took reached
+/// the host's intake exactly once, and before the ingestor was suspended or closed.
 pub(super) fn assert_every_taken_position_taken_in_first(events: &[ReadEvent]) {
     let mut taken = BTreeSet::new();
     let mut taken_in = BTreeSet::new();
@@ -136,13 +136,13 @@ pub(super) fn assert_every_taken_position_taken_in_first(events: &[ReadEvent]) {
     );
 }
 
-/// What the tests learn of the gathering source as the loop drives it.
+/// What the tests learn of the gathering ingestor as the loop drives it.
 pub(super) struct IngestorSignals {
     /// A read started waiting for its transport.
     pub(super) reading: Notify,
-    /// The source took a message from its transport.
+    /// The ingestor took a message from its transport.
     pub(super) took: Notify,
-    /// The source suspended.
+    /// The ingestor suspended.
     pub(super) suspended: Notify,
 }
 
@@ -156,7 +156,7 @@ impl IngestorSignals {
     }
 }
 
-/// One message of the gathering source, whose payload is its position.
+/// One message of the gathering ingestor, whose payload is its position.
 pub(super) struct GatheredMessage {
     position: u64,
     payload: Vec<u8>,
@@ -195,19 +195,19 @@ impl IngestorMessage for GatheredMessage {
     }
 }
 
-/// A source that gathers each batch from a channel one message at a time, waiting for the next one
+/// A ingestor that gathers each batch from a channel one message at a time, waiting for the next one
 /// until its batch is full, and that returns what it gathered once the host cancels.
-pub(super) struct GatheringSource {
+pub(super) struct GatheringIngestor {
     transport: mpsc::Receiver<u64>,
     events: ReadLog,
     signals: Arc<IngestorSignals>,
     read: ReadInFlight,
-    /// Ends the first read after its first message without the host cancelling it, which the source
+    /// Ends the first read after its first message without the host cancelling it, which the ingestor
     /// contract forbids.
     interrupts_unasked: bool,
 }
 
-impl GatheringSource {
+impl GatheringIngestor {
     pub(super) fn new(
         transport: mpsc::Receiver<u64>,
         events: ReadLog,
@@ -256,7 +256,10 @@ impl GatheringSource {
 }
 
 #[async_trait]
-impl IngestorConnector for GatheringSource {
+impl IngestorConnector for GatheringIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic);
+
     type Plan = ();
 
     async fn open(_plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
@@ -278,7 +281,7 @@ impl IngestorConnector for GatheringSource {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for GatheringSource {
+impl BrokerIngestorConnector for GatheringIngestor {
     type Message = GatheredMessage;
     type Position = u64;
 
@@ -459,7 +462,7 @@ pub(super) fn gathering_policy(max_in_flight: usize) -> BrokerIngestorPolicy {
             .assured("the tests gather at least one message"),
         batch_timeout: Duration::from_secs(60),
         timeout: Duration::from_secs(60),
-        retry: SOURCE_RECONNECT_POLICY,
+        retry: INGESTOR_RECONNECT_POLICY,
     };
     BrokerIngestorPolicy {
         acknowledgement,
@@ -468,14 +471,14 @@ pub(super) fn gathering_policy(max_in_flight: usize) -> BrokerIngestorPolicy {
     }
 }
 
-/// A source the tests feed and the host it reads for, before the loop takes them.
+/// A ingestor the tests feed and the host it reads for, before the loop takes them.
 struct Fixture {
-    source: GatheringSource,
+    source: GatheringIngestor,
     host: RecordingHost,
     observers: Observers,
 }
 
-/// What a test keeps of its fixture once the loop runs the source and the host.
+/// What a test keeps of its fixture once the loop runs the ingestor and the host.
 struct Observers {
     transport: mpsc::Sender<u64>,
     events: ReadLog,
@@ -499,7 +502,7 @@ impl Fixture {
             reported_errors: host.reported_errors.clone(),
         };
         Self {
-            source: GatheringSource::new(receiver, events, signals),
+            source: GatheringIngestor::new(receiver, events, signals),
             host,
             observers,
         }
@@ -537,9 +540,9 @@ struct RunningLoop {
 }
 
 impl RunningLoop {
-    fn start(source: GatheringSource, host: RecordingHost, policy: BrokerIngestorPolicy) -> Self {
+    fn start(source: GatheringIngestor, host: RecordingHost, policy: BrokerIngestorPolicy) -> Self {
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let task = nervix_primitives::task::spawn(run_source_instance_with_retry(
+        let task = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
             source,
             IngestorHost::new(host),
             policy,
@@ -696,7 +699,7 @@ async fn a_flush_due_while_a_read_waits_happens_without_cancelling_the_read() {
     host.flush_every = Some(Duration::from_millis(250));
     let unacknowledged = BrokerIngestorPolicy {
         acknowledgement: IngestorAckPolicy::None,
-        retry: SOURCE_RECONNECT_POLICY,
+        retry: INGESTOR_RECONNECT_POLICY,
         position_class: PositionClass::None,
     };
     let running = RunningLoop::start(source, host, unacknowledged);

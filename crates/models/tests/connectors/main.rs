@@ -2,7 +2,7 @@
 //!
 //! Layer: test harness.
 //!
-//! - **Owns.** The checks that the source and sink unions name every pair once, that each pair's
+//! - **Owns.** The checks that the source and emitter unions name every pair once, that each pair's
 //!   keywords, capabilities, quiesce modes, publishing modes and references are the declared
 //!   ones, and that every generated Model states what its pair declares.
 //! - **Depends on.** The vocabulary and the generators of `nervix-arbitrary`.
@@ -19,7 +19,7 @@ use nervix_models::{
     AckWindow, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterIngestorError,
     BatchMessageLimit, BatchUnavailability, ClickHouseEmitter, ClickHouseEmitterEntity,
     ClickHouseTableEmitter, ClickHouseValueMapping, ClientConsumerEmitter, ClientEmitterEntity,
-    ClientIngestMode, ClientName, ClientSourceEntity, ConnectorKind, EmitterBatchLegality,
+    ClientIngestMode, ClientIngestorEntity, ClientName, ConnectorKind, EmitterBatchLegality,
     EmitterBatchPolicy, EmitterBodyForm, EmitterClientReference, EmitterEntity, EmitterEntityKind,
     EmitterReference, EmitterValueMapping, EndpointIngestMode, EndpointType, Expression,
     HeaderLayout, HeaderModel, HttpEmitterEntity, HttpEndpointIngestor, HttpIngestor,
@@ -213,7 +213,7 @@ fn a_phrase_is_the_keyword_of_its_connector_then_of_its_entity() {
 fn the_transport_sources_are_every_source_pair_but_the_client_producer() {
     let transports = IngestorEntityKind::modeled().collect::<Vec<_>>();
     let mut expected = IngestorEntityKind::all().collect::<Vec<_>>();
-    expected.retain(|kind| *kind != IngestorEntityKind::Client(ClientSourceEntity::Producer));
+    expected.retain(|kind| *kind != IngestorEntityKind::Client(ClientIngestorEntity::Producer));
     assert_eq!(transports, expected);
 }
 
@@ -262,7 +262,7 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         reference: IngestorReferenceKind::Client(connector),
     };
     match kind {
-        IngestorEntityKind::Client(ClientSourceEntity::Producer) => IngestorDeclaration {
+        IngestorEntityKind::Client(ClientIngestorEntity::Producer) => IngestorDeclaration {
             headers: None,
             metadata: IngestorMetadataScope::Headers,
             every_node: false,
@@ -553,7 +553,7 @@ fn the_metadata_scopes_declare_their_fields_in_order() {
     );
 }
 
-/// What one sink pair declares, as the table below states it.
+/// What one emitter pair declares, as the table below states it.
 struct EmitterDeclaration {
     headers: Option<HeaderModel>,
     body: EmitterBodyForm,
@@ -685,42 +685,42 @@ fn the_sqs_emitter_admits_at_most_the_message_size_sqs_does() {
 }
 
 #[test]
-fn a_emitter_states_what_its_pair_declares() {
+fn an_emitter_states_what_its_pair_declares() {
     for kind in EmitterEntityKind::all() {
         for seed in 0..4 {
             let bytes = seeded_bytes(seed);
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
-            let connector = arbitrary.emitter_entity_of(kind);
+            let entity = arbitrary.emitter_entity_of(kind);
             let declared = kind.capabilities();
-            assert_eq!(connector.kind(), kind);
-            assert_eq!(connector.connector(), kind.connector());
-            assert_eq!(connector.transport_label(), kind.phrase());
-            assert_eq!(connector.capabilities(), declared);
-            assert_eq!(connector.requires_codec(), declared.body.requires_codec());
-            assert_eq!(connector.batch_legality(), declared.batch);
+            assert_eq!(entity.kind(), kind);
+            assert_eq!(entity.connector(), kind.connector());
+            assert_eq!(entity.transport_label(), kind.phrase());
+            assert_eq!(entity.capabilities(), declared);
+            assert_eq!(entity.requires_codec(), declared.body.requires_codec());
+            assert_eq!(entity.batch_legality(), declared.batch);
             assert_eq!(
-                connector.requires_batch_transformation(),
+                entity.requires_batch_transformation(),
                 declared.requires_batch_transformation
             );
             assert!(
                 declared
                     .publishing_modes
-                    .contains(&connector.publishing().kind())
+                    .contains(&entity.publishing().kind())
             );
-            match connector.reference() {
+            match entity.reference() {
                 EmitterReference::Client(EmitterClientReference { client, connector }) => {
-                    assert_eq!(connector.client(), Some(client));
+                    assert_eq!(entity.client(), Some(client));
                     assert!(declared.reference.admits_client(connector));
                 }
                 EmitterReference::StorageClient(client) => {
-                    assert_eq!(connector.client(), Some(client));
+                    assert_eq!(entity.client(), Some(client));
                     assert!(matches!(
                         declared.reference,
                         nervix_models::EmitterReferenceKind::StorageClient(_)
                     ));
                 }
                 EmitterReference::Schema(_) => {
-                    assert_eq!(connector.client(), None);
+                    assert_eq!(entity.client(), None);
                     assert_eq!(
                         kind,
                         EmitterEntityKind::Client(ClientEmitterEntity::Consumer)
@@ -822,7 +822,7 @@ fn an_iceberg_destination_retains_its_storage_client_for_resolution() {
     );
     assert_eq!(connector.commit_policy(), Some(("30s", "64MiB")));
     let EmitterEntity::Iceberg(IcebergEmitter::Table(table)) = &connector else {
-        panic!("an Iceberg table sink was built, found {connector:?}");
+        panic!("an Iceberg table emitter was built, found {connector:?}");
     };
     assert_eq!(table.catalog.connector(), ConnectorKind::IcebergRest);
 }
@@ -894,7 +894,7 @@ fn an_otel_emitter_names_its_signal_by_its_entity() {
         metric: declared, ..
     }) = &metrics
     else {
-        panic!("a metrics sink was built, found {metrics:?}");
+        panic!("a metrics emitter was built, found {metrics:?}");
     };
     assert_eq!(declared, &metric);
     for connector in [&logs, &traces, &metrics] {
@@ -905,7 +905,7 @@ fn an_otel_emitter_names_its_signal_by_its_entity() {
 
 #[test]
 fn direct_value_mappings_cover_all_external_value_sections() {
-    let client: ClientName = named("sink");
+    let client: ClientName = named("emitter");
     let mapping = |column: &str| ClickHouseValueMapping {
         column: column.to_owned(),
         expression: Expression::Literal(Literal::String(column.to_owned())),
@@ -1075,7 +1075,7 @@ fn two_emitters_are_one_definition_when_only_their_client_differs() {
     assert!(!iceberg("lake", "catalog").same_definition(&iceberg("lake", "other_catalog")));
 }
 
-/// A batching clause every sink's contract admits: small enough for the tightest destination.
+/// A batching clause every emitter's contract admits: small enough for the tightest destination.
 fn admissible_batch() -> EmitterBatchPolicy {
     EmitterBatchPolicy {
         max_messages: BatchMessageLimit::try_from(8_u32)
@@ -1095,7 +1095,7 @@ fn naming_another_client_keeps_a_emitter_of_every_pair_the_same_definition() {
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
             let mut original = arbitrary.create_emitter_to(kind);
             // An alteration checks the batching contract again, which is not what this check is
-            // about, so the emitter batches exactly as its sink requires.
+            // about, so the emitter batches exactly as its emitter requires.
             original.batch = match original.connector.batch_legality() {
                 EmitterBatchLegality::Required { .. } => Some(admissible_batch()),
                 EmitterBatchLegality::Optional { .. }
@@ -1112,8 +1112,9 @@ fn naming_another_client_keeps_a_emitter_of_every_pair_the_same_definition() {
             let outcome = rebound.apply_alter(&alter);
 
             if original.connector.client().is_none() {
-                let error = outcome
-                    .expect_err("a sink that serves session consumers publishes through no client");
+                let error = outcome.expect_err(
+                    "an emitter that serves session consumers publishes through no client",
+                );
                 assert_eq!(
                     error.current_context(),
                     &AlterEmitterError::ClientUnsupported,
@@ -1122,7 +1123,7 @@ fn naming_another_client_keeps_a_emitter_of_every_pair_the_same_definition() {
                 assert_eq!(rebound, original, "{kind:?}");
                 continue;
             }
-            outcome.expect("a sink that publishes through a client can name another");
+            outcome.expect("an emitter that publishes through a client can name another");
             assert_eq!(rebound.connector.kind(), kind);
             assert_eq!(rebound.connector.client(), Some(&other), "{kind:?}");
             assert!(
@@ -1248,8 +1249,8 @@ fn an_entity_model_converts_into_every_enum_that_holds_it() {
         IngestorEntityKind::from(RedisIngestorEntity::PubSub)
     );
     assert_eq!(
-        IngestorEntityKind::from(ClientSourceEntity::Producer),
-        IngestorEntityKind::Client(ClientSourceEntity::Producer)
+        IngestorEntityKind::from(ClientIngestorEntity::Producer),
+        IngestorEntityKind::Client(ClientIngestorEntity::Producer)
     );
 
     let connector = RedisPubSubEmitter {

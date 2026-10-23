@@ -3,8 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The emitter Model with its body, batching contract and attachment, its `ALTER`
-//!   operations and their typed failures, and the publishing modes a sink accepts.
-//! - **Depends on.** The sink union, the batching policy, processor inputs and route
+//!   operations and their typed failures, and the publishing modes an emitter accepts.
+//! - **Depends on.** The emitter union, the batching policy, processor inputs and route
 //!   construction, and the acknowledgement and retry vocabulary.
 //! - **Must not know.** How an emitter is validated, planned, hosted or driven.
 
@@ -34,7 +34,7 @@ pub struct CreateEmitter {
     pub body: EmitterBody,
     pub connector: Box<EmitterEntity>,
     /// `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, absent when the emitter publishes one record per
-    /// message. A sink whose [`EmitterEntity::batch_legality`] requires it never omits it.
+    /// message. A emitter whose [`EmitterEntity::batch_legality`] requires it never omits it.
     pub batch: Option<crate::EmitterBatchPolicy>,
     pub flush_policy: FlushPolicy,
     pub error_policies: ErrorPolicies,
@@ -98,8 +98,8 @@ impl CreateEmitter {
         Ok(())
     }
 
-    /// Checks the batching clause against what this emitter's sink requires of it: present where
-    /// the sink has no unbounded write, and no larger than a payload the destination can carry.
+    /// Checks the batching clause against what this emitter's emitter requires of it: present where
+    /// the emitter has no unbounded write, and no larger than a payload the destination can carry.
     pub fn validate_batch(&self) -> error_stack::Result<(), EmitterBatchContractError> {
         match self.batch_contract_violation() {
             Some(violation) => Err(Report::new(violation)),
@@ -107,7 +107,7 @@ impl CreateEmitter {
         }
     }
 
-    /// The requirement of its sink's batching contract that this emitter's clause breaks, if any.
+    /// The requirement of its emitter's batching contract that this emitter's clause breaks, if any.
     ///
     /// Both the standalone check and an alteration report a violation from here, each in its own
     /// error, so neither has to rebuild the other's report.
@@ -132,7 +132,7 @@ impl CreateEmitter {
         };
         let maximum = maximum?;
         if batch.max_size.bytes() > maximum.bytes() {
-            return Some(EmitterBatchContractError::SizeAboveSinkMaximum {
+            return Some(EmitterBatchContractError::SizeAboveEmitterMaximum {
                 connector,
                 declared: batch.max_size,
                 maximum,
@@ -401,7 +401,7 @@ pub enum AlterEmitterError {
     Batch(EmitterBatchContractError),
 }
 
-/// Why an emitter's batching clause does not fit the sink it publishes to.
+/// Why an emitter's batching clause does not fit the emitter it publishes to.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum EmitterBatchContractError {
     #[error("{connector} emitters {reason} and do not support BATCH")]
@@ -418,7 +418,7 @@ pub enum EmitterBatchContractError {
         "{connector} emitters accept BATCH MAX SIZE up to {maximum}, the largest message the \
          destination carries, found {declared}"
     )]
-    SizeAboveSinkMaximum {
+    SizeAboveEmitterMaximum {
         connector: &'static str,
         declared: crate::PayloadSizeLimit,
         maximum: crate::PayloadSizeLimit,

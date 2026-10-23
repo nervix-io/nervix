@@ -1,11 +1,11 @@
-//! Source host loop engagement checks under Shuttle.
+//! Ingestor host loop engagement checks under Shuttle.
 //!
 //! Layer: test harness.
-//! - **Owns.** Controlled source dispatch and quiesce interleavings for the host loops, the
+//! - **Owns.** Controlled ingestor dispatch and quiesce interleavings for the host loops, the
 //!   interleavings of a stop or a suspension of intake with a broker read that gathers a batch,
 //!   the interleavings of a lost broker connection with the broker loop's acknowledgements and
 //!   rejections, and the interleavings of a drain's observation with a batch's confirmation.
-//! - **Depends on.** The production source loops, source contract, quiesce control, the runtime's
+//! - **Depends on.** The production ingestor loops, ingestor contract, quiesce control, the runtime's
 //!   batch acknowledgement and confirmed ACK roots, the gathering doubles of the read tests, the
 //!   connection-bound doubles of the reconnect tests and Shuttle.
 //! - **Must not know.** Broker drivers, model planning or external payload transports.
@@ -24,10 +24,12 @@ use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
     read_tests::{
-        GatheringSource, HostControl, IngestorSignals, ReadEvent, ReadInFlight, ReadLog,
+        GatheringIngestor, HostControl, IngestorSignals, ReadEvent, ReadInFlight, ReadLog,
         RecordingHost, assert_every_taken_position_taken_in_first, gathering_policy,
     },
-    reconnect_tests::{RedeliveringBroker, RedeliveringSource, RedeliveryHost, sequential_policy},
+    reconnect_tests::{
+        RedeliveringBroker, RedeliveringIngestor, RedeliveryHost, sequential_policy,
+    },
     *,
 };
 
@@ -62,12 +64,12 @@ impl IngestorMessage for ChannelMessage {
     }
 }
 
-struct ChannelSource {
+struct ChannelIngestor {
     messages: mpsc::Receiver<ChannelMessage>,
     read: ReadInFlight,
 }
 
-impl ChannelSource {
+impl ChannelIngestor {
     fn new(messages: mpsc::Receiver<ChannelMessage>) -> Self {
         Self {
             messages,
@@ -92,7 +94,10 @@ impl ChannelSource {
 }
 
 #[async_trait]
-impl IngestorConnector for ChannelSource {
+impl IngestorConnector for ChannelIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic);
+
     type Plan = ();
 
     async fn open(
@@ -115,7 +120,7 @@ impl IngestorConnector for ChannelSource {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for ChannelSource {
+impl BrokerIngestorConnector for ChannelIngestor {
     type Message = ChannelMessage;
     type Position = u64;
 
@@ -146,7 +151,7 @@ impl BrokerIngestorConnector for ChannelSource {
 }
 
 #[async_trait]
-impl PacedIngestorConnector for ChannelSource {
+impl PacedIngestorConnector for ChannelIngestor {
     async fn poll(
         &mut self,
         scheduled_at: Timestamp,
@@ -383,7 +388,7 @@ async fn send_message(messages: &mpsc::Sender<ChannelMessage>, position: u64) {
             payload: vec![u8::try_from(position).assured("the check uses positions one and two")],
         })
         .await
-        .assured("the source loop keeps its payload channel open until shutdown");
+        .assured("the ingestor loop keeps its payload channel open until shutdown");
 }
 
 fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCause) {
@@ -419,25 +424,25 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
             dispatched: dispatched.clone(),
         };
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let source = ChannelSource::new(receiver);
+        let source = ChannelIngestor::new(receiver);
         if matches!(family, IngestorFamily::Request) {
             // Request sources only replay work already buffered when their loop starts.
             send_message(&replays, 1).await;
         }
         let loop_task = match family {
             IngestorFamily::Broker => {
-                nervix_primitives::task::spawn(run_source_instance_with_retry(
+                nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
                     source,
                     IngestorHost::new(host),
                     BrokerIngestorPolicy {
                         acknowledgement: IngestorAckPolicy::None,
-                        retry: SOURCE_RECONNECT_POLICY,
+                        retry: INGESTOR_RECONNECT_POLICY,
                         position_class: PositionClass::None,
                     },
                     shutdown_rx,
                 ))
             }
-            IngestorFamily::Paced => nervix_primitives::task::spawn(run_paced_source(
+            IngestorFamily::Paced => nervix_primitives::task::spawn(run_paced_ingestor(
                 source,
                 host,
                 ChannelCadence {
@@ -446,7 +451,7 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
                 NonZeroUsize::MIN,
                 shutdown_rx,
             )),
-            IngestorFamily::Request => nervix_primitives::task::spawn(run_request_source(
+            IngestorFamily::Request => nervix_primitives::task::spawn(run_request_ingestor(
                 source,
                 IngestorHost::new(host),
                 shutdown_rx,
@@ -522,30 +527,30 @@ fn explore_family(family: IngestorFamily) {
 }
 
 #[test]
-fn shuttle_broker_source_observes_engagement_during_dispatch() {
+fn shuttle_broker_ingestor_observes_engagement_during_dispatch() {
     explore_family(IngestorFamily::Broker);
 }
 
 #[test]
-fn shuttle_paced_source_observes_engagement_during_dispatch() {
+fn shuttle_paced_ingestor_observes_engagement_during_dispatch() {
     explore_family(IngestorFamily::Paced);
 }
 
 #[test]
-fn shuttle_request_source_observes_engagement_during_dispatch() {
+fn shuttle_request_ingestor_observes_engagement_during_dispatch() {
     explore_family(IngestorFamily::Request);
 }
 
 /// What interrupts a broker read in the gathering check.
 #[derive(Clone, Copy)]
 enum ReadInterruptionCause {
-    /// The source stops.
+    /// The ingestor stops.
     Stop,
     /// Intake is suspended, as a quiesce engagement that stops reading suspends it.
     Suspension,
 }
 
-/// A broker source gathering a batch of up to three messages while its transport delivers two, and
+/// A broker ingestor gathering a batch of up to three messages while its transport delivers two, and
 /// a stop or a suspension of intake meets the read at any point of its gathering.
 fn interrupted_gathering(cause: ReadInterruptionCause) {
     shuttle::future::block_on(async move {
@@ -554,15 +559,15 @@ fn interrupted_gathering(cause: ReadInterruptionCause) {
         let signals = Arc::new(IngestorSignals::new());
         let control = Arc::new(HostControl::new());
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let loop_task = nervix_primitives::task::spawn(run_source_instance_with_retry(
-            GatheringSource::new(receiver, events.clone(), signals.clone()),
+        let loop_task = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
+            GatheringIngestor::new(receiver, events.clone(), signals.clone()),
             IngestorHost::new(RecordingHost::new(events.clone(), control.clone())),
             gathering_policy(3),
             shutdown_rx,
         ));
         let deliverer = nervix_primitives::task::spawn(async move {
             for position in [1, 2] {
-                // The source drops its transport once the loop has stopped, which may come first.
+                // The ingestor drops its transport once the loop has stopped, which may come first.
                 if transport.send(position).await.is_err() {
                     break;
                 }
@@ -574,7 +579,7 @@ fn interrupted_gathering(cause: ReadInterruptionCause) {
         match cause {
             ReadInterruptionCause::Stop => {}
             ReadInterruptionCause::Suspension => {
-                // Only a source the loop has resumed is suspended, so intake is suspended once the
+                // Only a ingestor the loop has resumed is suspended, so intake is suspended once the
                 // loop reads. The batch can never fill, so the loop always reaches the suspension.
                 signals.reading.notified().await;
                 control.suspend_intake();
@@ -615,8 +620,8 @@ fn lost_connection_during_settlement(losses: usize) {
     shuttle::future::block_on(async move {
         let broker = RedeliveringBroker::shared([1, 2]);
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let loop_task = nervix_primitives::task::spawn(run_source_instance_with_retry(
-            RedeliveringSource::new(broker.clone()),
+        let loop_task = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
+            RedeliveringIngestor::new(broker.clone()),
             IngestorHost::new(RedeliveryHost::new(broker.clone(), false)),
             sequential_policy(PositionClass::BrokerRedelivered),
             shutdown_rx,
@@ -631,7 +636,7 @@ fn lost_connection_during_settlement(losses: usize) {
             }
         });
 
-        // The source closes once both messages are acknowledged and nothing is left to redeliver,
+        // The ingestor closes once both messages are acknowledged and nothing is left to redeliver,
         // which ends the loop without a shutdown.
         loop_task
             .await
@@ -669,19 +674,22 @@ fn shuttle_a_reconnect_discards_rejections_the_broker_redelivers() {
 struct ConfirmationProgress {
     /// Batches whose last acknowledgement root the graph has begun to resolve.
     resolved_batches: AtomicUsize,
-    /// Batches whose positions the source's transport confirmed.
+    /// Batches whose positions the ingestor's transport confirmed.
     confirmed_batches: AtomicUsize,
 }
 
-/// A source that hands the loop its two messages as one batch, and whose transport takes a round
+/// A ingestor that hands the loop its two messages as one batch, and whose transport takes a round
 /// trip to confirm them.
-struct ConfirmingChannelSource {
+struct ConfirmingChannelIngestor {
     queue: Vec<u64>,
     progress: StdArc<ConfirmationProgress>,
 }
 
 #[async_trait]
-impl IngestorConnector for ConfirmingChannelSource {
+impl IngestorConnector for ConfirmingChannelIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic);
+
     type Plan = ();
 
     async fn open(
@@ -695,7 +703,7 @@ impl IngestorConnector for ConfirmingChannelSource {
 }
 
 #[async_trait]
-impl BrokerIngestorConnector for ConfirmingChannelSource {
+impl BrokerIngestorConnector for ConfirmingChannelIngestor {
     type Message = ChannelMessage;
     type Position = u64;
 
@@ -723,7 +731,7 @@ impl BrokerIngestorConnector for ConfirmingChannelSource {
         &mut self,
         _positions: &[Self::Position],
     ) -> nervix_connector::IngestorResult<()> {
-        // The request to the broker and its answer: a production source awaits both before it
+        // The request to the broker and its answer: a production ingestor awaits both before it
         // returns, while drains observe the node.
         nervix_primitives::task::yield_now().await;
         nervix_primitives::task::yield_now().await;
@@ -833,7 +841,7 @@ impl IngestorHostServices for GraphHost {
 const DRAIN_OBSERVATIONS: usize = 12;
 
 /// A drain observes the domain at any point while the graph resolves a two-message batch in either
-/// order and the source's transport takes a round trip to confirm it.
+/// order and the ingestor's transport takes a round trip to confirm it.
 fn drain_observing_a_confirmation() {
     shuttle::future::block_on(async move {
         let trackers = IngestorAckRootTrackers::detached();
@@ -854,8 +862,8 @@ fn drain_observing_a_confirmation() {
             retry,
             position_class: PositionClass::Replayable,
         };
-        let loop_task = nervix_primitives::task::spawn(run_source_instance_with_retry(
-            ConfirmingChannelSource {
+        let loop_task = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
+            ConfirmingChannelIngestor {
                 queue: vec![1, 2],
                 progress: progress.clone(),
             },
@@ -916,7 +924,7 @@ fn drain_observing_a_confirmation() {
             }
         });
 
-        // The source closes once its one batch is settled, which ends the loop without a stop.
+        // The ingestor closes once its one batch is settled, which ends the loop without a stop.
         loop_task
             .await
             .assured("the host loop ends when its source closes");
@@ -948,7 +956,7 @@ fn shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch() {
 const REFUSED_PAYLOAD: [u8; 1] = [0];
 
 /// A host that consumes each payload its codec stand-in refuses through the runtime's batch roots,
-/// as the source host consumes a decode rejection, and hands the roots of the rest to the check's
+/// as the ingestor host consumes a decode rejection, and hands the roots of the rest to the check's
 /// graph, which resolves them.
 struct RefusingGraphHost {
     trackers: IngestorAckRootTrackers,
@@ -1052,7 +1060,7 @@ impl IngestorHostServices for RefusingGraphHost {
 }
 
 /// A drain observes the domain at any point while the host consumes the refused payload of a
-/// batch, the graph resolves the root of every other payload in it, and the source's transport
+/// batch, the graph resolves the root of every other payload in it, and the ingestor's transport
 /// takes a round trip to confirm the batch. `queue` is the batch's positions, and the payload at
 /// position zero is the refused one.
 fn drain_observing_a_batch_with_a_refused_payload(queue: &'static [u64]) {
@@ -1076,8 +1084,8 @@ fn drain_observing_a_batch_with_a_refused_payload(queue: &'static [u64]) {
             retry,
             position_class: PositionClass::Replayable,
         };
-        let loop_task = nervix_primitives::task::spawn(run_source_instance_with_retry(
-            ConfirmingChannelSource {
+        let loop_task = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
+            ConfirmingChannelIngestor {
                 queue: queue.to_vec(),
                 progress: progress.clone(),
             },
@@ -1095,7 +1103,7 @@ fn drain_observing_a_batch_with_a_refused_payload(queue: &'static [u64]) {
             let progress = progress.clone();
             async move {
                 // A batch whose every payload was refused hands the graph nothing, and the host's
-                // sender goes once its source closes.
+                // sender goes once its ingestor closes.
                 let Some(roots) = batch_roots.recv().await else {
                     return;
                 };
@@ -1138,7 +1146,7 @@ fn drain_observing_a_batch_with_a_refused_payload(queue: &'static [u64]) {
             }
         });
 
-        // The source closes once its one batch is settled, which ends the loop without a stop.
+        // The ingestor closes once its one batch is settled, which ends the loop without a stop.
         loop_task
             .await
             .assured("the host loop ends when its source closes");

@@ -24,7 +24,7 @@ struct EnvelopeCase {
     occurred_at: Timestamp,
 }
 
-impl SentryEmitter {
+impl SentryEventEmitter {
     fn fixture() -> Self {
         Self {
             client: HttpClient::new(),
@@ -78,7 +78,7 @@ impl EnvelopeCase {
     }
 
     fn assert_attempts(&self) {
-        let mut connector = SentryEmitter::fixture();
+        let mut connector = SentryEventEmitter::fixture();
         let codec_bytes = serde_json::to_vec(&self.event)
             .assured("the bounded event holds only serializable JSON values");
         let prepared = connector
@@ -138,7 +138,7 @@ impl EnvelopeCase {
 
 #[test]
 fn invalid_event_json_is_a_definitive_preparation_refusal_with_its_complete_cause() {
-    let mut connector = SentryEmitter::fixture();
+    let mut connector = SentryEventEmitter::fixture();
     let occurred_at = Timestamp::from_unix_nanos(946_684_800_000_000_000);
     let payload = b"not json";
     let Err(refusal) = connector.prepare_payload(payload.to_vec(), occurred_at) else {

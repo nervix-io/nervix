@@ -1,4 +1,4 @@
-//! MongoDB sink connector.
+//! MongoDB emitter connector.
 //!
 //! Layer: engines and infrastructure.
 //!
@@ -77,13 +77,13 @@ const GENERATED_ID_BYTES: u64 = 17;
 #[derive(Clone)]
 pub struct MongoDbClient(DriverClient);
 
-/// The node-owned client this sink writes through while its host holds the lease.
+/// The node-owned client this emitter writes through while its host holds the lease.
 pub trait MongoDbClientProvider: Send + Sync + 'static {
     fn client(&self) -> EmitterWriteResult<MongoDbClient>;
 }
 
-/// What one MongoDB emitter writes with, from its typed sink plan.
-pub struct MongoDbEmitterConfig {
+/// What one MongoDB emitter writes with, from its typed emitter plan.
+pub struct MongoDbCollectionEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub collection: MongoDbCollectionName,
     pub conflict_action: MongoDbConflictAction,
@@ -100,8 +100,8 @@ pub enum MongoDbConflictAction {
     DoUpdate { target: Vec<String> },
 }
 
-/// The MongoDB sink, which encodes each mapped row as one BSON document.
-pub struct MongoDbEmitter {
+/// The MongoDB emitter, which encodes each mapped row as one BSON document.
+pub struct MongoDbCollectionEmitter {
     client: Box<dyn MongoDbClientProvider>,
     database: String,
     collection: MongoDbCollectionName,
@@ -182,7 +182,7 @@ fn safe_infrastructure_error(operation: &str) -> Report<EmitterWriteError> {
         .attach_printable(format!("MongoDB {operation} failed"))
 }
 
-impl MongoDbEmitter {
+impl MongoDbCollectionEmitter {
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -191,11 +191,11 @@ impl MongoDbEmitter {
         )
     )]
     pub fn new(
-        config: MongoDbEmitterConfig,
+        config: MongoDbCollectionEmitterConfig,
         client: Box<dyn MongoDbClientProvider>,
         _host: EmitterHost,
     ) -> EmitterStartResult<Self> {
-        let MongoDbEmitterConfig {
+        let MongoDbCollectionEmitterConfig {
             config,
             collection,
             conflict_action,
@@ -212,7 +212,7 @@ impl MongoDbEmitter {
         })
     }
 
-    /// The database this sink writes into, once the collection it writes has been found there:
+    /// The database this emitter writes into, once the collection it writes has been found there:
     /// Nervix creates nothing in MongoDB, so a missing collection is a publish failure.
     async fn provisioned_database(
         &self,
@@ -234,7 +234,7 @@ impl MongoDbEmitter {
         Ok(database)
     }
 
-    /// Inserts `documents` in bulk inserts under this sink's limits, each measured as the
+    /// Inserts `documents` in bulk inserts under this emitter's limits, each measured as the
     /// documents it carries exactly as they are stored.
     async fn insert_documents(
         &self,
@@ -302,7 +302,7 @@ impl MongoDbEmitter {
         }
     }
 
-    /// Upserts `documents` in bulk writes under this sink's limits, each measured as the filter
+    /// Upserts `documents` in bulk writes under this emitter's limits, each measured as the filter
     /// and update documents it carries for every row.
     async fn upsert_documents(
         &self,
@@ -744,8 +744,17 @@ impl ConflictUpsert {
     }
 }
 
+impl MongoDbCollectionEmitter {
+    pub const KIND: nervix_models::EmitterEntityKind =
+        nervix_models::EmitterEntityKind::MongoDb(nervix_models::MongoDbEmitterEntity::Collection);
+}
+
 #[async_trait]
-impl EmitterLifecycle for MongoDbEmitter {
+impl EmitterLifecycle for MongoDbCollectionEmitter {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        Self::KIND
+    }
+
     /// Each unordered write answers for every document before the publish returns, so the
     /// client holds nothing.
     async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
@@ -754,7 +763,7 @@ impl EmitterLifecycle for MongoDbEmitter {
 }
 
 #[async_trait]
-impl RowEmitter for MongoDbEmitter {
+impl RowEmitter for MongoDbCollectionEmitter {
     /// Writes the rows of every carrier in inserts or bulk writes of at most `MAX MESSAGES`
     /// documents whose measured BSON is at most `MAX SIZE` bytes.
     #[cfg_attr(
@@ -821,7 +830,7 @@ impl RowEmitter for MongoDbEmitter {
     }
 }
 
-/// A mapped value this sink has no BSON representation for, named with the field that carries it.
+/// A mapped value this emitter has no BSON representation for, named with the field that carries it.
 #[derive(Debug, thiserror::Error)]
 #[cfg_attr(
     nervix_lint,
@@ -1153,7 +1162,11 @@ mod tests {
             occurred_at: Timestamp::from_unix_nanos(3),
         });
 
-        MongoDbEmitter::apply_insert_many_write_errors(&rows, &[(1, 11000), (2, 91)], &mut outcome);
+        MongoDbCollectionEmitter::apply_insert_many_write_errors(
+            &rows,
+            &[(1, 11000), (2, 91)],
+            &mut outcome,
+        );
 
         let outcome = outcome.into_parts();
         assert_eq!(

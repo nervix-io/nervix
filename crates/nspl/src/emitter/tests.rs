@@ -53,7 +53,7 @@ fn fields_named_like_the_request_clauses_stay_in_the_http_request() {
     let EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter { method, path, .. })) =
         parsed.connector.as_ref()
     else {
-        panic!("the sink must be HTTP, got {:?}", parsed.connector);
+        panic!("the emitter must be HTTP, got {:?}", parsed.connector);
     };
     assert_eq!(
         method,
@@ -85,7 +85,7 @@ fn fields_named_like_keywords_stay_in_a_fifo_group_and_values() {
     })) = parsed.connector.as_ref()
     else {
         panic!(
-            "the sink must be SQS with a group expression, got {:?}",
+            "the emitter must be SQS with a group expression, got {:?}",
             parsed.connector
         );
     };
@@ -104,7 +104,7 @@ fn fields_named_like_keywords_stay_in_a_fifo_group_and_values() {
         values, ..
     })) = parsed.connector.as_ref()
     else {
-        panic!("the sink must be ClickHouse, got {:?}", parsed.connector);
+        panic!("the emitter must be ClickHouse, got {:?}", parsed.connector);
     };
     let expressions = values
         .iter()
@@ -128,7 +128,7 @@ fn a_path_opening_with_a_parenthesis_still_begins_after_the_method() {
     let EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter { method, path, .. })) =
         parsed.connector.as_ref()
     else {
-        panic!("the sink must be HTTP, got {:?}", parsed.connector);
+        panic!("the emitter must be HTTP, got {:?}", parsed.connector);
     };
     assert_eq!(
         method,
@@ -246,7 +246,7 @@ fn parses_otel_logs_traces_and_metric_shapes() {
     let EmitterEntity::Otel(OtelEmitter::Logs(OtelLogsEmitter { mappings, .. })) =
         logs.connector.as_ref()
     else {
-        panic!("expected OTEL logs sink");
+        panic!("expected OTEL logs emitter");
     };
     assert_eq!(mappings.attributes.len(), 1);
     assert_eq!(mappings.resource.len(), 1);
@@ -447,7 +447,7 @@ fn parses_alter_emitter_direct_emitter_values_and_iceberg_commit_policy() {
          input.value } , SET BATCH MAX MESSAGES 100 MAX SIZE 1MiB, SET FLUSH EACH 1s MAX BATCH \
          SIZE 1MiB;",
     )
-    .expect("direct sink expressions should preserve internal commas");
+    .expect("direct emitter expressions should preserve internal commas");
     assert_eq!(direct.operations.len(), 3);
 
     let iceberg = parse_alter_emitter(
@@ -806,7 +806,7 @@ fn parses_alter_emitter_publishing_and_attachment_modes() {
     assert!(matches!(
         parsed.operations[0],
         AlterEmitterOperation::SetPublishingMode {
-            mode: EmitterModeChange::Kafka(KafkaEmitterMode::Topic(
+            mode: EmitterModeChange::Kafka(KafkaTopicEmitterMode::Topic(
                 KafkaTopicPublishingMode::Ack { .. }
             ))
         }
@@ -833,7 +833,7 @@ fn parses_alter_emitter_publishing_and_attachment_modes() {
     assert!(matches!(
         request_ack.operations.as_slice(),
         [AlterEmitterOperation::SetPublishingMode {
-            mode: EmitterModeChange::Postgres(PostgresEmitterMode::Table(
+            mode: EmitterModeChange::Postgres(PostgresTableEmitterMode::Table(
                 PostgresTablePublishingMode::Ack { .. }
             ))
         }]
@@ -916,9 +916,9 @@ fn suggests_input_collection_after_emitter_source() {
 fn parses_multiple_emitter_inputs_with_source_where() {
     let parsed = parse_create_emitter(
         "CREATE ZEROMQ PUSH EMITTER emit FROM source_a WHERE input.kind = 'a', source_b WHERE \
-         input.kind = 'b' COLLECT FOR 10ms MAX BATCH SIZE 1MiB TO sink MODE NO ACK RETRY POLICY \
-         BACKOFF 250ms MAX 30s ENCODE USING my_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
-         GENERAL ERROR LOG;",
+         input.kind = 'b' COLLECT FOR 10ms MAX BATCH SIZE 1MiB TO emitter MODE NO ACK RETRY \
+         POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+         ON GENERAL ERROR LOG;",
     )
     .expect("multiple emitter inputs should parse");
 
@@ -939,15 +939,15 @@ fn parses_multiple_emitter_inputs_with_source_where() {
 fn rejects_incomplete_multiple_emitter_inputs() {
     assert!(
         parse_create_emitter(
-            "CREATE ZEROMQ PUSH EMITTER emit FROM source_a, TO sink ENCODE USING my_codec FLUSH \
-             IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+            "CREATE ZEROMQ PUSH EMITTER emit FROM source_a, TO emitter ENCODE USING my_codec \
+             FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         )
         .is_err()
     );
     assert!(
         parse_create_emitter(
-            "CREATE ZEROMQ PUSH EMITTER emit FROM source_a WHERE, source_b TO sink ENCODE USING \
-             my_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+            "CREATE ZEROMQ PUSH EMITTER emit FROM source_a WHERE, source_b TO emitter ENCODE \
+             USING my_codec FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
         )
         .is_err()
     );
@@ -1093,7 +1093,7 @@ fn clickhouse_values_keep_an_array_value_whole() {
         values, ..
     })) = parsed.connector.as_ref()
     else {
-        panic!("expected a ClickHouse sink, got {:?}", parsed.connector);
+        panic!("expected a ClickHouse emitter, got {:?}", parsed.connector);
     };
     assert_eq!(
         values,
@@ -1407,7 +1407,7 @@ fn rejects_non_iceberg_emitter_with_commit_policy() {
     assert!(
         errs.iter()
             .any(|err| format!("{err:?}").contains("iden: Commit")),
-        "COMMIT EACH belongs to the Iceberg sink and must not be accepted here: {errs:?}"
+        "COMMIT EACH belongs to the Iceberg emitter and must not be accepted here: {errs:?}"
     );
 }
 
@@ -1515,7 +1515,7 @@ fn parses_postgres_emitter_on_conflict_do_update() {
         ..
     })) = parsed.connector.as_ref()
     else {
-        panic!("expected postgres emitter sink");
+        panic!("expected postgres emitter emitter");
     };
     assert_eq!(
         conflict_action,
@@ -1545,7 +1545,7 @@ fn parses_postgres_emitter_on_conflict_do_nothing_without_target() {
         ..
     })) = parsed.connector.as_ref()
     else {
-        panic!("expected postgres emitter sink");
+        panic!("expected postgres emitter emitter");
     };
     assert_eq!(
         conflict_action,
@@ -1751,7 +1751,7 @@ fn parses_mysql_emitter_on_conflict_do_update() {
         conflict_action, ..
     })) = parsed.connector.as_ref()
     else {
-        panic!("expected mysql emitter sink");
+        panic!("expected mysql emitter emitter");
     };
     assert_eq!(conflict_action, &MySqlConflictAction::DoUpdate);
 }
@@ -1775,7 +1775,7 @@ fn parses_mysql_emitter_on_conflict_do_nothing() {
         conflict_action, ..
     })) = parsed.connector.as_ref()
     else {
-        panic!("expected mysql emitter sink");
+        panic!("expected mysql emitter emitter");
     };
     assert_eq!(conflict_action, &MySqlConflictAction::DoNothing);
 }
@@ -1930,7 +1930,7 @@ fn parses_mongodb_emitter_on_conflict_do_update() {
         ..
     })) = parsed.connector.as_ref()
     else {
-        panic!("expected mongodb emitter sink");
+        panic!("expected mongodb emitter emitter");
     };
     assert_eq!(
         conflict_action,
@@ -1960,7 +1960,7 @@ fn parses_mongodb_emitter_on_conflict_do_nothing() {
         ..
     })) = parsed.connector.as_ref()
     else {
-        panic!("expected mongodb emitter sink");
+        panic!("expected mongodb emitter emitter");
     };
     assert_eq!(
         conflict_action,
@@ -2183,7 +2183,7 @@ fn suggests_mode_after_create() {
 
 #[test]
 fn suggests_encode_using_as_compound_keyword() {
-    // The codec follows the sink it encodes for, so it is offered once the sink is named.
+    // The codec follows the emitter it encodes for, so it is offered once the emitter is named.
     let input = "CREATE ATTACHED KAFKA TOPIC EMITTER emit FROM p99 TO broker1 TOPIC 'topic' MODE \
                  NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ";
     let suggestions = suggest_create_emitter(input, input.len());
@@ -2593,7 +2593,7 @@ fn batch_clause_follows_route_construction() {
          MAX MESSAGES 10 MAX SIZE 64KiB FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON \
          GENERAL ERROR LOG;",
     )
-    .expect("BATCH follows the route construction of an encoded sink");
+    .expect("BATCH follows the route construction of an encoded emitter");
     assert_eq!(encoded.batch, Some(batch_policy(10, "64KiB")));
     assert!(encoded.construction.where_clause.is_some());
 
@@ -2603,7 +2603,7 @@ fn batch_clause_follows_route_construction() {
          500 MAX SIZE 8MiB FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL \
          ERROR LOG;",
     )
-    .expect("BATCH follows the WHERE clause of a direct sink");
+    .expect("BATCH follows the WHERE clause of a direct emitter");
     assert_eq!(direct.batch, Some(batch_policy(500, "8MiB")));
     assert!(direct.construction.where_clause.is_some());
 }

@@ -3,6 +3,8 @@
 
 use std::collections::VecDeque;
 
+use async_trait::async_trait;
+
 use super::*;
 
 fn config(entries: &[(&str, &str)]) -> Vec<ClientConfigEntry> {
@@ -15,7 +17,7 @@ fn config(entries: &[(&str, &str)]) -> Vec<ClientConfigEntry> {
         .collect()
 }
 
-/// Host services the sink under test never calls.
+/// Host services the emitter under test never calls.
 struct SilentHost;
 
 impl nervix_connector::EmitterTransientErrorStatus for SilentHost {
@@ -51,14 +53,14 @@ impl nervix_connector::EmitterGeneralErrorHandler for SilentHost {
 
 const MAPPED_COLUMNS: [&str; 2] = ["time", "body"];
 
-/// A logs sink mapping `time` and `body`, with one resource attribute and a scope, that sends to
+/// A logs emitter mapping `time` and `body`, with one resource attribute and a scope, that sends to
 /// `endpoint` over `protocol`.
 async fn logs_emitter(
     endpoint: &str,
     protocol: &str,
     compression: Option<&str>,
     batch: Option<EmitterBatchPolicy>,
-) -> OtelEmitter {
+) -> OtlpEncoder {
     let mut entries = vec![("endpoint", endpoint), ("protocol", protocol)];
     if let Some(compression) = compression {
         entries.push(("compression", compression));
@@ -75,11 +77,11 @@ async fn logs_emitter(
         ),
         arrow_schema::Field::new("body", DataType::Utf8, true),
     ]));
-    OtelEmitter::new(
-        OtelEmitterConfig {
+    OtlpEncoder::new(
+        OtlpEncoderConfig {
             config: config(&entries),
             dns,
-            signal: OtelSignal::Logs,
+            signal: OtlpSignal::Logs,
             batch,
             values: MAPPED_COLUMNS.map(String::from).to_vec(),
             attributes: Vec::new(),
@@ -95,7 +97,7 @@ async fn logs_emitter(
         },
         EmitterHost::new(SilentHost),
     )
-    .unwrap_or_else(|error| panic!("the test logs sink configuration is valid: {error:?}"))
+    .unwrap_or_else(|error| panic!("the test logs emitter configuration is valid: {error:?}"))
 }
 
 /// The mapped columns of one batch: a time for every row and the given bodies, where `None` is a
@@ -131,7 +133,7 @@ fn batch_limits(max_messages: u32, max_size: u64) -> EmitterBatchPolicy {
 
 /// Prepares every row of `batch` as batch 3 of the host's buffer, the one carrier the host hands a
 /// preparation.
-async fn prepare_all(connector: &mut OtelEmitter, batch: &RecordBatch) -> RowRequestPreparation {
+async fn prepare_all(connector: &mut OtlpEncoder, batch: &RecordBatch) -> RowRequestPreparation {
     let target_columns = MAPPED_COLUMNS.map(String::from);
     let selected_rows = (0..batch.num_rows()).collect::<Vec<_>>();
     connector
@@ -165,17 +167,17 @@ fn members(request: &PreparedRowRequest) -> Vec<usize> {
 }
 
 /// The log records a prepared or sent Export request carries, after checking that it carries
-/// the sink's one resource and one scope.
+/// the emitter's one resource and one scope.
 fn log_records(body: &[u8]) -> Vec<LogRecord> {
     let request = ExportLogsServiceRequest::decode(body)
-        .assured("the sink prepares Export requests prost can decode");
+        .assured("the emitter prepares Export requests prost can decode");
     let [resource_logs] = request.resource_logs.as_slice() else {
         panic!("an Export request carries one resource");
     };
     let resource = resource_logs
         .resource
         .as_ref()
-        .assured("the sink installs its resource in every request");
+        .assured("the emitter installs its resource in every request");
     assert_eq!(resource.attributes.len(), 1);
     assert_eq!(resource.attributes[0].key, "service.name");
     let [scope_logs] = resource_logs.scope_logs.as_slice() else {
@@ -184,7 +186,7 @@ fn log_records(body: &[u8]) -> Vec<LogRecord> {
     let scope = scope_logs
         .scope
         .as_ref()
-        .assured("the sink installs its scope in every request");
+        .assured("the emitter installs its scope in every request");
     assert_eq!(
         (scope.name.as_str(), scope.version.as_str()),
         ("nervix/test", "1.0")
@@ -386,7 +388,7 @@ async fn http_receiver(
         let (mut stream, _) = listener
             .accept()
             .await
-            .assured("the sink under test connects once");
+            .assured("the emitter under test connects once");
         let mut buffer = Vec::new();
         for (status, answer) in answers {
             let head_end = loop {
@@ -459,11 +461,11 @@ fn gunzip(bytes: &[u8]) -> Vec<u8> {
     let mut decoded = Vec::new();
     flate2::read::GzDecoder::new(bytes)
         .read_to_end(&mut decoded)
-        .assured("the sink gzips what it sends with a valid stream");
+        .assured("the emitter gzips what it sends with a valid stream");
     decoded
 }
 
-/// The requests prepared from `batch`, as the host hands them to the sink.
+/// The requests prepared from `batch`, as the host hands them to the emitter.
 fn handed_over(preparation: &RowRequestPreparation) -> Vec<EmitterRowRequest> {
     preparation
         .requests
@@ -691,7 +693,7 @@ async fn a_prepared_grpc_export_reaches_its_receiver_after_a_negative_dns_answer
     .assured("the fixture DNS configuration is valid");
     let named_endpoint = endpoint.replacen("127.0.0.1", name, 1);
     let mut connector = logs_emitter(&endpoint, "grpc", None, None).await;
-    connector.client.transport = OtelEmitter::transport_from_config(
+    connector.client.transport = OtlpEncoder::transport_from_config(
         &config(&[
             ("endpoint", &named_endpoint),
             ("protocol", "grpc"),
@@ -817,4 +819,79 @@ fn a_grpc_answer_is_classified_by_the_otlp_retryable_codes() {
         OtelTransport::grpc_failure(GrpcStatus::new(GrpcCode::InvalidArgument, "answered")),
         OtelTransportOutcome::Rejected(_)
     ));
+}
+
+#[nervix_primitives::test]
+async fn entity_constructors_keep_their_kind_through_the_lifecycle_contract() {
+    use nervix_connector::EmitterLifecycle;
+    use nervix_models::{EmitterEntityKind, OtelEmitterEntity};
+
+    use crate::{
+        OtelExportConfig, OtelLogsEmitter, OtelLogsEmitterConfig, OtelMetricsEmitter,
+        OtelMetricsEmitterConfig, OtelTracesEmitter, OtelTracesEmitterConfig,
+    };
+
+    let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system())
+        .await
+        .expect("the host resolver loads");
+    let export = || OtelExportConfig {
+        config: config(&[
+            ("endpoint", "http://127.0.0.1:9"),
+            ("protocol", "http/protobuf"),
+        ]),
+        dns: dns.clone(),
+        batch: None,
+        values: Vec::new(),
+        attributes: Vec::new(),
+        resource: Vec::new(),
+        scope: None,
+        mapped_schema: StdArc::new(arrow_schema::Schema::empty()),
+    };
+    let mut emitters: [(Box<dyn EmitterLifecycle>, OtelEmitterEntity); 3] = [
+        (
+            Box::new(
+                OtelLogsEmitter::new(
+                    OtelLogsEmitterConfig { export: export() },
+                    EmitterHost::new(SilentHost),
+                )
+                .expect("logs opens"),
+            ),
+            OtelEmitterEntity::Logs,
+        ),
+        (
+            Box::new(
+                OtelTracesEmitter::new(
+                    OtelTracesEmitterConfig { export: export() },
+                    EmitterHost::new(SilentHost),
+                )
+                .expect("traces opens"),
+            ),
+            OtelEmitterEntity::Traces,
+        ),
+        (
+            Box::new(
+                OtelMetricsEmitter::new(
+                    OtelMetricsEmitterConfig {
+                        export: export(),
+                        metric: OtelMetric {
+                            name: "requests".to_string(),
+                            unit: "1".to_string(),
+                            description: None,
+                            kind: OtelMetricKind::Gauge,
+                        },
+                    },
+                    EmitterHost::new(SilentHost),
+                )
+                .expect("metrics opens"),
+            ),
+            OtelEmitterEntity::Metrics,
+        ),
+    ];
+    for (emitter, entity) in &mut emitters {
+        assert_eq!(emitter.kind(), EmitterEntityKind::Otel(*entity));
+        assert!(matches!(
+            emitter.finish(Instant::now()).await,
+            Ok(EmitterFinish::NothingHeld)
+        ));
+    }
 }

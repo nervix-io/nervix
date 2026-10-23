@@ -2,9 +2,9 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The PostgreSQL client Model with its connection pool, the table sink Model with
+//! - **Owns.** The PostgreSQL client Model with its connection pool, the table emitter Model with
 //!   its conflict action, and what it declares.
-//! - **Depends on.** The shared sink declarations and the names a body references.
+//! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The PostgreSQL driver, its configuration keys, or how rows are inserted.
 
 #![cfg_attr(
@@ -132,11 +132,11 @@ impl EmitterEntityBody for PostgresTableEmitter {
 
 connector_emitters! {
     connector Postgres = "POSTGRES";
-    /// What a PostgreSQL sink writes.
+    /// What a PostgreSQL emitter writes.
     pub enum PostgresEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum PostgresEmitterMode;
-    /// The entities a PostgreSQL sink writes.
+    pub enum PostgresTableEmitterMode;
+    /// The entities a PostgreSQL emitter writes.
     pub enum PostgresEmitterEntity {
         Table(PostgresTableEmitter, PostgresTablePublishingMode) = "TABLE";
     }

@@ -12,9 +12,14 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    RedisPubSubEmitter::KIND,
+    nervix_models::EmitterEntityKind::Redis(nervix_models::RedisEmitterEntity::PubSub)
+));
+
 impl EmitterConnectorStarter {
     pub(super) async fn redis(
-        connector: &RedisEmitterPlan,
+        connector: &RedisPubSubEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
         label: &str,
@@ -26,8 +31,8 @@ impl EmitterConnectorStarter {
                 label,
                 codec,
                 batch,
-                RedisEmitter::new(
-                    RedisEmitterConfig {
+                RedisPubSubEmitter::new(
+                    RedisPubSubEmitterConfig {
                         pool,
                         channel: connector.channel.clone(),
                     },

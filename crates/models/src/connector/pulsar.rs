@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Pulsar client Model, the topic source and sink Models with their delivery
+//! - **Owns.** The Pulsar client Model, the topic source and emitter Models with their delivery
 //!   mode, the topic and subscription names a source reads with the rules Pulsar holds them to,
 //!   who owns a source's subscription, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The Pulsar driver, its configuration keys, or how a topic is consumed or
 //!   produced to.
 
@@ -165,7 +165,7 @@ impl PulsarSubscriptionOwnership {
 pub type PulsarIngestMode = KafkaIngestMode;
 
 /// What the connector of a PULSAR TOPIC ingestor holds and how long it waits.
-const PULSAR_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const PULSAR_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "messages each partition consumer receives ahead of the host",
         bound: BufferBound::Bounded {
@@ -199,7 +199,7 @@ const PULSAR_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a PULSAR TOPIC emitter holds and how long it waits.
-const PULSAR_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+const PULSAR_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
             holds: "receipts held under NO ACK",
@@ -286,7 +286,7 @@ impl IngestorDeclaration for PulsarTopicIngestor {
             },
             OptionDeclaration::INSTANCES,
         ],
-        bounds: PULSAR_SOURCE_BOUNDS,
+        bounds: PULSAR_INGESTOR_BOUNDS,
     };
 }
 
@@ -313,7 +313,7 @@ connector_ingestors! {
     /// What a Pulsar source reads.
     pub enum PulsarIngestor;
     /// The alterations of the ingestors that read a Pulsar entity.
-    pub enum PulsarIngestorAlteration;
+    pub enum PulsarTopicIngestorAlteration;
     /// The entities a Pulsar source reads.
     pub enum PulsarIngestorEntity {
         Topic(PulsarTopicIngestor) = "TOPIC", "Pulsar";
@@ -346,7 +346,7 @@ impl EmitterDeclaration for PulsarTopicEmitter {
         options: &[],
         envelope: &[],
         properties: &[],
-        bounds: PULSAR_SINK_BOUNDS,
+        bounds: PULSAR_EMITTER_BOUNDS,
     };
 }
 
@@ -365,11 +365,11 @@ impl EmitterEntityBody for PulsarTopicEmitter {
 
 connector_emitters! {
     connector Pulsar = "PULSAR";
-    /// What a Pulsar sink writes.
+    /// What a Pulsar emitter writes.
     pub enum PulsarEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum PulsarEmitterMode;
-    /// The entities a Pulsar sink writes.
+    pub enum PulsarTopicEmitterMode;
+    /// The entities a Pulsar emitter writes.
     pub enum PulsarEmitterEntity {
         Topic(PulsarTopicEmitter, PulsarTopicPublishingMode) = "TOPIC";
     }

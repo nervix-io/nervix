@@ -12,9 +12,14 @@
 
 use super::*;
 
+const _: () = assert!(matches!(
+    SentryEventEmitter::KIND,
+    nervix_models::EmitterEntityKind::Sentry(nervix_models::SentryEmitterEntity::Event)
+));
+
 impl EmitterConnectorStarter {
     pub(super) fn sentry(
-        connector: &SentryEmitterPlan,
+        connector: &SentryEventEmitterPlan,
         context: &EmitterConnectorContext,
         codec: Option<&Arc<CompiledCodec>>,
         label: &str,
@@ -24,8 +29,8 @@ impl EmitterConnectorStarter {
             label,
             codec,
             batch,
-            SentryEmitter::new(
-                SentryEmitterConfig {
+            SentryEventEmitter::new(
+                SentryEventEmitterConfig {
                     config: connector.client.config.entries.clone(),
                     dns: context.dns()?,
                 },

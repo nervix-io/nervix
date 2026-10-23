@@ -29,8 +29,8 @@ use std::{cell::OnceCell, num::NonZeroU64, panic::Location, sync::LazyLock};
 use meticulous::{OptionExt as _, ResultExt as _};
 
 use super::{
-    Access, BlockedAttempt, BlockedThread, BoundedText, IngestorSite, LockKind, LockLifetime,
-    LockSite, OrderLock, TrackedLockId, TrackedThreadId, WaitedLock, order_history::OrderHistory,
+    Access, BlockedAttempt, BlockedThread, BoundedText, LockKind, LockLifetime, LockSite,
+    OrderLock, SourceSite, TrackedLockId, TrackedThreadId, WaitedLock, order_history::OrderHistory,
 };
 use crate::collections::DashMap;
 
@@ -102,7 +102,7 @@ impl Registry {
                 id,
                 site: Some(LockSite {
                     kind: record.kind,
-                    constructed_at: IngestorSite::from_location(record.constructed_at),
+                    constructed_at: SourceSite::from_location(record.constructed_at),
                 }),
                 lifetime: LockLifetime::Live,
             },
@@ -212,7 +212,7 @@ impl Registry {
         let site = match self.locks.get(&lock) {
             Some(record) => Some(LockSite {
                 kind: record.kind,
-                constructed_at: IngestorSite::from_location(record.constructed_at),
+                constructed_at: SourceSite::from_location(record.constructed_at),
             }),
             None => None,
         };
@@ -220,7 +220,7 @@ impl Registry {
         let attempt = match self.attempts.get(&thread) {
             Some(record) if record.lock == lock => Some(BlockedAttempt {
                 access: record.access,
-                at: IngestorSite::from_location(record.at),
+                at: SourceSite::from_location(record.at),
             }),
             Some(_) | None => None,
         };

@@ -1,13 +1,13 @@
-//! Redis Pub/Sub source transport.
+//! Redis Pub/Sub ingestor transport.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The dedicated subscription connection each source instance reads a channel
+//! - **Owns.** The dedicated subscription connection each ingestor instance reads a channel
 //!   through, including DNS, TCP, TLS, Redis's own protocol setup and the SUBSCRIBE, all within
 //!   the client's `connect_timeout_ms`.
 //! - **Depends on.** The connector contract, node DNS resolver, typed client configuration
 //!   entries, `error-stack`, Tokio and `redis`.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
+//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -48,7 +48,7 @@ use crate::pubsub::redis_client;
 
 const REDIS: &str = "redis";
 
-/// Why a Redis Pub/Sub source could not open its subscription.
+/// Why a Redis Pub/Sub ingestor could not open its subscription.
 #[derive(Debug, Error)]
 pub enum RedisPubSubIngestorError {
     #[error("invalid Redis client configuration")]
@@ -79,7 +79,7 @@ pub enum RedisPubSubIngestorError {
 
 type RedisPubSubIngestorResult<T> = Result<T, Report<RedisPubSubIngestorError>>;
 
-/// What one Redis Pub/Sub source subscribes to: its configured client, node resolver, channel,
+/// What one Redis Pub/Sub ingestor subscribes to: its configured client, node resolver, channel,
 /// and the deadline its subscription is established within.
 #[derive(Debug, Clone)]
 pub struct RedisPubSubIngestorPlan {
@@ -300,7 +300,7 @@ impl IngestorMessage for RedisPubSubIngestorMessage {
     }
 }
 
-/// One Redis Pub/Sub source instance: its subscription stream, absent while reconnecting.
+/// One Redis Pub/Sub ingestor instance: its subscription stream, absent while reconnecting.
 pub struct RedisPubSubIngestor {
     plan: RedisPubSubIngestorPlan,
     stream: Option<PubSubStream>,
@@ -308,6 +308,9 @@ pub struct RedisPubSubIngestor {
 
 #[async_trait]
 impl IngestorConnector for RedisPubSubIngestor {
+    const KIND: nervix_models::IngestorEntityKind =
+        nervix_models::IngestorEntityKind::Redis(nervix_models::RedisIngestorEntity::PubSub);
+
     type Plan = RedisPubSubIngestorPlan;
 
     async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {

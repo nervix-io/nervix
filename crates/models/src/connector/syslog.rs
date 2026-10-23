@@ -3,8 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The syslog client Model, the listener source Model with its delivery mode, the
-//!   collector sink Model, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//!   collector emitter Model, and what each entity declares.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** Syslog framing, its configuration keys, or how a listener is bound or a
 //!   collector is written to.
 
@@ -160,7 +160,7 @@ connector_ingestors! {
     /// What a syslog source reads.
     pub enum SyslogIngestor;
     /// The alterations of the ingestors that read a syslog entity.
-    pub enum SyslogIngestorAlteration;
+    pub enum SyslogListenerIngestorAlteration;
     /// The entities a syslog source reads.
     pub enum SyslogIngestorEntity {
         Listener(SyslogListenerIngestor) = "LISTENER", "Syslog";
@@ -207,11 +207,11 @@ impl EmitterEntityBody for SyslogCollectorEmitter {
 
 connector_emitters! {
     connector Syslog = "SYSLOG";
-    /// What a syslog sink writes.
+    /// What a syslog emitter writes.
     pub enum SyslogEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum SyslogEmitterMode;
-    /// The entities a syslog sink writes.
+    pub enum SyslogCollectorEmitterMode;
+    /// The entities a syslog emitter writes.
     pub enum SyslogEmitterEntity {
         Collector(SyslogCollectorEmitter, SyslogCollectorPublishingMode) = "COLLECTOR";
     }

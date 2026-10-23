@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The RabbitMQ client Model, the queue source and sink Models with their delivery
+//! - **Owns.** The RabbitMQ client Model, the queue source and emitter Models with their delivery
 //!   mode, the queue name a source consumes with the rule AMQP holds it to, and what each entity
 //!   declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The AMQP driver, its configuration keys, or how a queue is consumed or
 //!   published to.
 
@@ -65,7 +65,7 @@ pub struct RabbitMqQueueIngestor {
 }
 
 /// What the connector of a RABBITMQ QUEUE ingestor holds and how long it waits.
-const RABBITMQ_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const RABBITMQ_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "deliveries the broker sends ahead of their acknowledgement",
         bound: BufferBound::Bounded {
@@ -94,7 +94,7 @@ const RABBITMQ_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a RABBITMQ QUEUE emitter holds and how long it waits.
-const RABBITMQ_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+const RABBITMQ_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
             holds: "publishes awaiting confirmation",
@@ -152,7 +152,7 @@ impl IngestorDeclaration for RabbitMqQueueIngestor {
             name: LocatorName::External(RabbitMqQueueName::DECLARATION),
         }),
         options: &[OptionDeclaration::INSTANCES],
-        bounds: RABBITMQ_SOURCE_BOUNDS,
+        bounds: RABBITMQ_INGESTOR_BOUNDS,
     };
 }
 
@@ -203,7 +203,7 @@ connector_ingestors! {
     /// What a RabbitMQ source reads.
     pub enum RabbitMqIngestor;
     /// The alterations of the ingestors that read a RabbitMQ entity.
-    pub enum RabbitMqIngestorAlteration;
+    pub enum RabbitMqQueueIngestorAlteration;
     /// The entities a RabbitMQ source reads.
     pub enum RabbitMqIngestorEntity {
         Queue(RabbitMqQueueIngestor) = "QUEUE", "RabbitMQ";
@@ -236,7 +236,7 @@ impl EmitterDeclaration for RabbitMqQueueEmitter {
         options: &[],
         envelope: &[],
         properties: &[],
-        bounds: RABBITMQ_SINK_BOUNDS,
+        bounds: RABBITMQ_EMITTER_BOUNDS,
     };
 }
 
@@ -255,11 +255,11 @@ impl EmitterEntityBody for RabbitMqQueueEmitter {
 
 connector_emitters! {
     connector RabbitMq = "RABBITMQ";
-    /// What a RabbitMQ sink writes.
+    /// What a RabbitMQ emitter writes.
     pub enum RabbitMqEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum RabbitMqEmitterMode;
-    /// The entities a RabbitMQ sink writes.
+    pub enum RabbitMqQueueEmitterMode;
+    /// The entities a RabbitMQ emitter writes.
     pub enum RabbitMqEmitterEntity {
         Queue(RabbitMqQueueEmitter, RabbitMqQueuePublishingMode) = "QUEUE";
     }

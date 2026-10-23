@@ -8,7 +8,7 @@
 //!   rejected alone, or rejected together with the candidate it shared a failed container with.
 //! - **Depends on.** The emitter's compiled codec, which prepares members and encodes containers,
 //!   and its declared batching policy, with source relay and concrete branch identity.
-//! - **Must not know.** Which sink publishes a payload, how its members are acknowledged, or when
+//! - **Must not know.** Which emitter publishes a payload, how its members are acknowledged, or when
 //!   the emitter flushes.
 //!
 //! Packing is synchronous so that it runs wherever the codec's own execution policy requires: a
