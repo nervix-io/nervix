@@ -500,11 +500,14 @@ impl BranchRuntime {
         &mut self,
         processor_id: &ModelName,
         execution_now: Timestamp,
+        purpose: ProcessorCheckpointPurpose,
     ) -> OwnershipHandoffResult<()> {
         let Some(mut processor) = self.processors.remove(processor_id) else {
             return Ok(());
         };
-        let result = processor.checkpoint_live_state(self, execution_now).await;
+        let result = processor
+            .checkpoint_live_state(self, execution_now, purpose)
+            .await;
         self.processors.insert(processor_id.clone(), processor);
         result
     }

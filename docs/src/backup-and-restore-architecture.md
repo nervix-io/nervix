@@ -235,8 +235,12 @@ backup.
 
 For a quiesced cut, the owner first asks each ingestor, reingestor and processor it executes to
 checkpoint its current branch lifecycle, including branches created since the periodic snapshot.
-Each processor branch publishes on that request: a deduplicator its keyspace, a window its retained
-rows when they changed, and a WASM branch its guest save. Capture then runs as one storage job:
+Each deduplicator and window branch publishes on that request: a deduplicator its keyspace, a
+window its retained rows when they changed. A WASM branch publishes nothing and its guest is not
+asked to save: the checkpoint that completed its last callback already holds its guest state on the
+owner and on every replica it named, so the cut archives that save as the state store holds it.
+Saving the guest again would hold the frozen domain while the new save reached those replicas.
+Capture then runs as one storage job:
 
 1. A quiesced capture closes the domain's capture fence.
 2. Every Kafka offset state and branch lifecycle checkpoint assigned to the node is sealed into the

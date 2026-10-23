@@ -2483,7 +2483,6 @@ impl SessionServiceImpl {
         self.reconcile_persistent_commands(command_retry_fence, command_retry_fence)
             .await;
         let transactions = self.inner.consensus.current_transactions().await;
-        let mut tombstone_removal_required = false;
 
         for transaction in transactions.values() {
             nervix_primitives::task::consume_budget().await;
@@ -2521,15 +2520,17 @@ impl SessionServiceImpl {
                     }
                 }
                 TransactionState::Committing(_) => {}
-                TransactionState::Finished(finished) => {
+                TransactionState::Finished(_) => {
                     self.inner.transaction_bindings.remove(&transaction.id);
-                    if finished.finished_at <= finished_before {
-                        tombstone_removal_required = true;
-                    }
                 }
                 TransactionState::Open(_) => {}
             }
         }
+        let tombstone_removal_required = self
+            .inner
+            .consensus
+            .has_removable_finished_transactions(finished_before)
+            .await;
         if tombstone_removal_required
             && let Err(error) = self
                 .inner

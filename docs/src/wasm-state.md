@@ -59,7 +59,9 @@ records each conversion, its exact oracle and the limits of its claim.
 A normal backup holds a quiesced cut for each running domain. Once intake and acknowledged work
 drain, each owner applies the selected cut revision and its runtime plan, then requests a fresh
 branch lifecycle checkpoint from its active supervisors before
-reading durable WASM saves together with its other state from one database snapshot.
+reading durable WASM saves together with its other state from one database snapshot. The cut asks no
+guest to save: the checkpoint that completed each branch's last callback is the save it archives,
+so a cut never waits for a new save to reach the replicas.
 The archive stores a typed descriptor for each saved branch: processor, schema fingerprint, typed
 branch key and its fingerprint, generation, and checkpoint revision. Raw guest bytes occupy a
 separate section with a measured length and digest. `WITHOUT PAUSE` exports the latest published
@@ -309,8 +311,9 @@ deadline inside the checkpoint's ninety-second completion budget.
 The state store's durability barrier issues a ticket to every writer after its write is applied. At
 most one writer runs a synchronization at a time; it covers every ticket issued before it started,
 and the writers still waiting elect the next runner when it did not cover them. Branches that
-checkpoint at the same time therefore share one synchronization instead of queuing one each. No lock
-is held across the wait; see [Bounded Synchronization Outside The Open
+checkpoint before a synchronization starts therefore share it, and those that checkpoint while it
+runs share the next one, instead of queuing one each. No lock is held across the wait; see
+[Bounded Synchronization Outside The Open
 Path](./data-plane-concurrency.md#bounded-synchronization-outside-the-open-path).
 
 A failed synchronization is not retried. The operating system may have dropped the writes it failed

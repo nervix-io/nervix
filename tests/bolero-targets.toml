@@ -2950,6 +2950,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/mongodb/src/__fuzz__/tests__bolero_failed_write_answers_partition_the_write/corpus"
+domain_version = 1
+features = []
+id = "mongodb-write-answers"
+invariant = "Every row of a failed unordered MongoDB insert_many or bulk_write, under any mix of applied results of each kind, refusals for good and for retry, repeated refusals, answers naming documents beyond the write and a write concern failure, is delivered when the server applied it and refused it nowhere, rejected with its code when one refusal for good names it, and otherwise left unresolved; the write fails exactly when a row is unresolved, an answer names a document beyond the write, or the write concern failed, and the failure names the request and the write concern's code."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-connector-mongodb"
+random_iterations = 256
+source = "crates/connectors/mongodb/src/lib.rs"
+test = "tests::bolero_failed_write_answers_partition_the_write"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/web-console/src/backup_dialog/tests/__fuzz__/backup_dialog__tests__properties__bolero_pending_backups_survive_a_reload/corpus"
 domain_version = 1
 features = []
