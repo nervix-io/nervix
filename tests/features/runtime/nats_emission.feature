@@ -97,10 +97,8 @@ Feature: NATS emission
       relay="columnar_events"
       """
     When emitter "columnar_events_out" leaves stall mode
-    # The stall releases every buffered message at once, so this drains a larger burst than the
-    # streaming scenario below and is given the same budget. Measured drain of 32768 messages is
-    # about four seconds on an idle machine, which left the previous five second bound inside its
-    # own margin: it failed attempts on CI for this branch and for main alike.
+    # The independent sequence observation drains the complete burst while the runner polls
+    # other scenarios, retaining the original deadline and every sequence/header assertion.
     Then within "90s" the observed broker receives <message_count> messages in sequence by field "sequence" with headers
       """
       route=primary
@@ -267,6 +265,8 @@ Feature: NATS emission
       direction="sent"
       relay="narrow_events"
       """
+    # Verify every sequence and header on the observation's runtime task, so a loaded scenario
+    # runner cannot spend the delivery budget between polls of an already buffered message.
     Then within "90s" the observed broker receives <message_count> messages in sequence by field "sequence" with headers
       """
       route=narrow
