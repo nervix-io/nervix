@@ -1481,9 +1481,9 @@ pub(super) fn append_filter_map_nested_value(
 mod tests {
     use ahash::HashMap;
     use nervix_models::{
-        AckMode, CreateEmitter, CreateSchema, EmitSink, EmitterPublishingMode, ErrorPolicies,
-        FieldPath, KafkaSink, KafkaTopicSink, MessageErrorCode, MessageErrorOperation, ModelName,
-        ParseAsType, ProcessorInputs, RetryPolicy, Timestamp, ZeroMqPushSink, ZeroMqSink,
+        AckMode, CreateEmitter, CreateSchema, EmitSink, ErrorPolicies, FieldPath, KafkaSink,
+        KafkaTopicSink, MessageErrorCode, MessageErrorOperation, ModelName, ParseAsType,
+        ProcessorInputs, RetryPolicy, Timestamp, ZeroMqPushSink, ZeroMqSink,
     };
     use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
@@ -2285,6 +2285,12 @@ mod tests {
                 codec: named("notification_codec"),
             },
             sink: Box::new(EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
+                mode: nervix_models::KafkaTopicPublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
                 client: named("kafka_main"),
                 topic: named("notifications_out"),
             }))),
@@ -2295,12 +2301,6 @@ mod tests {
             },
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             construction: construction(
                 "INHERIT tenant SET normalized = lower(input.raw) WHERE input.active INVOKE \
                  write_header(lower(\"TENANT\"),
@@ -2335,6 +2335,12 @@ mod tests {
         .expect("program must exist");
         let mut unsupported_emitter = emitter.clone();
         *unsupported_emitter.sink = EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+            mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                retry_policy: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: named("zeromq_main"),
         }));
         let error = EmitterExecutionPlan::route(
@@ -2343,7 +2349,7 @@ mod tests {
             output_schema.arrow_schema().as_ref(),
         )
         .expect_err("ZeroMQ emitters must reject write_header");
-        assert!(error.to_string().contains("ZEROMQ emitter"));
+        assert!(error.to_string().contains("ZEROMQ PUSH emitter"));
         let messages = [true, false]
             .into_iter()
             .map(|active| {

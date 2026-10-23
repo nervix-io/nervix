@@ -8,8 +8,9 @@
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    KafkaConsumerGroupName, KafkaTopicName, MqttTopicFilter, NatsQueueGroupName, NatsSubjectName,
-    PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
+    ExternalName, KafkaConsumerGroupName, KafkaTopicName, MqttTopicFilter, MqttTopicName,
+    NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName, PulsarSubscriptionName,
+    PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
 };
 
 use crate::Arbitrary;
@@ -222,5 +223,33 @@ impl Arbitrary<'_> {
             text.push_str(piece);
         }
         text
+    }
+}
+
+impl Arbitrary<'_> {
+    /// An external table/collection identifier within its current lexical bound, with both cases.
+    pub fn emitter_table_name<N: ExternalName>(&mut self) -> N {
+        let text = self.pieces_text(["a", "Z", "0", "9", ".", "_", "-", "~"], 128);
+        N::parse(&text)
+            .assured("the generator uses the identifier alphabet within the declared bound")
+    }
+
+    /// A publication topic reaches the MQTT byte bound without subscription wildcards or NUL.
+    pub fn mqtt_publication_topic_name(&mut self) -> MqttTopicName {
+        let text = self.pieces_text(
+            [
+                "a", "Z", "0", "9", " ", "-", "_", ".", "$", "'", "é", "中文", "\n", "/",
+            ],
+            MQTT_TOPIC_FILTER_BYTES,
+        );
+        MqttTopicName::parse(&text)
+            .assured("the publication alphabet contains neither NUL nor wildcards")
+    }
+
+    /// A publication subject has concrete nonempty tokens and no subscription wildcards.
+    pub fn nats_publication_subject_name(&mut self) -> NatsPublishSubjectName {
+        let text = self.pieces_text(SOLID_PIECES, LONG_NAME_BYTES);
+        NatsPublishSubjectName::parse(&text)
+            .assured("one nonempty subject token contains neither whitespace nor wildcards")
     }
 }

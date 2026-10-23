@@ -66,6 +66,9 @@ use tracing::{debug, info, warn};
 use crate::runtime::AdvertisedSubscriptionInterest;
 use crate::runtime::SubscriptionInterestIndex;
 
+mod settings;
+pub use settings::{MembershipSettings, NodeUnavailabilityTimeout};
+
 const KEY_CLUSTER_ID: &str = "cluster_id";
 const KEY_NODE_ID: &str = "node_id";
 const KEY_GRPC_LISTEN_ADDR: &str = "grpc_listen_addr";

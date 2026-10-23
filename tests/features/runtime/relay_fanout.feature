@@ -42,7 +42,7 @@ Feature: Relay fan-out
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE EMITTER zeromq_fanout_out FROM notifications TO ZEROMQ zeromq_fanout MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE ZEROMQ PUSH EMITTER zeromq_fanout_out FROM notifications TO zeromq_fanout MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

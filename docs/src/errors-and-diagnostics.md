@@ -53,6 +53,12 @@ chapter that owns its subsystem:
 The NSPL forms for error routes are in [Message Errors](./processors.md#message-errors) and
 [Error Routes](./quickstart-error-routes.md).
 
+Emitter ALTER validation belongs to the vocabulary: its typed declared-kind and replacement-kind
+failures retain both connector/entity kinds and render their Plexus phrases. The parser constructs
+only each destination's own publishing-policy enum, so no registry or planner failure represents an
+impossible entity/policy pair. Reference validation still rejects a configured client of the wrong
+kind; Iceberg reports its declared object-store alternatives and the actual resolved client kind.
+
 ## The Report Model
 
 ### A Failure Has One Owner
@@ -589,7 +595,7 @@ contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the resolver's
 the deadline that ran out. The sink changes them into a configuration failure for an invalid
 address, CA file or deadline key and an initialization failure otherwise, leading with the failure's
 chain, down to a `connect_timeout_ms` it ran out of, which `DESCRIBE EMITTER` shows. Neither
-attaches credentials from the address. A `NO_ACK` round trip that runs out of the client's
+attaches credentials from the address. A `NO ACK` round trip that runs out of the client's
 `timeout_ms` fails the write as a publish failure with the elapsed deadline as its typed cause and
 its text leading the report.
 
@@ -616,6 +622,19 @@ A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLo
 `RedisPubSubSourceError::Resolve` and `SourceError::Resume`. A refused address, failed TLS name
 check or failed Redis protocol setup is also a connection failure. None rejects an input message
 or changes Redis Pub/Sub's server-acceptance boundary for `PUBLISH`.
+
+A Redis source client must declare `subscription_buffer_messages` and `idle_timeout_ms`.
+A missing key is `RedisPubSubSourceError::MissingConfiguration`, naming only that key; a capacity
+outside the bounded channel's range is `InvalidBufferCapacity`, and an invalid idle deadline keeps
+`ClientConfigError::InvalidDeadline` beneath `InvalidIdleTimeout`. These are source configuration
+failures before a subscription opens, not record rejections.
+
+Redis subscription protocol and read failures retain their driver causes beneath
+`RedisPubSubSourceError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
+the shared `DeadlineElapsed` with `idle_timeout_ms` and its configured bound beneath `IdleProbe`
+and `SourceError::Read`. The host displays that transient failure and reconnects on its existing
+policy. Reader task failures retain the typed join cause. A source explicitly ending its lifetime
+joins its reader; it owes no further read outcome after intake ends.
 
 A connection that runs out of the client's `connect_timeout_ms` keeps the connector contract's
 `DeadlineElapsed` as its innermost cause, naming the step that did not finish, the key and its
@@ -657,13 +676,21 @@ an address that refused the connection, a failed TLS handshake, including a cert
 not name the configured host, or a refused MQTT handshake. A source keeps the error beneath
 `MqttSourceError::Connect` while it connects and `MqttSourceError::Receive` while it reads, and
 those beneath `SourceError`, so `DESCRIBE INGESTOR` shows the deepest cause: the resolver's lookup
-error or the driver's description. A sink's event loop records the connection error's message as
-the emitter's transient error, which `DESCRIBE EMITTER` shows, and reconnects on the emitter's
-retry policy. None rejects a record or acknowledges input. A QoS 1 or 2 publish keeps the driver's
-`ClientError` when the client refuses to take a record, and its `PublishNoticeError` when an answer
-leaves a record unresolved, beneath `SinkPublishError::Publish`, each with the connector's
-description of the failure for the emitter's transient error. A missed `ACK TIMEOUT` is the
-confirmation window's `ConfirmationWindowError`, which the window describes the same way.
+error or the driver's description. The task that drives a source's connection hands the lost
+connection to the source's next read, or to an acknowledgement that finds the connection ended,
+which keeps it beneath `MqttSourceError::Acknowledge`; a task that fails without a report keeps its
+`JoinError` beneath `MqttSourceError::Driver`. An acknowledgement that meets the task holding a
+publish for room in a full read-ahead fails as `MqttSourceError::ReadAheadFull`, naming the
+read-ahead's capacity, because nothing would write it before the host reads again, and one whose
+connection wrote nothing for a keep-alive interval fails as
+`MqttSourceError::AcknowledgementDeadline`, naming the keep-alive. A sink's event
+loop records the connection error's message as the emitter's transient error, which
+`DESCRIBE EMITTER` shows, and reconnects on the emitter's retry policy. None rejects a record or
+acknowledges input. A QoS 1 or 2 publish keeps the driver's `ClientError` when the client refuses
+to take a record, and its `PublishNoticeError` when an answer leaves a record unresolved, beneath
+`SinkPublishError::Publish`, each with the connector's description of the failure for the
+emitter's transient error. A missed `ACK TIMEOUT` is the confirmation window's
+`ConfirmationWindowError`, which the window describes the same way.
 
 MQTT input retirement reports `RuntimeError::RetireIngestorSource`, naming its domain and
 ingestor, above the connector's `MqttSourceError::RetireInstance` and instance index. The report
@@ -730,6 +757,15 @@ acknowledgement, rather than failures to decode a record. A control call that ex
 watermark, timestamp and seek failures preserve the driver's typed cause beneath the operation
 that failed.
 
+A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
+and a refused charge keeps `AdmissionError` beneath `KafkaSourceError::RetirementAdmission`. It
+fails the source's open or the partition inspector's start, as transiently as a refused control
+call. A Kafka producer takes the same charge, and a refused one keeps `AdmissionError` beneath
+`KafkaProducerStartError::RetirementAdmission` beneath `SinkStartError::Initialize`, whose
+description names the refused charge; the emitter starts its sink again after its retry delay. See
+[Kafka client retirement](./connector-contract.md#kafka-client-retirement). A retirement has no
+caller to fail, so its supervisor reports a destruction job that panicked at `debug`.
+
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
 cause of its connection error, and the connector finds it there by type and keeps it as the context
@@ -767,7 +803,7 @@ stays an infrastructure failure of the attempt, which the emitter retries.
 
 The Pulsar sink preserves the driver's `pulsar::Error` beneath `SinkPublishError::Publish` for
 enqueue failures and failed receipts, with its description in a printable attachment. Its shared
-confirmation window owns a missed `ACK TIMEOUT` as `ConfirmationWindowError`. A `NO_ACK` finish
+confirmation window owns a missed `ACK TIMEOUT` as `ConfirmationWindowError`. A `NO ACK` finish
 keeps the first failed receipt beneath `SinkFinishError::Flush`; if its deadline expires with
 receipts still unanswered, `SinkFinishError::Unsent` counts those receipts, retaining an earlier
 driver failure beneath it when present. An unanswered receipt leaves delivery unknown rather
@@ -1038,11 +1074,20 @@ predicate, its relay. The decision fails before a new emitter plan or remote con
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
 opening an external sink may fail independently and follows the emitter's retry policy.
 
-The Iceberg sink checks its mapped schema against the loaded table while opening. A mapped column
-absent from the table or with an incompatible type returns `SinkStartError::InvalidConfiguration`
-before staging records. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg
-conversion error beneath that context. The check compares names and nested types after narrowing
-UTC datetimes to microseconds; table changes after open can still fail a later catalog commit.
+The Iceberg sink plans how its commits write the mapped columns into the table, matching them to
+the table's columns by name, once while opening and again against the table's current schema before
+each commit writes data files. A plan the table cannot take is an `IcebergColumnError` naming the
+column: a mapped column absent from the table (`Missing`) or of an incompatible Iceberg type
+(`TypeMismatch`, which carries both types), a required table column `VALUES` leaves out
+(`UnmappedRequired`), and a required column mapped from an expression that can produce a null
+(`NullableIntoRequired`), or whose nested values the table requires and the expression can leave
+null (`NullableNestedIntoRequired`). While opening, the error stays beneath
+`SinkStartError::InvalidConfiguration`, before staging records; before a commit, beneath
+`SinkPublishError::Commit`, so the commit keeps its staged rows and their acknowledgements. Either
+way the report attaches the error's own description, which the emitter shows as its transient error
+while it retries. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg conversion
+error beneath `IcebergColumnError::MappedSchema`. The plan compares names and nested types after
+narrowing UTC datetimes to microseconds.
 
 An Iceberg commit charges the bulk memory class for the staged files it reads back with
 `Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The
@@ -1111,9 +1156,20 @@ class, operation, configured budget, and required bytes, so the node fails start
 actionable diagnostic instead of discovering insufficient storage capacity while applying a
 transaction.
 
-Memory-pressure watermarks are validated where the node reads its options. A low watermark that is
-not below the high one, or a zero check interval, is a `MemoryPressureConfigError` carrying the
-configured values beneath `AppError::InvalidMemoryPressureConfig`, so the node does not start. The
+The node converts its settings once, where it reads its options, and before it opens a store. Each
+owner's definition validates its own value and its relationships with the settings it depends on,
+so defaults and an operator's values cross the same check, and each refusal names the settings by
+their option names with their values. A minimum election timeout that does not exceed the heartbeat
+interval, or a maximum that does not exceed the minimum, is a `RaftTimingError` beneath
+`AppError::InvalidRaftTimings`. A drain timeout above the shutdown timeout is a
+`ShutdownSettingsError` beneath `AppError::InvalidShutdownTimeouts`. A setting that a test names for
+a node but that the server's command line does not read keeps clap's error beneath
+`AppError::ReadSettings`.
+
+Memory-pressure watermarks are validated the same way. A watermark set without its pair, a low
+watermark that is not below the high one, or a zero check interval while the watermarks are set is
+a `MemoryPressureConfigError` carrying the configured values beneath
+`AppError::InvalidMemoryPressureConfig`, so the node does not start. The
 supervisor's constructor validates the same configuration beneath
 `MemoryPressureError::InvalidConfig`, and an allocator sample that jemalloc refuses is
 `MemoryPressureError::ReadJemalloc`, naming the control it read, the epoch, `stats.allocated` or
@@ -1235,7 +1291,13 @@ carry it. A SQL write that fails for a reason specific to its rows is written ag
 time, and each row the destination still refuses receives an `external` `publish` error with the
 destination's reason. That includes a violated MySQL `CHECK` constraint, which the server reports
 under the generic SQLSTATE `HY000`, and a Postgres cardinality violation, which is how
-`ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. An OTLP receiver's
+`ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. A MongoDB write answers for
+each document even when it fails: a document the server refused for good receives an `external`
+`publish` error with the server's code, a document it applied is delivered, and every other
+document stays unresolved. A write concern the deployment could not satisfy is an infrastructure
+failure the host retries, named with the server's code, such as
+`MongoDB insert_many write concern failed with code 100 (UnsatisfiableWriteConcern)`, and it never
+undoes the documents the server applied, so the retry carries only the rest. An OTLP receiver's
 `partial_success` has no member identities, so it acknowledges the entire request and emits a
 warning instead of inventing per-record rejections. An OTLP/gRPC export the receiver never answered
 — a timeout, a lost connection, an unreadable answer — is an infrastructure failure the host

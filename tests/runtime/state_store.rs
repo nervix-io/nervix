@@ -486,12 +486,17 @@ fn wasm_guest_placement(tenant: &str, value: u64) -> RuntimeStatePlacement {
 }
 
 pub(super) fn open_store(dir: &tempfile::TempDir) -> RuntimeStateStore {
+    open_store_on(dir, Executor::default())
+}
+
+/// Opens a store whose storage work runs on `executor`.
+pub(super) fn open_store_on(dir: &tempfile::TempDir, executor: Executor) -> RuntimeStateStore {
     let db = Database::builder(dir.path())
         .open()
         .expect("database should open");
     RuntimeStateStore::from_database(
         db,
-        Executor::default(),
+        executor,
         crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
     )
     .expect("state store should open")

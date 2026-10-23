@@ -1684,10 +1684,10 @@ mod tests {
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{
         AckMode, BranchSelection, ClusterNodeName, CoordinationIdentity, CreateEmitter,
-        CreateJunction, CreateRelay, DomainSchedule, EmitSink, EmitterName, EmitterPublishingMode,
-        ErrorPolicies, IngestQuiesceMode, IngestorName, ModelKind, ModelName, NodeRef,
-        ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName,
-        RetryPolicy, ZeroMqPushSink, ZeroMqSink,
+        CreateJunction, CreateRelay, DomainSchedule, EmitSink, EmitterName, ErrorPolicies,
+        IngestQuiesceMode, IngestorName, ModelKind, ModelName, NodeRef, ProcessorInputWhere,
+        ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName, RetryPolicy, ZeroMqPushSink,
+        ZeroMqSink,
     };
     use nervix_primitives::{
         sync::{
@@ -2566,17 +2566,17 @@ mod tests {
                 codec: named("event_codec"),
             },
             sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+                mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
                 client: named("sink"),
             }))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: nervix_models::RouteConstruction::default(),
             materialized_state: Vec::new(),

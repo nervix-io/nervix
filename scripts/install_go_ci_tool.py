@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install a pinned Go CI tool and retain every checksum transport failure."""
+"""Install a pinned Go CI tool and retain every public download transport failure."""
 
 from __future__ import annotations
 
@@ -33,13 +33,20 @@ TRANSPORT_ERRORS = (
 )
 
 
-def retryable_checksum_transport(output: str) -> bool:
-    """Retry only a failed read from Go's public checksum service."""
+def retryable_public_transport(output: str) -> bool:
+    """Retry failed reads from Go's public module and checksum services."""
     lowered = output.lower()
     if "checksum mismatch" in lowered or "security error" in lowered:
         return False
     return any(
-        "reading https://sum.golang.org/" in line
+        any(
+            source in line
+            for source in (
+                "reading https://sum.golang.org/",
+                "reading https://proxy.golang.org/",
+                'read "https://proxy.golang.org/',
+            )
+        )
         and any(error in line for error in TRANSPORT_ERRORS)
         for line in lowered.splitlines()
     )
@@ -89,14 +96,14 @@ def install(tool: str, destination: Path) -> int:
             output = f"Could not launch go: {error}\n"
 
         duration = time.monotonic() - attempt_started
-        retryable = status not in (0, 124, 127) and retryable_checksum_transport(output)
+        retryable = status not in (0, 124, 127) and retryable_public_transport(output)
         log = tool_directory / f"attempt-{attempt:02d}.log"
         log.write_text(
             f"Command: {' '.join(command)}\n"
             f"GOSUMDB: {environment['GOSUMDB']}\n"
             f"Exit status: {status}\n"
             f"Duration: {duration:.1f}s\n"
-            f"Retryable checksum transport error: {retryable}\n\n{output}"
+            f"Retryable public download transport error: {retryable}\n\n{output}"
         )
         print(f"{tool}: attempt {attempt}/{MAX_ATTEMPTS} exited {status}; log: {log}", flush=True)
         if status == 0:
@@ -110,7 +117,7 @@ def install(tool: str, destination: Path) -> int:
         if time.monotonic() - started + delay >= TOTAL_BUDGET_SECONDS:
             print(f"{tool}: no time remains for a verified retry", file=sys.stderr)
             return 124
-        print(f"{tool}: checksum transport failed; retrying in {delay}s", flush=True)
+        print(f"{tool}: public download transport failed; retrying in {delay}s", flush=True)
         time.sleep(delay)
 
     raise AssertionError("the installation loop must return")

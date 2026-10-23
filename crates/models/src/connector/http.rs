@@ -29,11 +29,11 @@ use super::{
 use crate::{
     AcknowledgementConfirmation, BatchUnavailability, ClientName, ConnectorKind, DeclaredDelivery,
     DeclaredQuiesce, DomainClockPeriod, EmitSinkCapabilities, EmitterBatchLegality,
-    EmitterBodyForm, EmitterPublishingModeKind, EndpointIngestMode, EndpointName, EndpointType,
-    Expression, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
-    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
-    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    EmitterBodyForm, EndpointIngestMode, EndpointName, EndpointType, Expression, HeaderLayout,
+    HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
+    OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass, SinkBody,
+    SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity,
+    SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Http: unpooled, config Nervix, CreateClientHttp => HttpConfigEntry);
@@ -229,6 +229,7 @@ connector_sources! {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct HttpRequestSink {
+    pub mode: HttpRequestPublishingMode,
     pub client: ClientName,
     pub method: Expression,
     pub path: Expression,
@@ -245,7 +246,7 @@ impl SinkEntity for HttpRequestSink {
             reason: BatchUnavailability::OneRequestPerRecord,
         },
         requires_batch_transformation: false,
-        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        publishing_modes: HttpRequestPublishingMode::KINDS,
         locator: None,
         options: &[
             OptionDeclaration {
@@ -288,8 +289,16 @@ connector_sinks! {
     connector Http = "HTTP";
     /// What an HTTP sink writes.
     pub enum HttpSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum HttpEmitterMode;
     /// The entities an HTTP sink writes.
     pub enum HttpSinkEntity {
-        Request(HttpRequestSink) = "REQUEST";
+        Request(HttpRequestSink, HttpRequestPublishingMode) = "REQUEST";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum HttpRequestPublishingMode {
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
     }
 }

@@ -32,11 +32,10 @@ use super::{
 use crate::{
     AcknowledgementConfirmation, ChoiceRequirement, ClientName, ConnectorKind, DeclaredDelivery,
     DeclaredQuiesce, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    EmitterPublishingModeKind, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
-    PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind, TopicName,
+    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
+    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, PositionClass,
+    RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
+    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
 };
 
 configured_client!(Mqtt: unpooled, config Nervix, CreateClientMqtt => MqttConfigEntry);
@@ -132,9 +131,19 @@ const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredBuffer {
+            holds: "publishes the connection reads ahead of the host",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting(
+                    "the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under \
+                     ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
             holds: "SUBSCRIBE and PUBACK requests for the connection",
             bound: BufferBound::Bounded {
-                capacity: BufferCapacity::Driver("1024 requests"),
+                capacity: BufferCapacity::Setting("the Receive Maximum, or 1 under NO ACK"),
                 overflow: BufferOverflow::Backpressure,
             },
         },
@@ -147,6 +156,10 @@ const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
         DeclaredWait {
             wait: "SUBACK",
             bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "an acknowledgement's PUBACKs written to the connection",
+            bound: WaitBound::Driver("one keep-alive interval of 60 s, or the broker's"),
         },
         DeclaredWait {
             wait: "a silent connection",
@@ -192,7 +205,7 @@ impl SourceEntity for MqttTopicSource {
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Mqtt),
         position_class: PositionClass::BrokerRedelivered,
-        acknowledgement_confirmation: AcknowledgementConfirmation::Queued,
+        acknowledgement_confirmation: AcknowledgementConfirmation::Written,
         delivery: &[
             DeclaredDelivery::NO_ACK,
             DeclaredDelivery::ACK_SEQUENTIAL.requiring(BROKER_KEPT_SESSION),
@@ -383,6 +396,16 @@ impl MqttIngestMode {
         }
     }
 
+    /// How many of its publishes may wait on their acknowledgements at once: one under
+    /// `ACK SEQUENTIAL` and `MAX` under `ACK PARALLEL`. `NO ACK` acknowledges nothing, so none wait.
+    pub const fn acknowledgement_window(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::NoAck { .. } => None,
+            Self::AckSequential { .. } => Some(NonZeroU64::MIN),
+            Self::AckParallel { max, .. } => Some(*max),
+        }
+    }
+
     pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
         match self {
             Self::AckParallel {
@@ -425,8 +448,9 @@ connector_sources! {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct MqttTopicSink {
+    pub mode: MqttTopicPublishingMode,
     pub client: ClientName,
-    pub topic: TopicName,
+    pub topic: MqttTopicName,
 }
 
 impl SinkEntity for MqttTopicSink {
@@ -436,16 +460,10 @@ impl SinkEntity for MqttTopicSink {
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[
-            EmitterPublishingModeKind::MqttQos0,
-            EmitterPublishingModeKind::MqttQos1,
-            EmitterPublishingModeKind::MqttQos2,
-        ],
+        publishing_modes: MqttTopicPublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
             keywords: "TOPIC",
-            name: LocatorName::Unquoted {
-                label: "topic_name",
-            },
+            name: LocatorName::External(MqttTopicName::DECLARATION),
         }),
         options: &[],
         envelope: &[],
@@ -471,8 +489,31 @@ connector_sinks! {
     connector Mqtt = "MQTT";
     /// What an MQTT sink writes.
     pub enum MqttSink;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum MqttEmitterMode;
     /// The entities an MQTT sink writes.
     pub enum MqttSinkEntity {
-        Topic(MqttTopicSink) = "TOPIC";
+        Topic(MqttTopicSink, MqttTopicPublishingMode) = "TOPIC";
     }
+}
+
+super::publishing::emitter_modes! {
+    pub enum MqttTopicPublishingMode {
+        Qos0 { retry_policy: crate::RetryPolicy } => MqttQos0,
+        Qos1 { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => MqttQos1,
+        Qos2 { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => MqttQos2,
+    }
+}
+
+super::external_name::external_names! {
+    /// An MQTT publication topic, without subscription wildcards.
+    pub struct MqttTopicName => mqtt_publication_topic, label "mqtt_topic", example "devices/Orders";
+}
+
+fn mqtt_publication_topic(text: &str) -> Result<(), ExternalNameError> {
+    require_length(text, MQTT_TOPIC_FILTER_MAX)?;
+    if let Some(ch) = text.chars().find(|ch| matches!(ch, '\0' | '+' | '#')) {
+        return Err(ExternalNameError::InvalidChar { ch });
+    }
+    Ok(())
 }

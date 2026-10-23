@@ -359,7 +359,16 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::command_pauses` | Scenario-controlled one-shot boundaries, including standalone transaction lookup and preflight, and a domain resume proposal and its refusal on a selected node; the forced-recovery startup fixture also records a missing destination schedule and releases that node's held initial installation. Scenario cleanup releases and clears the retained observations | test-only command and startup fault control |
 | `FaultInjectionState::refused_model_publications` | Armed by a pause recovery scenario or owner test; a testing build's coordinator looks its domain up before each transaction model step publication and each domain pause release, delivers the publication refusal and then the release refusal once each, and the entry stays marked delivered for the scenario's assertion; absent from product builds | test-only model publication fault control |
 | `FaultInjectionState::handoff_engagement_transport_failures` | Armed by a drain scenario; a testing build's coordinator looks its domain up before each remote ownership-handoff gate engagement request and delivers the failure once, and the entry stays marked delivered for the scenario's assertion; absent from product builds | test-only handoff transport fault control |
+| `FaultInjectionState::lost_handoff_gate_engagements` | Armed by a drain scenario for one coordinator-to-node link; a testing build's coordinator looks that link up before each attempt to send it an ownership-handoff gate engagement request, loses and counts every such request, and the count stays for the scenario's assertion; absent from product builds | test-only handoff link fault control |
 | Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations | test-only |
+
+A leader's transaction reconciliation takes one replicated snapshot for cleanup eligibility in
+addition to the transaction-list snapshot. `StoreInner::state` releases its read guard after the
+snapshot clone and before the pure eligibility decision. Replicated removal rechecks the same
+references when it applies. `transaction_bindings` receives one removal attempt for each retained
+finished transaction per pass; an applying execution can extend these attempts beyond the minimum
+tombstone age. These remain control-plane sweeps, including absent-key shard writes. Retaining a
+tombstone does not retain a session binding: terminal request handling and session close release it.
 
 ### Rust client attachment recovery
 

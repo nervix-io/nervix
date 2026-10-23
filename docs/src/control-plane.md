@@ -209,7 +209,7 @@ valid retroactively.
 
 Within a transaction, each consecutive run of model mutations can mix `CREATE`,
 `ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`,
-`ALTER REORDERER`, `ALTER EMITTER`, `ALTER <CONNECTOR> <ENTITY> INGESTOR`, `ALTER REINGESTOR`,
+`ALTER REORDERER`, `ALTER <CONNECTOR> <ENTITY> EMITTER`, `ALTER <CONNECTOR> <ENTITY> INGESTOR`, `ALTER REINGESTOR`,
 `ALTER GENERATOR`, `ALTER PLACEMENT`, and `DROP`. Nervix applies that run as one registry
 mutation: all operations are evaluated in written order against one candidate model map, the
 complete domain graph is revalidated, and one atomic storage batch persists the base-to-final
@@ -316,7 +316,15 @@ accepted is refused. A finished transaction's final report revision remains avai
 committed, failed, reverted, and expired outcomes even after later graph changes. Removing the
 tombstone removes its plan and report records and any topology content no retained report
 references. During retention, attach reports the exact outcome and aggregate commit output; after
-removal the id is unknown.
+removal the id is unknown. The configured retention is a minimum age from the terminal decision.
+A finished transaction remains retained while an applying command request targets its identity,
+or while its mutation owner names an applying ordinary command. The latter includes every internal
+planning refresh attempt of that command. Its commit plan and report records remain with it.
+Once all such executions finish, an already aged transaction is eligible for the next cleanup;
+finishing the command does not start another retention window. Cleanup checks these references in
+the same replicated state that applies removal, so leadership changes and recovery cannot remove
+the outcome an applying execution still needs. The leader proposes cleanup only when at least one
+transaction is eligible for removal.
 `SHOW TRANSACTIONS;`
 can be served by any node from locally applied replicated state and lists the id, owner, domain,
 state, pending count, progress, age, and idle time for live transactions and retained tombstones.
@@ -634,13 +642,21 @@ recorded stay applied.
 Node drain, the ownership move of a graceful-shutdown drain, placement consolidation, and `RELOCATE`
 are planned ownership handoffs.
 Nervix computes the complete target schedule before it engages a hold. It then fences dispatch at
-the affected subgraph boundary on every live node, stops new intake for each moved ingestor, and
-drains work already admitted to the moved unit. Ownership-handoff intake does not consult `ON
-QUIESCE`: an already admitted payload continues through its routes, while polling and endpoint
-admission stop. The drain includes relay rings, processor work, moved-ingestor ACK roots, emitter
-buffers and active publishing, and an Iceberg emitter's staged commit. Internal relays whose every
-producer moves with the same hard group remain open so admitted work can reach the group's output
-boundary.
+the affected subgraph boundary on every live node that runs part of it, stops new intake for each
+moved ingestor, and drains work already admitted to the moved unit. Ownership-handoff intake does
+not consult `ON QUIESCE`: an already admitted payload continues through its routes, while polling
+and endpoint admission stop. The drain includes relay rings, processor work, moved-ingestor ACK
+roots, emitter buffers and active publishing, and an Iceberg emitter's staged commit. Internal
+relays whose every producer moves with the same hard group remain open so admitted work can reach
+the group's output boundary.
+
+The hold's participants are the live nodes on which the current or the target schedule runs a
+moved entity, a relay the hold fences, or an entity that writes to such a relay. An ingestor that
+runs on every node counts on each node it is assigned to. Only those nodes can admit work into the
+moved unit, hold work it must drain, or run the unit once the handoff activates. The coordinator
+asks no other node to hold anything and waits for none of them, so a live node that runs none of
+the unit cannot spend the preparation deadline, however slowly the coordinator reaches it. A
+participant the coordinator cannot reach still fails the unit when that deadline passes.
 
 Before publishing the ownership freeze, each participant requests a force flush and drains its
 local affected work with the intake and boundary gates already closed. Routes and processors can

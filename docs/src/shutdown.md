@@ -95,11 +95,14 @@ running its remaining phases.
 
 Inside that deadline sits the drain timeout, `--drain-timeout` (`NERVIX_DRAIN_TIMEOUT`, default
 `30s`), which bounds the drain-support phase alone. The two defaults are ordered so that a full
-drain still leaves time for terminal teardown. Every drain step waits for the smaller of its
-remaining drain budget and the remaining shutdown deadline, so shortening the shutdown timeout below
-the drain timeout makes the shutdown deadline the effective bound. The one exception is the release
-of the cordon the node's own drain set, which keeps a one-second grace when moving the node's work
-used the whole drain timeout; see [Releasing The Drain Cordon](#releasing-the-drain-cordon).
+drain still leaves time for terminal teardown. A drain timeout may not exceed the shutdown timeout:
+a node given one above it refuses to start, before it opens a store, with
+`drain-timeout (…) must not exceed shutdown-timeout (…)`. Every drain step waits for the smaller of
+its remaining drain budget and the remaining shutdown deadline, so a drain timeout equal to the
+shutdown timeout lets the drain use the whole deadline, and the deadline also bounds a drain that
+starts after the earlier phases used part of it. The one exception is the
+release of the cordon the node's own drain set, which keeps a one-second grace when moving the
+node's work used the whole drain timeout; see [Releasing The Drain Cordon](#releasing-the-drain-cordon).
 
 Two bounds are deliberately outside the deadline. Terminal teardown's final stops — the runtime,
 consensus, cluster membership, and the interconnect — run to completion rather than being cut short,
@@ -538,11 +541,17 @@ The ownership move at the start of drain support is the same planned handoff use
 owns the general contract; this section states what shutdown adds.
 
 The complete target schedule is computed before anything is held. The coordinator then fences
-dispatch at the affected subgraph boundary on every live node, stops intake for each moved ingestor,
-and drains the work already admitted to the moved unit, including moved-ingestor acknowledgement
-roots, emitter buffers and active publishing, and an Iceberg emitter's staged commit. The new
-schedule is written only after that drain succeeds, and the fence opens only after the destination
-activates the published revision.
+dispatch at the affected subgraph boundary on every live node that runs part of it, stops intake for
+each moved ingestor, and drains the work already admitted to the moved unit, including
+moved-ingestor acknowledgement roots, emitter buffers and active publishing, and an Iceberg
+emitter's staged commit. The new schedule is written only after that drain succeeds, and the fence
+opens only after the destination activates the published revision.
+
+Only the hold's participants, which
+[Control Plane](./control-plane.md#planned-ownership-handoffs-and-failover) defines, are asked to
+hold anything. A live node that runs none of the moved unit is not one of them, so its link to the
+coordinator cannot spend the preparation deadline that the stopping node's drain budget sets, even
+when that link loses most of its packets.
 
 Each participant closes intake and boundary gates, requests a force flush and confirms its
 admission hold. The coordinator polls the exact operation's drain status while installed routes
@@ -704,6 +713,11 @@ both follow.
 
 ### Sources
 
+A Redis Pub/Sub source stops its dedicated reader and joins it before close or suspend returns.
+Its bounded read-ahead queue is volatile, unadmitted input and is discarded when that subscription
+ends. Redis Pub/Sub provides no acknowledgement or replay for those messages; an idle probe does
+not change that delivery contract.
+
 An MQTT execution stop or ownership move retains its persistent broker sessions for resume.
 Removing or changing the declared input retires its external state separately, after its exact
 source tasks stop; a stopped domain still holds the typed plan needed for cleanup. See
@@ -722,11 +736,10 @@ other acknowledgement root, within the drain timeout. What a source's confirmati
 acknowledgement confirmation its entity declares; see
 [Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements). An SQS deletion,
 a Kafka offset commit and a Pulsar acknowledgement in an `ACK` mode are answered, and a RabbitMQ
-acknowledgement is written to the connection, before the drain moves on, while an MQTT `PUBACK` is
-only queued by its client, so the drain does not wait for its broker to answer it. A Pulsar
-acknowledgement the broker does not answer within the client's 30-second operation timeout fails,
-and the host rejects the positions, so the drain timeout bounds it as well. A Kafka consumer group
-in `MODE NO ACK` acknowledges nothing: when intake stops, its source commits the positions its
+acknowledgement and an MQTT `PUBACK` are written to the connection, before the drain moves on. A
+Pulsar acknowledgement the broker does not answer within the client's 30-second operation timeout
+fails, and the host rejects the positions, so the drain timeout bounds it as well. A Kafka consumer
+group in `MODE NO ACK` acknowledges nothing: when intake stops, its source commits the positions its
 driver delivered since the driver's last commit, and waits for the answer before the consumer
 leaves the group, and a Pulsar subscription in `MODE NO ACK` only queues its acknowledgements.
 
@@ -786,7 +799,7 @@ Once the graph drain budget ends, terminal teardown cancels an emitter task wait
 attempt. It does not wait for that client's full attempt timeout or turn the canceled request into
 a record-specific success or rejection.
 
-A `NO_ACK` emitter on Kafka, Pulsar or MQTT QoS 0 reaches its completion point when its client
+A `NO ACK` emitter on Kafka, Pulsar or MQTT QoS 0 reaches its completion point when its client
 takes a record, so the drain can end while the client still holds records it has not sent. Every
 emitter therefore finishes its sink when it stops: the host calls the sink contract's finish hook
 once the emitter will publish nothing more, and records what the hook did. An emitter that the
@@ -796,12 +809,15 @@ the hook the domain drain timeout, cut short by the shutdown deadline. Kafka flu
 producer's local queue within that time, ignoring `linger.ms`; records still awaiting their delivery
 report when it ends are lost, and the emitter logs at `warn` how many, counting records alone and
 not the events waiting in librdkafka's queue, and reports them as its transient error and an error
-event. Pulsar retains the receipts of records accepted under `NO_ACK` and waits for them within
+event. Pulsar retains the receipts of records accepted under `NO ACK` and waits for them within
 that same finish deadline. A driver failure or still-unanswered receipts fail its finish; an
 expired deadline reports their count, without claiming the broker did not receive them. A Core
 NATS client holds records only after a write ran out of the client's `timeout_ms`, which leaves them
-unresolved and with the client; its finish flushes them within that same finish deadline, and a
-deadline that ends first reports how many the client still held. MQTT QoS 0 waits within that same
+unresolved and with the client; its finish flushes them within that same finish deadline. A
+deadline that ends first reports how many the client still held, and a client that fails while it
+flushes fails the finish with the driver's cause. A connection the client loses while it holds them
+discards those the client had taken for it but not yet written, and a finish whose flush completes
+after the client connected again still reports them flushed. MQTT QoS 0 waits within that same
 finish deadline for its client's event loop to write and flush the publishes the client still holds;
 a failed flush or publishes still unflushed when it ends fail its finish, which reports the failure
 or their count. Every other sink
@@ -949,6 +965,17 @@ remains. Connections that peers opened to the node close at once, together with 
 serving their streams, so a peer's request the node has not answered fails instead of completing.
 A forced ending skips this entirely, so peers observe the connections ending exactly as they do
 when a process crashes.
+
+Runtime teardown stops a Kafka ingestor's instances like any other source's, and a Kafka emitter
+like any other emitter, and each stopped instance hands its consumer, and each emitter's sink its
+producer, to its retirement on the connector storage workers; see
+[Kafka client retirement](./connector-contract.md#kafka-client-retirement). Teardown does not wait
+for those retirements. The process's runtime does, as it stops once the application has returned: a
+retirement already running finishes, within the five seconds a joined consumer's coordinator has to
+answer its LeaveGroup request, or the half second a producer flushes after its purge, and a client
+still waiting for a worker is destroyed by the runtime's stop, once the runtime runs no async work.
+The shutdown deadline bounds both, and a forced ending skips them as it skips every other
+destructor.
 
 The node's own OTLP trace exporter is a process service. After the application returns, its tracing
 guard closes resolver installation and asks the SDK to flush before the process drops its Tokio
@@ -1350,8 +1377,10 @@ mid-drain. When you raise `--shutdown-timeout`, raise the deployment grace perio
 grace period ends first, the supervisor sends `SIGKILL` and the node loses whatever the drain had
 not yet completed.
 
-Raising `--drain-timeout` above `--shutdown-timeout` does not extend the drain, because every drain
-step is also bounded by the shutdown deadline. Raise both together.
+A node refuses a `--drain-timeout` above its `--shutdown-timeout`, because every drain step is also
+bounded by the shutdown deadline, so such a drain could never use its own timeout. A drain timeout
+equal to the shutdown timeout leaves terminal teardown nothing once a drain uses all of it. Raise
+both together.
 
 ## Retained Drain Dependencies
 

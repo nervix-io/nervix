@@ -44,8 +44,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER retried FROM events
-        TO KAFKA kafka_main TOPIC retried_out_{{test_id}}
+      CREATE ATTACHED KAFKA TOPIC EMITTER retried FROM events
+        TO kafka_main TOPIC 'retried_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 3s MAX 3s
           ENCODE USING event_codec
         INHERIT ALL
@@ -126,8 +126,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED EMITTER detached_retried FROM events
-        TO KAFKA kafka_main TOPIC detached_retried_out_{{test_id}}
+      CREATE DETACHED KAFKA TOPIC EMITTER detached_retried FROM events
+        TO kafka_main TOPIC 'detached_retried_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 10s MAX 10s
           ENCODE USING event_codec
         INHERIT ALL
@@ -203,8 +203,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
         'bootstrap.servers' = '{{kafka_addr}}',
         'message.max.bytes' = '1000'
       };
-      CREATE EMITTER refused FROM events
-        TO KAFKA kafka_small_messages TOPIC refused_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER refused FROM events
+        TO kafka_small_messages TOPIC 'refused_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
@@ -274,14 +274,12 @@ Feature: Emitter batch payloads through acknowledgements and retries
         'addr' = '{{mongodb_addr}}',
         'database' = 'nervix'
       };
-      CREATE EMITTER to_mongodb FROM notifications
-        TO MONGODB mongodb_client INSERT TO COLLECTION retried_mongodb_{{test_id}}
-        VALUES {
+      CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications
+        TO mongodb_client COLLECTION 'retried_mongodb_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
           "mongodb_user_id" = input.user_id,
           "mongodb_action" = LOWER(input.action)
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO emitter_errors
           SET error_code = error.code,

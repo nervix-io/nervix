@@ -16,7 +16,7 @@ semantics. The state rules here apply to those systems without replacing their d
 [Execution Plans](./execution-plans.md) follows the validated values into a complete installed
 revision.
 
-The Pulsar sink's running publishing choice keeps related state together: the `NO_ACK` variant
+The Pulsar sink's running publishing choice keeps related state together: the `NO ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
 confirmation settings. An empty receipt collection means there are no outstanding receipts,
 and an absent failure means none has been observed. These are task-owned execution values,
@@ -47,6 +47,12 @@ typed validation report on failure, and provides no mutable access around that b
 `Prerequisites`, `ClusterParameters` and `NodeCapabilities` classify the fields; omitting the
 class is a compile-time error. [Node Settings](node-settings.md) owns their operational meaning,
 carriers, defaults, change procedures and source ratchet.
+
+Redis subscription plans carry a nonzero bounded message capacity and a validated idle deadline.
+The source's absent subscription means it needs a resume. An installed subscription owns its
+bounded receiver and exact reader task; close and suspend join that task before replacing it.
+Queued messages precede its terminal read failure. These handles, queued payloads and parsing
+state remain volatile and are never part of a persisted Model.
 
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,
 and planning produces an execution plan. Each stage passes forward a value whose type expresses
@@ -277,6 +283,17 @@ configures as a typed kind, so a source or a sink is matched with its client by 
 rather than labels. A session producer's source is no transport, so the transport union holds no
 Model of it; the kind union still names it, because capability decisions ask about every source.
 
+Each emitter destination also owns its closed publishing enum: a Kafka topic can hold its own
+`NO ACK` or acknowledged policy, while an HTTP request can hold only its request acknowledgement
+policy. Capability metadata comes from those enum declarations. Shared inspection borrows the
+policy; it stores no second mode. Plexus parses a complete `SET TO` body using its declared entity,
+and ALTER carries that declared kind. The vocabulary checks the stored kind and every replacement
+before atomically publishing an alteration, including manually constructed Models. Typed failures
+name both entities. External locators preserve case in entity-specific validated types, including
+one SQS queue-name type shared by sources and destinations. An Iceberg storage-client reference
+retains absence of a resolved backend until the decision layer resolves the actual configured
+client; no default backend fills that boundary.
+
 **Endpoint availability.** Gossip publication carries an optional typed interconnect endpoint.
 Parsing a present advertised endpoint checks its host and port syntax. Membership admission
 requires that validated interconnect endpoint; an incomplete publication cannot become a
@@ -438,6 +455,13 @@ BSON's signed range. It does not publish that record with a replacement BSON nul
 conflict key. An actual null remains null, and other valid records in the batch can proceed under
 the connector's record outcome contract. See [Connector Crates And The Connector Contract](./connector-contract.md)
 for the host's publish and acknowledgement boundaries.
+
+The MongoDB sink also distinguishes each failed write's document answers: delivered, rejected with
+the server's definitive refusal code, or unresolved. An insert's implicit applied-document account
+and a verbose bulk write's explicit applied indexes are separate request variants. The unsatisfied
+write concern remains an optional failure beside those answers; it never replaces the documents'
+individual outcomes. Repeated refusals leave that document unresolved. The connector contract owns
+how these answers narrow the host's retry.
 
 VM integer count and position operands retain their signedness and full magnitude. A large
 unsigned input does not narrow to the largest signed integer; an unsupported result size reports

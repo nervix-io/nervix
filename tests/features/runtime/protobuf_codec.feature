@@ -118,8 +118,8 @@ Feature: Protobuf codec
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE EMITTER emitted_readings FROM readings
-        TO KAFKA kafka_main TOPIC readings_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER emitted_readings FROM readings
+        TO kafka_main TOPIC 'readings_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING transforming_reading_codec
         INHERIT ALL
