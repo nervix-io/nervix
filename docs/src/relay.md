@@ -90,7 +90,7 @@ Runtime branch rules:
 - output routes and forwarders send records to downstream relay names inside the same branch
 - stateful processors keep branch-local state for that group
 - a `REINGESTOR` may consume across a branch boundary and start new downstream branches through `BRANCHED BY <branch>`
-- an `EMITTER` consumes records across the whole input relay and terminates the branch at an external sink
+- an `EMITTER` consumes records across the whole input relay and terminates the branch at an external emitter
 
 `branch` is a reserved namespace, so a relay cannot be named `branch`. Expressions inside a
 concrete branch may read its immutable key with `branch.<key>`. Bare fields never resolve to branch

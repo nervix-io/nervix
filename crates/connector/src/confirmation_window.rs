@@ -1,4 +1,4 @@
-//! The confirmation window a brokered sink publishes through in `MODE ACK`.
+//! The confirmation window a brokered emitter publishes through in `MODE ACK`.
 //!
 //! Layer: engines and infrastructure.
 //!
@@ -6,11 +6,11 @@
 //!   oldest first and at most the declared `MAX` at once; each record's deadline, `ACK TIMEOUT`
 //!   after its own hand-over; the wait for the oldest answer until that deadline; and the publish
 //!   outcome the answers settle, including every answer a failure finds already given.
-//! - **Depends on.** The sink contract's outcome, record identity and failure types, the
+//! - **Depends on.** The emitter contract's outcome, record identity and failure types, the
 //!   boundary's monotonic clock and deadline-bounded wait, and the futures through which a
 //!   connector's driver answers.
 //! - **Must not know.** Any broker driver or how a connector classifies its driver's answers, the
-//!   host's retry, buffer or backoff, or the source acknowledgements a record carries.
+//!   host's retry, buffer or backoff, or the ingestor acknowledgements a record carries.
 
 #![cfg_attr(
     nervix_lint,
@@ -38,9 +38,9 @@ use nervix_primitives::{
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
 
-use crate::sink::{
-    AckConfirmation, PerRecordOutcome, RejectedSinkRecord, SinkPublishError, SinkPublishResult,
-    SinkRecordId,
+use crate::emitter::{
+    AckConfirmation, EmitterRecordId, EmitterWriteError, EmitterWriteResult, PerRecordOutcome,
+    RejectedEmitterMember,
 };
 
 /// Why a failed answer is dropped while a failure settles the window: the record's outcome is
@@ -62,7 +62,7 @@ pub enum BrokerVerdict {
 /// What the answer for one record resolves to: the broker's verdict on it, or the failure that
 /// left its outcome unknown, because the connection, the client or the broker failed rather than
 /// the record.
-pub type BrokerAnswer = Result<BrokerVerdict, Report<SinkPublishError>>;
+pub type BrokerAnswer = Result<BrokerVerdict, Report<EmitterWriteError>>;
 
 /// Why a confirmed publish stopped waiting for its broker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -86,11 +86,11 @@ pub enum ConfirmationWindowError {
 /// The records a confirmed publish handed its broker and awaits answers for, and the outcome
 /// their answers settle.
 ///
-/// A brokered sink in `MODE ACK` hands its records to the driver one after another and receives,
+/// A brokered emitter in `MODE ACK` hands its records to the driver one after another and receives,
 /// for each, a future that resolves to the broker's [`BrokerAnswer`] for it. The window takes each
 /// record with that future, oldest first. A record's deadline is `ACK TIMEOUT` after its own
 /// hand-over. While the window holds `MAX` records it waits for the oldest answer, until the
-/// oldest's deadline and no longer, before the sink hands over another record, so at most `MAX`
+/// oldest's deadline and no longer, before the emitter hands over another record, so at most `MAX`
 /// records await their answers at once. `ACK SEQUENTIAL` is a window of one. A driver whose queue
 /// fills below `MAX` can request the oldest answer through [`ConfirmationWindow::settle_next`].
 ///
@@ -111,17 +111,17 @@ pub enum ConfirmationWindowError {
 /// at-least-once delivery `MODE ACK` promises.
 #[must_use = "a confirmed publish reports its outcome only through `finish` or `fail`"]
 pub struct ConfirmationWindow<A> {
-    /// The sink a failure of the window is reported for.
-    sink: &'static str,
+    /// The emitter a failure of the window is reported for.
+    connector: &'static str,
     settings: AckConfirmation,
     /// The records awaiting their answers, oldest first.
     in_flight: VecDeque<InFlightRecord<A>>,
-    outcome: PerRecordOutcome<SinkRecordId>,
+    outcome: PerRecordOutcome<EmitterRecordId>,
 }
 
 /// One record the broker was handed, and the future its answer arrives through.
 struct InFlightRecord<A> {
-    record: SinkRecordId,
+    record: EmitterRecordId,
     occurred_at: Timestamp,
     /// `ACK TIMEOUT` after the record's hand-over.
     deadline: Instant,
@@ -157,10 +157,10 @@ where
     }
 
     /// Records the broker's verdict on this record in `outcome`.
-    fn settle(self, verdict: BrokerVerdict, outcome: &mut PerRecordOutcome<SinkRecordId>) {
+    fn settle(self, verdict: BrokerVerdict, outcome: &mut PerRecordOutcome<EmitterRecordId>) {
         match verdict {
             BrokerVerdict::Confirmed => outcome.deliver(self.record),
-            BrokerVerdict::Rejected { message } => outcome.reject(RejectedSinkRecord::external(
+            BrokerVerdict::Rejected { message } => outcome.reject(RejectedEmitterMember::external(
                 self.record,
                 self.occurred_at,
                 message,
@@ -173,13 +173,13 @@ impl<A> ConfirmationWindow<A>
 where
     A: Future<Output = BrokerAnswer> + Unpin,
 {
-    /// An empty window for a publish of `records` records through `sink`, which awaits answers for
+    /// An empty window for a publish of `records` records through `emitter`, which awaits answers for
     /// at most `settings.max_in_flight` of them at once and for each until `settings.timeout` after
     /// its hand-over.
-    pub fn new(sink: &'static str, settings: AckConfirmation, records: usize) -> Self {
+    pub fn new(connector: &'static str, settings: AckConfirmation, records: usize) -> Self {
         let in_flight = settings.max_in_flight.get().min(records);
         Self {
-            sink,
+            connector,
             settings,
             in_flight: VecDeque::with_capacity(in_flight),
             outcome: PerRecordOutcome::with_capacity(records),
@@ -188,7 +188,7 @@ where
 
     /// Records a record the driver refused for good as it was handed over, so it never awaited an
     /// answer.
-    pub fn reject(&mut self, rejected: RejectedSinkRecord<SinkRecordId>) {
+    pub fn reject(&mut self, rejected: RejectedEmitterMember<EmitterRecordId>) {
         self.outcome.reject(rejected);
     }
 
@@ -204,10 +204,10 @@ where
     /// range, so the new record was never taken and stays unresolved.
     pub async fn admit(
         &mut self,
-        record: SinkRecordId,
+        record: EmitterRecordId,
         occurred_at: Timestamp,
         answer: A,
-    ) -> SinkPublishResult<()> {
+    ) -> EmitterWriteResult<()> {
         let timeout = self.settings.timeout;
         let Some(deadline) = Instant::now().checked_add(timeout) else {
             return Err(self.stopped(ConfirmationWindowError::DeadlineOutOfRange { timeout }));
@@ -229,7 +229,7 @@ where
     /// Returns the settled record's identity, or `None` when no answer is awaited. The wait keeps
     /// the record's original confirmation deadline. An error ends the publish through
     /// [`ConfirmationWindow::fail`], just as an admission or finish error does.
-    pub async fn settle_next(&mut self) -> SinkPublishResult<Option<SinkRecordId>> {
+    pub async fn settle_next(&mut self) -> EmitterWriteResult<Option<EmitterRecordId>> {
         let Some(oldest) = self.in_flight.front() else {
             return Ok(None);
         };
@@ -243,7 +243,7 @@ where
     ///
     /// When an answer fails or misses its deadline, the publish ends with that failure as
     /// [`ConfirmationWindow::fail`] ends it.
-    pub async fn finish(mut self) -> PerRecordOutcome<SinkRecordId> {
+    pub async fn finish(mut self) -> PerRecordOutcome<EmitterRecordId> {
         while !self.in_flight.is_empty() {
             nervix_primitives::task::consume_budget().await;
             if let Err(failure) = self.settle_oldest().await {
@@ -259,7 +259,7 @@ where
     /// a confirmed record is delivered and a refused one rejected, so the host's retry never sends
     /// either again. A record without an answer, or whose answer failed, stays unresolved for the
     /// retry.
-    pub fn fail(self, failure: Report<SinkPublishError>) -> PerRecordOutcome<SinkRecordId> {
+    pub fn fail(self, failure: Report<EmitterWriteError>) -> PerRecordOutcome<EmitterRecordId> {
         let Self {
             in_flight,
             mut outcome,
@@ -284,7 +284,7 @@ where
     /// failure that ends the publish. A missed deadline leaves the oldest record in the window, so
     /// the failure that ends the publish still settles an answer that arrives after the deadline
     /// and before the window is settled.
-    async fn settle_oldest(&mut self) -> SinkPublishResult<()> {
+    async fn settle_oldest(&mut self) -> EmitterWriteResult<()> {
         let oldest = self
             .in_flight
             .front_mut()
@@ -307,9 +307,11 @@ where
     ///
     /// The window describes this failure of its own in a printable attachment, which an emitter
     /// shows as its transient error, as a connector describes the failures it reports itself.
-    fn stopped(&self, error: ConfirmationWindowError) -> Report<SinkPublishError> {
+    fn stopped(&self, error: ConfirmationWindowError) -> Report<EmitterWriteError> {
         Report::new(error)
-            .change_context(SinkPublishError::Publish { sink: self.sink })
+            .change_context(EmitterWriteError::Publish {
+                connector: self.connector,
+            })
             .attach_printable(error.to_string())
     }
 }

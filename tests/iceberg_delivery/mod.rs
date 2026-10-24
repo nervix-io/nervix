@@ -7,7 +7,7 @@
 //!   directory and DESCRIBE EMITTER show of a commit.
 //! - **Depends on.** The scenario's dependency endpoints, the Iceberg table reads and DESCRIBE steps
 //!   of the shared scenario module, and the catalog gate.
-//! - **Must not know.** The Iceberg sink's private state, its staged-file names beyond their
+//! - **Must not know.** The Iceberg emitter's private state, its staged-file names beyond their
 //!   documented shape, or a catalog's internals.
 
 #![cfg_attr(

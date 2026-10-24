@@ -29,7 +29,7 @@ pub(super) fn mode<'src>()
     request_mode!(MySqlTablePublishingMode)
 }
 pub(super) fn table_body<'src>()
--> impl Parser<'src, &'src [Token], ParsedDestination<MySqlTableSink>, extra::Err<ParseError<'src>>>
+-> impl Parser<'src, &'src [Token], ParsedDestination<MySqlTableEmitter>, extra::Err<ParseError<'src>>>
 + Clone {
     values_destination(
         client_ref()
@@ -43,7 +43,7 @@ pub(super) fn table_body<'src>()
             .try_map(
                 |((((client, table), mode), values), conflict_action), span| {
                     let _ = span;
-                    Ok(MySqlTableSink {
+                    Ok(MySqlTableEmitter {
                         client,
                         table,
                         mode,

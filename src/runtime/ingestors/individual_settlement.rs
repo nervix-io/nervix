@@ -15,9 +15,9 @@ use super::*;
 
 enum DeliveryOutcome {
     Graph {
-        outcome: SourceAcknowledgementOutcome,
+        outcome: IngestorAcknowledgementOutcome,
         // Kept through the transport operation, including after this root resolved.
-        acknowledgement: SourceBatchAcknowledgement,
+        acknowledgement: IngestorBatchAcknowledgement,
     },
     IntakeRefused,
 }
@@ -44,12 +44,12 @@ where
                                    are cloned once into batch-owned recovery storage")
     )]
     pub(super) async fn intake<M>(
-        host: &mut SourceHost,
+        host: &mut IngestorHost,
         messages: Vec<M>,
         timeout: Duration,
     ) -> Self
     where
-        M: SourceMessage<Position = P>,
+        M: IngestorMessage<Position = P>,
     {
         let batch = Self {
             positions: messages
@@ -60,7 +60,7 @@ where
         };
         for (index, message) in messages.into_iter().enumerate() {
             nervix_primitives::task::consume_budget().await;
-            let intake = SourceIntakeMessage {
+            let intake = IngestorIntakeMessage {
                 payload: message.payload(),
                 metadata: message.metadata(),
             };
@@ -94,11 +94,11 @@ where
     pub(super) async fn settle<C>(
         mut self,
         source: &mut C,
-        host: &mut SourceHost,
+        host: &mut IngestorHost,
         settlement: BatchSettlement,
     ) -> BatchDisposition<P>
     where
-        C: BrokerSourceConnector<Position = P>,
+        C: BrokerIngestorConnector<Position = P>,
     {
         let mut retry = false;
         let mut retained: Option<Vec<P>> = None;
@@ -114,7 +114,7 @@ where
                 positions.push(position);
                 match delivery.outcome {
                     DeliveryOutcome::Graph {
-                        outcome: SourceAcknowledgementOutcome::Shutdown,
+                        outcome: IngestorAcknowledgementOutcome::Shutdown,
                         acknowledgement,
                     } => {
                         let outstanding = positions.len().checked_add(self.waits.len()).assured(
@@ -125,7 +125,7 @@ where
                         return BatchDisposition::Shutdown;
                     }
                     DeliveryOutcome::Graph {
-                        outcome: SourceAcknowledgementOutcome::NoAck(reason),
+                        outcome: IngestorAcknowledgementOutcome::NoAck(reason),
                         acknowledgement,
                     } => {
                         host.handle_ack_failure(reason);
@@ -140,7 +140,7 @@ where
             }
             let disposition = match delivery.outcome {
                 DeliveryOutcome::Graph {
-                    outcome: SourceAcknowledgementOutcome::Ack,
+                    outcome: IngestorAcknowledgementOutcome::Ack,
                     acknowledgement,
                 } => {
                     let disposition = confirm_batch(source, host, settlement, vec![position]).await;
@@ -148,7 +148,7 @@ where
                     disposition
                 }
                 DeliveryOutcome::Graph {
-                    outcome: SourceAcknowledgementOutcome::NoAck(reason),
+                    outcome: IngestorAcknowledgementOutcome::NoAck(reason),
                     acknowledgement,
                 } => {
                     host.handle_ack_failure(reason);
@@ -157,7 +157,7 @@ where
                     disposition
                 }
                 DeliveryOutcome::Graph {
-                    outcome: SourceAcknowledgementOutcome::Shutdown,
+                    outcome: IngestorAcknowledgementOutcome::Shutdown,
                     acknowledgement,
                 } => {
                     let outstanding = self.waits.len().checked_add(1).assured(

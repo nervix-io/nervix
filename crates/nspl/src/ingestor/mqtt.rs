@@ -14,7 +14,7 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    IngestQuiesceMode, MqttIngestMode, MqttQos, MqttSession, MqttTopicFilter, MqttTopicSource,
+    IngestQuiesceMode, MqttIngestMode, MqttQos, MqttSession, MqttTopicFilter, MqttTopicIngestor,
 };
 
 use super::delivery::{
@@ -143,14 +143,14 @@ fn quiesce_clause<'src>()
 
 /// `FROM <client> TOPIC '<filter>' [INSTANCES <n>] [SESSION …] [QOS …] MODE … ON QUIESCE …`.
 pub(super) fn topic_body<'src>()
--> impl Parser<'src, &'src [Token], MqttTopicSource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], MqttTopicIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Topic))
         .then(external_name::<MqttTopicFilter>())
         .then(optional_instances())
         .then(mode().then_with_ctx(quiesce_clause()))
         .map(
-            |(((client, topic), instances), (mode, quiesce))| MqttTopicSource {
+            |(((client, topic), instances), (mode, quiesce))| MqttTopicIngestor {
                 client,
                 topic,
                 instances,

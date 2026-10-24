@@ -122,7 +122,7 @@ const MODEL_CHANGE_ASPECTS: [ModelChangeAspect; 76] = [
     ModelChangeAspect::ReordererMaxTime,
     ModelChangeAspect::EmitterInput,
     ModelChangeAspect::EmitterInputWhere,
-    ModelChangeAspect::EmitterSink,
+    ModelChangeAspect::EmitterConnector,
     ModelChangeAspect::EmitterClient,
     ModelChangeAspect::EmitterCodec,
     ModelChangeAspect::EmitterCollectPolicy,

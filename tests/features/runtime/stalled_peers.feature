@@ -475,7 +475,7 @@ Feature: Stalled peers
     Then the silent endpoint "http_peer" eventually accepts a connection
     And within "20s" DESCRIBE INGESTOR "poll_reader" on the leader node contains
       """
-      transient error: failed to read from http source: failed to send HTTP source request
+      transient error: failed to read from http ingestor: failed to send HTTP ingestor request
       """
 
     Examples:
@@ -512,7 +512,7 @@ Feature: Stalled peers
     Then the silent endpoint "prometheus_peer" eventually accepts a connection
     And within "20s" DESCRIBE INGESTOR "prom_samples" on the leader node contains
       """
-      transient error: failed to read from prometheus source: failed to send Prometheus query
+      transient error: failed to read from prometheus ingestor: failed to send Prometheus query
       """
 
     Examples:

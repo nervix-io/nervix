@@ -24,46 +24,49 @@ use crate::{
     AlterSchemaOperation, AlterTransportIngestorOperation, AlterWireSchema,
     AlterWireSchemaOperation, AssignmentTarget, AssignmentTargetScope, AvroType, Backup,
     BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction, BranchSelection,
-    ClickHouseSink, ClickHouseTableSink, ClickHouseValueMapping, ClientConfigEntry,
-    ClientConsumerSink, ClientIngestMode, ClientProducerSource, ClientResourceMount, ClientSink,
-    CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName, CodecWireFormat,
-    CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
-    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
-    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
-    CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, CreateWireSchema, DescribeBackup, DescribeTransaction, DomainPace,
-    DomainStartPoint, EmitSink, EmitterBatchPolicy, EmitterBody, EmitterPublishing,
-    EndpointIngestMode, EndpointName, ExistingUserPolicy, Expression, FieldScope, Float64Literal,
-    FlushPolicy, GeneralErrorPolicy, HttpEndpointSource, HttpRequestIngestMode, HttpRequestSink,
-    HttpRequestSource, HttpSink, HttpSource, IcebergCatalog, IcebergSink, IcebergTableSink,
+    ClickHouseEmitter, ClickHouseTableEmitter, ClickHouseValueMapping, ClientConfigEntry,
+    ClientConsumerEmitter, ClientEmitter, ClientIngestMode, ClientProducerIngestor,
+    ClientResourceMount, CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName,
+    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob,
+    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
+    CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer,
+    CreateIngestor, CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay,
+    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
+    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DescribeBackup,
+    DescribeTransaction, DomainPace, DomainStartPoint, EmitterBatchPolicy, EmitterBody,
+    EmitterEntity, EmitterPublishing, EndpointIngestMode, EndpointName, ExistingUserPolicy,
+    Expression, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy, HttpEmitter,
+    HttpEndpointIngestor, HttpIngestor, HttpRequestEmitter, HttpRequestIngestMode,
+    HttpRequestIngestor, IcebergCatalog, IcebergEmitter, IcebergTableEmitter,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
-    IngestQuiesceMode, IngestSource, IngestTimestampSource, IngestorInput, Inheritance,
-    InputCollectPolicy, InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, KafkaSink,
-    KafkaSource, KafkaTopicSink, KafkaTopicSource, Literal, MaterializedStateDependency,
+    IngestQuiesceMode, IngestTimestampSource, IngestorEntity, IngestorInput, Inheritance,
+    InputCollectPolicy, InspectionFormat, JsonType, KafkaEmitter, KafkaIngestMode, KafkaIngestor,
+    KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicIngestor, Literal, MaterializedStateDependency,
     MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy, Model, ModelName,
-    MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MqttIngestMode, MqttQos,
-    MqttSession, MqttSink, MqttSource, MqttTopicSink, MqttTopicSource, MySqlConflictAction,
-    MySqlSink, MySqlTableSink, NamePosition, NatsIngestMode, NatsSink, NatsSource, NatsSubjectSink,
-    NatsSubjectSource, OtelMetric, OtelMetricKind, OtelMetricsSink, OtelSink, OutputBranch,
-    ParseAsType, PayloadSizeLimit, PlacementPolicy, PostgresConflictAction, PostgresSink,
-    PostgresTableSink, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
-    PrometheusIngestMode, PrometheusQuerySource, PrometheusSource, PulsarSink, PulsarSource,
-    PulsarTopicSink, PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSink, RabbitMqQueueSource,
-    RabbitMqSink, RabbitMqSource, RangeOperator, RedisPubSubIngestMode, RedisPubSubSink,
-    RedisPubSubSource, RedisSink, RedisSource, RelayBranching, RelayName, Restore,
-    RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, RetryPolicy, RouteConstruction,
-    SchemaField, SentryEventSink, SentrySink, SignalingProtocolName, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, SqsQueueSink,
-    SqsQueueSource, SqsSink, SqsSource, Statement, SubscriptionLiteral, SyslogCollectorSink,
-    SyslogIngestMode, SyslogListenerSource, SyslogSink, SyslogSource, TransactionInspectionTarget,
-    UnaryOperator, WebsocketsConnectionSource, WebsocketsEndpointSource, WebsocketsIngestMode,
-    WebsocketsSource, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
-    ZeroMqPullSource, ZeroMqPushSink, ZeroMqSink, ZeroMqSource,
+    MongoDbCollectionEmitter, MongoDbConflictAction, MongoDbEmitter, MqttEmitter, MqttIngestMode,
+    MqttIngestor, MqttQos, MqttSession, MqttTopicEmitter, MqttTopicIngestor, MySqlConflictAction,
+    MySqlEmitter, MySqlTableEmitter, NamePosition, NatsEmitter, NatsIngestMode, NatsIngestor,
+    NatsSubjectEmitter, NatsSubjectIngestor, OtelEmitter, OtelMetric, OtelMetricKind,
+    OtelMetricsEmitter, OutputBranch, ParseAsType, PayloadSizeLimit, PlacementPolicy,
+    PostgresConflictAction, PostgresEmitter, PostgresTableEmitter, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutputs, PrometheusIngestMode, PrometheusIngestor,
+    PrometheusQueryIngestor, PulsarEmitter, PulsarIngestor, PulsarTopicEmitter,
+    PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestMode, RabbitMqIngestor,
+    RabbitMqQueueEmitter, RabbitMqQueueIngestor, RangeOperator, RedisEmitter, RedisIngestor,
+    RedisPubSubEmitter, RedisPubSubIngestMode, RedisPubSubIngestor, RelayBranching, RelayName,
+    Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, RetryPolicy,
+    RouteConstruction, SchemaField, SentryEmitter, SentryEventEmitter, SignalingProtocolName,
+    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsEmitter, SqsFifoGroup, SqsIngestMode,
+    SqsIngestor, SqsQueueEmitter, SqsQueueIngestor, Statement, SubscriptionLiteral,
+    SyslogCollectorEmitter, SyslogEmitter, SyslogIngestMode, SyslogIngestor,
+    SyslogListenerIngestor, TransactionInspectionTarget, UnaryOperator,
+    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
+    WebsocketsIngestor, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqEmitter,
+    ZeroMqIngestMode, ZeroMqIngestor, ZeroMqPullIngestor, ZeroMqPushEmitter,
 };
 
 /// The NSPL release canonical rendering writes.
@@ -2116,7 +2119,7 @@ impl CreateEmitter {
             processor_inputs_to_nspl(&self.from)?
         ))];
         clauses.extend(materialized_state_clauses(&self.materialized_state)?);
-        let (reference, body) = emitter_destination_parts(&self.sink, &self.body, None)?;
+        let (reference, body) = emitter_destination_parts(&self.connector, &self.body, None)?;
         let to = if reference.is_empty() {
             "TO".to_string()
         } else {
@@ -2138,7 +2141,7 @@ impl CreateEmitter {
             format!(
                 "CREATE {} {} EMITTER {}",
                 self.mode.as_ref(),
-                self.sink.kind().phrase(),
+                self.connector.kind().phrase(),
                 self.name.as_str()
             ),
             clauses,
@@ -2935,7 +2938,7 @@ fn optional_max_body_size_to_nspl(max_body_size: Option<PayloadSizeLimit>) -> St
     }
 }
 
-impl IngestorBodyNspl for ClientProducerSource {
+impl IngestorBodyNspl for ClientProducerIngestor {
     /// Its quiesce mode is always `SUSPEND`, which the grammar requires it to state.
     fn body_to_nspl(&self) -> String {
         format!(
@@ -2946,7 +2949,7 @@ impl IngestorBodyNspl for ClientProducerSource {
     }
 }
 
-impl IngestorBodyNspl for HttpRequestSource {
+impl IngestorBodyNspl for HttpRequestIngestor {
     fn body_to_nspl(&self) -> String {
         let Self {
             client,
@@ -2967,13 +2970,13 @@ impl IngestorBodyNspl for HttpRequestSource {
     }
 }
 
-impl IngestorBodyNspl for HttpEndpointSource {
+impl IngestorBodyNspl for HttpEndpointIngestor {
     fn body_to_nspl(&self) -> String {
         endpoint_intake_to_nspl(&self.endpoint, &self.mode, &self.quiesce)
     }
 }
 
-impl IngestorBodyNspl for WebsocketsEndpointSource {
+impl IngestorBodyNspl for WebsocketsEndpointIngestor {
     fn body_to_nspl(&self) -> String {
         endpoint_intake_to_nspl(&self.endpoint, &self.mode, &self.quiesce)
     }
@@ -2998,7 +3001,7 @@ fn endpoint_intake_to_nspl(
     )
 }
 
-impl IngestorBodyNspl for KafkaTopicSource {
+impl IngestorBodyNspl for KafkaTopicIngestor {
     fn body_to_nspl(&self) -> String {
         let Self {
             client,
@@ -3020,7 +3023,7 @@ impl IngestorBodyNspl for KafkaTopicSource {
     }
 }
 
-impl IngestorBodyNspl for PulsarTopicSource {
+impl IngestorBodyNspl for PulsarTopicIngestor {
     fn body_to_nspl(&self) -> String {
         let Self {
             client,
@@ -3043,7 +3046,7 @@ impl IngestorBodyNspl for PulsarTopicSource {
     }
 }
 
-impl IngestorBodyNspl for MqttTopicSource {
+impl IngestorBodyNspl for MqttTopicIngestor {
     fn body_to_nspl(&self) -> String {
         let Self {
             client,
@@ -3063,7 +3066,7 @@ impl IngestorBodyNspl for MqttTopicSource {
     }
 }
 
-impl IngestorBodyNspl for NatsSubjectSource {
+impl IngestorBodyNspl for NatsSubjectIngestor {
     fn body_to_nspl(&self) -> String {
         let Self {
             client,
@@ -3088,7 +3091,7 @@ impl IngestorBodyNspl for NatsSubjectSource {
     }
 }
 
-impl IngestorBodyNspl for RabbitMqQueueSource {
+impl IngestorBodyNspl for RabbitMqQueueIngestor {
     fn body_to_nspl(&self) -> String {
         let Self {
             client,
@@ -3128,7 +3131,7 @@ impl RabbitMqIngestMode {
     }
 }
 
-impl IngestorBodyNspl for RedisPubSubSource {
+impl IngestorBodyNspl for RedisPubSubIngestor {
     fn body_to_nspl(&self) -> String {
         let Self {
             client,
@@ -3149,7 +3152,7 @@ impl IngestorBodyNspl for RedisPubSubSource {
     }
 }
 
-impl IngestorBodyNspl for PrometheusQuerySource {
+impl IngestorBodyNspl for PrometheusQueryIngestor {
     fn body_to_nspl(&self) -> String {
         let Self {
             client,
@@ -3174,7 +3177,7 @@ impl IngestorBodyNspl for PrometheusQuerySource {
     }
 }
 
-impl IngestorBodyNspl for ZeroMqPullSource {
+impl IngestorBodyNspl for ZeroMqPullIngestor {
     fn body_to_nspl(&self) -> String {
         let Self {
             client,
@@ -3193,7 +3196,7 @@ impl IngestorBodyNspl for ZeroMqPullSource {
     }
 }
 
-impl IngestorBodyNspl for SqsQueueSource {
+impl IngestorBodyNspl for SqsQueueIngestor {
     fn body_to_nspl(&self) -> String {
         let Self {
             client,
@@ -3217,7 +3220,7 @@ impl IngestorBodyNspl for SqsQueueSource {
     }
 }
 
-impl IngestorBodyNspl for WebsocketsConnectionSource {
+impl IngestorBodyNspl for WebsocketsConnectionIngestor {
     fn body_to_nspl(&self) -> String {
         let Self {
             client,
@@ -3253,7 +3256,7 @@ impl IngestorBodyNspl for WebsocketsConnectionSource {
     }
 }
 
-impl IngestorBodyNspl for SyslogListenerSource {
+impl IngestorBodyNspl for SyslogListenerIngestor {
     fn body_to_nspl(&self) -> String {
         let Self {
             client,
@@ -3273,22 +3276,22 @@ impl IngestorBodyNspl for SyslogListenerSource {
 }
 
 /// The body of a transport source, as its entity's own statement writes it after `FROM`.
-fn ingest_source_body_to_nspl(source: &IngestSource) -> String {
+fn ingest_source_body_to_nspl(source: &IngestorEntity) -> String {
     match source {
-        IngestSource::Http(HttpSource::Request(source)) => source.body_to_nspl(),
-        IngestSource::Http(HttpSource::Endpoint(source)) => source.body_to_nspl(),
-        IngestSource::Kafka(KafkaSource::Topic(source)) => source.body_to_nspl(),
-        IngestSource::Pulsar(PulsarSource::Topic(source)) => source.body_to_nspl(),
-        IngestSource::Mqtt(MqttSource::Topic(source)) => source.body_to_nspl(),
-        IngestSource::Nats(NatsSource::Subject(source)) => source.body_to_nspl(),
-        IngestSource::RabbitMq(RabbitMqSource::Queue(source)) => source.body_to_nspl(),
-        IngestSource::Redis(RedisSource::PubSub(source)) => source.body_to_nspl(),
-        IngestSource::Prometheus(PrometheusSource::Query(source)) => source.body_to_nspl(),
-        IngestSource::ZeroMq(ZeroMqSource::Pull(source)) => source.body_to_nspl(),
-        IngestSource::Sqs(SqsSource::Queue(source)) => source.body_to_nspl(),
-        IngestSource::Websockets(WebsocketsSource::Connection(source)) => source.body_to_nspl(),
-        IngestSource::Websockets(WebsocketsSource::Endpoint(source)) => source.body_to_nspl(),
-        IngestSource::Syslog(SyslogSource::Listener(source)) => source.body_to_nspl(),
+        IngestorEntity::Http(HttpIngestor::Request(source)) => source.body_to_nspl(),
+        IngestorEntity::Http(HttpIngestor::Endpoint(source)) => source.body_to_nspl(),
+        IngestorEntity::Kafka(KafkaIngestor::Topic(source)) => source.body_to_nspl(),
+        IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) => source.body_to_nspl(),
+        IngestorEntity::Mqtt(MqttIngestor::Topic(source)) => source.body_to_nspl(),
+        IngestorEntity::Nats(NatsIngestor::Subject(source)) => source.body_to_nspl(),
+        IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(source)) => source.body_to_nspl(),
+        IngestorEntity::Redis(RedisIngestor::PubSub(source)) => source.body_to_nspl(),
+        IngestorEntity::Prometheus(PrometheusIngestor::Query(source)) => source.body_to_nspl(),
+        IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(source)) => source.body_to_nspl(),
+        IngestorEntity::Sqs(SqsIngestor::Queue(source)) => source.body_to_nspl(),
+        IngestorEntity::Websockets(WebsocketsIngestor::Connection(source)) => source.body_to_nspl(),
+        IngestorEntity::Websockets(WebsocketsIngestor::Endpoint(source)) => source.body_to_nspl(),
+        IngestorEntity::Syslog(SyslogIngestor::Listener(source)) => source.body_to_nspl(),
     }
 }
 
@@ -3450,7 +3453,7 @@ impl EmitterPublishing<'_> {
 
 /// The entity's reference and options, followed by its typed MODE and complete payload.
 fn emitter_destination_parts(
-    destination: &EmitSink,
+    destination: &EmitterEntity,
     body: &EmitterBody,
     construction: Option<&RouteConstruction>,
 ) -> error_stack::Result<(String, Vec<Clause>), CanonicalNsplError> {
@@ -3484,7 +3487,7 @@ fn emitter_destination_parts(
                 ));
             }
             match destination {
-                EmitSink::Otel(destination) => {
+                EmitterEntity::Otel(destination) => {
                     if let Some(scope) = &destination.mappings().scope {
                         let version = match &scope.version {
                             Some(version) => format!(" VERSION {}", string_literal(version)),
@@ -3496,18 +3499,19 @@ fn emitter_destination_parts(
                         )));
                     }
                 }
-                EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
+                EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
                     conflict_action,
                     ..
                 })) => clauses.extend(conflict_clauses(postgres_conflict_action_to_nspl(
                     conflict_action,
                 ))),
-                EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
-                    conflict_action, ..
+                EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter {
+                    conflict_action,
+                    ..
                 })) => clauses.extend(conflict_clauses(mysql_conflict_action_to_nspl(
                     conflict_action,
                 ))),
-                EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
+                EmitterEntity::MongoDb(MongoDbEmitter::Collection(MongoDbCollectionEmitter {
                     conflict_action,
                     ..
                 })) => clauses.extend(conflict_clauses(mongodb_conflict_action_to_nspl(
@@ -3523,17 +3527,17 @@ fn emitter_destination_parts(
     Ok((reference, clauses))
 }
 
-impl EmitSink {
+impl EmitterEntity {
     /// The declared connector/entity with its reference, external locator and entity options.
     pub fn destination_to_plexus(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let conflict = match self {
-            EmitSink::Postgres(PostgresSink::Table(destination)) => {
+            EmitterEntity::Postgres(PostgresEmitter::Table(destination)) => {
                 postgres_conflict_action_to_nspl(&destination.conflict_action)
             }
-            EmitSink::MySql(MySqlSink::Table(destination)) => {
+            EmitterEntity::MySql(MySqlEmitter::Table(destination)) => {
                 mysql_conflict_action_to_nspl(&destination.conflict_action)
             }
-            EmitSink::MongoDb(MongoDbSink::Collection(destination)) => {
+            EmitterEntity::MongoDb(MongoDbEmitter::Collection(destination)) => {
                 mongodb_conflict_action_to_nspl(&destination.conflict_action)
             }
             _ => String::new(),
@@ -3547,13 +3551,15 @@ impl EmitSink {
 }
 
 fn emitter_reference_to_plexus(
-    destination: &EmitSink,
+    destination: &EmitterEntity,
 ) -> error_stack::Result<String, CanonicalNsplError> {
     Ok(match destination {
-        EmitSink::Client(ClientSink::Consumer(ClientConsumerSink { schema, .. })) => {
+        EmitterEntity::Client(ClientEmitter::Consumer(ClientConsumerEmitter {
+            schema, ..
+        })) => {
             format!("SCHEMA {}", schema.as_str())
         }
-        EmitSink::Http(HttpSink::Request(HttpRequestSink {
+        EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
             client,
             method,
             path,
@@ -3564,46 +3570,54 @@ fn emitter_reference_to_plexus(
             expression_to_nspl(method)?,
             expression_to_nspl(path)?
         ),
-        EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink { client, topic, .. })) => format!(
+        EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter { client, topic, .. })) => {
+            format!(
+                "{} TOPIC {}",
+                client.as_str(),
+                string_literal(topic.as_str())
+            )
+        }
+        EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
+            client, topic, ..
+        })) => format!(
             "{} TOPIC {}",
             client.as_str(),
             string_literal(topic.as_str())
         ),
-        EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink { client, topic, .. })) => format!(
-            "{} TOPIC {}",
-            client.as_str(),
-            string_literal(topic.as_str())
-        ),
-        EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink { client, queue, .. })) => {
+        EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(RabbitMqQueueEmitter {
+            client,
+            queue,
+            ..
+        })) => {
             format!(
                 "{} QUEUE {}",
                 client.as_str(),
                 string_literal(queue.as_str())
             )
         }
-        EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink {
+        EmitterEntity::Redis(RedisEmitter::PubSub(RedisPubSubEmitter {
             client, channel, ..
         })) => format!(
             "{} CHANNEL {}",
             client.as_str(),
             string_literal(channel.as_str())
         ),
-        EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink { client, topic, .. })) => format!(
+        EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter { client, topic, .. })) => format!(
             "{} TOPIC {}",
             client.as_str(),
             string_literal(topic.as_str())
         ),
-        EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
+        EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
             client, subject, ..
         })) => format!(
             "{} SUBJECT {}",
             client.as_str(),
             string_literal(subject.as_str())
         ),
-        EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink { client, .. })) => {
+        EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter { client, .. })) => {
             client.as_str().to_string()
         }
-        EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+        EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
             client,
             queue,
             fifo_group,
@@ -3622,41 +3636,49 @@ fn emitter_reference_to_plexus(
                 string_literal(queue.as_str())
             )
         }
-        EmitSink::Sentry(SentrySink::Event(SentryEventSink { client, .. })) => {
+        EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter { client, .. })) => {
             client.as_str().to_string()
         }
-        EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink { client, .. })) => {
-            client.as_str().to_string()
-        }
-        EmitSink::Otel(destination) => {
+        EmitterEntity::Syslog(SyslogEmitter::Collector(SyslogCollectorEmitter {
+            client, ..
+        })) => client.as_str().to_string(),
+        EmitterEntity::Otel(destination) => {
             let metric = match destination {
-                OtelSink::Metrics(OtelMetricsSink { metric, .. }) => {
+                OtelEmitter::Metrics(OtelMetricsEmitter { metric, .. }) => {
                     format!(" {}", otel_metric_reference(metric))
                 }
-                OtelSink::Logs(_) | OtelSink::Traces(_) => String::new(),
+                OtelEmitter::Logs(_) | OtelEmitter::Traces(_) => String::new(),
             };
             format!("{}{metric}", destination.client().as_str())
         }
-        EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
-            client, table, ..
+        EmitterEntity::ClickHouse(ClickHouseEmitter::Table(ClickHouseTableEmitter {
+            client,
+            table,
+            ..
         })) => format!(
             "{} TABLE {}",
             client.as_str(),
             string_literal(table.as_str())
         ),
-        EmitSink::Postgres(PostgresSink::Table(PostgresTableSink { client, table, .. })) => {
+        EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
+            client,
+            table,
+            ..
+        })) => {
             format!(
                 "{} TABLE {}",
                 client.as_str(),
                 string_literal(table.as_str())
             )
         }
-        EmitSink::MySql(MySqlSink::Table(MySqlTableSink { client, table, .. })) => format!(
-            "{} TABLE {}",
-            client.as_str(),
-            string_literal(table.as_str())
-        ),
-        EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
+        EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter { client, table, .. })) => {
+            format!(
+                "{} TABLE {}",
+                client.as_str(),
+                string_literal(table.as_str())
+            )
+        }
+        EmitterEntity::MongoDb(MongoDbEmitter::Collection(MongoDbCollectionEmitter {
             client,
             collection,
             ..
@@ -3665,7 +3687,7 @@ fn emitter_reference_to_plexus(
             client.as_str(),
             string_literal(collection.as_str())
         ),
-        EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
+        EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
             client,
             table,
             location,
@@ -3712,7 +3734,7 @@ fn otel_metric_reference(metric: &OtelMetric) -> String {
     )
 }
 
-/// The `ON CONFLICT` clause the row-insert sinks share, absent when the sink declares none.
+/// The `ON CONFLICT` clause the row-insert emitters share, absent when the emitter declares none.
 fn conflict_clauses(conflict_action: String) -> Vec<Clause> {
     let mut clauses = Vec::new();
     if !conflict_action.trim().is_empty() {
@@ -3940,7 +3962,7 @@ mod tests {
 
     use crate::{
         AckMode, AckWindow, AvroType, BinaryOperator, BranchSelection, ClientIngestMode,
-        ClientPoolBounds, ClientProducerSource, ClientResourceMount, CodecEncoding,
+        ClientPoolBounds, ClientProducerIngestor, ClientResourceMount, CodecEncoding,
         CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
         CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
         CreateClientHttp, CreateClientKafka, CreateClientMqtt, CreateClientNats,
@@ -3949,28 +3971,29 @@ mod tests {
         CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
         CreateEndpoint, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor,
         CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
-        CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterBody, EndpointIngestMode,
+        CreateWindowProcessor, CreateWireSchema, EmitterBody, EmitterEntity, EndpointIngestMode,
         EndpointType, ErrorPolicies, Expression, FieldScope, FlushPolicy, GeneralErrorPolicy,
-        HttpConfigEntry, HttpEndpointSource, HttpRequestIngestMode, HttpRequestSource,
-        IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KafkaSink,
-        KafkaTopicSink, KafkaTopicSource, Literal, MessageErrorPolicy, Model,
-        MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MongoDbValueMapping,
-        MqttIngestMode, MqttQos, MqttSession, MqttSink, MqttTopicSink, MqttTopicSource,
-        MySqlConflictAction, MySqlSink, MySqlTableSink, MySqlValueMapping, NatsIngestMode,
-        NatsSink, NatsSubjectSink, NatsSubjectSource, OutputBranch, ParseAsType, PlacementPolicy,
-        PostgresConflictAction, PostgresSink, PostgresTableSink, PostgresValueMapping,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
-        PrometheusIngestMode, PrometheusQuerySource, PulsarSink, PulsarSubscription,
-        PulsarSubscriptionOwnership, PulsarTopicSink, PulsarTopicSource, RabbitMqIngestMode,
-        RabbitMqQueueSink, RabbitMqQueueSource, RabbitMqSink, RedisPubSubIngestMode,
-        RedisPubSubSink, RedisPubSubSource, RedisSink, RelayBranching, RetryPolicy,
-        RouteConstruction, SchemaField, SentryConfigEntry, SentryEventSink, SentrySink,
-        SignalingProtobufConfig, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-        SqsIngestMode, SqsQueueSink, SqsQueueSource, SqsSink, SyslogCollectorSink,
-        SyslogIngestMode, SyslogListenerSource, SyslogSink, UdfArgument, UdfLanguage, UdfReturn,
-        WebsocketsConnectionSource, WebsocketsEndpointSource, WebsocketsIngestMode, WindowBound,
-        WindowStateLimit, WireSchemaField, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqPushSink,
-        ZeroMqSink, expression_to_nspl,
+        HttpConfigEntry, HttpEndpointIngestor, HttpRequestIngestMode, HttpRequestIngestor,
+        IngestorEntity, JsonType, KafkaConfigEntry, KafkaEmitter, KafkaIngestMode, KafkaOffsetMode,
+        KafkaTopicEmitter, KafkaTopicIngestor, Literal, MessageErrorPolicy, Model,
+        MongoDbCollectionEmitter, MongoDbConflictAction, MongoDbEmitter, MongoDbValueMapping,
+        MqttEmitter, MqttIngestMode, MqttQos, MqttSession, MqttTopicEmitter, MqttTopicIngestor,
+        MySqlConflictAction, MySqlEmitter, MySqlTableEmitter, MySqlValueMapping, NatsEmitter,
+        NatsIngestMode, NatsSubjectEmitter, NatsSubjectIngestor, OutputBranch, ParseAsType,
+        PlacementPolicy, PostgresConflictAction, PostgresEmitter, PostgresTableEmitter,
+        PostgresValueMapping, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        PrometheusConfigEntry, PrometheusIngestMode, PrometheusQueryIngestor, PulsarEmitter,
+        PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicEmitter, PulsarTopicIngestor,
+        RabbitMqEmitter, RabbitMqIngestMode, RabbitMqQueueEmitter, RabbitMqQueueIngestor,
+        RedisEmitter, RedisPubSubEmitter, RedisPubSubIngestMode, RedisPubSubIngestor,
+        RelayBranching, RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry,
+        SentryEmitter, SentryEventEmitter, SignalingProtobufConfig, SignalingStep,
+        SignalingWaitStep, SignalingWireFormat, SqsEmitter, SqsIngestMode, SqsQueueEmitter,
+        SqsQueueIngestor, SyslogCollectorEmitter, SyslogEmitter, SyslogIngestMode,
+        SyslogListenerIngestor, UdfArgument, UdfLanguage, UdfReturn, WebsocketsConnectionIngestor,
+        WebsocketsEndpointIngestor, WebsocketsIngestMode, WindowBound, WindowStateLimit,
+        WireSchemaField, ZeroMqEmitter, ZeroMqIngestMode, ZeroMqPullIngestor, ZeroMqPushEmitter,
+        expression_to_nspl,
     };
 
     fn named<N>(raw: &str) -> N
@@ -4901,10 +4924,10 @@ mod tests {
     }
 
     #[test]
-    fn renders_emitters_for_all_sink_variants() {
-        let sinks = [
+    fn renders_emitters_for_all_emitter_variants() {
+        let emitters = [
             (
-                EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
+                EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
                     mode: crate::KafkaTopicPublishingMode::NoAck {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
@@ -4917,7 +4940,7 @@ mod tests {
                 "kafka_main TOPIC 'orders'",
             ),
             (
-                EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
+                EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
                     mode: crate::PulsarTopicPublishingMode::NoAck {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
@@ -4930,7 +4953,7 @@ mod tests {
                 "pulsar_main TOPIC 'orders'",
             ),
             (
-                EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink {
+                EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(RabbitMqQueueEmitter {
                     mode: crate::RabbitMqQueuePublishingMode::NoAck {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
@@ -4943,7 +4966,7 @@ mod tests {
                 "rmq_main QUEUE 'orders_q'",
             ),
             (
-                EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink {
+                EmitterEntity::Redis(RedisEmitter::PubSub(RedisPubSubEmitter {
                     mode: crate::RedisPubSubPublishingMode::NoAck {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
@@ -4956,7 +4979,7 @@ mod tests {
                 "redis_main CHANNEL 'orders_ch'",
             ),
             (
-                EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink {
+                EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter {
                     mode: crate::MqttTopicPublishingMode::Qos0 {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
@@ -4969,7 +4992,7 @@ mod tests {
                 "mqtt_main TOPIC 'orders_topic'",
             ),
             (
-                EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
+                EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
                     mode: crate::NatsSubjectPublishingMode::NoAck {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
@@ -4982,7 +5005,7 @@ mod tests {
                 "nats_main SUBJECT 'orders_subject'",
             ),
             (
-                EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+                EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
                     mode: crate::ZeroMqPushPublishingMode::NoAck {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
@@ -4994,7 +5017,7 @@ mod tests {
                 "zmq_main",
             ),
             (
-                EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+                EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
                     mode: crate::SqsQueuePublishingMode::Single {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
@@ -5008,7 +5031,7 @@ mod tests {
                 "sqs_main QUEUE 'orders_queue'",
             ),
             (
-                EmitSink::Sentry(SentrySink::Event(SentryEventSink {
+                EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
                     mode: crate::SentryEventPublishingMode::Ack {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
@@ -5020,7 +5043,7 @@ mod tests {
                 "sentry_main",
             ),
             (
-                EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink {
+                EmitterEntity::Syslog(SyslogEmitter::Collector(SyslogCollectorEmitter {
                     mode: crate::SyslogCollectorPublishingMode::NoAck {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
@@ -5033,9 +5056,9 @@ mod tests {
             ),
         ];
 
-        for (sink, rendered_sink) in sinks {
-            let rendered_mode = sink.publishing().to_canonical_plexus();
-            let rendered_kind = sink.kind().phrase();
+        for (connector, rendered_emitter) in emitters {
+            let rendered_mode = connector.publishing().to_canonical_plexus();
+            let rendered_kind = connector.kind().phrase();
             let emitter = CreateEmitter {
                 name: named("emit_orders"),
                 from: ProcessorInputs::single(named("orders_stream"))
@@ -5043,7 +5066,7 @@ mod tests {
                 body: EmitterBody::Codec {
                     codec: named("orders_codec"),
                 },
-                sink: Box::new(sink),
+                connector: Box::new(connector),
                 batch: None,
                 flush_policy: FlushPolicy::Each {
                     interval: "100ms".to_string(),
@@ -5059,7 +5082,7 @@ mod tests {
                 emitter.to_canonical_nspl().expect("must render"),
                 format!(
                     "CREATE ATTACHED {rendered_kind} EMITTER emit_orders\n  FROM orders_stream \
-                     COLLECT FOR 50ms MAX BATCH SIZE 4MiB\n  TO {rendered_sink}\n    MODE \
+                     COLLECT FOR 50ms MAX BATCH SIZE 4MiB\n  TO {rendered_emitter}\n    MODE \
                      {rendered_mode}\n    ENCODE USING orders_codec\n  FLUSH EACH 100ms MAX BATCH \
                      SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
                 )
@@ -5073,7 +5096,7 @@ mod tests {
                 batching.to_canonical_nspl().expect("must render"),
                 format!(
                     "CREATE ATTACHED {rendered_kind} EMITTER emit_orders\n  FROM orders_stream \
-                     COLLECT FOR 50ms MAX BATCH SIZE 4MiB\n  TO {rendered_sink}\n    MODE \
+                     COLLECT FOR 50ms MAX BATCH SIZE 4MiB\n  TO {rendered_emitter}\n    MODE \
                      {rendered_mode}\n    ENCODE USING orders_codec\n  BATCH MAX MESSAGES 500 MAX \
                      SIZE 1MiB\n  FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  \
                      ON GENERAL ERROR LOG;"
@@ -5101,7 +5124,7 @@ mod tests {
         );
 
         let sqs = |fifo_group| {
-            EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+            EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
                 mode: crate::SqsQueuePublishingMode::Single {
                     retry_policy: crate::RetryPolicy {
                         backoff: "250ms".to_string(),
@@ -5126,7 +5149,7 @@ mod tests {
             "sqs_main QUEUE 'orders_queue' FIFO GROUP input.tenant"
         );
 
-        let otel = EmitSink::from(crate::OtelMetricsSink {
+        let otel = EmitterEntity::from(crate::OtelMetricsEmitter {
             mode: crate::OtelMetricsPublishingMode::Ack {
                 retry_policy: crate::RetryPolicy {
                     backoff: "250ms".to_string(),
@@ -5185,29 +5208,34 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
-            sink: Box::new(EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
-                mode: crate::PostgresTablePublishingMode::Ack {
-                    retry_policy: crate::RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+            connector: Box::new(EmitterEntity::Postgres(PostgresEmitter::Table(
+                PostgresTableEmitter {
+                    mode: crate::PostgresTablePublishingMode::Ack {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
+                    client: named("postgres_main"),
+                    table: named("notification_rows"),
+                    values: vec![
+                        PostgresValueMapping {
+                            column: "postgres_user_id".to_string(),
+                            expression: scoped_field(FieldScope::Input, "user_id"),
+                        },
+                        PostgresValueMapping {
+                            column: "postgres_action".to_string(),
+                            expression: call(
+                                "lower",
+                                vec![scoped_field(FieldScope::Input, "action")],
+                            ),
+                        },
+                    ],
+                    conflict_action: PostgresConflictAction::DoUpdate {
+                        target: vec!["postgres_user_id".to_string()],
                     },
                 },
-                client: named("postgres_main"),
-                table: named("notification_rows"),
-                values: vec![
-                    PostgresValueMapping {
-                        column: "postgres_user_id".to_string(),
-                        expression: scoped_field(FieldScope::Input, "user_id"),
-                    },
-                    PostgresValueMapping {
-                        column: "postgres_action".to_string(),
-                        expression: call("lower", vec![scoped_field(FieldScope::Input, "action")]),
-                    },
-                ],
-                conflict_action: PostgresConflictAction::DoUpdate {
-                    target: vec!["postgres_user_id".to_string()],
-                },
-            }))),
+            ))),
             batch: Some(batch_policy(500, "8MiB")),
             flush_policy: FlushPolicy::Each {
                 interval: "10s".to_string(),
@@ -5237,27 +5265,32 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
-            sink: Box::new(EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
-                mode: crate::MySqlTablePublishingMode::Ack {
-                    retry_policy: crate::RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+            connector: Box::new(EmitterEntity::MySql(MySqlEmitter::Table(
+                MySqlTableEmitter {
+                    mode: crate::MySqlTablePublishingMode::Ack {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
                     },
+                    client: named("mysql_main"),
+                    table: named("notification_rows"),
+                    values: vec![
+                        MySqlValueMapping {
+                            column: "mysql_user_id".to_string(),
+                            expression: scoped_field(FieldScope::Input, "user_id"),
+                        },
+                        MySqlValueMapping {
+                            column: "mysql_action".to_string(),
+                            expression: call(
+                                "lower",
+                                vec![scoped_field(FieldScope::Input, "action")],
+                            ),
+                        },
+                    ],
+                    conflict_action: MySqlConflictAction::DoNothing,
                 },
-                client: named("mysql_main"),
-                table: named("notification_rows"),
-                values: vec![
-                    MySqlValueMapping {
-                        column: "mysql_user_id".to_string(),
-                        expression: scoped_field(FieldScope::Input, "user_id"),
-                    },
-                    MySqlValueMapping {
-                        column: "mysql_action".to_string(),
-                        expression: call("lower", vec![scoped_field(FieldScope::Input, "action")]),
-                    },
-                ],
-                conflict_action: MySqlConflictAction::DoNothing,
-            }))),
+            ))),
             batch: Some(batch_policy(500, "8MiB")),
             flush_policy: FlushPolicy::Each {
                 interval: "10s".to_string(),
@@ -5287,8 +5320,8 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
-            sink: Box::new(EmitSink::MongoDb(MongoDbSink::Collection(
-                MongoDbCollectionSink {
+            connector: Box::new(EmitterEntity::MongoDb(MongoDbEmitter::Collection(
+                MongoDbCollectionEmitter {
                     mode: crate::MongoDbCollectionPublishingMode::Ack {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
@@ -5351,7 +5384,7 @@ mod tests {
     }
 
     /// A transport input decoded by `orders_codec`.
-    fn decoded(source: impl Into<IngestSource>) -> crate::IngestorInput {
+    fn decoded(source: impl Into<IngestorEntity>) -> crate::IngestorInput {
         crate::IngestorInput::Transport(crate::TransportIngestorInput {
             source: source.into(),
             codec: named("orders_codec"),
@@ -5374,7 +5407,7 @@ mod tests {
             (
                 orders_ingestor(
                     "http_ingestor",
-                    decoded(HttpRequestSource {
+                    decoded(HttpRequestIngestor {
                         client: named("http_main"),
                         every: every("30s"),
                         mode: HttpRequestIngestMode::NoAck,
@@ -5387,7 +5420,7 @@ mod tests {
             (
                 orders_ingestor(
                     "endpoint_ingestor",
-                    decoded(HttpEndpointSource {
+                    decoded(HttpEndpointIngestor {
                         endpoint: named("orders_endpoint"),
                         mode: EndpointIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Reject {
@@ -5401,7 +5434,7 @@ mod tests {
             (
                 orders_ingestor(
                     "kafka_ingestor",
-                    decoded(KafkaTopicSource {
+                    decoded(KafkaTopicIngestor {
                         client: named("kafka_main"),
                         topic: named("Orders.Topic"),
                         offset_mode: KafkaOffsetMode::ConsumerGroup(named("Orders Group")),
@@ -5423,7 +5456,7 @@ mod tests {
             (
                 orders_ingestor(
                     "pulsar_ingestor",
-                    decoded(PulsarTopicSource {
+                    decoded(PulsarTopicIngestor {
                         client: named("pulsar_main"),
                         topic: named("persistent://public/default/Orders"),
                         subscription: PulsarSubscription {
@@ -5442,7 +5475,7 @@ mod tests {
             (
                 orders_ingestor(
                     "mqtt_ingestor",
-                    decoded(MqttTopicSource {
+                    decoded(MqttTopicIngestor {
                         client: named("mqtt_main"),
                         topic: named("devices/+/Orders"),
                         instances: nonzero!(2u64),
@@ -5459,7 +5492,7 @@ mod tests {
             (
                 orders_ingestor(
                     "mqtt_session_ingestor",
-                    decoded(MqttTopicSource {
+                    decoded(MqttTopicIngestor {
                         client: named("mqtt_main"),
                         topic: named("devices/#"),
                         instances: nonzero!(1u64),
@@ -5476,7 +5509,7 @@ mod tests {
             (
                 orders_ingestor(
                     "nats_ingestor",
-                    decoded(NatsSubjectSource {
+                    decoded(NatsSubjectIngestor {
                         client: named("nats_main"),
                         subject: named("orders.*.created"),
                         queue_group: named("Orders-Workers"),
@@ -5492,7 +5525,7 @@ mod tests {
             (
                 orders_ingestor(
                     "rabbit_ingestor",
-                    decoded(RabbitMqQueueSource {
+                    decoded(RabbitMqQueueIngestor {
                         client: named("rmq_main"),
                         queue: named("Orders Queue"),
                         instances: nonzero!(1u64),
@@ -5510,7 +5543,7 @@ mod tests {
             (
                 orders_ingestor(
                     "redis_ingestor",
-                    decoded(RedisPubSubSource {
+                    decoded(RedisPubSubIngestor {
                         client: named("redis_main"),
                         channel: named("orders:*"),
                         mode: RedisPubSubIngestMode::NoAck,
@@ -5523,7 +5556,7 @@ mod tests {
             (
                 orders_ingestor(
                     "prom_ingestor",
-                    decoded(PrometheusQuerySource {
+                    decoded(PrometheusQueryIngestor {
                         client: named("prom_main"),
                         query: "rate(orders_total[5m])".to_string(),
                         max_body_size: None,
@@ -5538,7 +5571,7 @@ mod tests {
             (
                 orders_ingestor(
                     "bounded_prom_ingestor",
-                    decoded(PrometheusQuerySource {
+                    decoded(PrometheusQueryIngestor {
                         client: named("prom_main"),
                         query: "up".to_string(),
                         max_body_size: Some(
@@ -5557,7 +5590,7 @@ mod tests {
             (
                 orders_ingestor(
                     "zmq_ingestor",
-                    decoded(ZeroMqPullSource {
+                    decoded(ZeroMqPullIngestor {
                         client: named("zmq_main"),
                         mode: ZeroMqIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Suspend,
@@ -5569,7 +5602,7 @@ mod tests {
             (
                 orders_ingestor(
                     "sqs_ingestor",
-                    decoded(SqsQueueSource {
+                    decoded(SqsQueueIngestor {
                         client: named("sqs_main"),
                         queue: named("Orders.fifo"),
                         instances: nonzero!(4u64),
@@ -5587,7 +5620,7 @@ mod tests {
             (
                 orders_ingestor(
                     "ws_ingestor",
-                    decoded(WebsocketsConnectionSource {
+                    decoded(WebsocketsConnectionIngestor {
                         client: named("ws_main"),
                         headers: Vec::new(),
                         mode: WebsocketsIngestMode::NoAck,
@@ -5600,7 +5633,7 @@ mod tests {
             (
                 orders_ingestor(
                     "ws_endpoint_ingestor",
-                    decoded(WebsocketsEndpointSource {
+                    decoded(WebsocketsEndpointIngestor {
                         endpoint: named("orders_socket"),
                         mode: EndpointIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::EndpointBuffer {
@@ -5614,7 +5647,7 @@ mod tests {
             (
                 orders_ingestor(
                     "syslog_ingestor",
-                    decoded(SyslogListenerSource {
+                    decoded(SyslogListenerIngestor {
                         client: named("syslog_main"),
                         mode: SyslogIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Drop,
@@ -5637,7 +5670,7 @@ mod tests {
     fn renders_a_client_producer_ingestor_without_a_codec() {
         let ingestor = orders_ingestor(
             "orders_in",
-            crate::IngestorInput::Client(ClientProducerSource {
+            crate::IngestorInput::Client(ClientProducerIngestor {
                 schema: named("order"),
                 mode: ClientIngestMode {
                     window: AckWindow::Parallel {

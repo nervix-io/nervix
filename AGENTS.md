@@ -127,8 +127,8 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - [Connector Crates And The Connector Contract](docs/src/connector-contract.md) is the authoritative
   architecture reference for external integrations and the contract between connector crates and
   their host. Any change to a connector crate, the shared connector contract, connector planning or
-  composition, or host source and sink execution must keep that chapter current in the same change.
-  Its scope includes layer and dependency ownership, source and sink plans and lifecycle, metadata
+  composition, or host ingestor and emitter execution must keep that chapter current in the same change.
+  Its scope includes layer and dependency ownership, ingestor and emitter plans and lifecycle, metadata
   and header semantics, ACK and commit boundaries, host loops and cadence, special integrations,
   failures, guarantees, limits, and observability.
 - [Cluster Interconnect](docs/src/interconnect.md) is the authoritative architecture reference for
@@ -294,7 +294,7 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - [Execution Plans](docs/src/execution-plans.md) is the authoritative architecture reference for
   converting a committed schedule into one typed execution revision and installing it as running
   or passive runtime state. Any change to revision construction, typed node, resource, source,
-  sink, processor or message-error plans, schedule-delta application, graph publication, or
+  emitter, processor or message-error plans, schedule-delta application, graph publication, or
   plan-based recovery must keep that chapter current in the same change. The linked engine,
   connector, concurrency, error, resource and state chapters retain their detailed contracts.
 
@@ -353,7 +353,7 @@ the code. A contract rewritten to describe today's imports has stopped saying an
 ### Connector crates
 
 Every external integration belongs in its own crate under `crates/connectors/`, and implements the
-source contract, the sink contract, or both, from `nervix-connector` in `crates/connector`.
+ingestor contract, the emitter contract, or both, from `nervix-connector` in `crates/connector`.
 
 - A connector crate is an engine driven by the host. The host is the server's data plane, which owns
   task lifecycle, branch routing, acknowledgement tracking, quiesce, retry and flush cadence,
@@ -393,8 +393,8 @@ source contract, the sink contract, or both, from `nervix-connector` in `crates/
   gives, and `acknowledge` returns only once that confirmation arrives, so progress, a drain and a
   handoff wait for the transport. A read the host cancels returns every message it already took. A
   payload its codec refuses is consumed as a decode rejection through the ingestor's general error
-  policy, never presented again. Every sink implements `finish` for what its client still holds,
-  by the host's deadline, and a brokered sink in `MODE ACK` awaits its broker through the shared
+  policy, never presented again. Every emitter implements `finish` for what its client still holds,
+  by the host's deadline, and a brokered emitter in `MODE ACK` awaits its broker through the shared
   `ConfirmationWindow`, so a retry never resends a confirmed record. A connector delivery defect
   is fixed red first, from a public scenario through the connector's real transport and, where the
   defect is an interleaving, a Shuttle check over its production owner. The
@@ -490,7 +490,7 @@ choose a backend.
   stays retryable rather than becoming a decode, encode or authentication failure. A class whose
   wait queue is full refuses work that answers a request, because its sender can present it again.
   Work the node already accepted and keeps, which nothing can present again, such as a payload a
-  quiesce buffer retained or a poll a paced source moved past, states
+  quiesce buffer retained or a poll a paced ingestor moved past, states
   `QueueAdmission::WaitForPlace` and waits for a place instead; its owner lets shutdown and a new
   quiesce end that wait, and keeps the work where it was until then or decides on it again. A
   payload a source hands over without an acknowledgement waits only when holding the source's loop

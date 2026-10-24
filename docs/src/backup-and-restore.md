@@ -87,7 +87,7 @@ node's bulk memory budget is archived within it. [The Quiesced
 Cut](./backup-and-restore-architecture.md#the-quiesced-cut) and [Capture On The
 Owners](./backup-and-restore-architecture.md#capture-on-the-owners) describe each step.
 
-An unavailable sink keeps its publish and ACK counts outstanding until `TIMEOUT` expires; the
+An unavailable emitter keeps its publish and ACK counts outstanding until `TIMEOUT` expires; the
 failed backup reports those counts and resumes the domain. A leader change during a cut refuses
 that cut. The next leader resumes the domain and runs the backup again under the same execution
 reference, so a client that retries the reference receives the archive of that new cut.
@@ -880,7 +880,7 @@ that compare restored and re-exported state.
 
 The freeze covers only the drain of admitted work, the confirming force flush and the owners'
 staging. The leader resumes the domain before it assembles the archive, so neither the archive's
-size nor the client's download rate lengthens the freeze, and a domain whose sink stops
+size nor the client's download rate lengthens the freeze, and a domain whose emitter stops
 acknowledging stays frozen only until the timeout fails the backup. A state owner that crashes or
 loses contact with its peers during the freeze, while the cluster still reports it live, fails the
 backup with `backup failed:`, and the domain resumes either way, a node that was unreachable

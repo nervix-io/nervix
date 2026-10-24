@@ -1869,6 +1869,14 @@ coverage-turmoil output:
 coverage-native-extras *producers:
     python3 -m scripts.native_coverage --target-dir {{ quote(cargo_target_dir) }} run {{ producers }}
 
+# CI calls these only after the owning phase succeeds. Exported coverage and compiler evidence
+# live outside these Cargo build outputs; failed phases keep their outputs for diagnosis.
+clean-ci-docs:
+    cargo clean --target-dir {{ quote(cargo_target_dir / "typed-ratchet/docs") }}
+
+clean-ci-benchmarks:
+    cargo clean --profile dev --target-dir {{ quote(cargo_target_dir / "native-coverage-build") }}
+
 # Exercise the native coverage collector: its producer inventory, source policy, selection and
 # failure handling, then instrumented runs of a fixture crate through the real toolchain.
 test-native-coverage:

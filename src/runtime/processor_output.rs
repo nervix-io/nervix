@@ -26,7 +26,7 @@ pub(super) enum ProcessorOutputError {
 pub(super) struct ProcessorOutputDispatchContext<'a> {
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: ModelKind,
-    pub(super) source_kind: ModelKind,
+    pub(super) entity_kind: ModelKind,
     pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) materialized_state: ProcessorMaterializedState<'a>,
@@ -663,7 +663,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
         };
         if context
             .branch
-            .dispatch_output(output, context.source_kind, context.processor, &forwarded)
+            .dispatch_output(output, context.entity_kind, context.processor, &forwarded)
             .await
             .is_ok()
         {
@@ -804,7 +804,7 @@ async fn flush_processor_outputs(
         };
         if context
             .branch
-            .dispatch_output(output, context.source_kind, context.processor, &forwarded)
+            .dispatch_output(output, context.entity_kind, context.processor, &forwarded)
             .await
             .is_ok()
         {

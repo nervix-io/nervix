@@ -546,7 +546,7 @@ enum ModelChangeAspect : ubyte {
   ReordererMaxTime,
   EmitterInput,
   EmitterInputWhere,
-  EmitterSink,
+  EmitterConnector,
   EmitterClient,
   EmitterCodec,
   EmitterCollectPolicy,

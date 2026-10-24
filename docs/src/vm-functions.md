@@ -48,7 +48,7 @@ separately from [execution and concurrency evidence](./execution-primitives.md#v
 | Language | `nervix-nspl` | Parsing a call as a generic `name(args)` or `udf::name(args)` into those Models. The grammar has no function-name table; completion emits a typed builtin or UDF expectation at a call position. |
 | Engines and infrastructure | `nervix-vm` | Lowering Models into VM programs, the semantic catalog of every operator, cast, and builtin, type and sensitivity checking, compilation into instructions over typed registers, every kernel, window aggregate lowering and route compilation, and where an execution runs: inline, or admitted through the node's bounded executor onto its data or extension workers. |
 | Engines and infrastructure | `nervix-roto` | Compiling a typed UDF program on the node's bulk workers, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
-| Decisions | Registry validation and resource planning | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, then selecting scheduled UDF programs and lowering generator and emitter routes, source filters, HTTP fields, ordering groups and sink mappings against their declared scopes. |
+| Decisions | Registry validation and resource planning | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, then selecting scheduled UDF programs and lowering generator and emitter routes, source filters, HTTP fields, ordering groups and emitter mappings against their declared scopes. |
 | Data plane | Runtime plan binding and hosts | Binding runtime programs against installed schemas once per typed node revision, projecting carrier batches into VM input, supplying the execution context and injectors, turning row errors into structured message errors, and owning branch-local window accumulators. |
 | Control plane | Subscriptions | Compiling a session subscription's `WHERE` into a read-only predicate when the subscription is created. |
 
@@ -74,9 +74,9 @@ fails. [Errors And Diagnostics](errors-and-diagnostics.md) owns those compiler c
 For ordinary expression completion, the session resolver asks `FunctionName` for the VM's sorted
 builtin spellings, including datetime names and accepted aliases. That list excludes injected
 calls and `write_header`; it is a candidate catalog, while VM lowering and registry validation
-still decide whether a call is valid for its arguments. The parser carries the source or sink kind
+still decide whether a call is valid for its arguments. The parser carries the source or emitter kind
 with header-function expectations. The resolver adds `read_header` and `read_headers` only for a
-source that can read headers, and `write_header` only for a sink that can write them. UDF candidates
+source that can read headers, and `write_header` only for an emitter that can write them. UDF candidates
 come from the selected domain's Models after the session's queued transaction changes.
 
 Registry planning converts the validated scheduled Models into typed processor specifications.

@@ -4,19 +4,20 @@ use std::num::{NonZeroU16, NonZeroUsize};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AckWindow, ClientIngestMode, ClientProducerSource, ClientSourceEntity, CreateIngestor,
-    EndpointIngestMode, HttpEndpointSource, HttpRequestIngestMode, HttpRequestSource,
-    HttpSourceEntity, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource, IngestSourceKind,
-    IngestTimestampSource, IngestorInput, KafkaIngestMode, KafkaOffsetMode, KafkaSourceEntity,
-    KafkaTopicSource, MqttIngestMode, MqttQos, MqttSession, MqttSourceEntity, MqttTopicSource,
-    NatsIngestMode, NatsSourceEntity, NatsSubjectSource, PrometheusIngestMode,
-    PrometheusQuerySource, PrometheusSourceEntity, PulsarSourceEntity, PulsarSubscription,
-    PulsarSubscriptionOwnership, PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource,
-    RabbitMqSourceEntity, RedisPubSubIngestMode, RedisPubSubSource, RedisSourceEntity, RetryPolicy,
-    SourceBody, SourceEntity, SqsIngestMode, SqsQueueSource, SqsSourceEntity, SyslogIngestMode,
-    SyslogListenerSource, SyslogSourceEntity, TransportIngestorInput, WebsocketsConnectionSource,
-    WebsocketsEndpointSource, WebsocketsIngestMode, WebsocketsSourceEntity, ZeroMqIngestMode,
-    ZeroMqPullSource, ZeroMqSourceEntity,
+    AckWindow, ClientIngestMode, ClientIngestorEntity, ClientProducerIngestor, CreateIngestor,
+    EndpointIngestMode, HttpEndpointIngestor, HttpIngestorEntity, HttpRequestIngestMode,
+    HttpRequestIngestor, IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource,
+    IngestorDeclaration, IngestorEntity, IngestorEntityBody, IngestorEntityKind, IngestorInput,
+    KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicIngestor, MqttIngestMode,
+    MqttIngestorEntity, MqttQos, MqttSession, MqttTopicIngestor, NatsIngestMode,
+    NatsIngestorEntity, NatsSubjectIngestor, PrometheusIngestMode, PrometheusIngestorEntity,
+    PrometheusQueryIngestor, PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionOwnership,
+    PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor,
+    RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SqsIngestMode,
+    SqsIngestorEntity, SqsQueueIngestor, SyslogIngestMode, SyslogIngestorEntity,
+    SyslogListenerIngestor, TransportIngestorInput, WebsocketsConnectionIngestor,
+    WebsocketsEndpointIngestor, WebsocketsIngestMode, WebsocketsIngestorEntity, ZeroMqIngestMode,
+    ZeroMqIngestorEntity, ZeroMqPullIngestor,
 };
 
 use crate::{
@@ -33,14 +34,14 @@ impl Arbitrary<'_> {
     }
 
     /// Any connector and entity an ingestor reads.
-    pub fn ingest_source_kind(&mut self) -> IngestSourceKind {
-        let kinds = IngestSourceKind::all().collect::<Vec<_>>();
+    pub fn ingest_source_kind(&mut self) -> IngestorEntityKind {
+        let kinds = IngestorEntityKind::all().collect::<Vec<_>>();
         let count = NonZeroUsize::new(kinds.len()).assured("the vocabulary declares sources");
         kinds[self.entropy.index(count)]
     }
 
     /// An ingestor over a source of the requested connector and entity.
-    pub fn create_ingestor_from(&mut self, kind: IngestSourceKind) -> CreateIngestor {
+    pub fn create_ingestor_from(&mut self, kind: IngestorEntityKind) -> CreateIngestor {
         let input = self.ingestor_input_of(kind);
         let timestamp_source = match self.entropy.byte() % 3 {
             0 => None,
@@ -63,7 +64,7 @@ impl Arbitrary<'_> {
 
     /// The input of the requested connector and entity: a transport with the codec that decodes
     /// it, or the batches session producers submit.
-    pub fn ingestor_input_of(&mut self, kind: IngestSourceKind) -> IngestorInput {
+    pub fn ingestor_input_of(&mut self, kind: IngestorEntityKind) -> IngestorInput {
         match self.ingest_source_of(kind) {
             Some(source) => IngestorInput::Transport(TransportIngestorInput {
                 source,
@@ -74,8 +75,8 @@ impl Arbitrary<'_> {
     }
 
     /// The batches session producers submit into a client ingestor.
-    pub fn client_producer_source(&mut self) -> ClientProducerSource {
-        ClientProducerSource {
+    pub fn client_producer_source(&mut self) -> ClientProducerIngestor {
+        ClientProducerIngestor {
             schema: self.name(),
             mode: ClientIngestMode {
                 window: self.ack_window(),
@@ -86,8 +87,8 @@ impl Arbitrary<'_> {
     }
 
     /// A transport source of any connector and entity, quiescing in a mode it supports.
-    pub fn ingest_source(&mut self) -> IngestSource {
-        let kinds = IngestSourceKind::modeled().collect::<Vec<_>>();
+    pub fn ingest_source(&mut self) -> IngestorEntity {
+        let kinds = IngestorEntityKind::modeled().collect::<Vec<_>>();
         let count =
             NonZeroUsize::new(kinds.len()).assured("the vocabulary declares transport sources");
         let kind = kinds[self.entropy.index(count)];
@@ -100,35 +101,45 @@ impl Arbitrary<'_> {
     ///
     /// The match is exhaustive, so a new pair does not compile until the generator is taught to
     /// build it.
-    pub fn ingest_source_of(&mut self, kind: IngestSourceKind) -> Option<IngestSource> {
+    pub fn ingest_source_of(&mut self, kind: IngestorEntityKind) -> Option<IngestorEntity> {
         let source = match kind {
-            IngestSourceKind::Client(ClientSourceEntity::Producer) => return None,
-            IngestSourceKind::Http(HttpSourceEntity::Request) => self.http_request_source().into(),
-            IngestSourceKind::Http(HttpSourceEntity::Endpoint) => {
+            IngestorEntityKind::Client(ClientIngestorEntity::Producer) => return None,
+            IngestorEntityKind::Http(HttpIngestorEntity::Request) => {
+                self.http_request_source().into()
+            }
+            IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => {
                 self.http_endpoint_source().into()
             }
-            IngestSourceKind::Kafka(KafkaSourceEntity::Topic) => self.kafka_topic_source().into(),
-            IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) => {
+            IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) => {
+                self.kafka_topic_source().into()
+            }
+            IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => {
                 self.pulsar_topic_source().into()
             }
-            IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => self.mqtt_topic_source().into(),
-            IngestSourceKind::Nats(NatsSourceEntity::Subject) => self.nats_subject_source().into(),
-            IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) => {
+            IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => self.mqtt_topic_source().into(),
+            IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => {
+                self.nats_subject_source().into()
+            }
+            IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => {
                 self.rabbitmq_queue_source().into()
             }
-            IngestSourceKind::Redis(RedisSourceEntity::PubSub) => self.redis_pubsub_source().into(),
-            IngestSourceKind::Prometheus(PrometheusSourceEntity::Query) => {
+            IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => {
+                self.redis_pubsub_source().into()
+            }
+            IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => {
                 self.prometheus_query_source().into()
             }
-            IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull) => self.zeromq_pull_source().into(),
-            IngestSourceKind::Sqs(SqsSourceEntity::Queue) => self.sqs_queue_source().into(),
-            IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
+            IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull) => {
+                self.zeromq_pull_source().into()
+            }
+            IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => self.sqs_queue_source().into(),
+            IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection) => {
                 self.websockets_connection_source().into()
             }
-            IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => {
+            IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => {
                 self.websockets_endpoint_source().into()
             }
-            IngestSourceKind::Syslog(SyslogSourceEntity::Listener) => {
+            IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener) => {
                 self.syslog_listener_source().into()
             }
         };
@@ -136,8 +147,8 @@ impl Arbitrary<'_> {
     }
 
     /// An HTTP request polled on a cadence of domain time.
-    pub fn http_request_source(&mut self) -> HttpRequestSource {
-        let source = HttpRequestSource {
+    pub fn http_request_source(&mut self) -> HttpRequestIngestor {
+        let source = HttpRequestIngestor {
             client: self.name(),
             every: self.clock_period(),
             mode: HttpRequestIngestMode::NoAck,
@@ -147,8 +158,8 @@ impl Arbitrary<'_> {
     }
 
     /// An HTTP endpoint the cluster serves.
-    pub fn http_endpoint_source(&mut self) -> HttpEndpointSource {
-        let source = HttpEndpointSource {
+    pub fn http_endpoint_source(&mut self) -> HttpEndpointIngestor {
+        let source = HttpEndpointIngestor {
             endpoint: self.name(),
             mode: self.endpoint_mode(),
             quiesce: IngestQuiesceMode::Suspend,
@@ -157,13 +168,13 @@ impl Arbitrary<'_> {
     }
 
     /// A Kafka topic, its offsets kept by a consumer group or by the domain.
-    pub fn kafka_topic_source(&mut self) -> KafkaTopicSource {
+    pub fn kafka_topic_source(&mut self) -> KafkaTopicIngestor {
         let offset_mode = if self.entropy.flag() {
             KafkaOffsetMode::ConsumerGroup(self.kafka_consumer_group_name())
         } else {
             KafkaOffsetMode::Domain
         };
-        let source = KafkaTopicSource {
+        let source = KafkaTopicIngestor {
             client: self.name(),
             topic: self.kafka_topic_name(),
             offset_mode,
@@ -176,7 +187,7 @@ impl Arbitrary<'_> {
 
     /// A Pulsar topic read through a subscription that the ingestor owns or an operator
     /// provisioned.
-    pub fn pulsar_topic_source(&mut self) -> PulsarTopicSource {
+    pub fn pulsar_topic_source(&mut self) -> PulsarTopicIngestor {
         let client = self.name();
         let topic = self.pulsar_topic_name();
         let name = self.pulsar_subscription_name();
@@ -185,7 +196,7 @@ impl Arbitrary<'_> {
         } else {
             PulsarSubscriptionOwnership::Provisioned
         };
-        let source = PulsarTopicSource {
+        let source = PulsarTopicIngestor {
             client,
             topic,
             subscription: PulsarSubscription { name, ownership },
@@ -197,8 +208,8 @@ impl Arbitrary<'_> {
     }
 
     /// An MQTT topic filter.
-    pub fn mqtt_topic_source(&mut self) -> MqttTopicSource {
-        let source = MqttTopicSource {
+    pub fn mqtt_topic_source(&mut self) -> MqttTopicIngestor {
+        let source = MqttTopicIngestor {
             client: self.name(),
             topic: self.mqtt_topic_filter(),
             instances: self.positive_u64(),
@@ -209,8 +220,8 @@ impl Arbitrary<'_> {
     }
 
     /// A NATS subject read as a member of a queue group.
-    pub fn nats_subject_source(&mut self) -> NatsSubjectSource {
-        let source = NatsSubjectSource {
+    pub fn nats_subject_source(&mut self) -> NatsSubjectIngestor {
+        let source = NatsSubjectIngestor {
             client: self.name(),
             subject: self.nats_subject_name(),
             queue_group: self.nats_queue_group_name(),
@@ -222,8 +233,8 @@ impl Arbitrary<'_> {
     }
 
     /// A RabbitMQ queue.
-    pub fn rabbitmq_queue_source(&mut self) -> RabbitMqQueueSource {
-        let source = RabbitMqQueueSource {
+    pub fn rabbitmq_queue_source(&mut self) -> RabbitMqQueueIngestor {
+        let source = RabbitMqQueueIngestor {
             client: self.name(),
             queue: self.rabbitmq_queue_name(),
             instances: self.positive_u64(),
@@ -234,8 +245,8 @@ impl Arbitrary<'_> {
     }
 
     /// A Redis Pub/Sub channel.
-    pub fn redis_pubsub_source(&mut self) -> RedisPubSubSource {
-        let source = RedisPubSubSource {
+    pub fn redis_pubsub_source(&mut self) -> RedisPubSubIngestor {
+        let source = RedisPubSubIngestor {
             client: self.name(),
             channel: self.redis_channel_name(),
             mode: RedisPubSubIngestMode::NoAck,
@@ -245,7 +256,7 @@ impl Arbitrary<'_> {
     }
 
     /// A PromQL query evaluated on a cadence of domain time, with or without its response bound.
-    pub fn prometheus_query_source(&mut self) -> PrometheusQuerySource {
+    pub fn prometheus_query_source(&mut self) -> PrometheusQueryIngestor {
         let client = self.name();
         let query = self.string();
         let max_body_size = if self.entropy.flag() {
@@ -253,7 +264,7 @@ impl Arbitrary<'_> {
         } else {
             None
         };
-        let source = PrometheusQuerySource {
+        let source = PrometheusQueryIngestor {
             client,
             query,
             max_body_size,
@@ -265,8 +276,8 @@ impl Arbitrary<'_> {
     }
 
     /// A ZeroMQ pull socket.
-    pub fn zeromq_pull_source(&mut self) -> ZeroMqPullSource {
-        let source = ZeroMqPullSource {
+    pub fn zeromq_pull_source(&mut self) -> ZeroMqPullIngestor {
+        let source = ZeroMqPullIngestor {
             client: self.name(),
             mode: ZeroMqIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,
@@ -275,8 +286,8 @@ impl Arbitrary<'_> {
     }
 
     /// An SQS queue.
-    pub fn sqs_queue_source(&mut self) -> SqsQueueSource {
-        let source = SqsQueueSource {
+    pub fn sqs_queue_source(&mut self) -> SqsQueueIngestor {
+        let source = SqsQueueIngestor {
             client: self.name(),
             queue: self.sqs_queue_name(),
             instances: self.positive_u64(),
@@ -290,7 +301,7 @@ impl Arbitrary<'_> {
     }
 
     /// The connection a WebSockets client opens.
-    pub fn websockets_connection_source(&mut self) -> WebsocketsConnectionSource {
+    pub fn websockets_connection_source(&mut self) -> WebsocketsConnectionIngestor {
         let mut headers = Vec::new();
         for index in 0..(self.entropy().byte() % 3) {
             headers.push(nervix_models::WebsocketsUpgradeHeader {
@@ -298,7 +309,7 @@ impl Arbitrary<'_> {
                 value: format!("fixture-{}'\"\\", self.entropy().byte()),
             });
         }
-        let source = WebsocketsConnectionSource {
+        let source = WebsocketsConnectionIngestor {
             client: self.name(),
             headers,
             mode: WebsocketsIngestMode::NoAck,
@@ -308,8 +319,8 @@ impl Arbitrary<'_> {
     }
 
     /// A WebSockets endpoint the cluster serves.
-    pub fn websockets_endpoint_source(&mut self) -> WebsocketsEndpointSource {
-        let source = WebsocketsEndpointSource {
+    pub fn websockets_endpoint_source(&mut self) -> WebsocketsEndpointIngestor {
+        let source = WebsocketsEndpointIngestor {
             endpoint: self.name(),
             mode: self.endpoint_mode(),
             quiesce: IngestQuiesceMode::Suspend,
@@ -318,8 +329,8 @@ impl Arbitrary<'_> {
     }
 
     /// The listener a syslog client binds.
-    pub fn syslog_listener_source(&mut self) -> SyslogListenerSource {
-        let source = SyslogListenerSource {
+    pub fn syslog_listener_source(&mut self) -> SyslogListenerIngestor {
+        let source = SyslogListenerIngestor {
             client: self.name(),
             mode: SyslogIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,
@@ -328,7 +339,7 @@ impl Arbitrary<'_> {
     }
 
     /// `source` quiescing in one of the modes it supports.
-    fn quiescing_as_supported<Source: SourceBody + SourceEntity>(
+    fn quiescing_as_supported<Source: IngestorEntityBody + IngestorDeclaration>(
         &mut self,
         mut source: Source,
     ) -> Source {
@@ -346,7 +357,7 @@ impl Arbitrary<'_> {
     }
 
     /// One of the quiesce modes `source` supports, as its entity declares them.
-    fn supported_quiesce<Source: SourceBody + SourceEntity>(
+    fn supported_quiesce<Source: IngestorEntityBody + IngestorDeclaration>(
         &mut self,
         source: &Source,
     ) -> IngestQuiesceMode {

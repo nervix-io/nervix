@@ -147,7 +147,7 @@ Reading top to bottom:
 ## Emit To Redis
 
 An emitter drains a relay out of the graph. The Redis integration is Pub/Sub
-([Supported Emitter Sinks](emitters.md#supported-emitter-sinks)), and the same codec that decoded
+([Supported Emitter Emitters](emitters.md#supported-emitter-emitters)), and the same codec that decoded
 the input encodes it back to JSON:
 
 ```nspl

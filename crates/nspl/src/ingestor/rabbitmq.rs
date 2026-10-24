@@ -13,7 +13,7 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{RabbitMqIngestMode, RabbitMqQueueName, RabbitMqQueueSource};
+use nervix_models::{RabbitMqIngestMode, RabbitMqQueueIngestor, RabbitMqQueueName};
 
 use super::delivery::{
     ParallelAck, SequentialAck, ack_parallel, ack_sequential, no_ack, optional_instances,
@@ -26,7 +26,7 @@ use crate::{
 
 /// `FROM <client> QUEUE '<queue>' [INSTANCES <n>] MODE … ON QUIESCE SUSPEND`.
 pub(super) fn queue_body<'src>()
--> impl Parser<'src, &'src [Token], RabbitMqQueueSource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], RabbitMqQueueIngestor, extra::Err<ParseError<'src>>> + Clone {
     let sequential = ack_sequential().map(
         |SequentialAck {
              timeout,
@@ -67,7 +67,7 @@ pub(super) fn queue_body<'src>()
         .then(mode)
         .then(suspend_only_quiesce_clause())
         .map(
-            |((((client, queue), instances), mode), quiesce)| RabbitMqQueueSource {
+            |((((client, queue), instances), mode), quiesce)| RabbitMqQueueIngestor {
                 client,
                 queue,
                 instances,
@@ -87,7 +87,7 @@ mod tests {
     use std::num::NonZeroU16;
 
     use meticulous::OptionExt as _;
-    use nervix_models::{IngestSource, IngestorInput, Model, RabbitMqSource, RetryPolicy};
+    use nervix_models::{IngestorEntity, IngestorInput, Model, RabbitMqIngestor, RetryPolicy};
 
     use super::*;
     use crate::conformance_support::{assert_offers_exactly, created_model, refused};
@@ -135,7 +135,7 @@ mod tests {
             let IngestorInput::Transport(input) = ingestor.input else {
                 panic!("RabbitMQ is a transport")
             };
-            let IngestSource::RabbitMq(RabbitMqSource::Queue(source)) = input.source else {
+            let IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(source)) = input.source else {
                 panic!("the declared source is a RabbitMQ queue")
             };
             assert_eq!(source.mode, expected);
