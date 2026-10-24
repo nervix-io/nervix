@@ -302,6 +302,78 @@ impl RelayAdmissionStatus {
     }
 }
 
+/// Why a receiver did not issue a relay grant.
+///
+/// A capacity refusal is temporary: the receiver answered, and it has no room for the delivery at
+/// the moment, so its sender asks again. Every other refusal is permanent for the grant that asked:
+/// asking again with the same grant is refused the same way.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Archive,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    strum::AsRefStr,
+    strum::Display,
+    strum::EnumCount,
+    strum::EnumIter,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum RelayGrantRefusal {
+    /// The relay memory budget has no room for the body, the largest decoded batch and the decode
+    /// scratch a grant reserves.
+    Memory,
+    /// The application queue has no item left for another delivery.
+    QueueItem,
+    /// The capacity kept for the terminal admission outcomes of granted deliveries is taken.
+    TerminalOutcome,
+    /// The delivery's channel still has an unadmitted batch.
+    ChannelBusy,
+    /// The grant names a sender process epoch other than its authenticated connection's.
+    SenderEpoch,
+    /// The grant names a body longer than the relay body limit.
+    BodyTooLarge,
+    /// The grant carries no admission registration.
+    MissingAdmission,
+    /// The grant's admission registration names a node other than its authenticated sender.
+    ForeignRegistrar,
+    /// The grant names content other than what its delivery identity was first granted with.
+    ContentConflict,
+    /// The grant's channel incarnation is unknown or its sequence is out of order.
+    OutOfOrder,
+    /// The grant's admission registration is already active for another delivery.
+    AdmissionActive,
+}
+
+impl RelayGrantRefusal {
+    /// Whether the refusal is temporary: the receiver has no room for the delivery at the moment.
+    pub fn is_capacity(self) -> bool {
+        matches!(
+            self,
+            Self::Memory | Self::QueueItem | Self::TerminalOutcome | Self::ChannelBusy
+        )
+    }
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Memory => 0,
+            Self::QueueItem => 1,
+            Self::TerminalOutcome => 2,
+            Self::ChannelBusy => 3,
+            Self::SenderEpoch => 4,
+            Self::BodyTooLarge => 5,
+            Self::MissingAdmission => 6,
+            Self::ForeignRegistrar => 7,
+            Self::ContentConflict => 8,
+            Self::OutOfOrder => 9,
+            Self::AdmissionActive => 10,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayAdmissionDecision {
     Admitted,
@@ -1118,6 +1190,8 @@ pub enum TransportError {
     IncomingQueueFull,
     #[error("relay transfer grant was refused: {0}")]
     RelayGrant(String),
+    #[error("the receiver refused the relay grant: {0}")]
+    RelayGrantRefused(RelayGrantRefusal),
     #[error("relay delivery was cancelled before runtime admission")]
     RelayCancelled,
     #[error("relay delivery outcome is indeterminate after a peer process epoch change")]

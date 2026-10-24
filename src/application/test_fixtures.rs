@@ -650,14 +650,25 @@ pub(in crate::application) async fn build_test_service_inner(
         .maybe_initialize()
         .await
         .expect("single-node consensus should initialize");
-    if create_default_domain_flag {
-        create_test_domain(&consensus.proposer(), "default").await;
-    }
-    for _ in 0..50 {
+    // Every service a test builds acts as the leader of its single-node consensus, and a loaded
+    // machine can take well over a second to elect it. The fixture waits for that election, bounded
+    // generously at a minute of polls, and fails here rather than hand a test a node that does not
+    // lead yet.
+    let mut leading = false;
+    for _ in 0..3_000 {
+        nervix_primitives::task::consume_budget().await;
         if consensus.observer().current_leader().await.as_ref() == Some(&expected_leader) {
+            leading = true;
             break;
         }
         nervix_primitives::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        leading,
+        "the single-node test consensus did not elect node '{expected_leader}'"
+    );
+    if create_default_domain_flag {
+        create_test_domain(&consensus.proposer(), "default").await;
     }
     let interconnect_addr = interconnect.local_addr();
     let cluster = Arc::new(

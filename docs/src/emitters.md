@@ -1026,7 +1026,7 @@ CREATE [IF NOT EXISTS] <kind> CLIENT <name>
 
 Transport-specific expectations:
 
-- `KAFKA`: pass-through to librdkafka. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and optional `'ssl.certificate.location'` plus `'ssl.key.location'`.
+- `KAFKA`: pass-through to librdkafka, except `allow.auto.create.topics`, which `CREATE KAFKA CLIENT` refuses. The emitter's producer keeps librdkafka's producer default, so a broker that allows auto-creation creates a missing topic on the first publish; provision topics explicitly. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and optional `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `RABBITMQ`: use `amqps://...` in `addr`; Nervix honors `tls_ca_file`.
 - `REDIS`: use `rediss://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`.
@@ -1345,7 +1345,14 @@ still verifies the configured hostname and uses its configured CA and optional c
 ### MQTT
 
 The default client identity is `<domain>~<emitter>`. A `client_id` in the client configuration
-overrides that identity.
+replaces the whole identity, including its domain prefix. Choose an explicit identity unique to
+this connection on the broker, including across domains and ingestors.
+
+Connections use the driver's 60-second keep-alive unless the broker supplies a Server Keep Alive
+in `CONNACK`; a broker-supplied zero disables it. Plexus exposes no client setting for this
+interval. QoS 0 uses a clean session. QoS 1 and 2 request a persistent session with the maximum
+Session Expiry Interval (`0xFFFFFFFF`); the broker's accepted expiry and retention limits
+still apply. Plexus exposes no session-expiry setting.
 
 <!-- connector-matrix:emit-mqtt-topic:start -->
 ```plexus,ignore
@@ -1387,10 +1394,15 @@ See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#m
 QoS 0 acknowledges client acceptance. When the emitter stops, it waits within the stop or shutdown
 deadline for its client to send the publishes it still holds, which a client cut off from its
 broker holds until it connects again; publishes still unsent at that deadline fail the stop and are
-counted in the emitter's transient error. QoS 1 waits for `PUBACK`; QoS 2
-waits for the complete exactly-once handshake. QoS 1 and 2 use a persistent session and the emitter client's stable
-identity so in-flight messages survive reconnects. Reconnect pacing follows the declared retry
-policy. When an answer misses its `ACK TIMEOUT`, or the broker or client fails it for a reason that
+counted in the emitter's transient error. Sending a QoS 0 publish to the connection does not
+confirm that the broker received it.
+
+QoS 1 waits for `PUBACK`; QoS 2 waits for the complete exactly-once handshake. Their persistent
+session and stable client identity let the same client resume in-flight publishes across network
+reconnects while the broker retains the session. Nervix keeps local delivery attempts and
+acknowledgements in memory, so this is not a durable checkpoint of emitter state.
+Reconnect pacing follows the declared retry policy. When an answer misses its `ACK TIMEOUT`, or
+the broker or client fails it for a reason that
 is not the record's own, the emitter keeps every answer the broker already gave and retries only the
 records without one; `DESCRIBE EMITTER` shows why, such as
 `the broker did not answer within ACK TIMEOUT 10s`. A record the emitter stopped waiting for stays

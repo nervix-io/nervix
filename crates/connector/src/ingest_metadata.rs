@@ -18,6 +18,7 @@
 )]
 
 use nervix_models::SourceMetadataScope;
+use nervix_primitives::sync::Arc;
 
 /// Transport headers of one source message, visited in the order its entity's declared header model
 /// keeps them: as the message carries them for `ordered_repeats`, each name's values together for
@@ -87,6 +88,11 @@ impl IngestMessageHeaders for RetainedIngestHeaders {
 /// row copies only those borrows.
 #[derive(Clone, Copy)]
 pub enum IngestMetadataRow<'a> {
+    Websockets {
+        frame_type: nervix_models::WebsocketsFrameType,
+        // A buffered frame can outlive the exact connection whose upgrade supplied these fields.
+        headers: &'a Arc<RetainedIngestHeaders>,
+    },
     Kafka {
         topic: &'a str,
         partition: i32,
@@ -106,6 +112,7 @@ impl IngestMetadataRow<'_> {
     /// appended into.
     pub fn scope(&self) -> SourceMetadataScope {
         match self {
+            Self::Websockets { .. } => SourceMetadataScope::Websockets,
             Self::Kafka { .. } => SourceMetadataScope::Kafka,
             Self::Syslog { .. } => SourceMetadataScope::Syslog,
             Self::Headers { .. } => SourceMetadataScope::Headers,

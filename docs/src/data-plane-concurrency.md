@@ -106,7 +106,11 @@ reads the budget again every 10 milliseconds; it registers for no release notifi
 queues in the budget's semaphore, whose released permits would otherwise go to the held charge
 ahead of the relay work that frees it. The batch task returns each watch's share as that watch
 ends, through its exclusively owned reservation, so the hold involves no shared state beyond the
-budget's own atomic permit count.
+budget's own atomic permit count. A sender storing a delivery's record acknowledgements waits for
+room through the same hold, inside the delivery's channel slot, and a sender whose grant the
+receiver refused for capacity waits on its own timer before it asks again. Neither registers for a
+notification, so neither adds a wait-and-notify protocol: each ends on its own timer, its bound, or
+the cancellation of its channel.
 The registered wire number selects the position, exact generation and row without a concurrent
 map lookup. The process identity is checked before routing. Generation exhaustion seals the
 position, and cancellation, timeout, terminal resolution and shutdown compete to take each row
@@ -276,6 +280,18 @@ writer.
 | Backup state snapshot | Branch lifecycle publications, Kafka offset commits and WASM checkpoints register on a per-domain atomic generation before changing their published state. After the domain is paused and drained, the owner closes that generation with a Release RMW and waits with Acquire loads for registered publishers to leave. It then serializes Kafka positions and branch lifecycle into the runtime state store and opens one database snapshot for those records and durable WASM saves. The closing RMW is in the release sequence that a publisher entering the next generation acquires. | A publisher that entered before the cut completes into the captured view; a publisher that enters after it waits for the next generation. An older periodic storage write cannot replace a newer forced publication. The backup reads the database snapshot off the record path and stages owned section bytes. A live backup does not close the generation and reports its weaker cut explicitly. The server's Shuttle and Loom checks drive this production fence. |
 
 | Restore state publication | The control plane stages checkpoints under a replicated authority, then admits one fixed-size storage job, validates a complete generation namespace and durably publishes its active pointer. It holds the consensus applied-state read guard through authority validation, synchronous storage mutation and runtime-handle clearing. The state store reuses its existing latest-snapshot installation mutex for staging, pointer publication and bounded cleanup. Checkpoint jobs retain their selected namespace and validate it under that barrier; entity replacement and purge also select the active namespace while holding the barrier. | A newer applied generation and the release of the start gate require the state-machine write guard. Every node therefore replaces a whole state set before `START` is available, and stale coordinators cannot mutate a running restored domain. The store retains authority and inventory for exact retry and monotonic rejection. Database readers select pointer, header and chunk values from one snapshot, which retains its complete set across bounded deletion of obsolete namespaces and unreferenced active chunk sets. Publication runs on stopped-domain lifecycle paths. The admitted maintenance loop also follows running checkpoint replacement and purge under the installation barrier; record delivery adds no lock. |
+
+The Syslog stream source gives each accepted connection its own decoder and one bounded intake
+channel send. After decoding a frame, the connection completes that send even when a SUSPEND watch
+change races a full channel; it observes the pause before its next read. An accept error removes
+only the listening socket, leaving the connection tasks and channel owned by the same source until
+resume rebinds the socket. Source close aborts those tasks. The registered Syslog Shuttle check
+explores the full-channel handoff against a pause change. One-node and three-node Cucumber
+scenarios exercise every listener. They check the delivered frame count through entity quiescence
+and keep one connection streaming after an injected accept failure while the source rebinds its
+listening socket. The test-only fault channel enters through the source plan and retains one armed
+request until its selected listener acknowledges it. Another arm cannot replace an unobserved
+request, and a cancelled accept leaves it available. No shared lock or map is reached per frame.
 
 Restore storage qualification includes the store's cancellation, corruption, snapshot, queued
 writer, active chunk liveness and many-key cleanup regressions in `just test-deloxide`,
@@ -2026,6 +2042,14 @@ locks. Socket I/O, close-handshake deadlines and reconnect timers remain outside
 observation; public peer observations measure the delays, and a paused-clock host regression checks
 that successful upgrades keep backoff until a delivered batch resets it. Direct connector tests
 exercise suspension and close without claiming those socket waits are tracked locks.
+The declaration-buffer workloads engage the tracked entity gate, admit text and binary frames
+under BUFFER, and replay them after a codec change on one and three nodes. Their scenario and
+stress records name the entity-gate and quiesce-buffer owners. Connection response headers are
+published once and shared by messages and retained buffer entries; this adds no lock or mutable
+map on the frame path. Upgrade-field installation has a focused external-iterator dispatch
+contract; its local conversions remain analyzed. The registered `websocket-retained-metadata` Bolero property checks every
+field and exact snapshot identity through the production retain/replay conversion. Client ping
+timer and socket scheduling remain outside the detector and are exercised by real-peer owner tests.
 
 The native backup-wait workloads reach the client's pending-reply locks during multi-domain
 capture, bounded wait expiry and recovery under the same execution reference. They run on one-

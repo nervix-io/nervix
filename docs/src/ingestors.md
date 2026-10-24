@@ -504,6 +504,7 @@ The `name` argument can be any expression that returns `STRING`. Both functions 
 
 - `HTTP ENDPOINT` and `HTTP REQUEST` expose HTTP headers with UTF-8 values
 - `WEBSOCKETS ENDPOINT` exposes UTF-8 headers from the opening HTTP upgrade request
+- `WEBSOCKETS CONNECTION` exposes printable ASCII headers from its opening HTTP upgrade response
 - `KAFKA TOPIC` exposes Kafka record headers
 - `NATS SUBJECT` exposes message headers
 - `PULSAR TOPIC` exposes message properties
@@ -523,9 +524,10 @@ Each of these sources declares a [header model](./connector-contract.md#header-m
 | `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `SQS QUEUE` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| `WEBSOCKETS CONNECTION` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `WEBSOCKETS ENDPOINT` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 
-`CLIENT PRODUCER`, `MQTT TOPIC`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` carry no transport headers and refuse `read_header` and `read_headers`.
+`CLIENT PRODUCER`, `MQTT TOPIC`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SYSLOG LISTENER` carry no transport headers and refuse `read_header` and `read_headers`.
 <!-- connector-matrix:ingest-headers:end -->
 
 `read_headers` returns a name's values in the order its model keeps them, at most one of them where
@@ -567,7 +569,7 @@ CREATE [IF NOT EXISTS] <kind> CLIENT <name>
 
 Transport-specific schemes and keys:
 
-- `KAFKA`: pass-through to librdkafka. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
+- `KAFKA`: pass-through to librdkafka, except `allow.auto.create.topics`, which `CREATE KAFKA CLIENT` refuses. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
 - `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file` and `tls_key_file`, and the client requires `timeout_ms`; see [Prometheus](#prometheus) for every key it declares.
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
@@ -1001,6 +1003,12 @@ Kafka client configuration is passed through to librdkafka. Nervix does not over
 `auto.offset.reset`; set it explicitly, for example to `earliest`, when a new consumer group must
 read records that may already exist.
 
+A Kafka ingestor never creates the topic it reads. Every consumer Nervix runs for it sets
+`allow.auto.create.topics` to `false`, whatever the broker allows, and `CREATE KAFKA CLIENT` refuses a
+Kafka client whose `CONFIG` sets that key. Provision the topic before the ingestor starts. Until it
+exists, `DESCRIBE INGESTOR` reports `transient error: Kafka topic '<topic>' does not exist`, and the
+ingestor starts reading once the topic is created.
+
 In an ACK mode, Nervix commits a Kafka position only after its downstream acknowledgement
 completes. If downstream work rejects a record, the ingestor seeks back to it. A consumer-group
 rebalance can move the record's partition to another group member while its batch is in flight.
@@ -1357,6 +1365,18 @@ See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#m
 The topic filter is a string literal; see [External Names](#external-names) for the levels and
 wildcards it may hold.
 
+Connections use the driver's 60-second keep-alive unless the broker supplies a Server Keep Alive
+in `CONNACK`. Plexus exposes no client setting for this interval. A broker-supplied zero disables
+the keep-alive and the acknowledgement-write deadline derived from it; it does not make a silent
+connection fail within a fixed time.
+
+`SESSION CLEAN` starts a fresh broker session on every connection and retains no session after
+disconnect. `SESSION PERSISTENT` resumes the broker session for the same client identity and
+requests the maximum Session Expiry Interval (`0xFFFFFFFF`). The broker's accepted expiry,
+offline-queue limits and eviction policy still govern retention. Plexus exposes no session-expiry
+setting. Nervix keeps delivery attempts and acknowledgements in memory; a persistent broker
+session does not persist that local state.
+
 Delivery constraints:
 
 - `NO ACK` defaults to `SESSION CLEAN QOS 0`; explicit `SESSION` and `QOS` may be supplied before `MODE`
@@ -1386,10 +1406,11 @@ batch's acknowledgement fails and the ingestor reconnects, and the broker delive
 unacknowledged QoS 1 publishes again. See
 [MQTT source connections](connector-contract.md#mqtt-source-connections).
 
-Every connection an MQTT ingestor opens advertises the incoming packet bound the table above
-declares as the Maximum Packet Size of its `CONNECT`. MQTT 5 requires the broker to discard a larger
-publish for this subscriber instead of sending it, so the publish never reaches the ingestor and a
-persistent session never presents it again; the broker's own metrics, not Nervix's, show that
+Every connection an MQTT ingestor opens advertises a 10,240-byte (10 KiB) incoming packet bound as
+the Maximum Packet Size of its `CONNECT`. This bounds the complete packet, including its headers
+and properties, so the payload must leave room for that overhead. MQTT 5 requires the broker to
+discard a larger publish for this subscriber instead of sending it. It never reaches the ingestor,
+and a persistent session never presents it again; the broker's own metrics, not Nervix's, show that
 discard. A broker that sends a larger packet anyway is answered with a `DISCONNECT` whose reason is
 Packet too large, and the ingestor reports the packet's size and the bound as its transient error
 and an error event before it reconnects.
@@ -1397,7 +1418,9 @@ and an error event before it reconnects.
 Without a `client_id` in the client configuration, one instance connects as
 `<domain>~<ingestor>`. Multiple instances connect as `<domain>~<ingestor>~<instance>`, with
 zero-based instance indices. An explicit identity shared by multiple instances must contain
-`{{instance}}`. Identities remain stable across node ownership changes.
+`{{instance}}`. An explicit identity replaces the whole default, including its domain prefix:
+choose identities unique to each live connection on the same broker, across domains too.
+Identities remain stable across node ownership changes.
 
 `DROP INGESTOR` releases the broker sessions, including after `STOP`. Nervix stops the source,
 opens a clean cleanup connection for each distinct identity, sends `UNSUBSCRIBE` for its filter,
@@ -1949,6 +1972,7 @@ The referenced resource bundle must contain:
 ```plexus,ignore
 CREATE WEBSOCKETS CONNECTION INGESTOR <name>
   FROM <client>
+  [HEADERS { 'authorization' = 'Bearer token' }]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1963,15 +1987,15 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | WEBSOCKETS client |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | No entity-specific options. |
-| Headers | Not offered: A frame carries its payload; handshake headers are not a per-frame header map. |
+| Options in statement order | `HEADERS { 'authorization' = 'Bearer token' }` (composed clause); optional; omitted when unset |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |
+| Metadata | metadata.frame_type: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
 | Buffers | frames that arrive while the signaling handshake runs: unbounded |
-| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded<br>close: fixed 1s |
+| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded<br>writing a configured ping: fixed 1s<br>close: fixed 1s |
 | Driver limits | A message above 64 MiB or a frame above 16 MiB ends the connection. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
@@ -1979,10 +2003,36 @@ See the [WEBSOCKETS CONNECTION capability and mirror reference](connector-capabi
 <!-- connector-matrix:ingest-websockets-connection:end -->
 
 This opens an outbound WebSocket connection through a `WEBSOCKETS CLIENT` and decodes text or
-binary frames.
+binary frames. Its optional `HEADERS { 'authorization' = 'Bearer token' }` clause follows `FROM
+<client>` and takes literal string names and values. Names are case-insensitive; repeated names,
+protocol-owned fields (`Host`, hop-by-hop framing fields and `Sec-WebSocket-*`), malformed values,
+more than 128 fields, or more than 32 KiB of field name/value bytes are refused before activation.
+
+Each data frame exposes `metadata.frame_type` as `text` or `binary`. `read_header` and
+`read_headers` read the opening response's printable ASCII header values, including repeated values in their
+transport order. These values belong to the frame's exact connection: accepted signaling frames
+and quiesce-buffered frames retain that snapshot across suspension, reconnection and replay.
+Headers are not copied into every frame and are not propagated to a relay unless mapped explicitly.
+The connection is ingest-only; it declares no emitter envelope or `BATCH` clause.
+
+The client's Nervix-owned `CONFIG` is strict and matches keys without regard to ASCII case:
+
+| Key | Contract |
+| --- | --- |
+| `endpoint` | Required `ws://` or `wss://` URL with a host and without a fragment. |
+| `connect_timeout_ms` | Positive whole milliseconds for DNS, TCP, TLS and upgrade together; omitted means 30000. |
+| `ping_interval_ms` | Positive whole milliseconds between client pings after signaling completes; omitted means only answering peer pings. |
+| `tls_ca_file` | Optional CA file for `wss://`. |
+| `tls_cert_file`, `tls_key_file` | Optional client identity files, supplied together for `wss://`. |
+
+Durations obey the shared schedulable physical-duration bound. Unknown or repeated keys are
+refused. TLS file keys are refused with `ws://`. Resource mounts and
+configuration templates keep their shared client contract; rendered values are checked again when
+opening the source. A ping write has a one-second physical budget and a failure triggers recovery.
+
 For `ws` and `wss`, each initial connection and resume resolves the URL host through the node's
-asynchronous resolver. It tries the returned addresses in order within one 30-second budget for
-DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
+asynchronous resolver. It tries the returned addresses in order within the configured
+`connect_timeout_ms` budget for DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
 header, TLS server name, path and query; custom TLS roots and client identity remain in effect.
 An expired DNS answer is refreshed on a new attempt, while a healthy connection stays open.
 Resolution, connection and read failures are transient source failures. A peer Close records its

@@ -258,15 +258,15 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Reference | WEBSOCKETS client |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
-| Options in statement order | No entity-specific options. |  |
-| Headers | Not offered: A frame carries its payload; handshake headers are not a per-frame header map. |  |
+| Options in statement order | `HEADERS { 'authorization' = 'Bearer token' }` (composed clause); optional; omitted when unset |  |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
-| Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |  |
+| Metadata | metadata.frame_type: STRING OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
 | Buffers | frames that arrive while the signaling handshake runs: unbounded |  |
-| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded<br>close: fixed 1s |  |
+| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded<br>writing a configured ping: fixed 1s<br>close: fixed 1s |  |
 | Driver limits | A message above 64 MiB or a frame above 16 MiB ends the connection. |  |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
 

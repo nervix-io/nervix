@@ -78,7 +78,11 @@ shuttle = [
 ]
 # Test-only feature used by the standard test recipes for fault injection, random multinode
 # scheduling, and lower intentionally expensive password hashing parameters.
-testing = ["nervix-connector-kafka/testing", "nervix-consensus/testing"]
+testing = [
+  "nervix-connector-kafka/testing",
+  "nervix-connector-syslog/testing",
+  "nervix-consensus/testing",
+]
 
 [dependencies]
 ahash = { workspace = true }

@@ -16,6 +16,11 @@ semantics. The state rules here apply to those systems without replacing their d
 [Execution Plans](./execution-plans.md) follows the validated values into a complete installed
 revision.
 
+Opening a WebSockets ingest metadata builder validates the frame-label byte capacity derived from
+the group's row bound and the vocabulary's frame labels. An estimate that exceeds the address space
+is a typed error before allocation; the ingest group adds the opening operation's context and
+retains the cause for its general-error policy.
+
 The Pulsar sink's running publishing choice keeps related state together: the `NO ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
 confirmation settings. An empty receipt collection means there are no outstanding receipts,
@@ -121,6 +126,12 @@ No fabricated close code stands for an absent status. The source removes the exa
 before its bounded closing wait, so cancellation leaves it needing a new resume. The
 [connector contract](./connector-contract.md#source-boundary) owns the retry and payload lifetime
 effects.
+
+WebSockets upgrade fields cross from literal semantic Models into `WebsocketsUpgradeHeaders`,
+whose private representation enforces HTTP bounds and WebSocket protocol-name restrictions before
+an execution plan receives it. `WebsocketDataFrame` carries either text or binary payload, so a
+text tag cannot accompany invalid UTF-8. Each message retains its connection's immutable response
+header snapshot; the quiesce buffer retains the same handle beside the typed frame kind.
 
 Zero work outstanding, an initial sequence value, an empty payload, and a genuinely empty result
 remain ordinary values. A documented scalar function may return zero for a particular input;
@@ -821,6 +832,12 @@ clears its own state in the current atomic publication. Selection retains an act
 first, an active connector retry next, and a task error without a retry after that, so a pending
 retry remains visible to drains. Operator inspection reads both owners' errors and the selected
 retry from one immutable publication. Retained observations are immutable.
+
+A Syslog stream source separately represents its listener's existence and the listening socket's
+presence. An absent socket after accept failure requires rebind, while the same listener still
+owns established connection tasks and queued frames; source close ends that retained state.
+The testing capability shares one named listener-fault request between the connector and host:
+the selected bound address and its acknowledgement belong to that same armed request.
 
 Domain-clock publication carries lifecycle pause, generation and start
 point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;

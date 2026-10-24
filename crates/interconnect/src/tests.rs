@@ -1548,7 +1548,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         .expect_err("the authenticated sender must own the declared admission reply");
     assert!(matches!(
         error.current_context(),
-        TransportError::RemoteRejected { status: 403, .. }
+        TransportError::RelayGrantRefused(RelayGrantRefusal::ForeignRegistrar)
     ));
     // Admission progress shares the sender's bounded application queue. Keep one update queued
     // so terminal delivery cannot assume the application has consumed every progress frame.
@@ -1578,10 +1578,13 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         )
         .await
         .expect_err("a second grant must wait until the first terminal outcome is sent");
-    assert!(matches!(
-        error.current_context(),
-        TransportError::RemoteRejected { status: 429, .. }
-    ));
+    let TransportError::RelayGrantRefused(refusal) = error.current_context() else {
+        panic!("the receiver answers the second grant with a typed refusal: {error:?}");
+    };
+    // The channel's first batch is still unadmitted while the application holds it, so the
+    // channel is busy before any other capacity is consulted; either way the refusal is temporary.
+    assert_eq!(*refusal, RelayGrantRefusal::ChannelBusy);
+    assert!(refusal.is_capacity());
 
     drop(first);
     let terminal = timeout(Duration::from_secs(2), async {
@@ -1626,6 +1629,129 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
     })
     .await
     .expect("redeemed grant expiry work should not delay transport shutdown");
+}
+
+/// A grant the receiver's relay budget has no room for is answered with a typed capacity refusal
+/// both ends count, and the same delivery is granted and received once the room returns.
+#[nervix_primitives::test]
+async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_a,
+        node_b,
+        executor_b,
+        mut incoming_b,
+        ..
+    } = connected_transports().await;
+    let payload = RelayPayload {
+        delivery: RelayDelivery {
+            channel_incarnation: [3; 16],
+            sequence: 0,
+        },
+        kind: RelayPayloadKind::Routed,
+        domain: DomainName::parse("test").expect("test domain should be valid"),
+        relay: RelayName::parse("relay").expect("test relay should be valid"),
+        key: None,
+        batch_ipc: Executor::default()
+            .try_charge_owned(MemoryClass::Relay, vec![1])
+            .expect("the test relay body should fit its budget"),
+        metadata: Vec::new(),
+        acks: Vec::new(),
+        admission: Some(registration(1, &node_a)),
+    };
+    let relay_memory = executor_b.memory(MemoryClass::Relay);
+    let room_for_no_grant = executor_b.limits().relay_scratch_bytes.as_u64();
+    let room = relay_memory
+        .capacity_bytes
+        .checked_sub(relay_memory.reserved_bytes)
+        .expect("a budget never reserves more than its capacity");
+    let filled = room
+        .checked_sub(room_for_no_grant)
+        .expect("an idle receiver has more room than one operation's scratch");
+    let occupied = executor_b
+        .try_reserve(MemoryClass::Relay, filled)
+        .expect("an idle receiver's relay budget takes the fill");
+    let refused = |snapshot: TransportSnapshot, direction: ConnectionDirection| {
+        snapshot.counters.relay_grant_refusals[direction.index()][RelayGrantRefusal::Memory.index()]
+    };
+
+    let error = transport_a
+        .send(&node_b, Envelope::RelayPayload(payload.clone()))
+        .await
+        .expect_err("a receiver without room for the grant refuses it");
+    assert!(matches!(
+        error.current_context(),
+        TransportError::RelayGrantRefused(RelayGrantRefusal::Memory)
+    ));
+    assert!(RelayGrantRefusal::Memory.is_capacity());
+    assert_eq!(
+        refused(transport_b.snapshot(), ConnectionDirection::Inbound),
+        1
+    );
+    assert_eq!(
+        refused(transport_a.snapshot(), ConnectionDirection::Outbound),
+        1
+    );
+
+    drop(occupied);
+    transport_a
+        .send(&node_b, Envelope::RelayPayload(payload))
+        .await
+        .expect("the same delivery is granted once the receiver has room");
+    let received = timeout(Duration::from_secs(2), incoming_b.recv())
+        .await
+        .expect("the granted relay should enter the application queue")
+        .expect("the application queue should remain open");
+    assert!(matches!(received.envelope, Envelope::RelayPayload(_)));
+    assert_eq!(
+        refused(transport_b.snapshot(), ConnectionDirection::Inbound),
+        1
+    );
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+#[test]
+fn each_relay_grant_refusal_counts_under_its_own_reason_and_fails_a_request_by_its_class() {
+    use strum::{EnumCount as _, IntoEnumIterator as _};
+
+    let observations = observation::TransportObservations::default();
+    for refusal in RelayGrantRefusal::iter() {
+        observations.relay_grant_refused(ConnectionDirection::Inbound, refusal);
+    }
+    let counters = observations.counters();
+    let inbound = counters.relay_grant_refusals[ConnectionDirection::Inbound.index()];
+    let outbound = counters.relay_grant_refusals[ConnectionDirection::Outbound.index()];
+    assert_eq!(
+        inbound,
+        [1; RelayGrantRefusal::COUNT],
+        "every refusal reason has a counter of its own"
+    );
+    assert_eq!(outbound, [0; RelayGrantRefusal::COUNT]);
+
+    for refusal in RelayGrantRefusal::iter() {
+        let class = StreamResetReason::of(&TransportError::RelayGrantRefused(refusal));
+        let expected = match refusal {
+            RelayGrantRefusal::Memory
+            | RelayGrantRefusal::QueueItem
+            | RelayGrantRefusal::TerminalOutcome
+            | RelayGrantRefusal::ChannelBusy => StreamResetReason::Capacity,
+            RelayGrantRefusal::SenderEpoch
+            | RelayGrantRefusal::BodyTooLarge
+            | RelayGrantRefusal::MissingAdmission
+            | RelayGrantRefusal::ForeignRegistrar
+            | RelayGrantRefusal::ContentConflict
+            | RelayGrantRefusal::OutOfOrder
+            | RelayGrantRefusal::AdmissionActive => StreamResetReason::Peer,
+        };
+        assert_eq!(class, expected, "{refusal}");
+        assert_eq!(
+            refusal.is_capacity(),
+            expected == StreamResetReason::Capacity,
+            "{refusal}"
+        );
+    }
 }
 
 #[nervix_primitives::test]

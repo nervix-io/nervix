@@ -283,6 +283,13 @@ Relay admission:
   its relay memory has no room for the delivery's acknowledgement watches stays an unresolved
   attempt here, with its relay memory near `nervix_execution_memory_capacity_bytes`, and counts no
   rejection until it is admitted
+- `nervix_interconnect_relay_grant_refusals_total`: relay grants refused, by `direction` and
+  `reason`. `direction="inbound"` counts the grants this node refused other nodes and
+  `direction="outbound"` the refusals this node received for its own deliveries. The capacity
+  reasons, `memory`, `queue_item`, `terminal_outcome` and `channel_busy`, hold the delivery back,
+  and its sender asks again; a count of them that keeps rising on a sender means its deliveries are
+  waiting for the receiver's room, and its sources are held with them. Every other reason fails the
+  delivery at once. See [Held Deliveries](./interconnect.md#held-deliveries)
 - `nervix_interconnect_relay_admissions_total` and
   `nervix_interconnect_relay_admission_wait_seconds_total`: attempts resolved, by `outcome`
   (`admitted`, `rejected`, `cancelled`), and the time they spent between an accepted reservation

@@ -27,13 +27,17 @@ use nervix_models::{
 };
 use nervix_primitives::sync::StdArc;
 use rkyv::{rancor::Error as RkyvError, util::AlignedVec};
+use strum::{EnumCount as _, IntoEnumIterator as _};
 
 use super::{
     ConnectionAccepted, ConnectionAnswer, ConnectionHello, RelayAdmissionRequest,
     RelayAdmissionResponse, RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse,
     RelayMetadata, decode_aligned, decode_rkyv, encode_rkyv, validation_depth,
 };
-use crate::{PoolClass, RelayAdmissionStatus, RelayDelivery, RelayPayload, RelayPayloadKind};
+use crate::{
+    PoolClass, RelayAdmissionStatus, RelayDelivery, RelayGrantRefusal, RelayPayload,
+    RelayPayloadKind,
+};
 
 /// The bytes one case reads its messages from.
 const CASE_BYTES: usize = 2048;
@@ -199,7 +203,8 @@ impl WireCase {
         // most 64 bytes, and a choice read after they run out takes its first option, which would
         // leave nearly every case with the first disposition, status and outcome and no branch
         // key.
-        let disposition_choice = arbitrary.entropy().byte() % 6;
+        let disposition_choice = arbitrary.entropy().byte() % 7;
+        let refusal_choice = arbitrary.entropy().byte();
         let status_choice = arbitrary.entropy().byte() % 8;
         let outcome_choice = arbitrary.entropy().byte() % 4;
         let answer_accepts = arbitrary.entropy().flag();
@@ -256,7 +261,8 @@ impl WireCase {
             2 => RelayGrantDisposition::Admitted,
             3 => RelayGrantDisposition::Rejected(reason.clone()),
             4 => RelayGrantDisposition::Cancelled,
-            _ => RelayGrantDisposition::Retired,
+            5 => RelayGrantDisposition::Retired,
+            _ => RelayGrantDisposition::Refused(refusal(refusal_choice)),
         };
         let status = match status_choice {
             0 => RelayAdmissionStatus::Reserved,
@@ -316,6 +322,14 @@ impl WireCase {
             metadata: RelayMetadata::from_payload(&self.payload),
         }
     }
+}
+
+/// The grant refusal a generated choice names, every refusal reachable.
+fn refusal(choice: u8) -> RelayGrantRefusal {
+    let index = usize::from(choice) % RelayGrantRefusal::COUNT;
+    RelayGrantRefusal::iter()
+        .nth(index)
+        .assured("an index below the refusal count names a refusal")
 }
 
 fn delivery(entropy: &mut Entropy<'_>) -> RelayDelivery {

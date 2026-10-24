@@ -30,8 +30,8 @@ mod source;
 
 pub use signaling::{
     CompiledSignalingProtocol, SignalingDataSink, SignalingFrameEncodeError,
-    SignalingProtobufDescriptors, SignalingProtocolCompileError, WebsocketSignalingError,
-    WebsocketSignalingSession,
+    SignalingProtobufDescriptors, SignalingProtocolCompileError, WebsocketDataFrame,
+    WebsocketSignalingError, WebsocketSignalingSession,
 };
 pub use source::{
     WebsocketSource, WebsocketSourceMessage, WebsocketSourcePlan, WebsocketSourcePlanError,

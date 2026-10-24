@@ -34,8 +34,9 @@ use nervix_approx_into::ApproxInto as _;
 use nervix_consensus::Observer;
 use nervix_execution::{Executor, MemoryBudgetSnapshot, WorkerClassSnapshot};
 use nervix_interconnect::{
-    ConnectionDirection, ConnectionFailureReason, PoolClass, RelayAdmissionOutcome, RequestOutcome,
-    RequestSubquota, StreamResetReason, TransferDirection, Transport, TransportSnapshot,
+    ConnectionDirection, ConnectionFailureReason, PoolClass, RelayAdmissionOutcome,
+    RelayGrantRefusal, RequestOutcome, RequestSubquota, StreamResetReason, TransferDirection,
+    Transport, TransportSnapshot,
 };
 use nervix_primitives::{
     sync::{
@@ -221,6 +222,7 @@ const CLASS: &[&str] = &["class"];
 const CLASS_DIRECTION: &[&str] = &["class", "direction"];
 const CLASS_REASON: &[&str] = &["class", "reason"];
 const DIRECTION_OPERATION: &[&str] = &["direction", "operation"];
+const DIRECTION_REASON: &[&str] = &["direction", "reason"];
 const OPERATION: &[&str] = &["operation"];
 const OPERATION_OUTCOME: &[&str] = &["operation", "outcome"];
 const OUTCOME: &[&str] = &["outcome"];
@@ -319,6 +321,13 @@ const SERIES: &[SeriesSpec] = &[
                health probe.",
         kind: SeriesKind::Counter,
         labels: OPERATION,
+    },
+    SeriesSpec {
+        name: "nervix_interconnect_relay_grant_refusals_total",
+        help: "Relay grants refused, by direction and reason: inbound grants this node refused \
+               its peers, and outbound refusals its peers answered this node's deliveries with.",
+        kind: SeriesKind::Counter,
+        labels: DIRECTION_REASON,
     },
     SeriesSpec {
         name: "nervix_interconnect_relay_admissions_total",
@@ -740,6 +749,20 @@ fn transport_families(families: &mut Families, transport: &TransportSnapshot) {
         request_time.sample(&[("operation", operation.as_ref())], elapsed.as_secs_f64());
     }
 
+    let mut grant_refusals = families.open("nervix_interconnect_relay_grant_refusals_total");
+    for direction in ConnectionDirection::iter() {
+        for refusal in RelayGrantRefusal::iter() {
+            let count = counters.relay_grant_refusals[direction.index()][refusal.index()];
+            grant_refusals.sample(
+                &[
+                    ("direction", direction.as_ref()),
+                    ("reason", refusal.as_ref()),
+                ],
+                count.approx_into(),
+            );
+        }
+    }
+
     let mut admissions = families.open("nervix_interconnect_relay_admissions_total");
     for outcome in RelayAdmissionOutcome::iter() {
         let count = counters.relay_outcomes[outcome.index()];
@@ -999,6 +1022,7 @@ mod tests {
                 relay_outcomes: [0; RelayAdmissionOutcome::COUNT],
                 relay_admission_wait: Duration::ZERO,
                 relay_channel_watermarks_evicted: 0,
+                relay_grant_refusals: [[0; RelayGrantRefusal::COUNT]; ConnectionDirection::COUNT],
                 bulk_bytes: [[0; TransferDirection::COUNT]; PoolClass::COUNT],
             },
             connections: [[0; PoolClass::COUNT]; ConnectionDirection::COUNT],

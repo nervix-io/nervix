@@ -718,8 +718,12 @@ impl Application {
         let startup = startup
             .require_handler_registration(&cluster, health_handler)
             .await?;
-        let application_revision_handler =
-            completion::register_application_revision_handler(cluster.clone(), &interconnect);
+        let application_revision_handler = completion::register_application_revision_handler(
+            cluster.clone(),
+            &interconnect,
+            #[cfg(feature = "testing")]
+            fault_injection.clone(),
+        );
         let startup = startup
             .require_handler_registration(&cluster, application_revision_handler)
             .await?;
