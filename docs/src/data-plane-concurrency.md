@@ -2304,7 +2304,14 @@ check runs twice, each time in its own process: under the exploration it declare
 Shuttle's uncontrolled-nondeterminism detector, which runs 100 random schedules twice each and
 fails when the second run diverges. A run counts only when its test passed and the runner printed
 its record, and the command reports how many checks it discovered, selected, executed and saw
-complete. `just test-shuttle <filter>` selects the checks whose full name contains the filter in
+complete. Checks run beside each other, one per CPU the runner may use, so a run lasts about as
+long as its longest check rather than as long as every check added together. A check's own two
+runs stay one after the other, because both persist a failing schedule in its one failure
+directory. The runner starts checks in selection order, records each one in its evidence as it
+starts, and prints a check's output, with how long each run took, once the check ends. Nothing in a
+check depends on what runs beside it: every process explores its own model under its own
+scheduler, and a check opens no socket and writes no fixed path.
+`just test-shuttle <filter>` selects the checks whose full name contains the filter in
 every package; a package with no match is fine, and a filter that selects nothing at all fails. The
 recipe uses the repository's kache-backed build and prepares the server's test dependencies; `just
 test` continues to run the ordinary suite.
