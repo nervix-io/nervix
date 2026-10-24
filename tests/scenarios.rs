@@ -13948,6 +13948,66 @@ async fn then_rabbitmq_queue_holds_messages(
     );
 }
 
+#[then(expr = "RabbitMQ queue {string} eventually has {int} unacknowledged deliveries")]
+async fn then_rabbitmq_queue_has_unacknowledged_deliveries(
+    world: &mut ScenarioWorld,
+    queue: String,
+    expected: usize,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let probe = world
+        .cluster()
+        .rabbitmq_queue_probe(&queue)
+        .expect("the management endpoint is provisioned");
+    probe
+        .wait_for(crate::common::rabbitmq_queue::QueueExpectation::Unacknowledged(expected))
+        .await
+        .expect("RabbitMQ did not reach the expected unacknowledged count");
+}
+
+#[then(expr = "RabbitMQ queue {string} eventually has {int} outstanding deliveries in total")]
+async fn then_rabbitmq_queue_has_outstanding_deliveries(
+    world: &mut ScenarioWorld,
+    queue: String,
+    expected: usize,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let probe = world
+        .cluster()
+        .rabbitmq_queue_probe(&queue)
+        .expect("the management endpoint is provisioned");
+    probe
+        .wait_for(crate::common::rabbitmq_queue::QueueExpectation::Outstanding(expected))
+        .await
+        .expect("RabbitMQ did not reach the expected total outstanding count");
+}
+
+#[then(expr = "RabbitMQ queue {string} eventually has one {word} consumer with prefetch {int}")]
+async fn then_rabbitmq_queue_has_consumer_contract(
+    world: &mut ScenarioWorld,
+    queue: String,
+    acknowledgements: String,
+    prefetch: u16,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let ack_required = match acknowledgements.as_str() {
+        "manual" => true,
+        "automatic" => false,
+        _ => panic!("the consumer's acknowledgement is manual or automatic"),
+    };
+    let probe = world
+        .cluster()
+        .rabbitmq_queue_probe(&queue)
+        .expect("the management endpoint is provisioned");
+    probe
+        .wait_for(crate::common::rabbitmq_queue::QueueExpectation::Consumer {
+            ack_required,
+            prefetch,
+        })
+        .await
+        .expect("RabbitMQ did not expose the declared consumer contract");
+}
+
 #[then(expr = "Redis channel {string} eventually has {int} subscribers")]
 async fn then_redis_channel_eventually_has_subscribers(
     world: &mut ScenarioWorld,
@@ -25151,6 +25211,26 @@ async fn when_rabbitmq_message_is_published(
         .publish_rabbitmq(&queue, &payload)
         .await
         .expect("failed to publish rabbitmq message");
+}
+
+#[when(expr = "RabbitMQ messages are published to queue {string}")]
+async fn when_rabbitmq_messages_are_published(
+    world: &mut ScenarioWorld,
+    queue: String,
+    #[step] step: &Step,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let payload = expand_placeholders(world, docstring(step));
+    let messages: Vec<serde_json::Value> =
+        serde_json::from_str(&payload).expect("the fixture lists messages as a JSON array");
+    for message in messages {
+        nervix_primitives::task::consume_budget().await;
+        world
+            .cluster()
+            .publish_rabbitmq(&queue, &message.to_string())
+            .await
+            .expect("the broker accepts each explicitly published message");
+    }
 }
 
 #[when(expr = "Redis message is published to channel {string}")]

@@ -727,7 +727,6 @@ fn every_runtime_connects_through_the_resolver_it_was_given() {
             assert_eq!(header, AMQP_PROTOCOL_HEADER);
             assert!(fixture.authority.questions_for(BROKER) > 0, "round {round}");
         });
-        drop(runtime);
     }
 }
 

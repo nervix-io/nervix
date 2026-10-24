@@ -2040,6 +2040,13 @@ impl Cluster {
         Ok(state.messages)
     }
 
+    pub(crate) fn rabbitmq_queue_probe(
+        &self,
+        queue: &str,
+    ) -> io::Result<super::rabbitmq_queue::RabbitMqQueueProbe> {
+        super::rabbitmq_queue::RabbitMqQueueProbe::new(&self.dependencies, queue)
+    }
+
     pub(crate) async fn wait_for_redis_channel_subscribers(
         &self,
         channel: &str,

@@ -153,6 +153,7 @@ tags = [
   "@kept_ingestor_offsets",
   "@redis_subscription_backpressure",
   "@redis_idle_subscription",
+  "@rabbitmq_consumer_modes",
   "@node_prerequisite_refusal",
 ]
 target = "test:scenarios"
@@ -3236,4 +3237,84 @@ id = "stress.command-transaction-retention-recovery"
 invariant = "Recovery of an ordinary command or transaction batch beyond tombstone age returns its recorded outcome without applying the effect again."
 invocation = "stress-transaction-retention"
 scenario = "Leadership recovery uses a finished transaction beyond its age retention"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "scenario.rabbitmq-auto-ack"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "scenarios"
+scenario = "RabbitMQ NO ACK consumes automatically without prefetch or pending transport acknowledgements"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "stress.rabbitmq-auto-ack"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "stress-scenarios"
+scenario = "RabbitMQ NO ACK consumes automatically without prefetch or pending transport acknowledgements"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "scenario.rabbitmq-parallel-reject-reconnect"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "scenarios"
+scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must reject them after its connection was lost"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "stress.rabbitmq-parallel-reject-reconnect"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "stress-scenarios"
+scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must reject them after its connection was lost"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "scenario.rabbitmq-parallel-ack-reconnect"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "scenarios"
+scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must acknowledge them after its connection was lost"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "stress.rabbitmq-parallel-ack-reconnect"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "stress-scenarios"
+scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must acknowledge them after its connection was lost"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "scenario.rabbitmq-individual-settlement"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "scenarios"
+scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another delivery is rejected"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "stress.rabbitmq-individual-settlement"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "stress-scenarios"
+scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another delivery is rejected"
 selections = ["deloxide-stress"]

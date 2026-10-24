@@ -325,6 +325,15 @@ pub trait IngestorConnector: Send + Sized + 'static {
     }
 }
 
+/// The transport boundary at which an ingestor can settle graph outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestorSettlement {
+    /// Positions share a commit or acknowledgement boundary, so the host settles their batch.
+    Batch,
+    /// Every position has its own acknowledgement and rejection, independent of its siblings.
+    Individual,
+}
+
 /// Broker operations the host drives between ingestor lifecycle transitions.
 #[async_trait]
 #[cfg_attr(
@@ -338,6 +347,9 @@ pub trait IngestorConnector: Send + Sized + 'static {
 pub trait BrokerIngestorConnector: IngestorConnector {
     type Message: IngestorMessage<Position = Self::Position>;
     type Position: Clone + Debug + Send + Sync + 'static;
+
+    /// Whether one graph outcome settles a batch or only its own position.
+    const SETTLEMENT: IngestorSettlement = IngestorSettlement::Batch;
 
     /// Reads the next batch, up to `request.max_messages`.
     ///

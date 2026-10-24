@@ -54,8 +54,9 @@ pub use connection::RabbitMqConnectError;
 use error_stack::Report;
 use futures_util::FutureExt;
 pub use ingestor::{
-    RabbitMqDeliveryHeaders, RabbitMqQueueIngestor, RabbitMqQueueIngestorError,
-    RabbitMqQueueIngestorMessage, RabbitMqQueueIngestorPlan, RabbitMqQueueIngestorPosition,
+    RabbitMqConsumerMode, RabbitMqDeliveryHeaders, RabbitMqQueueIngestor,
+    RabbitMqQueueIngestorError, RabbitMqQueueIngestorMessage, RabbitMqQueueIngestorPlan,
+    RabbitMqQueueIngestorPosition,
 };
 use lapin::{
     Confirmation, PublisherConfirm,
