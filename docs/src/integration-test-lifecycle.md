@@ -1503,11 +1503,15 @@ until that node has ended.
 - The scenario-local WebSocket lifecycle peer records Close frames and reconnect instants through
   a bounded channel. Cleanup aborts and joins its listener task before returning its reserved port;
   socket ownership stays in that task, so the same cancellation releases its active connection.
-  The declaration peer also records an opening client ending an incomplete upgrade, then accepts
-  another connection with its pending payload gate intact. The BUFFER/codec-change outlines end a
-  partial upgrade and await that cancellation event before starting their one- or three-node
-  cluster. Other handshake errors and established-connection failures still fail the fixture and
-  its After hook.
+  The declaration peer also records an opening client ending an incomplete upgrade. An HTTP 101
+  written by the peer does not prove the client completed its opening: the peer confirms that
+  connection with a Ping and its matching Pong before consuming the pending payload gate. A
+  transport ending before that confirmation records an opening cancellation and leaves the gate
+  for the next connection. The BUFFER/codec-change outlines end a partial upgrade and await that
+  cancellation event before starting their one- or three-node cluster. The shared peer's ordinary
+  harness tests also end a completed upgrade before its probe, then require a replacement
+  connection to receive both gated payloads. A reset after confirmation still fails the fixture,
+  qualified by a separate transport test; other handshake errors remain fatal as well.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes, and the
   endpoints it stood in front of a shared dependency, are released once those nodes have ended.
 - The ZeroMQ and syslog ports drawn for the scenario return to the pool after their nodes and
