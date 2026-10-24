@@ -106,7 +106,11 @@ reads the budget again every 10 milliseconds; it registers for no release notifi
 queues in the budget's semaphore, whose released permits would otherwise go to the held charge
 ahead of the relay work that frees it. The batch task returns each watch's share as that watch
 ends, through its exclusively owned reservation, so the hold involves no shared state beyond the
-budget's own atomic permit count.
+budget's own atomic permit count. A sender storing a delivery's record acknowledgements waits for
+room through the same hold, inside the delivery's channel slot, and a sender whose grant the
+receiver refused for capacity waits on its own timer before it asks again. Neither registers for a
+notification, so neither adds a wait-and-notify protocol: each ends on its own timer, its bound, or
+the cancellation of its channel.
 The registered wire number selects the position, exact generation and row without a concurrent
 map lookup. The process identity is checked before routing. Generation exhaustion seals the
 position, and cancellation, timeout, terminal resolution and shutdown compete to take each row

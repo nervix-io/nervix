@@ -68,8 +68,8 @@ use self::{
 use super::{
     ControlEnvelope, CoordinationIdentityAllocationError, Envelope, PeerTarget, PoolClass,
     RELAY_GRANT_LIFETIME, ReceivedEnvelope, RelayAdmissionDecision, RelayAdmissionStatus,
-    RelayDelivery, RelayPayload, RequestSubquota, TlsConfigBundle, TransportError,
-    TransportIdentity, TransportOptions, wire,
+    RelayDelivery, RelayGrantRefusal, RelayPayload, RequestSubquota, TlsConfigBundle,
+    TransportError, TransportIdentity, TransportOptions, wire,
 };
 use crate::{
     identity::CertificateIdentity,

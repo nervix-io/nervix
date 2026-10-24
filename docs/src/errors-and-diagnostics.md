@@ -1449,10 +1449,11 @@ The materialized relay reads that clock before rebuilding its branch activity re
 unreadable activation time ends the task with this event; record event watermarks cannot supply
 the missing domain time.
 
-An owner-delivery admission failure logs the domain, relay, branch scope and target together with
-the transport report, including retained cancellation and rejection causes, before returning the
-undelivered batch. This keeps admission and connection failures visible even when the batch
-carries no acknowledgement, without logging branch field values.
+An owner-delivery admission failure, and an owner delivery whose acknowledgement records could not
+be stored, log the domain, relay, branch scope and target together with the report, including
+retained cancellation, rejection and admission causes, before returning the undelivered batch.
+This keeps admission and connection failures visible even when the batch carries no
+acknowledgement, without logging branch field values.
 
 ## Cross-Node And Public Boundaries
 
@@ -1474,8 +1475,19 @@ owns what each means for a requester.
 
 The interconnect validates and bounds the wire request before its operation handler runs. A
 delivery correlation that has no free position reports `CorrelationCapacity`; an exhausted
-generation reports `CorrelationIdentityExhausted`; failure to reserve record storage reports
-`CorrelationMemory`. A receiver whose relay budget has no room for a batch's acknowledgement watches
+generation reports `CorrelationIdentityExhausted`. Record storage the sender's relay budget has no
+room for waits for room before the delivery's body is encoded, because that lack of room is
+temporary, and reports `CorrelationMemory`, with the budget's typed `AdmissionError` beneath it,
+only when it is larger than the whole budget or still without room when the delivery's five-minute
+bound has passed. A receiver that cannot issue a relay grant answers with a typed
+`RelayGrantRefusal`, never an HTTP status, and the sender decides from the refusal's class, a
+method of the refusal, without reading any text. The sender's transport reports the refusal as
+`TransportError::RelayGrantRefused`. A capacity refusal is temporary: the delivery is held back, the
+refusal counts as the receiver's progress, and the sender asks for the grant again. A permanent
+refusal fails the delivery at once with `RemoteDispatchError::GrantRefused`, which names the target
+and the refusal and keeps the transport report beneath it. A delivery still held when its bound
+passes fails with `AdmissionTotalTimeout`, with the last capacity refusal beneath it. A receiver
+whose relay budget has no room for a batch's acknowledgement watches
 holds the batch back unadmitted rather than failing it, because that lack of room is temporary. It
 reports `RemoteAckAdmission`, with the typed `AdmissionError` beneath it rather than rendered into
 its own text, only for watches larger than the whole budget or a hold still without room when the
