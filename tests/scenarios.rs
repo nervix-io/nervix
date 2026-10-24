@@ -8166,6 +8166,50 @@ async fn given_transaction_tombstone_retention_is_configured(
         parse_duration_text(&retention).expect("transaction tombstone retention must be valid");
 }
 
+#[given(expr = "transaction tombstone cleanup for domain {string} pauses on every node")]
+async fn given_transaction_cleanup_pauses(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    for node in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .pause_transaction_cleanup(crate::common::cluster::node_name(&node), domain.clone());
+    }
+}
+
+#[then(expr = "transaction tombstone cleanup for domain {string} is paused on node {string}")]
+async fn then_transaction_cleanup_is_paused(
+    world: &mut ScenarioWorld,
+    domain: String,
+    node: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    let node = expand_placeholders(world, &node);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_transaction_cleanup_pause(&crate::common::cluster::node_name(&node), &domain),
+    )
+    .await
+    .expect("the node did not reach the transaction cleanup pause");
+}
+
+#[when(expr = "transaction tombstone cleanup for domain {string} is released on every node")]
+async fn when_transaction_cleanup_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    for node in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .release_transaction_cleanup_pause(&crate::common::cluster::node_name(&node), &domain);
+    }
+}
+
 #[given(expr = "command retry identities are valid for {string}")]
 async fn given_command_retry_identities_are_valid_for(world: &mut ScenarioWorld, validity: String) {
     assert!(

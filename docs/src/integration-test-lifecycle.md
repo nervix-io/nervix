@@ -51,6 +51,17 @@ completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 
+The orphaned-transaction expiry scenario holds finished-transaction cleanup for its domain on each
+node before it begins the transaction. Expiry and the leadership transfer proceed normally. The
+successor reaches its cleanup barrier only after it observes the replicated terminal transaction;
+public inspection and attach then verify `EXPIRED` while that record remains retained. Releasing
+every node's barrier lets the normal retention sweep remove it, which the scenario also verifies
+through inspection and attach. The idle timeout, tombstone age and assertion deadlines stay fixed.
+This orders the observations against cleanup instead of assuming leadership transfer and client
+round trips finish inside the five-second retention window. The testing-only barrier uses the
+existing one-shot pause owner; scenario teardown releases it before stopping nodes, including after
+an assertion fails. It neither changes product retention nor serializes other scenarios.
+
 The Pulsar finish scenario runs a public `STOP` concurrently with a timed resumption of its
 paused dependency forwarder. The forwarder's resumption future owns its control and cancellation
 handles and is awaited beside the command, so no timer task outlives the scenario. It records
@@ -865,6 +876,13 @@ The harness keeps these boundaries explicit.
   cluster status. Releasing the barrier waits for that pass to finish before restoring heartbeats
   and application health. While the heartbeat is held, peer startup waits for listeners; Raft
   catch-up is checked after release, so the fixture never waits for progress its own fault prevents.
+  The slow-readiness restart fixture also stops every in-process node first. It then arms a testing
+  hook in the leader's reconciliation and restarts the whole cluster, counting one named node ready
+  only once a leader of the restarted cluster has passed its startup voter observation: it observed
+  every voter live, or its grace expired. The node runs and gossips from its start, so only the
+  harness's own readiness waits on the hook, never the product. Its scenario requires a voter
+  restarted beside that node to keep its work. A restart that started each node only once the one
+  before it was ready would start that voter after the grace expired, and its work would fail over.
   This is an in-process scheduling regression; immutable-image external
   Chaos runs retain the real-process crash and restart evidence.
   The durable follower catch-up fixture creates client writes while the restarted follower applies
@@ -1326,7 +1344,14 @@ by the cleanup record and every node that was still stopping or panicked when th
 fails the step.
 
 The other ways a scenario starts nodes reuse the same budgets. Restarting a whole cluster stops its
-nodes and builds it again with a fresh construction deadline. Adding a node, or starting one a
+nodes and then starts every one of them at once under a fresh construction deadline, each with its
+own nested startup budget, as an operator's restart of the whole cluster does. Once every node is
+ready, it waits for each to catch up with the leader and then for the same convergence checks.
+Starting the nodes one after another would hold the last voter back by every earlier node's startup.
+On a loaded host that can outlast the ten-second grace a newly started leader gives voters it has
+not yet observed before it fails their work over, as [Control Plane](./control-plane.md) describes.
+Only the restarted-voter observation fixture keeps the bootstrap node first, because its scenario
+observes scheduling while that node leads. Adding a node, or starting one a
 scenario stopped, spends one 84-second node startup and the catch-up that follows it; adding a node
 also repeats the convergence checks. A node started while its consensus connectivity is blocked
 spends the node startup without the catch-up. A scenario whose subject is a node that cannot apply
@@ -1682,6 +1707,13 @@ the fixture kills the process, so cleanup never waits for a graceful stop and a 
 never leaves a server running. What the process does between a signal and its exit is product
 behavior; see [Shutdown And Recovery](./shutdown.md#exit-status).
 
+A whole-cluster restart polls every persisted voter's executable read, launch and readiness
+concurrently, then checks convergence through public status endpoints. Each voter retains its own
+120-second startup deadline, including its executable read. This lets a started voter probe while
+its peers prepare and launch, instead of spending its readiness budget on their serial preparation
+before it can recover a quorum. The restart preserves each member's readiness observations and the
+cluster's convergence requirement.
+
 **Reading the executable first.** A process does not read its executable when it starts. The kernel
 maps the file, and every page the process first touches is read when the process faults on it: one
 page at a time, in the order its code happens to run. A debug server executable maps about 450 MB,
@@ -1795,6 +1827,15 @@ the documents it applied. This fault belongs to that client's write concern, so 
 sharing the server keep running. Each scenario provisions its own collection and retains its
 server kind with that collection for later assertions; standalone and TLS collections keep their
 own server kinds.
+
+The write-concern outline connects a named public client to the emitter's reported owner before
+publishing. That client retains the server's error notices independently of the sessions used by
+readiness and `DESCRIBE` probes. After checking all six documents and delaying the observer, the
+outline waits for the current emitter status to be `OK`, then reads the retained error notice
+within the unchanged twenty-second bound. It checks the insert or upsert operation and numeric
+code `100` (`UnsatisfiableWriteConcern`). The notice proves that the failure occurred even after
+the live status has cleared. The scenario preserves its retry policy, write concern and exact
+document oracle.
 
 Both MongoDB test servers set `GLIBC_TUNABLES=glibc.pthread.rseq=1`, enabling glibc's restartable
 sequence registration. This avoids the MongoDB/TCMalloc crash on affected Linux kernels when the

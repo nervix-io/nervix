@@ -61,6 +61,7 @@ mod shutdown_handoff;
 mod standalone_transaction;
 #[cfg(test)]
 mod syslog_tests;
+mod transaction_cleanup;
 
 pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
@@ -72,7 +73,7 @@ pub use model_publication::ModelPublicationRefusalKind;
 use pause::TestPause;
 use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
-use restarted_voter::StartupVoterGossip;
+use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 pub use standalone_transaction::StandaloneTransactionBoundary;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +188,9 @@ struct FaultInjectionState {
     blocked_gossip_nodes: DashMap<ClusterNodeName, Duration, RandomState>,
     /// Restart regressions retain one relayed heartbeat until the first scheduling pass finishes.
     startup_voter_gossip: DashMap<ClusterNodeName, StartupVoterGossip, RandomState>,
+    /// Whether a restart fixture waits for the restarted cluster's leader to end its startup voter
+    /// observation, and whether one has.
+    startup_observation_end: watch::Sender<StartupObservationEnd>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -355,6 +359,10 @@ enum HandoffEngagementTransportFailure {
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
+    TransactionCleanup {
+        node: ClusterNodeName,
+        domain: DomainName,
+    },
     StandaloneTransaction {
         node: ClusterNodeName,
         domain: DomainName,
@@ -438,6 +446,7 @@ impl Default for FaultInjection {
     fn default() -> Self {
         let (leadership_transfers, _) = broadcast::channel(16);
         let (syslog_listener_faults, _) = watch::channel(None);
+        let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
             inner: Arc::new(FaultInjectionState {
                 emitter_faults: DashMap::default(),
@@ -470,6 +479,7 @@ impl Default for FaultInjection {
                 failed_health_links: DashMap::default(),
                 blocked_gossip_nodes: DashMap::default(),
                 startup_voter_gossip: DashMap::default(),
+                startup_observation_end,
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
