@@ -367,6 +367,15 @@ executor configuration, and the executor snapshot and worker metrics expose the 
 The existing execution-settings adoption owns detection and capability-record publication.
 Filesystem and consensus retain independent admission while a connector call holds its worker.
 
+The interconnect's bulk receive window is `Setting<BulkReceiveWindow>` with class
+`NodeCapabilities` inside `TransportOptions`. Its one default is 1 MiB, the HTTP/2 window each
+stream of a bulk connection grants its sender, and like the transport's other windows no
+command-line option sets it. The value must be
+nonzero, and the connection window derived from it, one window for each of the four bulk streams,
+must fit the 2^31-1 bytes HTTP/2 can advertise; the definition checks both. A transport refuses to
+bind when the executor's `bulk_window` memory budget cannot back one window. The fixed constant
+for the HTTP/2 maximum names RFC 9113.
+
 A Kafka consumer's single control-operation turn is an ordering invariant rather than an
 operator capacity. Its fixed constant states that a cancelled native mutation cannot be
 overtaken by the next operation. The source control-call budget is the external client's

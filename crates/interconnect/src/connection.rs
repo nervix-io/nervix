@@ -91,6 +91,7 @@ mod dial;
 mod duplex;
 mod join;
 mod published_tls;
+mod receive_window;
 mod relay;
 mod relay_admission_choice;
 mod relay_owner;
@@ -336,6 +337,10 @@ fn increment(total: usize, addition: usize) -> usize {
 pub(crate) struct StreamLease {
     connection: StdArc<ClientConnection>,
     slot: Option<OwnedSemaphorePermit>,
+    /// The receive window a bulk stream grants its sender, reserved before its request leaves and
+    /// returned when the stream ends. A stream of any other pool grants the initial window, which
+    /// no reservation backs.
+    _receive_window: Option<Reservation>,
     state: TransportState,
     released: StreamRelease,
 }
@@ -877,6 +882,7 @@ impl TransportState {
             join_terms,
         } = identity;
         options.validate()?;
+        Self::validate_bulk_receive_window(&options, &executor)?;
         tls.certificate
             .validate_local(&cluster_id, &node_id, &advertised_host)
             .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
@@ -1534,6 +1540,7 @@ impl TransportState {
                 hello,
             )
             .await?;
+            let binding_window = self.reserve_binding_receive_window(key).await?;
             let accepted = connection
                 .request_raw(
                     self,
@@ -1547,6 +1554,7 @@ impl TransportState {
                     },
                 )
                 .await?;
+            drop(binding_window);
             let answer = wire::decode_rkyv::<ConnectionAnswer>(
                 &self.executor,
                 MemoryClass::Management,
@@ -1589,6 +1597,9 @@ impl TransportState {
         }
     }
 
+    /// Lease a stream of `class` to `node_id` before `deadline`. A bulk stream also reserves the
+    /// receive window its connection grants it before the caller sends anything on it, so the
+    /// sender can never put more on the wire toward this node than the node has room for.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -1598,6 +1609,29 @@ impl TransportState {
         )
     )]
     pub(crate) async fn lease(
+        &self,
+        node_id: &ClusterNodeName,
+        class: PoolClass,
+        subquota: RequestSubquota,
+        deadline: Instant,
+    ) -> Result<StreamLease, Report<TransportError>> {
+        let mut lease = self.lease_slot(node_id, class, subquota, deadline).await?;
+        if class.grants_bulk_receive_window() {
+            lease._receive_window =
+                Some(self.reserve_bulk_receive_window(node_id, deadline).await?);
+        }
+        Ok(lease)
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
+    async fn lease_slot(
         &self,
         node_id: &ClusterNodeName,
         class: PoolClass,
@@ -1688,6 +1722,7 @@ impl TransportState {
             return StreamLeaseAttempt::Leased(StreamLease {
                 connection,
                 slot: Some(permit),
+                _receive_window: None,
                 state: self.clone(),
                 released: StreamRelease {
                     pool: Arc::clone(&target.pool),

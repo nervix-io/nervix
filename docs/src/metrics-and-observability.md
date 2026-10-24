@@ -245,7 +245,7 @@ identifier.
 
 `class` is the traffic class on transport series — `management`, `commands`, `replication`, `relay`,
 or `bulk` — and the execution class on admission series — `management`, `commands`, `relay`, `bulk`,
-`restore_metadata`, `credentials` for memory, and `control_cpu`, `credentials_cpu`, `data_cpu`, `extension_cpu`,
+`bulk_window`, `restore_metadata`, `credentials` for memory, and `control_cpu`, `credentials_cpu`, `data_cpu`, `extension_cpu`,
 `bulk_cpu`, `consensus_storage`, `filesystem_storage` for workers. `operation` is the reserved request subquota: `shared`, `append`, `resource`, `snapshot`,
 `discovery`, `liveness`, `progress`, `admission`, `cancellation`, or `terminal`.
 

@@ -150,6 +150,7 @@ impl ConnectionFailureReason {
             TransportError::InvalidHandshake(_)
             | TransportError::InvalidServerName(_)
             | TransportError::InvalidOptions { .. }
+            | TransportError::BulkReceiveWindowUnbacked { .. }
             | TransportError::Encode(_)
             | TransportError::Decode(_)
             | TransportError::RemoteRejected { .. }
@@ -159,7 +160,9 @@ impl ConnectionFailureReason {
             | TransportError::RelayCancelled
             | TransportError::RelayIndeterminate
             | TransportError::RelayRejected(_) => Self::Handshake,
-            TransportError::PoolExhausted | TransportError::IncomingQueueFull => Self::Capacity,
+            TransportError::PoolExhausted
+            | TransportError::IncomingQueueFull
+            | TransportError::BulkReceiveWindowRefused { .. } => Self::Capacity,
             TransportError::ShuttingDown => Self::Closed,
             TransportError::RefusedByPeer { .. } | TransportError::IncompatiblePeer { .. } => {
                 Self::Prerequisite
@@ -188,6 +191,7 @@ impl StreamResetReason {
             TransportError::PoolExhausted
             | TransportError::IncomingQueueFull
             | TransportError::PayloadTooLarge { .. }
+            | TransportError::BulkReceiveWindowRefused { .. }
             | TransportError::RelayGrant(_) => Self::Capacity,
             TransportError::RelayGrantRefused(refusal) => {
                 if refusal.is_capacity() {
@@ -201,6 +205,7 @@ impl StreamResetReason {
             | TransportError::Decode(_)
             | TransportError::Http(_)
             | TransportError::InvalidOptions { .. }
+            | TransportError::BulkReceiveWindowUnbacked { .. }
             | TransportError::InvalidServerName(_)
             | TransportError::InvalidHandshake(_) => Self::Malformed,
             TransportError::Io(_)

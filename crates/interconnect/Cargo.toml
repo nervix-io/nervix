@@ -60,6 +60,7 @@ tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }
 turmoil = { workspace = true, optional = true }
+ubyte = { workspace = true }
 url = { workspace = true }
 x509-parser = { workspace = true }
 
@@ -77,4 +78,3 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sorted-vec = { workspace = true }
 tempfile = { workspace = true }
-ubyte = { workspace = true }
