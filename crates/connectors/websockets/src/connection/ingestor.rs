@@ -25,12 +25,14 @@
     )
 )]
 
-use std::{collections::VecDeque, future::Future, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use futures_util::{SinkExt as _, StreamExt as _};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
+#[cfg(test)]
+use meticulous::ResultExt as _;
 use nervix_connector::{
     BrokerIngestorConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMetadataRow,
     IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
@@ -39,28 +41,26 @@ use nervix_connector::{
 };
 use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
 use nervix_models::{
-    ClientConfigEntry, WEBSOCKETS_CONTROL_FRAME_BUDGET, WebsocketsClientConfig,
+    ClientConfigEntry, ConnectorKind, WEBSOCKETS_CONTROL_FRAME_BUDGET, WebsocketsClientConfig,
     WebsocketsUpgradeHeaders,
 };
-use nervix_primitives::{
-    net::TcpStream,
-    sync::{Arc, mpsc},
-    time::timeout,
-};
+use nervix_primitives::{net::TcpStream, sync::Arc, time::timeout};
 use thiserror::Error;
 use tokio_tungstenite::{
     Connector, client_async_tls_with_config,
-    tungstenite::{Message, client::IntoClientRequest as _},
+    tungstenite::{Message, client::IntoClientRequest as _, protocol::WebSocketConfig},
 };
 
 use crate::{
     CompiledSignalingProtocol, SignalingDataEmitter, WebsocketDataFrame, WebsocketSignalingSession,
 };
 
-const WEBSOCKETS: &str = "websockets";
+const WEBSOCKETS: ConnectorKind = ConnectorKind::Websockets;
 
 #[derive(Debug, Error)]
 enum WebsocketsConnectionIngestorFailure {
+    #[error("WebSocket peer sent no frame within the {budget:?} idle read deadline")]
+    IdleTimeout { budget: Duration },
     #[error("WebSocket ping could not be written within {budget:?}")]
     PingTimeout { budget: Duration },
     #[error("WebSocket peer closed with code {code}: {reason}")]
@@ -89,6 +89,9 @@ pub struct WebsocketsConnectionIngestorPlan {
     signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
     headers: WebsocketsUpgradeHeaders,
     ping_interval: Option<Duration>,
+    idle_deadline: connection::WebsocketIdleDeadline,
+    handshake_capacity: usize,
+    transport_config: WebSocketConfig,
     /// How long opening one connection may take: name resolution, the address attempts, TLS and
     /// the upgrade handshake.
     connect_timeout: ConfiguredDeadline,
@@ -123,6 +126,8 @@ impl WebsocketsConnectionIngestorPlan {
         let port = parsed
             .port_or_known_default()
             .verified("ws and wss have known default ports, and explicit ports were parsed");
+        let idle_deadline = connection::WebsocketIdleDeadline::new(&entries, config.idle_timeout())
+            .change_context(WebsocketsConnectionIngestorPlanError::Configuration)?;
         Ok(Self {
             endpoint: WebsocketEndpoint {
                 raw: parsed.to_string(),
@@ -136,6 +141,13 @@ impl WebsocketsConnectionIngestorPlan {
             headers,
             connect_timeout,
             ping_interval: config.ping_interval(),
+            idle_deadline,
+            handshake_capacity: config.handshake_buffer_capacity(),
+            transport_config: WebSocketConfig {
+                max_message_size: Some(config.max_message_size()),
+                max_frame_size: Some(config.max_frame_size()),
+                ..WebSocketConfig::default()
+            },
         })
     }
 
@@ -191,12 +203,15 @@ pub struct WebsocketsConnectionIngestor {
     tls_connector: Option<Connector>,
     signaling_protocol: Option<Arc<CompiledSignalingProtocol>>,
     connection: Option<WebsocketConnection>,
-    pending: VecDeque<WebsocketsConnectionIngestorMessage>,
+    pending: handshake::HandshakeFrames,
     headers: WebsocketsUpgradeHeaders,
     ping_interval: Option<Duration>,
+    idle_deadline: connection::WebsocketIdleDeadline,
+    transport_config: WebSocketConfig,
 }
 
 mod connection;
+mod handshake;
 use connection::{WebsocketConnection, WebsocketRead};
 
 enum WebsocketPingOutcome {
@@ -225,7 +240,7 @@ impl WebsocketsConnectionIngestor {
             Ok(Err(error)) => {
                 self.connection = None;
                 Err(Report::new(error).change_context(IngestorError::Read {
-                    connector: WEBSOCKETS,
+                    connector: WEBSOCKETS.keyword(),
                 }))
             }
             Err(error) => {
@@ -235,7 +250,7 @@ impl WebsocketsConnectionIngestor {
                         budget: WEBSOCKETS_CONTROL_FRAME_BUDGET,
                     })
                     .change_context(IngestorError::Read {
-                        connector: WEBSOCKETS,
+                        connector: WEBSOCKETS.keyword(),
                     }))
             }
         }
@@ -249,7 +264,7 @@ impl WebsocketsConnectionIngestor {
         failures: Vec<String>,
     ) -> Report<IngestorError> {
         let resume = IngestorError::Resume {
-            connector: WEBSOCKETS,
+            connector: WEBSOCKETS.keyword(),
         };
         let mut report = if budget.remaining().is_zero() {
             Report::new(
@@ -320,7 +335,7 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
             let config = RustlsClientConfigProvider::new(&plan.entries)
                 .build_with_default_roots()
                 .change_context(IngestorError::Open {
-                    connector: WEBSOCKETS,
+                    connector: WEBSOCKETS.keyword(),
                 })?;
             Some(Connector::Rustls(config))
         } else {
@@ -333,26 +348,28 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
             tls_connector,
             signaling_protocol: plan.signaling_protocol.clone(),
             connection: None,
-            pending: VecDeque::new(),
+            pending: handshake::HandshakeFrames::new(plan.handshake_capacity),
             headers: plan.headers.clone(),
             ping_interval: plan.ping_interval,
+            idle_deadline: plan.idle_deadline,
+            transport_config: plan.transport_config,
         })
     }
 
     fn needs_resume(&mut self) -> bool {
-        self.connection.is_none()
+        self.connection.is_none() && self.pending.is_empty()
     }
 
     async fn suspend(&mut self) -> IngestorResult<()> {
         self.close_transport()
             .await
             .change_context(IngestorError::Suspend {
-                connector: WEBSOCKETS,
+                connector: WEBSOCKETS.keyword(),
             })
     }
 
     async fn resume(&mut self) -> IngestorResult<IngestorResume> {
-        if self.connection.is_some() {
+        if self.connection.is_some() || !self.pending.is_empty() {
             return Ok(IngestorResume::Ready);
         }
         let budget = OperationBudget::start(self.connect_timeout.bound(), LookupShare::Whole);
@@ -362,7 +379,7 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
             .as_str()
             .into_client_request()
             .change_context(IngestorError::Resume {
-                connector: WEBSOCKETS,
+                connector: WEBSOCKETS.keyword(),
             })?;
         WebsocketConnection::install_request_headers(&mut request, &self.headers);
         let addresses = self
@@ -370,7 +387,7 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
             .resolve(&self.endpoint.host, self.endpoint.port, budget.lookup())
             .await
             .change_context(IngestorError::Resume {
-                connector: WEBSOCKETS,
+                connector: WEBSOCKETS.keyword(),
             })?;
         let mut failures = Vec::new();
         let mut connected = None;
@@ -383,7 +400,7 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
                 client_async_tls_with_config(
                     request.clone(),
                     stream,
-                    None,
+                    Some(self.transport_config),
                     self.tls_connector.clone(),
                 )
                 .await
@@ -406,36 +423,22 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
         };
         let headers = WebsocketConnection::capture_headers(response.headers());
         if let Some(protocol) = self.signaling_protocol.as_ref() {
-            let (payloads_tx, mut payloads_rx) = mpsc::unbounded_channel();
-            let sink = QueuedSignalingDataEmitter { payloads_tx };
-            {
-                let mapping_input = WebsocketSignalingSession::new(protocol.clone())
-                    .run(&mut relay, &sink)
-                    .await;
-                match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(error) => Err({
-                        // A frame the peer could not take or send keeps the transport error beneath
-                        // the signaling context, so the reason is the whole chain.
-                        let reason = format!("{error:#}");
-                        error
-                            .change_context(IngestorError::Resume {
-                                connector: WEBSOCKETS,
-                            })
-                            .attach_printable(format!("websocket signaling failed: {reason}"))
-                    }),
-                }
-            }?;
-            drop(sink);
-            while let Ok(frame) = payloads_rx.try_recv() {
-                self.pending
-                    .push_back(WebsocketsConnectionIngestorMessage::new(
-                        frame,
-                        headers.clone(),
-                    ));
-            }
+            let mut pending = self.pending.for_handshake();
+            let sink = pending.sink(headers.clone());
+            let session = WebsocketSignalingSession::new(protocol.clone());
+            self.pending = pending
+                .complete(session.run(&mut relay, &sink))
+                .await
+                .change_context(IngestorError::Resume {
+                    connector: WEBSOCKETS.keyword(),
+                })?;
         }
-        self.connection = Some(WebsocketConnection::new(relay, headers, self.ping_interval));
+        self.connection = Some(WebsocketConnection::new(
+            relay,
+            headers,
+            self.ping_interval,
+            self.idle_deadline,
+        ));
         Ok(IngestorResume::Ready)
     }
 
@@ -444,7 +447,7 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
         self.close_transport()
             .await
             .change_context(IngestorError::Close {
-                connector: WEBSOCKETS,
+                connector: WEBSOCKETS.keyword(),
             })
     }
 }
@@ -537,14 +540,14 @@ impl BrokerIngestorConnector for WebsocketsConnectionIngestor {
                         Err(error) => report.attach_printable(error),
                     };
                     return Err(report.change_context(IngestorError::Read {
-                        connector: WEBSOCKETS,
+                        connector: WEBSOCKETS.keyword(),
                     }));
                 }
                 WebsocketRead::Frame(None) => {
                     self.connection = None;
                     return Err(Report::new(WebsocketsConnectionIngestorFailure::Ended)
                         .change_context(IngestorError::Read {
-                            connector: WEBSOCKETS,
+                            connector: WEBSOCKETS.keyword(),
                         }));
                 }
                 WebsocketRead::Frame(Some(
@@ -560,19 +563,6 @@ impl BrokerIngestorConnector for WebsocketsConnectionIngestor {
 
     async fn reject(&mut self, _positions: &[Self::Position]) -> IngestorResult<()> {
         Ok(())
-    }
-}
-
-struct QueuedSignalingDataEmitter {
-    payloads_tx: mpsc::UnboundedSender<WebsocketDataFrame>,
-}
-
-impl SignalingDataEmitter for QueuedSignalingDataEmitter {
-    fn accept(&self, frame: WebsocketDataFrame) -> impl Future<Output = ()> + Send {
-        self.payloads_tx
-            .send(frame)
-            .assured("the signaling session retains its payload receiver while the sink is live");
-        std::future::ready(())
     }
 }
 
@@ -742,8 +732,24 @@ mod tests {
             };
             let (closed, ()) = tokio::join!(ending, observe);
             closed.assured("the close handshake succeeds");
-            assert!(source.needs_resume());
             assert_eq!(source.pending.len(), usize::from(suspend));
+            if suspend {
+                let batch = source
+                    .next_batch(
+                        IngestorBatchRequest {
+                            max_messages: std::num::NonZeroUsize::MIN,
+                            batch_timeout: None,
+                        },
+                        &IngestorReadCancellation::new(),
+                    )
+                    .await
+                    .assured("the suspended source retains its accepted frame");
+                let IngestorBatch::Messages(messages) = batch else {
+                    panic!("the retained frame is ready before another connection");
+                };
+                assert_eq!(messages[0].payload(), b"retained");
+            }
+            assert!(source.needs_resume());
         }
     }
 
@@ -871,8 +877,24 @@ mod tests {
                 .err()
                 .assured("a peer that never reads cannot answer the Close");
             assert!(format!("{error:#}").contains("close handshake"));
-            assert!(source.needs_resume());
             assert_eq!(source.pending.len(), usize::from(suspend));
+            if suspend {
+                let batch = source
+                    .next_batch(
+                        IngestorBatchRequest {
+                            max_messages: std::num::NonZeroUsize::MIN,
+                            batch_timeout: None,
+                        },
+                        &IngestorReadCancellation::new(),
+                    )
+                    .await
+                    .assured("a failed closing wait keeps the suspended source's accepted frame");
+                let IngestorBatch::Messages(messages) = batch else {
+                    panic!("the retained frame is ready before another connection");
+                };
+                assert_eq!(messages[0].payload(), b"retained");
+            }
+            assert!(source.needs_resume());
         }
     }
 

@@ -67,6 +67,7 @@ shuttle = [
   "nervix-connector-sentry/shuttle",
   "nervix-connector-sqs/shuttle",
   "nervix-connector-syslog/shuttle",
+  "nervix-connector-websockets/shuttle",
   "nervix-connector-zeromq/shuttle",
   "nervix-consensus/shuttle",
   "nervix-deadlock?/shuttle",

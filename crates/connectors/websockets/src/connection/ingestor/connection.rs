@@ -1,7 +1,8 @@
 //! One outbound WebSockets connection and the exact upgrade snapshot its frames retain.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** The active transport, its immutable response headers and optional ping cadence.
+//! - **Owns.** The active transport, immutable response headers, optional ping cadence and the
+//!   inbound activity deadline retained across read cancellation.
 //! - **Depends on.** Connector outcomes, execution primitives and WebSocket transport.
 //! - **Must not know.** Configuration Models, Plexus, domains, relays, registry or host admission.
 
@@ -18,25 +19,74 @@ use std::time::Duration;
 
 use error_stack::Report;
 use futures_util::StreamExt as _;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    IngestMessageHeaders, IngestorError, IngestorResult, RetainedIngestHeaders,
+    ClientConfigResult, ConfiguredDeadline, IngestMessageHeaders, IngestorError, IngestorResult,
+    RetainedIngestHeaders,
 };
-use nervix_models::WebsocketsUpgradeHeaders;
+use nervix_models::{ClientConfigEntry, WebsocketsUpgradeHeaders};
 use nervix_primitives::{
     net::TcpStream,
     sync::Arc,
-    time::{Interval, MissedTickBehavior, interval},
+    time::{Instant, Interval, MissedTickBehavior, error::Elapsed, interval, timeout_at},
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
-use super::WEBSOCKETS;
+use super::{WEBSOCKETS, WebsocketsConnectionIngestorFailure};
+
+/// An explicit client deadline retains its key; a derived keep-alive/default keeps its bound.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum WebsocketIdleDeadline {
+    Configured(ConfiguredDeadline),
+    Derived(Duration),
+}
+
+impl WebsocketIdleDeadline {
+    pub(super) fn new(
+        entries: &[ClientConfigEntry],
+        derived: Duration,
+    ) -> ClientConfigResult<Self> {
+        match ConfiguredDeadline::idle(entries)? {
+            Some(deadline) => Ok(Self::Configured(deadline)),
+            None => Ok(Self::Derived(derived)),
+        }
+    }
+
+    fn bound(self) -> Duration {
+        match self {
+            Self::Configured(deadline) => deadline.bound(),
+            Self::Derived(bound) => bound,
+        }
+    }
+
+    fn elapsed(self, elapsed: Elapsed) -> Report<IngestorError> {
+        // Elapsed is a fieldless expiry signal. Retain it for typed inspection while the
+        // actionable key/budget remains the deepest context projected into source status.
+        let read = IngestorError::Read {
+            connector: WEBSOCKETS.keyword(),
+        };
+        match self {
+            Self::Configured(deadline) => {
+                Report::new(deadline.elapsed("reading the next WebSocket frame"))
+                    .attach(elapsed)
+                    .change_context(read)
+            }
+            Self::Derived(budget) => {
+                Report::new(WebsocketsConnectionIngestorFailure::IdleTimeout { budget })
+                    .attach(elapsed)
+                    .change_context(read)
+            }
+        }
+    }
+}
 
 pub(super) struct WebsocketConnection {
     pub(super) relay: WebSocketStream<MaybeTlsStream<TcpStream>>,
     // Pending and delivered messages retain this snapshot after the connection ends.
     pub(super) headers: Arc<RetainedIngestHeaders>,
     pings: Option<Interval>,
+    idle_deadline: WebsocketIdleDeadline,
+    last_received: Instant,
 }
 
 pub(super) enum WebsocketRead {
@@ -70,6 +120,7 @@ impl WebsocketConnection {
         relay: WebSocketStream<MaybeTlsStream<TcpStream>>,
         headers: Arc<RetainedIngestHeaders>,
         ping_interval: Option<Duration>,
+        idle_deadline: WebsocketIdleDeadline,
     ) -> Self {
         let pings = match ping_interval {
             Some(period) => {
@@ -84,6 +135,8 @@ impl WebsocketConnection {
             relay,
             headers,
             pings,
+            idle_deadline,
+            last_received: Instant::now(),
         }
     }
 
@@ -96,17 +149,29 @@ impl WebsocketConnection {
     }
 
     pub(super) async fn next(&mut self) -> IngestorResult<WebsocketRead> {
+        // This absolute deadline survives cancelled reads and outgoing pings. Only an inbound
+        // frame resets it, including peer ping/pong control frames.
+        let deadline = self
+            .last_received
+            .checked_add(self.idle_deadline.bound())
+            .verified("client deadlines are held to the schedulable duration bound");
+        let read = timeout_at(deadline, self.relay.next());
         let frame = match self.pings.as_mut() {
             Some(pings) => nervix_primitives::select! {
-                frame = self.relay.next() => frame,
+                biased;
+                frame = read => frame,
                 _ = pings.tick() => return Ok(WebsocketRead::Ping),
             },
-            None => self.relay.next().await,
-        };
+            None => read.await,
+        }
+        .map_err(|error| self.idle_deadline.elapsed(error))?;
         match frame {
-            Some(Ok(frame)) => Ok(WebsocketRead::Frame(Some(frame))),
+            Some(Ok(frame)) => {
+                self.last_received = Instant::now();
+                Ok(WebsocketRead::Frame(Some(frame)))
+            }
             Some(Err(error)) => Err(Report::new(error).change_context(IngestorError::Read {
-                connector: WEBSOCKETS,
+                connector: WEBSOCKETS.keyword(),
             })),
             None => Ok(WebsocketRead::Frame(None)),
         }

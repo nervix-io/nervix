@@ -115,3 +115,78 @@ async fn a_configured_ping_is_written_while_the_source_waits_for_data() {
     ));
     assert!(!source.needs_resume());
 }
+
+#[nervix_primitives::test]
+async fn a_silent_peer_expires_with_the_explicit_or_ping_derived_idle_bound() {
+    for explicit in [false, true] {
+        let mut config = vec![ClientConfigEntry {
+            key: "ping_interval_ms".to_string(),
+            value: "10".to_string(),
+        }];
+        if explicit {
+            config.push(ClientConfigEntry {
+                key: "idle_timeout_ms".to_string(),
+                value: "100".to_string(),
+            });
+        }
+        let (mut source, _silent_peer) =
+            tests::connected_pair_with(config, WebsocketsUpgradeHeaders::default()).await;
+        let result = timeout(
+            Duration::from_secs(60),
+            source.next_batch(
+                IngestorBatchRequest {
+                    max_messages: std::num::NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &IngestorReadCancellation::new(),
+            ),
+        )
+        .await
+        .assured("the source's idle bound ends its read");
+        let Err(report) = result else {
+            panic!("a peer that sends no frame must expire");
+        };
+        let rendered = format!("{report:#}");
+        if explicit {
+            assert!(report.contains::<nervix_connector::DeadlineElapsed>());
+            assert!(rendered.contains("idle_timeout_ms 100ms"), "{rendered}");
+        } else {
+            assert!(report.contains::<WebsocketsConnectionIngestorFailure>());
+            assert!(rendered.contains("30ms idle read deadline"), "{rendered}");
+        }
+        assert!(source.needs_resume());
+    }
+}
+
+#[nervix_primitives::test]
+async fn inbound_message_and_frame_limits_end_the_exact_connection_with_the_driver_cause() {
+    for key in ["max_message_size", "max_frame_size"] {
+        let config = vec![ClientConfigEntry {
+            key: key.to_string(),
+            value: "4".to_string(),
+        }];
+        let (mut source, mut peer) =
+            tests::connected_pair_with(config, WebsocketsUpgradeHeaders::default()).await;
+        peer.send(Message::Binary(vec![0; 8]))
+            .await
+            .assured("the peer can send its small test frame");
+        let result = source
+            .next_batch(
+                IngestorBatchRequest {
+                    max_messages: std::num::NonZeroUsize::MIN,
+                    batch_timeout: None,
+                },
+                &IngestorReadCancellation::new(),
+            )
+            .await;
+        let Err(report) = result else {
+            panic!("the inbound bytes exceed the declared limit");
+        };
+        assert!(report.contains::<tokio_tungstenite::tungstenite::Error>());
+        assert!(matches!(
+            report.current_context(),
+            IngestorError::Read { .. }
+        ));
+        assert!(source.needs_resume());
+    }
+}

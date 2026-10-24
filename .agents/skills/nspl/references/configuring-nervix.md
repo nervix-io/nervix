@@ -170,9 +170,10 @@ relay. Do not use them to scan across branches.
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
   schedule recomputation.
 - For `WEBSOCKETS CONNECTION` literal upgrade headers, frame metadata, strict client CONFIG,
-  recovery and graceful close, read `Ingestors` →
+  handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close, read `Ingestors` →
   `WEBSOCKETS CONNECTION` in the selected documentation index.
   A successful upgrade does not establish data delivery or reset repeated-failure backoff.
+  Check the effective idle bound together with the ping cadence and the peer's inbound activity.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
   optionality match exactly. Declared wire formats are separate entity kinds even when their names
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER

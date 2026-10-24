@@ -96,10 +96,35 @@ pub struct WebsocketsConnectionIngestor {
 
 /// What the connector of a WEBSOCKETS CONNECTION holds and how long it waits.
 const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
-    buffers: &[DeclaredBuffer {
-        holds: "frames that arrive while the signaling handshake runs",
-        bound: BufferBound::Unbounded,
-    }],
+    buffers: &[
+        DeclaredBuffer {
+            holds: "accepted signaling frames retained for source reads",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting(
+                    "handshake_buffer_capacity messages (default 16), each at most \
+                     max_message_size bytes",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "one accepted frame waiting for handoff room",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("max_message_size bytes (default 67108864)"),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "the incoming message assembled by the transport",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting(
+                    "max_message_size bytes (default 67108864), with each frame bounded by \
+                     max_frame_size bytes (default 16777216)",
+                ),
+                overflow: BufferOverflow::FailRead,
+            },
+        },
+    ],
     waits: &[
         DeclaredWait {
             wait: "connection: name resolution, address attempts, TLS and the opening upgrade",
@@ -114,7 +139,12 @@ const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
         DeclaredWait {
             wait: "reading the next frame",
-            bound: WaitBound::Unbounded,
+            bound: WaitBound::Key {
+                key: DeadlineKey::IdleTimeout,
+                omitted: OmittedDeadline::Derived(
+                    "three ping_interval_ms intervals, or 30 s without configured pings",
+                ),
+            },
         },
         DeclaredWait {
             wait: "writing a configured ping",
@@ -125,7 +155,7 @@ const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Fixed(WEBSOCKETS_CONTROL_FRAME_BUDGET),
         },
     ],
-    driver_limits: &["A message above 64 MiB or a frame above 16 MiB ends the connection."],
+    driver_limits: &[],
 };
 
 /// What the connector of a WEBSOCKETS ENDPOINT holds and how long it waits.

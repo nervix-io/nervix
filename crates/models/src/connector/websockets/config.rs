@@ -1,8 +1,9 @@
 //! WebSockets client configuration values.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** The client's closed key set, endpoint and positive physical timer values, and TLS
-//!   pairing rules, checked before a client is committed and after its templates are rendered.
+//! - **Owns.** The client's closed key set, endpoint, positive physical timers and inbound
+//!   frame/message/handoff limits, and TLS pairing rules, checked before commitment and after
+//!   templates are rendered.
 //! - **Depends on.** Client configuration entries, the URL parser and standard duration values.
 //! - **Must not know.** DNS, sockets, TLS file loading, signaling or runtime scheduling.
 
@@ -11,9 +12,16 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::{collections::BTreeMap, str::FromStr as _, time::Duration};
+use std::{
+    collections::BTreeMap,
+    num::{NonZeroU16, NonZeroU32, ParseIntError},
+    str::FromStr,
+    time::Duration,
+};
 
 use error_stack::{Report, ResultExt as _};
+use meticulous::{OptionExt as _, ResultExt as _};
+use strum::EnumProperty as _;
 use thiserror::Error;
 use url::Url;
 
@@ -32,12 +40,21 @@ use crate::{ClientConfigEntry, ClientDeadline, DEFAULT_CONNECT_TIMEOUT};
     strum::Display,
     strum::EnumIter,
     strum::EnumString,
+    strum::EnumProperty,
 )]
 #[strum(serialize_all = "snake_case", ascii_case_insensitive)]
 pub enum WebsocketsClientKey {
     Endpoint,
     ConnectTimeoutMs,
     PingIntervalMs,
+    #[strum(props(default = "30000"))]
+    IdleTimeoutMs,
+    #[strum(props(default = "16"))]
+    HandshakeBufferCapacity,
+    #[strum(props(default = "67108864"))]
+    MaxMessageSize,
+    #[strum(props(default = "16777216"))]
+    MaxFrameSize,
     TlsCaFile,
     TlsCertFile,
     TlsKeyFile,
@@ -60,6 +77,10 @@ pub enum WebsocketsClientConfigError {
     InvalidEndpoint,
     #[error("'{key}' must be positive whole milliseconds within the schedulable duration bound")]
     InvalidDuration { key: WebsocketsClientKey },
+    #[error("'{key}' must be a positive decimal integer within its declared range")]
+    InvalidLimit { key: WebsocketsClientKey },
+    #[error("three '{key}' intervals exceed the schedulable idle deadline")]
+    IdleDerivationTooLong { key: WebsocketsClientKey },
     #[error("'{key}' requires a wss endpoint")]
     TlsRequiresSecureEndpoint { key: WebsocketsClientKey },
     #[error("'tls_cert_file' and 'tls_key_file' must be set together")]
@@ -72,6 +93,10 @@ pub struct WebsocketsClientConfig {
     endpoint: Url,
     connect_timeout: Duration,
     ping_interval: Option<Duration>,
+    idle_timeout: Duration,
+    handshake_buffer_capacity: NonZeroU16,
+    max_message_size: NonZeroU32,
+    max_frame_size: NonZeroU32,
 }
 
 impl WebsocketsClientConfig {
@@ -126,11 +151,65 @@ impl WebsocketsClientConfig {
             None => DEFAULT_CONNECT_TIMEOUT,
         };
         let ping_interval = Self::duration(&values, WebsocketsClientKey::PingIntervalMs)?;
+        let idle_timeout = match Self::duration(&values, WebsocketsClientKey::IdleTimeoutMs)? {
+            Some(timeout) => timeout,
+            None => match ping_interval {
+                Some(period) => {
+                    if period > ClientDeadline::LONGEST / 3 {
+                        return Err(Report::new(
+                            WebsocketsClientConfigError::IdleDerivationTooLong {
+                                key: WebsocketsClientKey::PingIntervalMs,
+                            },
+                        ));
+                    }
+                    period
+                        .checked_mul(3)
+                        .verified("three periods fit the checked schedulable deadline bound")
+                }
+                None => {
+                    let default = WebsocketsClientKey::IdleTimeoutMs
+                        .get_str("default")
+                        .verified("the idle key declares its default milliseconds");
+                    ClientDeadline::parse(default)
+                        .assured("the declared idle default is positive and schedulable")
+                        .duration()
+                }
+            },
+        };
         Ok(Self {
             endpoint,
             connect_timeout,
             ping_interval,
+            idle_timeout,
+            handshake_buffer_capacity: Self::limit(
+                &values,
+                WebsocketsClientKey::HandshakeBufferCapacity,
+            )?,
+            max_message_size: Self::limit(&values, WebsocketsClientKey::MaxMessageSize)?,
+            max_frame_size: Self::limit(&values, WebsocketsClientKey::MaxFrameSize)?,
         })
+    }
+
+    /// Byte and item keys keep their single defaults beside the key declaration, in CONFIG's
+    /// decimal representation. The parsed fields enforce their positive, portable ranges.
+    fn limit<T: FromStr<Err = ParseIntError>>(
+        values: &BTreeMap<WebsocketsClientKey, &str>,
+        key: WebsocketsClientKey,
+    ) -> error_stack::Result<T, WebsocketsClientConfigError> {
+        let value = match values.get(&key) {
+            Some(value) => *value,
+            None => key
+                .get_str("default")
+                .verified("each size or capacity key declares its default"),
+        };
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(Report::new(WebsocketsClientConfigError::InvalidLimit {
+                key,
+            }));
+        }
+        value
+            .parse::<T>()
+            .change_context(WebsocketsClientConfigError::InvalidLimit { key })
     }
 
     fn duration(
@@ -153,5 +232,20 @@ impl WebsocketsClientConfig {
     }
     pub fn ping_interval(&self) -> Option<Duration> {
         self.ping_interval
+    }
+    /// The explicit idle timeout, three configured ping intervals, or the declared idle default.
+    pub fn idle_timeout(&self) -> Duration {
+        self.idle_timeout
+    }
+    pub fn handshake_buffer_capacity(&self) -> usize {
+        usize::from(self.handshake_buffer_capacity.get())
+    }
+    pub fn max_message_size(&self) -> usize {
+        usize::try_from(self.max_message_size.get())
+            .assured("Nervix's native and browser targets have at least 32-bit addresses")
+    }
+    pub fn max_frame_size(&self) -> usize {
+        usize::try_from(self.max_frame_size.get())
+            .assured("Nervix's native and browser targets have at least 32-bit addresses")
     }
 }

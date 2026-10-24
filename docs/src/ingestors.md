@@ -2009,10 +2009,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | frames that arrive while the signaling handshake runs: unbounded |
-| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded<br>writing a configured ping: fixed 1s<br>close: fixed 1s |
-| Driver limits | A message above 64 MiB or a frame above 16 MiB ends the connection. |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
+| Buffers | accepted signaling frames retained for source reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
+| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |
+| Driver limits | None declared. |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
 See the [WEBSOCKETS CONNECTION capability and mirror reference](connector-capabilities.md#websockets-connection-ingest).
 <!-- connector-matrix:ingest-websockets-connection:end -->
@@ -2037,6 +2037,10 @@ The client's Nervix-owned `CONFIG` is strict and matches keys without regard to 
 | `endpoint` | Required `ws://` or `wss://` URL with a host and without a fragment. |
 | `connect_timeout_ms` | Positive whole milliseconds for DNS, TCP, TLS and upgrade together; omitted means 30000. |
 | `ping_interval_ms` | Positive whole milliseconds between client pings after signaling completes; omitted means only answering peer pings. |
+| `idle_timeout_ms` | Positive whole milliseconds without an inbound frame before reconnecting. When omitted, three configured ping intervals apply, or 30000 without configured pings. |
+| `handshake_buffer_capacity` | Accepted signaling messages retained before readiness: 1–65535, default 16. A full queue backpressures the connection within the signaling `TIMEOUT`. |
+| `max_message_size` | Positive whole bytes per incoming message, including fragmented messages: at most 4294967295, default 67108864 (64 MiB). |
+| `max_frame_size` | Positive whole bytes per incoming frame: at most 4294967295, default 16777216 (16 MiB). |
 | `tls_ca_file` | Optional CA file for `wss://`. |
 | `tls_cert_file`, `tls_key_file` | Optional client identity files, supplied together for `wss://`. |
 
@@ -2044,6 +2048,20 @@ Durations obey the shared schedulable physical-duration bound. Unknown or repeat
 refused. TLS file keys are refused with `ws://`. Resource mounts and
 configuration templates keep their shared client contract; rendered values are checked again when
 opening the source. A ping write has a one-second physical budget and a failure triggers recovery.
+
+An explicit idle timeout overrides the ping-derived value. Every received frame, including a
+ping or pong, refreshes activity. Sending a client ping or cancelling a read leaves the inactivity
+deadline in place. The idle deadline is physical time and a silent connection is closed and retried
+on the reconnect policy. Choose a bound that permits the peer's expected idle periods or keepalive
+cadence. Three ping intervals must fit the shared schedulable bound when they supply the deadline.
+
+Accepted signaling data stays in one bounded handoff until the handshake completes. The source
+then delivers those messages in order before reading new socket frames. In addition to the queue,
+one accepted frame can wait for room, and the transport can assemble a message within its declared
+message and frame limits. If a full handoff prevents signaling from completing, the signaling
+`TIMEOUT` fails that connection and clears its undelivered handshake data before retrying. An
+oversized incoming frame or message also ends the connection with a transient read failure;
+reconnection supplies no durable replay guarantee.
 
 For `ws` and `wss`, each initial connection and resume resolves the URL host through the node's
 asynchronous resolver. It tries the returned addresses in order within the configured

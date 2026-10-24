@@ -17,6 +17,7 @@ pub(super) use peer::WebsocketPeer;
 use super::{ScenarioWorld, draw_scenario_port, initialize_scenario_identity};
 use crate::common::websocket_close::reply_to_close;
 
+mod bounds;
 mod peer;
 
 #[given("a WebSocket declaration peer verifies upgrade headers and sends text and binary frames")]

@@ -283,3 +283,131 @@ impl WebsocketPeer {
             .assured("the WebSocket lifecycle peer task remains alive")
     }
 }
+
+impl WebsocketPeer {
+    pub(super) fn idle_blackhole(listener: TcpListener) -> Self {
+        let (events_tx, events) = mpsc::channel(64);
+        let task = nervix_primitives::task::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .map_err(io::Error::other)?;
+                if events_tx
+                    .send(PeerEvent::Connected(Instant::now()))
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                // One live TCP connection, never polled for WebSocket frames or client pings.
+                let (replacement, _) = listener.accept().await?;
+                drop(socket);
+                stream = replacement;
+            }
+        });
+        Self {
+            events,
+            payload: None,
+            task: AbortOnDropHandle::new(task),
+        }
+    }
+
+    pub(super) fn handshake_flood(listener: TcpListener, frames: usize) -> Self {
+        let (events_tx, events) = mpsc::channel(64);
+        let task = nervix_primitives::task::spawn(async move {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let (stream, _) = listener.accept().await?;
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .map_err(io::Error::other)?;
+                if events_tx
+                    .send(PeerEvent::Connected(Instant::now()))
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                socket
+                    .send(Message::Text("{\"open\":true}".into()))
+                    .await
+                    .map_err(io::Error::other)?;
+                for user_id in 0..frames {
+                    nervix_primitives::task::consume_budget().await;
+                    socket
+                        .send(Message::Text(format!("{{\"user_id\":{user_id}}}")))
+                        .await
+                        .map_err(io::Error::other)?;
+                }
+                socket
+                    .send(Message::Text("{\"ready\":true}".into()))
+                    .await
+                    .map_err(io::Error::other)?;
+                // The ready marker follows the payload frames. A full handoff holds it behind
+                // backpressure until the signaling timeout.
+                while let Some(message) = socket.next().await {
+                    nervix_primitives::task::consume_budget().await;
+                    match message {
+                        Ok(Message::Close(_)) | Err(_) => break,
+                        Ok(_) => socket.flush().await.map_err(io::Error::other)?,
+                    }
+                }
+            }
+        });
+        Self {
+            events,
+            payload: None,
+            task: AbortOnDropHandle::new(task),
+        }
+    }
+
+    pub(super) fn silent_connection(listener: TcpListener) -> Self {
+        let (events_tx, events) = mpsc::channel(2);
+        let task = nervix_primitives::task::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut silent = tokio_tungstenite::accept_async(stream)
+                .await
+                .map_err(io::Error::other)?;
+            events_tx
+                .send(PeerEvent::Connected(Instant::now()))
+                .await
+                .map_err(io::Error::other)?;
+            silent
+                .send(Message::Text("{\"user_id\":42}".into()))
+                .await
+                .map_err(io::Error::other)?;
+            // Keep TCP open without polling the WebSocket: even client pings get no pong.
+            let (stream, _) = listener.accept().await?;
+            let mut replacement = tokio_tungstenite::accept_async(stream)
+                .await
+                .map_err(io::Error::other)?;
+            events_tx
+                .send(PeerEvent::Connected(Instant::now()))
+                .await
+                .map_err(io::Error::other)?;
+            replacement
+                .send(Message::Text("{\"user_id\":43}".into()))
+                .await
+                .map_err(io::Error::other)?;
+            drop(silent);
+            while let Some(message) = replacement.next().await {
+                nervix_primitives::task::consume_budget().await;
+                match message.map_err(io::Error::other)? {
+                    Message::Close(_) => {
+                        replacement.flush().await.map_err(io::Error::other)?;
+                        break;
+                    }
+                    _ => replacement.flush().await.map_err(io::Error::other)?,
+                }
+            }
+            Ok(())
+        });
+        Self {
+            events,
+            payload: None,
+            task: AbortOnDropHandle::new(task),
+        }
+    }
+}
