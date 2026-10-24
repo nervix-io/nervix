@@ -13,9 +13,162 @@
 use futures_util::FutureExt as _;
 
 use super::*;
+use crate::runtime::relay_memory_hold::RECHECK_INTERVAL;
 
 fn receiver() -> ClusterNodeName {
     ClusterNodeName::parse("node-2").assured("the fixture node is valid")
+}
+
+fn storage_deadline() -> Instant {
+    Instant::now()
+        .checked_add(REMOTE_RELAY_TOTAL_TIMEOUT)
+        .assured("the fixed relay admission bound fits the monotonic clock")
+}
+
+/// Records the relay budget has no room for wait for it instead of being refused, claim no
+/// position while they wait, and are stored once the memory that filled the budget returns.
+#[nervix_primitives::test(start_paused = true)]
+async fn records_wait_for_room_and_are_stored_once_it_returns() {
+    let owners = RemoteDispatchRegistry::with_capacity(1);
+    let capacity = owners.executor.snapshot().relay_memory.capacity_bytes;
+    let occupied = owners
+        .executor
+        .try_reserve(MemoryClass::Relay, capacity)
+        .assured("the fixture reserves exactly its relay budget");
+    let (acks, completion) = AckSet::root();
+    let storage = owners.store_acks(
+        receiver(),
+        vec![acks, AckSet::empty()],
+        storage_deadline(),
+        std::future::pending(),
+    );
+    let mut storage = std::pin::pin!(storage);
+
+    assert!(storage.as_mut().now_or_never().is_none());
+    nervix_primitives::time::advance(REMOTE_RELAY_TOTAL_TIMEOUT / 2).await;
+    assert!(
+        storage.as_mut().now_or_never().is_none(),
+        "records the budget has no room for wait"
+    );
+    assert_eq!(owners.executor.snapshot().relay_memory.refused, 0);
+    assert_eq!(
+        owners.next_delivery.load(Ordering::Relaxed),
+        0,
+        "a delivery waiting for record storage claims no position"
+    );
+
+    drop(occupied);
+    nervix_primitives::time::advance(RECHECK_INTERVAL).await;
+    let Some(Ok(RecordStorage::Stored(ids))) = storage.as_mut().now_or_never() else {
+        panic!("the records are stored at the first recheck after room returns");
+    };
+    assert_eq!(ids.len(), 2);
+    assert!(
+        ids[1].is_none(),
+        "a row without an acknowledgement stores nothing"
+    );
+    let id = ids[0].assured("the first row carries an acknowledgement");
+    assert!(owners.holds_ack(id));
+    assert!(owners.executor.snapshot().relay_memory.reserved_bytes > 0);
+    assert!(owners.resolve_ack(id, AckOutcome::Ack));
+    assert_eq!(completion.wait().await, AckOutcome::Ack);
+    assert_eq!(owners.executor.snapshot().relay_memory.reserved_bytes, 0);
+    assert_eq!(owners.executor.snapshot().relay_memory.refused, 0);
+}
+
+/// Records still without room when their delivery's bound passes are refused, with the budget's
+/// typed refusal beneath `CorrelationMemory`, and claim no position.
+#[nervix_primitives::test(start_paused = true)]
+async fn records_still_without_room_at_their_bound_are_refused_with_the_budget_cause() {
+    let owners = RemoteDispatchRegistry::with_capacity(1);
+    let capacity = owners.executor.snapshot().relay_memory.capacity_bytes;
+    let occupied = owners
+        .executor
+        .try_reserve(MemoryClass::Relay, capacity)
+        .assured("the fixture reserves exactly its relay budget");
+    let (acks, completion) = AckSet::root();
+    let storage = owners.store_acks(
+        receiver(),
+        vec![acks],
+        storage_deadline(),
+        std::future::pending(),
+    );
+    let mut storage = std::pin::pin!(storage);
+
+    assert!(storage.as_mut().now_or_never().is_none());
+    nervix_primitives::time::advance(REMOTE_RELAY_TOTAL_TIMEOUT).await;
+    let Some(Err(refusal)) = storage.as_mut().now_or_never() else {
+        panic!("records still without room at their bound are refused");
+    };
+    assert_eq!(
+        *refusal.current_context(),
+        RemoteDispatchError::CorrelationMemory
+    );
+    assert!(matches!(
+        refusal.downcast_ref::<nervix_execution::AdmissionError>(),
+        Some(nervix_execution::AdmissionError::BudgetExhausted { .. })
+    ));
+    assert_eq!(owners.next_delivery.load(Ordering::Relaxed), 0);
+    drop(occupied);
+    drop(completion);
+    assert_eq!(owners.executor.snapshot().relay_memory.reserved_bytes, 0);
+}
+
+/// A delivery whose channel ends while its records wait for room stores nothing and leaves nothing
+/// charged.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_storage_wait_ends_without_a_charge_when_its_delivery_is_cancelled() {
+    let owners = RemoteDispatchRegistry::with_capacity(1);
+    let capacity = owners.executor.snapshot().relay_memory.capacity_bytes;
+    let occupied = owners
+        .executor
+        .try_reserve(MemoryClass::Relay, capacity)
+        .assured("the fixture reserves exactly its relay budget");
+    let (cancel, cancelled) = oneshot::channel::<()>();
+    let (acks, _completion) = AckSet::root();
+    let storage = owners.store_acks(receiver(), vec![acks], storage_deadline(), async {
+        cancelled
+            .await
+            .discarded("a dropped sender cancels the delivery as surely as a sent value");
+    });
+    let mut storage = std::pin::pin!(storage);
+
+    assert!(storage.as_mut().now_or_never().is_none());
+    drop(cancel);
+    let Some(Ok(RecordStorage::Cancelled)) = storage.as_mut().now_or_never() else {
+        panic!("a cancelled delivery ends its storage wait at once");
+    };
+    assert_eq!(owners.next_delivery.load(Ordering::Relaxed), 0);
+    drop(occupied);
+    assert_eq!(owners.executor.snapshot().relay_memory.reserved_bytes, 0);
+    assert_eq!(owners.executor.snapshot().relay_memory.refused, 0);
+}
+
+/// A delivery whose rows carry no acknowledgement has no records to store, so it neither waits
+/// nor charges anything, even while the relay budget is full.
+#[nervix_primitives::test]
+async fn a_delivery_without_acknowledgements_stores_nothing() {
+    let owners = RemoteDispatchRegistry::with_capacity(1);
+    let capacity = owners.executor.snapshot().relay_memory.capacity_bytes;
+    let occupied = owners
+        .executor
+        .try_reserve(MemoryClass::Relay, capacity)
+        .assured("the fixture reserves exactly its relay budget");
+    let storage = owners
+        .store_acks(
+            receiver(),
+            vec![AckSet::empty(); 3],
+            storage_deadline(),
+            std::future::pending(),
+        )
+        .await;
+    let Ok(RecordStorage::Stored(ids)) = storage else {
+        panic!("rows without acknowledgements store nothing: {storage:?}");
+    };
+    assert_eq!(ids, vec![None; 3]);
+    assert_eq!(owners.next_delivery.load(Ordering::Relaxed), 0);
+    drop(occupied);
+    assert_eq!(owners.executor.snapshot().relay_memory.reserved_bytes, 0);
 }
 
 #[test]

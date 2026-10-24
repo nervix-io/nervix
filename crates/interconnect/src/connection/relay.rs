@@ -321,6 +321,13 @@ impl TransportState {
                 relay_owner.retire_outbound(&outbound_key);
                 return Err(Report::new(TransportError::RelayIndeterminate));
             }
+            RelayGrantDisposition::Refused(refusal) => {
+                // A refused grant created nothing on the receiver to reconcile.
+                relay_owner.retire_outbound(&outbound_key);
+                self.observations
+                    .relay_grant_refused(ConnectionDirection::Outbound, refusal);
+                return Err(Report::new(TransportError::RelayGrantRefused(refusal)));
+            }
         };
         let path = format!("{RELAY_PATH_PREFIX}{grant_id}");
         let sender_epoch = self.process_epoch.to_string();
@@ -502,6 +509,18 @@ impl TransportState {
         Ok(())
     }
 
+    /// Answer a grant request this node does not issue with its typed refusal, and count it.
+    async fn refuse_relay_grant(
+        &self,
+        respond: server::SendResponse<Bytes>,
+        refusal: RelayGrantRefusal,
+    ) -> Result<(), Report<TransportError>> {
+        self.observations
+            .relay_grant_refused(ConnectionDirection::Inbound, refusal);
+        self.send_relay_grant_response(respond, RelayGrantDisposition::Refused(refusal))
+            .await
+    }
+
     async fn send_relay_grant_response(
         &self,
         respond: server::SendResponse<Bytes>,
@@ -534,7 +553,7 @@ impl TransportState {
         peer_epoch: u64,
         relay_owner: StdArc<RelayPeerOwner>,
         body: RecvStream,
-        mut respond: server::SendResponse<Bytes>,
+        respond: server::SendResponse<Bytes>,
     ) -> Result<(), Report<TransportError>> {
         let encoded = read_body(
             &self.executor,
@@ -552,37 +571,25 @@ impl TransportState {
         )
         .await?
         .into_parts();
-        if grant.sender_epoch != peer_epoch
-            || grant.body_bytes > self.executor.limits().relay_encoded_bytes.as_u64()
-        {
-            send_response(
-                respond,
-                StatusCode::BAD_REQUEST,
-                None,
-                self.options.progress_timeout,
-            )
-            .await?;
-            return Ok(());
+        if grant.sender_epoch != peer_epoch {
+            return self
+                .refuse_relay_grant(respond, RelayGrantRefusal::SenderEpoch)
+                .await;
+        }
+        if grant.body_bytes > self.executor.limits().relay_encoded_bytes.as_u64() {
+            return self
+                .refuse_relay_grant(respond, RelayGrantRefusal::BodyTooLarge)
+                .await;
         }
         let Some(admission) = grant.metadata.admission.as_ref() else {
-            send_response(
-                respond,
-                StatusCode::BAD_REQUEST,
-                None,
-                self.options.progress_timeout,
-            )
-            .await?;
-            return Ok(());
+            return self
+                .refuse_relay_grant(respond, RelayGrantRefusal::MissingAdmission)
+                .await;
         };
         if admission.registrar.node_id() != &peer_node_id {
-            send_response(
-                respond,
-                StatusCode::FORBIDDEN,
-                None,
-                self.options.progress_timeout,
-            )
-            .await?;
-            return Ok(());
+            return self
+                .refuse_relay_grant(respond, RelayGrantRefusal::ForeignRegistrar)
+                .await;
         }
         let admission_key = RelayAdmissionKey {
             peer_node_id: peer_node_id.clone(),
@@ -610,14 +617,9 @@ impl TransportState {
         let existing = relay_owner.attempt(&attempt);
         if let Some(existing) = existing {
             if existing.body_bytes != grant.body_bytes || existing.metadata != grant.metadata {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::CONFLICT,
-                    "relay delivery identity names different content",
-                    self.options.progress_timeout,
-                )
-                .await?;
-                return Ok(());
+                return self
+                    .refuse_relay_grant(respond, RelayGrantRefusal::ContentConflict)
+                    .await;
             }
             let status = existing.status();
             let disposition = existing.grant_disposition();
@@ -628,24 +630,14 @@ impl TransportState {
             return Ok(());
         }
         if relay_owner.channel_busy(&attempt) {
-            send_static_error(
-                &mut respond,
-                StatusCode::TOO_MANY_REQUESTS,
-                "relay channel already has an unadmitted batch",
-                self.options.progress_timeout,
-            )
-            .await?;
-            return Ok(());
+            return self
+                .refuse_relay_grant(respond, RelayGrantRefusal::ChannelBusy)
+                .await;
         }
         if !relay_owner.can_follow(&attempt) {
-            send_static_error(
-                &mut respond,
-                StatusCode::CONFLICT,
-                "relay channel incarnation is unknown or its sequence is out of order",
-                self.options.progress_timeout,
-            )
-            .await?;
-            return Ok(());
+            return self
+                .refuse_relay_grant(respond, RelayGrantRefusal::OutOfOrder)
+                .await;
         }
         let operation_bytes = grant
             .body_bytes
@@ -664,52 +656,26 @@ impl TransportState {
         {
             Ok(reservation) => reservation,
             Err(error) => {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "relay admission is full",
-                    self.options.progress_timeout,
-                )
-                .await?;
-                debug!(?error, "relay grant refused by memory admission");
-                return Ok(());
+                debug!(error = %format_args!("{error:#}"), "relay grant refused by memory admission");
+                return self
+                    .refuse_relay_grant(respond, RelayGrantRefusal::Memory)
+                    .await;
             }
         };
-        let item = match StdArc::clone(&self.relay_items).try_acquire_owned() {
-            Ok(item) => item,
-            Err(_) => {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "relay item admission is full",
-                    self.options.progress_timeout,
-                )
-                .await?;
-                return Ok(());
-            }
+        let Ok(item) = StdArc::clone(&self.relay_items).try_acquire_owned() else {
+            return self
+                .refuse_relay_grant(respond, RelayGrantRefusal::QueueItem)
+                .await;
         };
-        let terminal = match StdArc::clone(&self.terminal_outcomes).try_acquire_owned() {
-            Ok(terminal) => terminal,
-            Err(_) => {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "relay terminal-outcome admission is full",
-                    self.options.progress_timeout,
-                )
-                .await?;
-                return Ok(());
-            }
+        let Ok(terminal) = StdArc::clone(&self.terminal_outcomes).try_acquire_owned() else {
+            return self
+                .refuse_relay_grant(respond, RelayGrantRefusal::TerminalOutcome)
+                .await;
         };
         if relay_owner.has_admission(&admission_key) {
-            send_static_error(
-                &mut respond,
-                StatusCode::CONFLICT,
-                "relay admission acknowledgement is already active",
-                self.options.progress_timeout,
-            )
-            .await?;
-            return Ok(());
+            return self
+                .refuse_relay_grant(respond, RelayGrantRefusal::AdmissionActive)
+                .await;
         }
         let grant_id = self.next_grant_id(&relay_owner);
         let record = StdArc::new(RelayAdmissionRecord {
@@ -747,14 +713,9 @@ impl TransportState {
             RelayGrantRegistration::Existing(existing) => {
                 if existing.body_bytes != record.body_bytes || existing.metadata != record.metadata
                 {
-                    send_static_error(
-                        &mut respond,
-                        StatusCode::CONFLICT,
-                        "relay delivery identity names different content",
-                        self.options.progress_timeout,
-                    )
-                    .await?;
-                    return Ok(());
+                    return self
+                        .refuse_relay_grant(respond, RelayGrantRefusal::ContentConflict)
+                        .await;
                 }
                 let status = existing.status();
                 let disposition = existing.grant_disposition();
@@ -769,34 +730,19 @@ impl TransportState {
                 return Ok(());
             }
             RelayGrantRegistration::InvalidSequence => {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::CONFLICT,
-                    "relay channel incarnation is unknown or its sequence is out of order",
-                    self.options.progress_timeout,
-                )
-                .await?;
-                return Ok(());
+                return self
+                    .refuse_relay_grant(respond, RelayGrantRefusal::OutOfOrder)
+                    .await;
             }
             RelayGrantRegistration::ChannelBusy => {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "relay channel already has an unadmitted batch",
-                    self.options.progress_timeout,
-                )
-                .await?;
-                return Ok(());
+                return self
+                    .refuse_relay_grant(respond, RelayGrantRefusal::ChannelBusy)
+                    .await;
             }
             RelayGrantRegistration::AdmissionBusy => {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::CONFLICT,
-                    "relay admission acknowledgement is already active",
-                    self.options.progress_timeout,
-                )
-                .await?;
-                return Ok(());
+                return self
+                    .refuse_relay_grant(respond, RelayGrantRefusal::AdmissionActive)
+                    .await;
             }
         }
         let expiring_owner = relay_owner.clone();
