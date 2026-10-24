@@ -8166,6 +8166,50 @@ async fn given_transaction_tombstone_retention_is_configured(
         parse_duration_text(&retention).expect("transaction tombstone retention must be valid");
 }
 
+#[given(expr = "transaction tombstone cleanup for domain {string} pauses on every node")]
+async fn given_transaction_cleanup_pauses(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    for node in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .pause_transaction_cleanup(crate::common::cluster::node_name(&node), domain.clone());
+    }
+}
+
+#[then(expr = "transaction tombstone cleanup for domain {string} is paused on node {string}")]
+async fn then_transaction_cleanup_is_paused(
+    world: &mut ScenarioWorld,
+    domain: String,
+    node: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    let node = expand_placeholders(world, &node);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_transaction_cleanup_pause(&crate::common::cluster::node_name(&node), &domain),
+    )
+    .await
+    .expect("the node did not reach the transaction cleanup pause");
+}
+
+#[when(expr = "transaction tombstone cleanup for domain {string} is released on every node")]
+async fn when_transaction_cleanup_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    for node in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .release_transaction_cleanup_pause(&crate::common::cluster::node_name(&node), &domain);
+    }
+}
+
 #[given(expr = "command retry identities are valid for {string}")]
 async fn given_command_retry_identities_are_valid_for(world: &mut ScenarioWorld, validity: String) {
     assert!(
@@ -13354,34 +13398,34 @@ async fn when_emitter_leaves_fault_mode(world: &mut ScenarioWorld, emitter: Stri
     world.cluster().clear_emitter_fault_on_all_nodes(&emitter);
 }
 
-#[when(expr = "sink client for emitter {string} enters unavailable fault mode")]
-async fn when_sink_client_enters_unavailable_fault_mode(
+#[when(expr = "emitter client for emitter {string} enters unavailable fault mode")]
+async fn when_emitter_client_enters_unavailable_fault_mode(
     world: &mut ScenarioWorld,
     emitter: String,
 ) {
     let emitter = expand_placeholders(world, &emitter);
     world
         .cluster()
-        .fail_sink_client_unavailable_on_all_nodes(&emitter);
+        .fail_emitter_client_unavailable_on_all_nodes(&emitter);
 }
 
-#[when(expr = "sink client for emitter {string} leaves fault mode")]
-#[then(expr = "sink client for emitter {string} leaves fault mode")]
-async fn when_sink_client_leaves_fault_mode(world: &mut ScenarioWorld, emitter: String) {
+#[when(expr = "emitter client for emitter {string} leaves fault mode")]
+#[then(expr = "emitter client for emitter {string} leaves fault mode")]
+async fn when_emitter_client_leaves_fault_mode(world: &mut ScenarioWorld, emitter: String) {
     let emitter = expand_placeholders(world, &emitter);
     world
         .cluster()
-        .clear_sink_client_fault_on_all_nodes(&emitter);
+        .clear_emitter_client_fault_on_all_nodes(&emitter);
 }
 
-/// The sink still writes every record of the emitter's next write, but the emitter receives the
+/// The emitter still writes every record of the emitter's next write, but the emitter receives the
 /// answers for only the first `resolved` of them, as from a broker that stops answering after it
 /// accepted the rest, and retries the write as one whose outcome it never learned.
 #[when(
-    expr = "the sink of emitter {string} stalls after resolving {int} record(s) of its next \
+    expr = "the emitter of emitter {string} stalls after resolving {int} record(s) of its next \
             publish"
 )]
-async fn when_emitter_sink_stalls_after_resolving(
+async fn when_emitter_connector_stalls_after_resolving(
     world: &mut ScenarioWorld,
     emitter: String,
     resolved: usize,
@@ -13389,7 +13433,7 @@ async fn when_emitter_sink_stalls_after_resolving(
     let emitter = expand_placeholders(world, &emitter);
     world
         .cluster()
-        .stall_emitter_sink_after_resolving_on_all_nodes(&emitter, resolved);
+        .stall_emitter_connector_after_resolving_on_all_nodes(&emitter, resolved);
 }
 
 #[when(expr = "ingestor {string} enters fault mode")]
@@ -14112,7 +14156,7 @@ fn record_mqtt_ingestors(world: &mut ScenarioWorld, commands: &str) {
         let nervix_models::Model::Ingestor(ingestor) = *create.body else {
             continue;
         };
-        let Some(nervix_models::IngestSource::Mqtt(_)) = ingestor.input.transport_source() else {
+        let Some(nervix_models::IngestorEntity::Mqtt(_)) = ingestor.input.transport_entity() else {
             continue;
         };
         world
@@ -24997,20 +25041,20 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
     world: &mut ScenarioWorld,
     count: u64,
     user_id: u32,
-    source_kind: String,
+    entity_kind: String,
     input: String,
 ) {
     let input = expand_placeholders(world, &input);
-    let source_kind = source_kind.to_ascii_uppercase();
+    let entity_kind = entity_kind.to_ascii_uppercase();
     let payload = format!(r#"{{"user_id":{user_id}}}"#);
 
     let count = count
         .try_into()
         .expect("rapid publish count must fit into usize");
-    if source_kind == "MQTT" || source_kind == "MQTT_QOS1" {
+    if entity_kind == "MQTT" || entity_kind == "MQTT_QOS1" {
         wait_for_mqtt_ingestors_ready(world).await;
     }
-    match source_kind.as_str() {
+    match entity_kind.as_str() {
         "KAFKA" => world
             .cluster()
             .publish_kafka_payloads(&input, &vec![payload.as_bytes().to_vec(); count])

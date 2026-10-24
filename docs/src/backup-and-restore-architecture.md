@@ -194,7 +194,7 @@ after the freeze ends. The leader's backup coordinator runs it in this order:
 8. **Release.** It always releases the lease, and checks its tenure a last time.
 
 A drain that does not finish by the deadline fails the backup with the counts each node still held
-and resumes the domain; an unavailable sink keeps its publish and acknowledgement counts outstanding
+and resumes the domain; an unavailable emitter keeps its publish and acknowledgement counts outstanding
 until then. A tenure change at any check refuses the cut, still attempts the resume and the release,
 and leaves the command applying. The next leader holds no alteration guard for the domain, so its
 reconciliation resumes the domain if it is still paused, and it re-executes every applying backup
@@ -759,7 +759,7 @@ routing could not reach. A section path names a branch by the BLAKE3 fingerprint
 | Boundary | Failure | What remains | Recovery |
 | --- | --- | --- | --- |
 | Backup admission | The statement is batched, queued in a transaction, or sent to a follower | Nothing admitted | Send it alone, to the leader the redirect names. |
-| Cut lease and drain | The lease or the drain does not finish within the cut's budget | A pause is undone and the lease released; a failed drain names what each node still held | Send the backup again, with a longer `TIMEOUT` or after the stalled sink recovers. |
+| Cut lease and drain | The lease or the drain does not finish within the cut's budget | A pause is undone and the lease released; a failed drain names what each node still held | Send the backup again, with a longer `TIMEOUT` or after the stalled emitter recovers. |
 | Cut reach | A node the schedule assigns the domain's work to is not reported live when a quiesced cut starts, a scheduled state owner is not reported live when any cut captures, or the schedule places an entity whose state the archive captures on no node | Nothing paused when a quiesced cut refused before its pause, otherwise the pause is undone; the lease is released and no archive is assembled | Send the backup again once the node is back, or once failover has moved its placements or a node can host the entity again. |
 | Leader change during a cut | The tenure check fails | The domain is resumed, by the coordinator or by the next leader's reconciliation, and the command stays applying | The next leader re-executes the backup under the same reference; the client retries the reference to receive its archive. |
 | Owner capture | An owner cannot apply the revision, convert a checkpoint, or stage a section | No archive is assembled. The coordinator's copies and the failing owner's partial files are dropped; other owners' staged sections expire after 600 seconds | Send the backup again; it takes a new cut. |

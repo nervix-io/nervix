@@ -1521,7 +1521,7 @@ pub(super) fn compile_reorderer_program(
 /// this node's schemas, state, lookups and UDFs.
 pub(super) fn bind_ingestor_filter_map_program(
     node: &ModelName,
-    metadata_scope: SourceMetadataScope,
+    metadata_scope: IngestorMetadataScope,
     allow_header_reads: bool,
     construction: &LoweredConstruction,
     schemas: RuntimeVmSchemaPair,
@@ -1965,7 +1965,7 @@ mod tests {
                 "ingestor",
                 bind_ingestor_filter_map_program(
                     &identifier,
-                    SourceMetadataScope::Headers,
+                    IngestorMetadataScope::Headers,
                     true,
                     &lowered,
                     schemas(),
@@ -2037,7 +2037,7 @@ mod tests {
         }));
         let program = bind_ingestor_route_for_test(
             &named::<ModelName>("logic_ingestor"),
-            SourceMetadataScope::Headers,
+            IngestorMetadataScope::Headers,
             true,
             &construction("INHERIT tenant SET normalized = lower(input.raw)"),
             RuntimeVmSchemaPair {

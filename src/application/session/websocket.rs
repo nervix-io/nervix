@@ -184,7 +184,7 @@ impl SessionServiceImpl {
         E: std::fmt::Display + Send + 'static,
     {
         let codec = ServerWebSocketCodec::new(limits);
-        let (sink, messages) = connection.split();
+        let (connector, messages) = connection.split();
         let (violation_sender, violation) = oneshot::channel();
         let mut violations = ViolationReport {
             sender: Some(violation_sender),
@@ -199,7 +199,7 @@ impl SessionServiceImpl {
         let writer = self
             .inner
             .service_tasks
-            .spawn(write_frames(sink, codec, frames, violation));
+            .spawn(write_frames(connector, codec, frames, violation));
         self.run_session(user, SessionTransport::Console, limits, inbound, outbound)
             .await;
         writer
@@ -211,7 +211,7 @@ impl SessionServiceImpl {
 /// Writes every frame the session queues, then closes the connection: with the code of the
 /// violation that ended it, or normally.
 async fn write_frames<S, E>(
-    mut sink: S,
+    mut connector: S,
     codec: ServerWebSocketCodec,
     mut frames: SessionFrames,
     violation: oneshot::Receiver<Violation>,
@@ -222,13 +222,13 @@ async fn write_frames<S, E>(
     while let Some(frame) = frames.next().await {
         nervix_primitives::task::consume_budget().await;
         let payload = Vec::from(codec.encode(frame));
-        if let Err(error) = sink.send(Message::Binary(payload)).await {
+        if let Err(error) = connector.send(Message::Binary(payload)).await {
             debug!(error = %error, "a console session connection stopped taking frames");
             return;
         }
     }
     let close = close_frame(violation.await.ok());
-    if let Err(error) = sink.send(Message::Close(Some(close))).await {
+    if let Err(error) = connector.send(Message::Close(Some(close))).await {
         debug!(error = %error, "a console session connection closed before its close frame");
     }
 }

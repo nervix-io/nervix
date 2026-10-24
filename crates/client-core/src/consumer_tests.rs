@@ -95,7 +95,7 @@ impl AttachedConsumer {
             generation: generation.clone(),
             closed: AtomicBool::new(false),
         });
-        let registry = client.inner.events.sinks.consumers.clone();
+        let registry = client.inner.events.emitters.consumers.clone();
         let handle = StdArc::new(ConsumerHandle {
             client,
             request: OpenEmitterRequest {

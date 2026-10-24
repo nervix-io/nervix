@@ -287,8 +287,8 @@ fn entity_input_relays(model: &Model) -> Vec<RelayName> {
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        DomainName, EndpointIngestMode, HttpEndpointSource, HttpSource, IngestQuiesceMode,
-        IngestSource, IngestorInput, ModelName, PlacementGroupSchedule, ScheduledNode,
+        DomainName, EndpointIngestMode, HttpEndpointIngestor, HttpIngestor, IngestQuiesceMode,
+        IngestorEntity, IngestorInput, ModelName, PlacementGroupSchedule, ScheduledNode,
         SchemaFingerprint,
     };
 
@@ -310,7 +310,7 @@ mod tests {
         let IngestorInput::Transport(transport) = &mut statement.input else {
             panic!("the fixture ingestor reads a transport");
         };
-        transport.source = IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+        transport.source = IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
             endpoint: named("public_http"),
             mode: EndpointIngestMode::NoAck,
             quiesce: IngestQuiesceMode::EndpointBuffer {

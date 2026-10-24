@@ -20,7 +20,7 @@ pub(super) fn mode<'src>()
 
 pub(super) fn topic_body<'src>(
     context: EmitterContext,
-) -> impl Parser<'src, &'src [Token], ParsedDestination<KafkaTopicSink>, extra::Err<ParseError<'src>>>
+) -> impl Parser<'src, &'src [Token], ParsedDestination<KafkaTopicEmitter>, extra::Err<ParseError<'src>>>
 + Clone {
     encoded_destination(
         context,
@@ -29,7 +29,7 @@ pub(super) fn topic_body<'src>(
             .then(external_name::<KafkaTopicName>())
             .then_ignore(kw(Identifier::Mode))
             .then(mode())
-            .map(|((client, topic), mode)| KafkaTopicSink {
+            .map(|((client, topic), mode)| KafkaTopicEmitter {
                 client,
                 topic,
                 mode,

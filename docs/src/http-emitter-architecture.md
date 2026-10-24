@@ -14,7 +14,7 @@ chapter owns the shared host and connector boundary; [Control Plane](./control-p
 time, binding, and recovery rules. The [HTTP emitter acceptance ledger](https://github.com/nervix-io/nervix/blob/main/tests/http-emitter-acceptance-ledger.md#http-emitter-09-qualification)
 records the public qualification evidence summarized below.
 
-## From NSPL to an active sink
+## From NSPL to an active emitter
 
 The language parses `TO HTTP` and its ordered `METHOD`, `PATH`, `MODE ACK RETRY POLICY`, and body
 selection into semantic Models. The registry validates the complete candidate against the same
@@ -24,7 +24,7 @@ plan. A running data-plane task receives that plan; it does not read a Model or 
 The server composes the HTTP connector with the emitter host. These conversions and their
 installation boundary are described in [Execution Plans](./execution-plans.md).
 
-The sink has one request/response mode, with an explicit retry policy and exactly one body choice:
+The emitter has one request/response mode, with an explicit retry policy and exactly one body choice:
 
 ```nspl,ignore
 TO HTTP <client>
@@ -174,7 +174,7 @@ it does not create a row-map payload. The HTTP connector receives a typed, alrea
 request containing the validated method, normalized target, application headers, and either exact
 codec bytes or no body. It owns HTTP connection and TLS handling, transport-generated fields,
 response parsing, `Retry-After` interpretation, and per-request outcomes. It sees neither graph
-branches nor upstream ACKs. The [connector chapter's HTTP sink boundary](./connector-contract.md#sink-boundary)
+branches nor upstream ACKs. The [connector chapter's HTTP emitter boundary](./connector-contract.md#emitter-boundary)
 defines the shared contract and host loop in detail.
 
 One HTTP request is prepared for each eligible source record, even when `COLLECT FOR` or `FLUSH`
@@ -304,7 +304,7 @@ Nervix supplies no idempotency key. The application can send a stable event iden
 `Idempotency-Key` invocation above does, and arrange endpoint-side deduplication. A generated
 value is stable during a *local* retry because preparation is retained; source replay after a
 restart may evaluate it again. [ACK Semantics And Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery)
-defines the wider source/sink combinations.
+defines the wider source/emitter combinations.
 
 ## Errors and inspection
 
@@ -336,7 +336,7 @@ Method, target, headers, and response bytes are not payload bytes or metric-labe
 
 ## Replacement, drain, and recovery
 
-Changing the sink's method, path, client reference, body selection, or retry mode takes an
+Changing the emitter's method, path, client reference, body selection, or retry mode takes an
 `ENTITY_PAUSE`; a `FLUSH`-only change is `DYNAMIC`. Changing source membership or a client
 definition has its existing `DOMAIN_PAUSE` contract. `ALTER HTTP REQUEST EMITTER ... SET TO` restates the
 complete method, path, mode, and body selection. `SET CLIENT`, `SET MODE`, and `SET ENCODE USING`
@@ -434,9 +434,9 @@ above, each on one-node and three-node clusters:
   to an address whose handshake never completes, followed by the receiver's address. The request
   reaches the receiver, and `DESCRIBE EMITTER` then shows no transient error.
 
-Paused-clock unit tests of the HTTP sink end a silent name server's lookup after its half of
+Paused-clock unit tests of the HTTP emitter end a silent name server's lookup after its half of
 `timeout_ms` and before the whole of it, and end the attempt of an only address that never
 connects with its share; each checks the transient error listed above. A third unit test delivers
 the request through the second address within one attempt when the first never connects. The
-`http-request-heads` Bolero property checks that the request head the sink writes carries every
+`http-request-heads` Bolero property checks that the request head the emitter writes carries every
 prepared field and declares the length the transport rules above require.

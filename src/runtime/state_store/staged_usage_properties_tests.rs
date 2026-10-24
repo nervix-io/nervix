@@ -30,7 +30,7 @@ use super::{
 const DOMAINS: [&str; 2] = ["alpha", "beta"];
 
 /// The entities a history stages checkpoints for within one domain.
-const ENTITIES: [&str; 2] = ["source", "sink"];
+const ENTITIES: [&str; 2] = ["source", "emitter"];
 
 /// The newest generation a history stages or publishes.
 const GENERATIONS: u64 = 3;

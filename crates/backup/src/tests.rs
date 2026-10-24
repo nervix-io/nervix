@@ -459,12 +459,12 @@ fn write_archive(manifest: BackupManifest, sections: &[TestSection]) -> (Archive
     let mut bytes = Vec::new();
     let mut remaining = sections.iter();
     layout
-        .write_to(&mut bytes, |entry, sink| {
+        .write_to(&mut bytes, |entry, connector| {
             let section = remaining
                 .next()
                 .assured("the layout asks for the sections in manifest order");
             assert_eq!(&section.entry, entry);
-            std::io::Write::write_all(sink, &section.bytes)
+            std::io::Write::write_all(connector, &section.bytes)
         })
         .assured("the test archive writes");
     (layout, bytes)
@@ -1397,8 +1397,8 @@ fn supplied_bytes_that_differ_from_their_entry_are_refused() {
     let layout = ArchiveLayout::new(manifest).assured("the archive lays out");
     let mut bytes = Vec::new();
     let error = layout
-        .write_to(&mut bytes, |_, sink| {
-            std::io::Write::write_all(sink, b"other")
+        .write_to(&mut bytes, |_, connector| {
+            std::io::Write::write_all(connector, b"other")
         })
         .expect_err("the supplied bytes differ");
     assert_eq!(

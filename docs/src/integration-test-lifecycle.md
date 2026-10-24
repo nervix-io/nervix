@@ -51,6 +51,17 @@ completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 
+The orphaned-transaction expiry scenario holds finished-transaction cleanup for its domain on each
+node before it begins the transaction. Expiry and the leadership transfer proceed normally. The
+successor reaches its cleanup barrier only after it observes the replicated terminal transaction;
+public inspection and attach then verify `EXPIRED` while that record remains retained. Releasing
+every node's barrier lets the normal retention sweep remove it, which the scenario also verifies
+through inspection and attach. The idle timeout, tombstone age and assertion deadlines stay fixed.
+This orders the observations against cleanup instead of assuming leadership transfer and client
+round trips finish inside the five-second retention window. The testing-only barrier uses the
+existing one-shot pause owner; scenario teardown releases it before stopping nodes, including after
+an assertion fails. It neither changes product retention nor serializes other scenarios.
+
 The Pulsar finish scenario runs a public `STOP` concurrently with a timed resumption of its
 paused dependency forwarder. The forwarder's resumption future owns its control and cancellation
 handles and is awaited beside the command, so no timer task outlives the scenario. It records
@@ -85,6 +96,17 @@ producer and consumer connections therefore stay behind the same pause gate as b
 An opaque bootstrap proxy alone does not establish a Pulsar broker fault because discovery can
 otherwise connect directly to the broker. The exact payload oracle checks each sequence once after
 recovery, including a producer with all 100 receipt slots occupied.
+
+The Pulsar producer-finish outline posts through an acknowledged HTTP endpoint, `MODE ACK MAX
+100 ACK TIMEOUT 60s` with `ON QUIESCE REJECT RETRY AFTER 1s`. Its window holds the fixture's maximum
+of one hundred concurrent posts. One client posts them concurrently and requires HTTP 200 with a
+completed endpoint outcome within each request's sixty-second response budget. The Pulsar emitter
+stays in `MODE NO ACK`, so each post completes once that producer accepts its record, without
+waiting for the paused broker's receipt. The sent counter's thirty-second wait then observes
+producer acceptance rather than timing a queued relay backlog after an intake-only 202 response.
+STOP still has to await the broker receipts after the endpoint resumes, with the same drain bound,
+measured resume ordering and exact sequenced-payload oracle on one and three nodes. The separate
+long-receipt outline keeps its own intake mode.
 
 The MySQL shared-pool isolation scenario owns independent root sessions holding `LOCK TABLES`
 write locks. It observes a pending metadata lock on the server before queuing the next writer,
@@ -310,7 +332,7 @@ interrupted publication and bounded cleanup, and the materialized publication li
 pass its libtest accounting and record exactly one qualifying process observation in both
 diagnostic selections. The tracked locks' conformance checks of `nervix-primitives` run the same
 way, each in a fresh process in both selections. They record no evidence file, because the
-primitive crate sits below the crate that owns evidence: a finding reaches a sink that aborts the
+primitive crate sits below the crate that owns evidence: a finding reaches an emitter that aborts the
 check, and the lane fails on that ending.
 
 Test dependencies start through one suite-owned environment. If Docker creates a named container
@@ -592,7 +614,14 @@ the full bucket URL can make the remote cache appear empty.
 `benchmark` and `build-book` jobs, and the builder stage of every Docker image build.
 
 `kunobi-ninja/kache-action` installs kache, sets `RUSTC_WRAPPER`, the store and a job-scoped
-runtime directory, and stops the job's daemon in its post step. It receives no S3 inputs, so its
+runtime directory, and stops the job's daemon in its post step. The action and Docker builder
+keep the pinned kache version's automatic local-store budget: 5% of the volume that holds the
+store, rounded to the nearest GiB and bounded between 5 and 100 GiB. A 250 GiB volume therefore
+budgets 13 GiB; a 500 GiB volume budgets 25 GiB. This leaves room for compiled outputs and
+coverage profiles, and the budget follows the actual cache volume when the runner changes. If
+the volume size cannot be probed, kache uses its bounded 50 GiB fallback. The daemon applies its
+normal eviction while the compiler wrapper and shared remote stay enabled. The action receives
+no S3 inputs, so its
 post step neither saves a manifest nor pushes. The `Start kache remote` step that follows it:
 
 1. writes the daemon's configuration, `$RUNNER_TEMP/kache-remote.toml`, with the bucket, region,
@@ -605,14 +634,23 @@ post step neither saves a manifest nor pushes. The `Start kache remote` step tha
    daemon that has not answered yet gets three polls, two seconds apart. The step prints whether
    the daemon publishes uploads or, under kache's read-only policy, skips them.
 
-Native CI jobs and the BuildKit builder set `KACHE_AUTO_RECOVER_MIN_FREE_BYTES=68719476736`
-(64 GiB). Kache 1.2.1 otherwise disables free-space recovery in CI, and the configured 1 TiB
-store limit can exceed a runner's whole disk. The explicit floor lets kache reclaim eligible
-cached artifacts when free space falls below it, while preserving artifacts still shared with
-active build targets. Target-directory recovery stays disabled. The floor is a reclamation
-trigger checked at kache's existing cadence; active build outputs and concurrent writes still consume
-the runner's storage. The
-compiler wrapper, remote publication and coverage executable identity checks keep their contracts.
+The extra-tests job also reclaims completed build phases. Before benchmark smoke it runs
+`just clean-ci-docs` to release the completed doctests' Cargo target directory. After the native
+benchmark collector has exported coverage and recorded completion, `just clean-ci-benchmarks`
+releases that instrumented target's dev-profile build outputs. Both steps run only after their
+preceding checks succeed. Exported reports, completion records, raw profiles,
+compiler evidence and the source tree remain available; a failed phase keeps its build outputs.
+The native collector marks its owned build directory as a Cargo cache while holding its build
+lock, so Cargo recognizes it for guarded cleanup. Later phases rebuild any required artifact
+through the configured cache.
+
+Native CI jobs and the BuildKit builder also set `KACHE_AUTO_RECOVER_MIN_FREE_BYTES=68719476736`
+(64 GiB). Kache 1.2.1 otherwise disables free-space recovery in CI. This floor enables reclamation
+of eligible cached artifacts when free space falls below it, while the cache budget above scales
+with the actual cache filesystem. Artifacts still shared with active build targets are retained;
+target-directory recovery stays disabled. The floor is a trigger checked at kache's existing
+cadence, and active build outputs and concurrent writes still consume storage. The compiler
+wrapper, remote publication and coverage executable identity checks keep their contracts.
 
 During the build the daemon publishes each entry the build stores: kache records a durable upload
 intent, uploads the entry in the background, and retries an upload that failed for a retryable
@@ -827,11 +865,13 @@ The harness keeps these boundaries explicit.
   and exit statuses belong to the process boundary, which only the server-process fixture crosses.
   See [Shutdown And Recovery](./shutdown.md#stop-requests).
   A real-process cluster can deliver `SIGKILL` to all three voters before waiting for any child to
-  exit. On restart it launches all existing stores before awaiting readiness, so no one voter is
-  required to answer without the persisted quorum. A start and a whole restart end once every node
-  reports, through its public status endpoint, the same leader, all three voters, and a
-  `connected` application-health target for every other node, as an in-process cluster's
-  construction does.
+  exit. On restart it supervises every persisted voter's full startup concurrently, including
+  executable preparation, launch, readiness and any lost-bind relaunch, within each startup's
+  original deadline. One voter's executable preparation cannot postpone another's readiness
+  probes, and peers that must move listeners can relaunch while the others await the persisted
+  quorum. A start and a whole restart end once every node reports, through its public status
+  endpoint, the same leader, all three voters, and a `connected` application-health target for
+  every other node, as an in-process cluster's construction does.
   It can also fault one voter while the other two keep the quorum: `SIGKILL`, after which a step
   waits for that child to exit and checks the signal, or `SIGSTOP`, which freezes the process with
   its connections open, so its peers hear nothing from it and see no reset until `SIGCONT` lets it
@@ -1126,7 +1166,7 @@ The MQTT changed-address restart scenario waits for the post-restart marker with
 delivery window. Its persistent QoS 1 source may replay the pre-restart marker before that row;
 broker receipt does not establish that its source acknowledgement reached the broker before the
 node stopped. The OTEL metric scenario observes one successful export from each concrete emitter
-owner before checking Collector output. HTTP intake acceptance does not establish sink export,
+owner before checking Collector output. HTTP intake acceptance does not establish emitter export,
 and the per-owner counters retain exact progress assertions for both HTTP and gRPC.
 
 The OTEL Collector content wait keeps its ten-second bound, from the step's start to the text's
@@ -1531,11 +1571,15 @@ until that node has ended.
 - The scenario-local WebSocket lifecycle peer records Close frames and reconnect instants through
   a bounded channel. Cleanup aborts and joins its listener task before returning its reserved port;
   socket ownership stays in that task, so the same cancellation releases its active connection.
-  The declaration peer also records an opening client ending an incomplete upgrade, then accepts
-  another connection with its pending payload gate intact. The BUFFER/codec-change outlines end a
-  partial upgrade and await that cancellation event before starting their one- or three-node
-  cluster. Other handshake errors and established-connection failures still fail the fixture and
-  its After hook.
+  The declaration peer also records an opening client ending an incomplete upgrade. An HTTP 101
+  written by the peer does not prove the client completed its opening: the peer confirms that
+  connection with a Ping and its matching Pong before consuming the pending payload gate. A
+  transport ending before that confirmation records an opening cancellation and leaves the gate
+  for the next connection. The BUFFER/codec-change outlines end a partial upgrade and await that
+  cancellation event before starting their one- or three-node cluster. The shared peer's ordinary
+  harness tests also end a completed upgrade before its probe, then require a replacement
+  connection to receive both gated payloads. A reset after confirmation still fails the fixture,
+  qualified by a separate transport test; other handshake errors remain fatal as well.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes, and the
   endpoints it stood in front of a shared dependency, are released once those nodes have ended.
 - The ZeroMQ and syslog ports drawn for the scenario return to the pool after their nodes and
@@ -1692,6 +1736,13 @@ the fixture kills the process, so cleanup never waits for a graceful stop and a 
 never leaves a server running. What the process does between a signal and its exit is product
 behavior; see [Shutdown And Recovery](./shutdown.md#exit-status).
 
+A whole-cluster restart polls every persisted voter's executable read, launch and readiness
+concurrently, then checks convergence through public status endpoints. Each voter retains its own
+120-second startup deadline, including its executable read. This lets a started voter probe while
+its peers prepare and launch, instead of spending its readiness budget on their serial preparation
+before it can recover a quorum. The restart preserves each member's readiness observations and the
+cluster's convergence requirement.
+
 **Reading the executable first.** A process does not read its executable when it starts. The kernel
 maps the file, and every page the process first touches is read when the process faults on it: one
 page at a time, in the order its code happens to run. A debug server executable maps about 450 MB,
@@ -1795,6 +1846,15 @@ the documents it applied. This fault belongs to that client's write concern, so 
 sharing the server keep running. Each scenario provisions its own collection and retains its
 server kind with that collection for later assertions; standalone and TLS collections keep their
 own server kinds.
+
+The write-concern outline connects a named public client to the emitter's reported owner before
+publishing. That client retains the server's error notices independently of the sessions used by
+readiness and `DESCRIBE` probes. After checking all six documents and delaying the observer, the
+outline waits for the current emitter status to be `OK`, then reads the retained error notice
+within the unchanged twenty-second bound. It checks the insert or upsert operation and numeric
+code `100` (`UnsatisfiableWriteConcern`). The notice proves that the failure occurred even after
+the live status has cleared. The scenario preserves its retry policy, write concern and exact
+document oracle.
 
 Both MongoDB test servers set `GLIBC_TUNABLES=glibc.pthread.rseq=1`, enabling glibc's restartable
 sequence registration. This avoids the MongoDB/TCMalloc crash on affected Linux kernels when the
@@ -2780,10 +2840,11 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 The scenarios of `tests/features/cluster/server_process_ports.feature` have a listener of their own
 hold a drawn port: at a single process's start, for its web console and for its gRPC listener, at
 the bootstrap member of a three-process cluster, for its interconnect listener, and at a restarted
-member, for its gRPC listener. Each asserts that the startup relaunched exactly once, moved exactly
-that listener, and binds another port for it. A last scenario starts a process whose startup ends
-with another report, a web console certificate without its key, and asserts that the startup fails
-with the process's own exit after one launch.
+member, for its gRPC listener. A whole-cluster restart also holds two persisted peers' gRPC ports
+and requires both peers to relaunch while all voters recover together. Each asserts that the
+startup relaunched exactly once, moved exactly that listener, and binds another port for it.
+A last scenario starts a process whose startup ends with another report, a web console certificate
+without its key, and asserts that the startup fails with the process's own exit after one launch.
 
 The scenarios tagged `@node_bound_port_taken`, in `tests/features/runtime/zeromq_ingestion.feature`
 and `tests/features/runtime/syslog_support.feature`, have another socket take the port a scenario

@@ -2,9 +2,9 @@
 //!
 //! Layer: decisions.
 //!
-//! - **Owns.** Resolving sink clients and source relays, preserving their delivery modes, and
+//! - **Owns.** Resolving emitter clients and source relays, preserving their delivery modes, and
 //!   lowering emitter route, source, HTTP request, and ordering expressions before runtime binding.
-//! - **Depends on.** Validated schedule Models, the activation plan's schemas, the sink start
+//! - **Depends on.** Validated schedule Models, the activation plan's schemas, the emitter start
 //!   decision, and the expression VM frontend.
 //! - **Must not know.** Tokio, locks, connector I/O, node-local resources, or task spawning.
 
@@ -59,8 +59,8 @@ pub(crate) enum EmitterExecutionPlanError {
         emitter: EmitterName,
         schema: nervix_models::SchemaName,
     },
-    #[error("emitter '{emitter}' cannot plan its sink")]
-    Sink { emitter: EmitterName },
+    #[error("emitter '{emitter}' cannot plan its emitter")]
+    Connector { emitter: EmitterName },
     #[error("emitter '{emitter}' has an invalid source predicate for '{relay}'")]
     SourceFilter {
         emitter: EmitterName,
@@ -70,10 +70,10 @@ pub(crate) enum EmitterExecutionPlanError {
     Route { emitter: EmitterName },
     #[error("direct emitter '{emitter}' supports VALUES and WHERE only")]
     DirectConstruction { emitter: EmitterName },
-    #[error("{sink} emitter '{emitter}' does not support FILTER-MAP headers")]
+    #[error("{connector} emitter '{emitter}' does not support FILTER-MAP headers")]
     Headers {
         emitter: EmitterName,
-        sink: &'static str,
+        connector: &'static str,
     },
     #[error("HTTP emitter '{emitter}' has invalid request fields")]
     HttpRequest { emitter: EmitterName },
@@ -96,7 +96,7 @@ pub(crate) struct EmitterRoutePlan {
     pub(crate) codec_route: bool,
 }
 
-/// The source-row group that the host evaluates before handing an SQS record to its sink.
+/// The source-row group that the host evaluates before handing an SQS record to its emitter.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum EmitterOrderingGroupPlan {
     FromBranch,
@@ -112,9 +112,9 @@ pub(crate) struct EmitterExecutionPlan {
     pub(crate) inputs: Vec<EmitterInputPlan>,
     pub(crate) collect_policy: Option<InputCollectPolicy>,
     pub(crate) codec: Option<CodecName>,
-    /// The validated schema of the rows handed to this emitter's sink.
+    /// The validated schema of the rows handed to this emitter's emitter.
     pub(crate) output_schema: Arc<CompiledSchema>,
-    pub(crate) sink: EmitterStartPlan<DeclaredClientConfig>,
+    pub(crate) connector: EmitterStartPlan<DeclaredClientConfig>,
     pub(crate) route: Option<EmitterRoutePlan>,
     pub(crate) http_request: Option<SpannedNode<Program>>,
     pub(crate) ordering_group: Option<EmitterOrderingGroupPlan>,
@@ -129,26 +129,26 @@ impl EmitterExecutionPlan {
         nodes: &ScheduledNodes,
         activation: &DomainActivationPlan,
     ) -> error_stack::Result<Self, EmitterExecutionPlanError> {
-        let client = match emitter.sink.client() {
+        let client = match emitter.connector.client() {
             Some(name) => nodes
                 .get(&NodeRef::new(ModelKind::Client, name))
                 .map(|node| node.config.as_ref()),
             None => None,
         };
-        let catalog_client = match emitter.sink.catalog_client() {
+        let catalog_client = match emitter.connector.catalog_client() {
             Some(catalog) => nodes
                 .get(&NodeRef::new(ModelKind::Client, catalog.client))
                 .map(|node| node.config.as_ref()),
             None => None,
         };
-        let sink = EmitterStartPlan::decide(
+        let connector = EmitterStartPlan::decide(
             emitter,
             EmitterClientModels {
                 client,
                 catalog_client,
             },
         )
-        .change_context(EmitterExecutionPlanError::Sink {
+        .change_context(EmitterExecutionPlanError::Connector {
             emitter: emitter.name.clone(),
         })?;
 
@@ -188,9 +188,9 @@ impl EmitterExecutionPlan {
             })
         })?;
         let codec = emitter.body.codec().cloned();
-        let output_schema = match emitter.sink.as_ref() {
-            nervix_models::EmitSink::Client(nervix_models::ClientSink::Consumer(
-                nervix_models::ClientConsumerSink { schema, .. },
+        let output_schema = match emitter.connector.as_ref() {
+            nervix_models::EmitterEntity::Client(nervix_models::ClientEmitter::Consumer(
+                nervix_models::ClientConsumerEmitter { schema, .. },
             )) => activation
                 .schemas
                 .get(schema)
@@ -235,7 +235,7 @@ impl EmitterExecutionPlan {
             collect_policy: emitter.from.collect_policy.clone(),
             codec,
             output_schema,
-            sink,
+            connector,
             route,
             http_request,
             ordering_group,
@@ -253,12 +253,15 @@ impl EmitterExecutionPlan {
         let codec_route = emitter.body.codec().is_some()
             || matches!(emitter.body, nervix_models::EmitterBody::Client);
         if emitter.construction.is_empty()
-            && !matches!(emitter.sink.as_ref(), nervix_models::EmitSink::Http(_))
+            && !matches!(
+                emitter.connector.as_ref(),
+                nervix_models::EmitterEntity::Http(_)
+            )
         {
             return Ok(None);
         }
-        let construction = match emitter.sink.as_ref() {
-            nervix_models::EmitSink::Http(_) => RouteConstruction {
+        let construction = match emitter.connector.as_ref() {
+            nervix_models::EmitterEntity::Http(_) => RouteConstruction {
                 invocations: Vec::new(),
                 ..emitter.construction.clone()
             },
@@ -289,11 +292,11 @@ impl EmitterExecutionPlan {
             .invoke
             .iter()
             .any(|invocation| invocation.inner.function == FunctionName::WriteHeader)
-            && !emitter.sink.capabilities().writes_headers()
+            && !emitter.connector.capabilities().writes_headers()
         {
             return Err(Report::new(EmitterExecutionPlanError::Headers {
                 emitter: emitter.name.clone(),
-                sink: emitter.sink.transport_label(),
+                connector: emitter.connector.transport_label(),
             }));
         }
         let inherited_count = if codec_route {
@@ -316,9 +319,9 @@ impl EmitterExecutionPlan {
     fn http_request(
         emitter: &CreateEmitter,
     ) -> error_stack::Result<Option<SpannedNode<Program>>, EmitterExecutionPlanError> {
-        let nervix_models::EmitSink::Http(nervix_models::HttpSink::Request(
-            nervix_models::HttpRequestSink { method, path, .. },
-        )) = emitter.sink.as_ref()
+        let nervix_models::EmitterEntity::Http(nervix_models::HttpEmitter::Request(
+            nervix_models::HttpRequestEmitter { method, path, .. },
+        )) = emitter.connector.as_ref()
         else {
             return Ok(None);
         };
@@ -352,12 +355,12 @@ impl EmitterExecutionPlan {
         emitter: &CreateEmitter,
         input: &arrow_schema::Schema,
     ) -> error_stack::Result<Option<EmitterOrderingGroupPlan>, EmitterExecutionPlanError> {
-        let nervix_models::EmitSink::Sqs(nervix_models::SqsSink::Queue(
-            nervix_models::SqsQueueSink {
+        let nervix_models::EmitterEntity::Sqs(nervix_models::SqsEmitter::Queue(
+            nervix_models::SqsQueueEmitter {
                 fifo_group: Some(group),
                 ..
             },
-        )) = emitter.sink.as_ref()
+        )) = emitter.connector.as_ref()
         else {
             return Ok(None);
         };
@@ -442,8 +445,9 @@ impl EmitterExecutionPlans {
 )]
 mod tests {
     use nervix_models::{
-        AckMode, ClientName, EmitSink, EmitterBody, ErrorPolicies, FlushPolicy, HttpRequestSink,
-        HttpSink, ProcessorInputs, RetryPolicy, SqsQueueSink, SqsSink, ZeroMqPushSink, ZeroMqSink,
+        AckMode, ClientName, EmitterBody, EmitterEntity, ErrorPolicies, FlushPolicy, HttpEmitter,
+        HttpRequestEmitter, ProcessorInputs, RetryPolicy, SqsEmitter, SqsQueueEmitter,
+        ZeroMqEmitter, ZeroMqPushEmitter,
     };
 
     use super::*;
@@ -460,12 +464,12 @@ mod tests {
         nervix_nspl::parse_expression(raw).expect("the fixture uses valid expressions")
     }
 
-    fn emitter(sink: EmitSink, body: EmitterBody) -> CreateEmitter {
+    fn emitter(connector: EmitterEntity, body: EmitterBody) -> CreateEmitter {
         CreateEmitter {
             name: named("output"),
             from: ProcessorInputs::single(named("input_relay")),
             body,
-            sink: Box::new(sink),
+            connector: Box::new(connector),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
@@ -493,7 +497,7 @@ mod tests {
     #[test]
     fn direct_emitter_lowers_only_its_filter_and_codec_emitter_preserves_empty_route() {
         let mut direct = emitter(
-            EmitSink::Http(HttpSink::Request(HttpRequestSink {
+            EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
                 mode: nervix_models::HttpRequestPublishingMode::Ack {
                     retry_policy: retry_policy(),
                 },
@@ -511,11 +515,11 @@ mod tests {
         assert!(route.program.inner.filter.is_some());
         assert_eq!(route.inherited_count, 0);
 
-        *direct.sink = EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+        *direct.connector = EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
             mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
                 retry_policy: retry_policy(),
             },
-            client: named("sink"),
+            client: named("emitter"),
         }));
         direct.body = EmitterBody::Codec {
             codec: named("codec"),
@@ -531,7 +535,7 @@ mod tests {
     #[test]
     fn http_request_fields_are_lowered_beside_the_route() {
         let http = emitter(
-            EmitSink::Http(HttpSink::Request(HttpRequestSink {
+            EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
                 mode: nervix_models::HttpRequestPublishingMode::Ack {
                     retry_policy: retry_policy(),
                 },
@@ -557,7 +561,7 @@ mod tests {
     #[test]
     fn sqs_ordering_group_is_lowered_or_reads_the_branch() {
         let mut sqs = emitter(
-            EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+            EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
                 mode: nervix_models::SqsQueuePublishingMode::Single {
                     retry_policy: retry_policy(),
                 },
@@ -576,9 +580,10 @@ mod tests {
             panic!("the group is an expression");
         };
         assert_eq!(program.inner.set[0].0.field, ORDERING_GROUP_FIELD);
-        let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink { fifo_group, .. })) = sqs.sink.as_mut()
+        let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter { fifo_group, .. })) =
+            sqs.connector.as_mut()
         else {
-            panic!("the fixture sink is SQS");
+            panic!("the fixture emitter is SQS");
         };
         *fifo_group = Some(SqsFifoGroup::FromBranch);
         assert_eq!(
