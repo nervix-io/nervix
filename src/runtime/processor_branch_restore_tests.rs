@@ -111,7 +111,7 @@ impl OpenWindowFixture {
         };
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            source_kind: ModelKind::WindowProcessor,
+            entity_kind: ModelKind::WindowProcessor,
             source: RelayName::from(&processor),
             root_relay: input_relay.clone(),
             branch: Some(named::<BranchName>("by_tenant")),

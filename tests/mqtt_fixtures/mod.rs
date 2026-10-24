@@ -2,7 +2,7 @@
 //!
 //! - **Owns.** A delayed fixture connection and complete broker-delivery assertions.
 //! - **Depends on.** The real broker, shared publisher, observer, and TCP stall proxy.
-//! - **Must not know.** Product source, sink, graph, or acknowledgement state.
+//! - **Must not know.** Product source, emitter, graph, or acknowledgement state.
 
 use super::*;
 

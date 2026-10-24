@@ -119,7 +119,7 @@ impl nervix_connector::IngestMessageHeaders for TestIngestHeaders<'_> {
 
 /// Builds one group's ingest metadata through the group builders, as the runtime does.
 pub(super) fn ingest_metadata_for_test(
-    scope: super::SourceMetadataScope,
+    scope: super::IngestorMetadataScope,
     rows: &[nervix_connector::IngestMetadataRow<'_>],
 ) -> super::IngestFilterMapMetadata {
     let mut builders = super::IngestMetadataBuilders::new(scope, rows.len())
@@ -885,7 +885,7 @@ pub(super) fn wasm_guest_stream(schema: StdArc<ArrowSchema>, batches: &[RecordBa
 /// tests whose subject is the bound route program.
 pub(super) fn bind_ingestor_route_for_test(
     identifier: &ModelName,
-    metadata_scope: SourceMetadataScope,
+    metadata_scope: IngestorMetadataScope,
     allow_header_reads: bool,
     construction: &RouteConstruction,
     schemas: RuntimeVmSchemaPair,
@@ -1224,7 +1224,7 @@ pub(super) fn junction_branch_template(
     let input_relay = named::<RelayName>(input_relay);
     super::BranchInstanceTemplate {
         revision: super::ProcessorPlanRevision::new(),
-        source_kind: ModelKind::Junction,
+        entity_kind: ModelKind::Junction,
         source: RelayName::from(&processor.clone()),
         root_relay: input_relay.clone(),
         branch: None,
@@ -1337,12 +1337,12 @@ pub(super) fn input_value(batch: &RelayRecordBatch) -> i64 {
     value
 }
 
-pub(super) fn sink_context() -> EmitterSinkContext {
+pub(super) fn emitter_context() -> EmitterConnectorContext {
     let domain = DomainName::parse("emitter_tests").expect("valid domain");
     let runtime = Runtime::default();
     let emitter = EmitterName::parse("output").assured("fixture emitter name is valid");
     let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
-    EmitterSinkContext {
+    EmitterConnectorContext {
         routing: StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
         metrics_dirty: BranchMetricsMark::default(),
         status: runtime.emitter_status(&key),

@@ -137,18 +137,18 @@ def main() -> int:
     runtime_root = ROOT / "src/runtime"
     actual_utc_owner = ROOT / PHYSICAL_TIME_OWNER
     actual_utc_consumers = {
-        ROOT / "crates/connectors/http/src/lib.rs",
-        ROOT / "crates/connectors/http/src/sink.rs",
-        ROOT / "crates/connectors/iceberg/src/lib.rs",
-        ROOT / "crates/connectors/otel/src/lib.rs",
-        ROOT / "crates/connectors/prometheus/src/lib.rs",
-        ROOT / "crates/connectors/sentry/src/lib.rs",
+        ROOT / "crates/connectors/http/src/request/mod.rs",
+        ROOT / "crates/connectors/http/src/request/emitter.rs",
+        ROOT / "crates/connectors/iceberg/src/table/mod.rs",
+        ROOT / "crates/connectors/otel/src/otlp/mod.rs",
+        ROOT / "crates/connectors/prometheus/src/query/mod.rs",
+        ROOT / "crates/connectors/sentry/src/event/mod.rs",
         runtime_root / "client_ingestor.rs",
         runtime_root / "domain_clock.rs",
         runtime_root / "emitter_task.rs",
         runtime_root / "endpoint.rs",
         runtime_root / "ingestors/kafka.rs",
-        runtime_root / "ingestors/source.rs",
+        runtime_root / "ingestors/connector.rs",
         runtime_root / "ingestors/syslog.rs",
         runtime_root / "ingestors/websockets.rs",
     }

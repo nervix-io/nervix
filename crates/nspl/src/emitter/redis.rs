@@ -20,8 +20,12 @@ pub(super) fn mode<'src>()
 
 pub(super) fn pubsub_body<'src>(
     context: EmitterContext,
-) -> impl Parser<'src, &'src [Token], ParsedDestination<RedisPubSubSink>, extra::Err<ParseError<'src>>>
-+ Clone {
+) -> impl Parser<
+    'src,
+    &'src [Token],
+    ParsedDestination<RedisPubSubEmitter>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
     encoded_destination(
         context,
         client_ref()
@@ -29,7 +33,7 @@ pub(super) fn pubsub_body<'src>(
             .then(external_name::<RedisChannelName>())
             .then_ignore(kw(Identifier::Mode))
             .then(mode())
-            .map(|((client, channel), mode)| RedisPubSubSink {
+            .map(|((client, channel), mode)| RedisPubSubEmitter {
                 client,
                 channel,
                 mode,

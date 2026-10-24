@@ -1481,9 +1481,9 @@ pub(super) fn append_filter_map_nested_value(
 mod tests {
     use ahash::HashMap;
     use nervix_models::{
-        AckMode, CreateEmitter, CreateSchema, EmitSink, ErrorPolicies, FieldPath, KafkaSink,
-        KafkaTopicSink, MessageErrorCode, MessageErrorOperation, ModelName, ParseAsType,
-        ProcessorInputs, RetryPolicy, Timestamp, ZeroMqPushSink, ZeroMqSink,
+        AckMode, CreateEmitter, CreateSchema, EmitterEntity, ErrorPolicies, FieldPath,
+        KafkaEmitter, KafkaTopicEmitter, MessageErrorCode, MessageErrorOperation, ModelName,
+        ParseAsType, ProcessorInputs, RetryPolicy, Timestamp, ZeroMqEmitter, ZeroMqPushEmitter,
     };
     use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
@@ -1607,7 +1607,7 @@ mod tests {
             }
         );
 
-        let empty_ingest_metadata = ingest_metadata_for_test(SourceMetadataScope::Headers, &[]);
+        let empty_ingest_metadata = ingest_metadata_for_test(IngestorMetadataScope::Headers, &[]);
         let error = evaluate_filter_map_on_batch(
             &Executor::default(),
             &program,
@@ -2284,16 +2284,18 @@ mod tests {
             body: nervix_models::EmitterBody::Codec {
                 codec: named("notification_codec"),
             },
-            sink: Box::new(EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
-                mode: nervix_models::KafkaTopicPublishingMode::NoAck {
-                    retry_policy: RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+            connector: Box::new(EmitterEntity::Kafka(KafkaEmitter::Topic(
+                KafkaTopicEmitter {
+                    mode: nervix_models::KafkaTopicPublishingMode::NoAck {
+                        retry_policy: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
                     },
+                    client: named("kafka_main"),
+                    topic: named("notifications_out"),
                 },
-                client: named("kafka_main"),
-                topic: named("notifications_out"),
-            }))),
+            ))),
             batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "100ms".to_string(),
@@ -2334,15 +2336,16 @@ mod tests {
         .expect("emitter filter-map must compile")
         .expect("program must exist");
         let mut unsupported_emitter = emitter.clone();
-        *unsupported_emitter.sink = EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-            mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+        *unsupported_emitter.connector =
+            EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
+                mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: nervix_models::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
                 },
-            },
-            client: named("zeromq_main"),
-        }));
+                client: named("zeromq_main"),
+            }));
         let error = EmitterExecutionPlan::route(
             &unsupported_emitter,
             input_schema.arrow_schema().as_ref(),
@@ -2613,7 +2616,7 @@ mod tests {
         }));
         let program = bind_ingestor_route_for_test(
             &named::<ModelName>("logic_ingestor"),
-            SourceMetadataScope::Headers,
+            IngestorMetadataScope::Headers,
             true,
             &construction(
                 "INHERIT tenant SET u8_next = input.u8 + (1 AS U8), i8_abs = abs(input.i8), \

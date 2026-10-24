@@ -20,13 +20,13 @@ pub(super) fn mode<'src>()
 
 pub(super) fn push_body<'src>(
     context: EmitterContext,
-) -> impl Parser<'src, &'src [Token], ParsedDestination<ZeroMqPushSink>, extra::Err<ParseError<'src>>>
+) -> impl Parser<'src, &'src [Token], ParsedDestination<ZeroMqPushEmitter>, extra::Err<ParseError<'src>>>
 + Clone {
     encoded_destination(
         context,
         client_ref()
             .then_ignore(kw(Identifier::Mode))
             .then(mode())
-            .map(|(client, mode)| ZeroMqPushSink { client, mode }),
+            .map(|(client, mode)| ZeroMqPushEmitter { client, mode }),
     )
 }

@@ -23,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use nervix_models::{EmitSinkKind, IngestSourceKind};
+use nervix_models::{EmitterEntityKind, IngestorEntityKind};
 use serde::Deserialize;
 
 /// The inventory, as `tests/connector-capability-inventory.toml` writes it.
@@ -78,7 +78,7 @@ fn inventory() -> Inventory {
 /// Every capability every entity declares.
 fn declared() -> BTreeSet<Declared> {
     let mut declared = BTreeSet::new();
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         for capability in kind.capabilities().runtime_capabilities() {
             declared.insert(Declared {
                 entity: format!("{} INGESTOR", kind.phrase()),
@@ -86,7 +86,7 @@ fn declared() -> BTreeSet<Declared> {
             });
         }
     }
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         for capability in kind.capabilities().runtime_capabilities() {
             declared.insert(Declared {
                 entity: format!("{} EMITTER", kind.phrase()),

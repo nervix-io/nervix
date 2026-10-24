@@ -21,7 +21,7 @@ The current top-level surface includes:
 - domain lifecycle statements
 - user statements
 - create/alter/drop model statements
-- resource lifecycle statements
+- reingestor lifecycle statements
 - session subscription statements
 - explicit transaction controls: `BEGIN`, `COMMIT`, and `REVERT`
 - describe and show commands
@@ -469,11 +469,11 @@ Larger batches genuinely pay only at boundaries that do work per batch rather th
 Broker emitters — Kafka, Pulsar, NATS, RabbitMQ, MQTT, Redis, ZeroMQ, Sentry, and syslog — encode
 and publish one record at a time whatever the batch size; wire batching there belongs to the
 client, such as Kafka's `linger.ms` and `batch.size`. SQS `BATCH` groups at most ten records per
-request, and database sinks split every flush into statements of at most the
+request, and database emitters split every flush into statements of at most the
 [batching clause's](emitters.md#batching) `MAX MESSAGES` records. On such routes a larger
 `MAX BATCH SIZE` or a longer interval buys only fewer flush
 cycles, at the cost of latency, memory, and coarser failure and retry granularity: prefer the
-shortest interval the sink tolerates and let the byte cap protect memory.
+shortest interval the emitter tolerates and let the byte cap protect memory.
 
 `MAX BATCH SIZE` measures the logical Arrow data in the current batch slice: value buffers plus
 the offsets and validity data needed to represent those values. It does not count unused buffer
@@ -895,7 +895,7 @@ General notes:
 - keywords are case-insensitive
 - autocomplete is derived from the parser surface
 - transport/client configs are generally preserved as pass-through string key/value pairs
-- native schema fields may use the `SENSITIVE` modifier; session subscription output masks those values as `<masked>`, while emitters may send sensitive values to their configured external sink
+- native schema fields may use the `SENSITIVE` modifier; session subscription output masks those values as `<masked>`, while emitters may send sensitive values to their configured external emitter
 - `CREATE SUBSCRIPTION` and `DELETE SUBSCRIPTION` are not persisted in the registry
 - `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK` follow and stop following the active domain's
   clock for the session alone and are not persisted either; see

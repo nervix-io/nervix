@@ -20,8 +20,12 @@ pub(super) fn mode<'src>()
 
 pub(super) fn queue_body<'src>(
     context: EmitterContext,
-) -> impl Parser<'src, &'src [Token], ParsedDestination<RabbitMqQueueSink>, extra::Err<ParseError<'src>>>
-+ Clone {
+) -> impl Parser<
+    'src,
+    &'src [Token],
+    ParsedDestination<RabbitMqQueueEmitter>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
     encoded_destination(
         context,
         client_ref()
@@ -29,7 +33,7 @@ pub(super) fn queue_body<'src>(
             .then(external_name::<RabbitMqQueueName>())
             .then_ignore(kw(Identifier::Mode))
             .then(mode())
-            .map(|((client, queue), mode)| RabbitMqQueueSink {
+            .map(|((client, queue), mode)| RabbitMqQueueEmitter {
                 client,
                 queue,
                 mode,

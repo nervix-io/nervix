@@ -34,7 +34,7 @@ The recovery promise stops at a durable boundary:
 | --- | --- | --- |
 | Committed control-plane state and published consensus snapshots | Reopens from the committed generation | Reopens from the last fully published generation |
 | Runtime-state checkpoints already synced to the node store | Flushed again while runtime tasks stop | Reopen at the last completed periodic snapshot |
-| External source offsets and sink commits | Connector acknowledgements and commits finish when drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
+| External source offsets and emitter commits | Connector acknowledgements and commits finish when drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens and ACK maps | Drain tries to resolve them before its deadline | Volatile; they may be lost |
 
 The crash-window rows in the real-process scenario intentionally have no exactly-once assertion.

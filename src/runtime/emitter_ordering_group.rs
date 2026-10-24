@@ -6,10 +6,10 @@
 //!   selection, and the reason a row has no group.
 //! - **Depends on.** The emitter's start plan, the expression VM that evaluates a group expression,
 //!   and the relay batches it runs over.
-//! - **Must not know.** Which sink writes records under a group, what the external system does with
+//! - **Must not know.** Which emitter writes records under a group, what the external system does with
 //!   it, or when the emitter publishes.
 //!
-//! A sink that orders records per group receives each record's group already evaluated, so the
+//! A emitter that orders records per group receives each record's group already evaluated, so the
 //! expression that produced it, and the reason a record has none, both stay with the host.
 
 #![cfg_attr(

@@ -25,6 +25,7 @@ use std::{
 #[cfg(feature = "deloxide")]
 use arch_into::ArchInto as _;
 use error_stack::Report;
+use futures_util::future::try_join_all;
 #[cfg(feature = "deloxide")]
 use meticulous::OptionExt as _;
 use nix::sys::signal::Signal;
@@ -380,11 +381,10 @@ impl ServerProcessCluster {
         Ok(())
     }
 
-    /// Restarts persisted voters concurrently, including each executable read and readiness
-    /// probe, then waits until they converge through each process's public status endpoint.
+    /// Supervises every persisted voter's full startup concurrently, then waits until they
+    /// converge through each process's public status endpoint.
     pub(crate) async fn restart_all(&mut self) -> io::Result<()> {
-        futures_util::future::try_join_all(self.nodes.values_mut().map(ServerProcess::restart))
-            .await?;
+        try_join_all(self.nodes.values_mut().map(ServerProcess::restart)).await?;
         self.convergence().wait().await.map_err(convergence_failure)
     }
 

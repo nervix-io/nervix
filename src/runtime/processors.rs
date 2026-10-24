@@ -82,7 +82,7 @@ pub(super) struct WasmAckContext {
 #[derive(Debug, Clone)]
 pub(super) struct BranchInstanceTemplate {
     pub(super) revision: ProcessorPlanRevision,
-    pub(super) source_kind: ModelKind,
+    pub(super) entity_kind: ModelKind,
     pub(super) source: RelayName,
     pub(super) root_relay: RelayName,
     pub(super) branch: Option<BranchName>,

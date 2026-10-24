@@ -1506,7 +1506,7 @@ contract. A large reply uses the normal bounded transfer parts. Reading the repl
 acknowledges it. The Rust client decodes a batch only when its stream declares exactly the Arrow
 schema of the fields the emitter declared at the open and holds one record batch of the member
 count, and treats any other stream as an unexpected reply. The registered
-`client-emitter-deliveries` property holds that decoder to the stream a client emitter's sink
+`client-emitter-deliveries` property holds that decoder to the stream a client emitter's connector
 writes: the declared schema, every delivered row in order, and every value and null.
 
 `SettleEmitterBatchRequest` carries the consumer, attempt reference, and `Ack`, `Retry`, or

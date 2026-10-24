@@ -11,25 +11,25 @@ use nervix_models::{
     AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
     AlterWireSchema, AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope,
-    ClientSourceEntity, CordonNode, CreateDomain, CreateResource, CreateStatement, CreateUser,
+    ClientIngestorEntity, CordonNode, CreateDomain, CreateResource, CreateStatement, CreateUser,
     DescribeCluster, DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter,
     DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement,
     DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction,
     DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace,
-    DomainTimeRate, DrainNode, DropModel, DropNode, EmitSinkKind, EmitterBatchLegality,
-    EmitterBodyForm, ExistingUserPolicy, FieldName, HttpSourceEntity, IngestSourceKind,
-    IngestorAlteration, InspectionFormat, KafkaSourceEntity, LookupQuery, ModelKind, ModelName,
-    MqttSourceEntity, NatsSourceEntity, NodeRef, PlacementPolicy, PrometheusSourceEntity,
-    PulsarSourceEntity, RabbitMqSourceEntity, RebindResource, RebindResourceMembers,
-    RebindResourceSelection, RedisSourceEntity, RelayBranching, RelayName, Relocation,
-    RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+    DomainTimeRate, DrainNode, DropModel, DropNode, EmitterBatchLegality, EmitterBodyForm,
+    EmitterEntityKind, EmitterReferenceKind, ExistingUserPolicy, FieldName, HttpIngestorEntity,
+    IngestorAlteration, IngestorEntityKind, InspectionFormat, KafkaIngestorEntity, LookupQuery,
+    ModelKind, ModelName, MqttIngestorEntity, NatsIngestorEntity, NodeRef, PlacementPolicy,
+    PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity, RebindResource,
+    RebindResourceMembers, RebindResourceSelection, RedisIngestorEntity, RelayBranching, RelayName,
+    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
     RelocationSelection, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore,
     RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate,
     ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
-    SinkReferenceKind, SqsSourceEntity, StartDomain, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionLiteral, SyslogSourceEntity, TransactionInspectionRequest,
+    SqsIngestorEntity, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
     TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
-    WebsocketsSourceEntity, ZeroMqSourceEntity,
+    WebsocketsIngestorEntity, ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -487,7 +487,7 @@ impl Arbitrary<'_> {
                 })
             }
             StatementVariant::AlterEmitter => {
-                let kinds = EmitSinkKind::all().collect::<Vec<_>>();
+                let kinds = EmitterEntityKind::all().collect::<Vec<_>>();
                 let count = NonZeroUsize::new(kinds.len())
                     .assured("the vocabulary declares emitter entities");
                 let kind = kinds[self.entropy.index(count)];
@@ -1027,7 +1027,7 @@ impl Arbitrary<'_> {
             .assured("a route list holds at least one route")
     }
 
-    fn alter_emitter_operation(&mut self, kind: EmitSinkKind) -> AlterEmitterOperation {
+    fn alter_emitter_operation(&mut self, kind: EmitterEntityKind) -> AlterEmitterOperation {
         let mut choices = vec![
             EmitterOperationForm::AddFrom,
             EmitterOperationForm::DropFrom,
@@ -1041,7 +1041,7 @@ impl Arbitrary<'_> {
             EmitterOperationForm::SetFlush,
         ];
         let capabilities = kind.capabilities();
-        if let SinkReferenceKind::Client(_) | SinkReferenceKind::StorageClient(_) =
+        if let EmitterReferenceKind::Client(_) | EmitterReferenceKind::StorageClient(_) =
             capabilities.reference
         {
             choices.push(EmitterOperationForm::SetClient);
@@ -1087,7 +1087,7 @@ impl Arbitrary<'_> {
                         Some(emitter.construction)
                     };
                 AlterEmitterOperation::SetTo {
-                    destination: emitter.sink,
+                    destination: emitter.connector,
                     body: emitter.body,
                     construction,
                 }
@@ -1107,7 +1107,7 @@ impl Arbitrary<'_> {
                 mode: self.ack_mode(),
             },
             EmitterOperationForm::SetMode => AlterEmitterOperation::SetPublishingMode {
-                mode: self.emit_sink_of(kind).mode_change(),
+                mode: self.emitter_entity_of(kind).mode_change(),
             },
             EmitterOperationForm::SetBatch => AlterEmitterOperation::SetBatch {
                 policy: self.batch_policy(),
@@ -1130,51 +1130,51 @@ impl Arbitrary<'_> {
     /// alter it.
     pub fn ingestor_alteration(&mut self) -> IngestorAlteration {
         match self.ingest_source_kind() {
-            IngestSourceKind::Client(ClientSourceEntity::Producer) => self
+            IngestorEntityKind::Client(ClientIngestorEntity::Producer) => self
                 .operations(|arbitrary| {
                     arbitrary.alter_ingestor_operation(Self::client_producer_source)
                 })
                 .into(),
-            IngestSourceKind::Http(HttpSourceEntity::Request) => {
+            IngestorEntityKind::Http(HttpIngestorEntity::Request) => {
                 self.transport_operations(Self::http_request_source)
             }
-            IngestSourceKind::Http(HttpSourceEntity::Endpoint) => {
+            IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => {
                 self.transport_operations(Self::http_endpoint_source)
             }
-            IngestSourceKind::Kafka(KafkaSourceEntity::Topic) => {
+            IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) => {
                 self.transport_operations(Self::kafka_topic_source)
             }
-            IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) => {
+            IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => {
                 self.transport_operations(Self::pulsar_topic_source)
             }
-            IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => {
+            IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => {
                 self.transport_operations(Self::mqtt_topic_source)
             }
-            IngestSourceKind::Nats(NatsSourceEntity::Subject) => {
+            IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => {
                 self.transport_operations(Self::nats_subject_source)
             }
-            IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) => {
+            IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => {
                 self.transport_operations(Self::rabbitmq_queue_source)
             }
-            IngestSourceKind::Redis(RedisSourceEntity::PubSub) => {
+            IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => {
                 self.transport_operations(Self::redis_pubsub_source)
             }
-            IngestSourceKind::Prometheus(PrometheusSourceEntity::Query) => {
+            IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => {
                 self.transport_operations(Self::prometheus_query_source)
             }
-            IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull) => {
+            IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull) => {
                 self.transport_operations(Self::zeromq_pull_source)
             }
-            IngestSourceKind::Sqs(SqsSourceEntity::Queue) => {
+            IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => {
                 self.transport_operations(Self::sqs_queue_source)
             }
-            IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
+            IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection) => {
                 self.transport_operations(Self::websockets_connection_source)
             }
-            IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => {
+            IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => {
                 self.transport_operations(Self::websockets_endpoint_source)
             }
-            IngestSourceKind::Syslog(SyslogSourceEntity::Listener) => {
+            IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener) => {
                 self.transport_operations(Self::syslog_listener_source)
             }
         }

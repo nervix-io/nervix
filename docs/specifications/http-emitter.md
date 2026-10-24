@@ -20,7 +20,7 @@ provisioning or probe request against the destination.
 
 ## Plexus surface
 
-The HTTP sink has this form:
+The HTTP emitter has this form:
 
 ```nspl,ignore
 CREATE HTTP REQUEST EMITTER <name> FROM <relays> TO <client>
@@ -35,7 +35,7 @@ in that order. `MODE ACK` is the request/response mode: it takes no acknowledgem
 `ACK TIMEOUT`. HTTP emission supports neither `NO ACK` nor a parallel publishing mode. The
 referenced client's `timeout_ms` bounds each attempt.
 
-The ordinary emitter clauses surround this sink: source relays and their predicates, optional
+The ordinary emitter clauses surround this emitter: source relays and their predicates, optional
 `COLLECT FOR` and materialized dependencies, route construction where a codec is used, optional
 route `WHERE`, optional `INVOKE`, required `FLUSH`, and message and general error policies.
 Attachment is selected by the ordinary `CREATE [ATTACHED|DETACHED] EMITTER` form.
@@ -360,7 +360,7 @@ semantics govern initialization failures and work abandoned when execution canno
 ### Configuration changes
 
 Changing the method or path uses a complete
-`ALTER HTTP REQUEST EMITTER ... SET TO ... MODE ...` sink replacement and uses `ENTITY_PAUSE`. For this
+`ALTER HTTP REQUEST EMITTER ... SET TO ... MODE ...` emitter replacement and uses `ENTITY_PAUSE`. For this
 HTTP form, `SET TO` includes exactly one of `ENCODE USING` and `WITHOUT BODY`, so a replacement
 never inherits an ambiguous body selection. `SET CLIENT` and `SET ENCODE USING` retain their
 existing meanings; `SET ENCODE USING` selects codec-body mode, and `DROP ENCODE` is rejected for
@@ -423,14 +423,14 @@ header values never become metric labels.
 
 An HTTP emitter publishes exactly one request per eligible record, so it has no batch container.
 The optional `BATCH MAX MESSAGES <n> MAX SIZE <bytes>` clause of
-[optional emitter batching](./emitter-batching.md) is not part of the HTTP sink: a statement that
+[optional emitter batching](./emitter-batching.md) is not part of the HTTP emitter: a statement that
 declares it on an HTTP emitter is rejected with a validation error naming the emitter, completion
-does not offer it after an HTTP sink, and `ALTER HTTP REQUEST EMITTER ... SET BATCH` on an HTTP emitter fails
+does not offer it after an HTTP emitter, and `ALTER HTTP REQUEST EMITTER ... SET BATCH` on an HTTP emitter fails
 the same way. `DESCRIBE EMITTER` reports `batch: none` for every HTTP emitter.
 
-This leaves the batching contract unchanged. Its sink matrix, its validation list, and its
-qualification cover the sixteen sinks it names, and none of them gains or loses a form because the
-HTTP sink exists. The HTTP emitter still consumes the host machinery both contracts share: a
+This leaves the batching contract unchanged. Its emitter matrix, its validation list, and its
+qualification cover the sixteen emitters it names, and none of them gains or loses a form because the
+HTTP emitter exists. The HTTP emitter still consumes the host machinery both contracts share: a
 prepared request is a prepared payload with exactly one member, retained verbatim across local
 retries and resolved once by its outcome.
 

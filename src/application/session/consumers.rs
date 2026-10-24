@@ -20,8 +20,8 @@ use nervix_client_wire::{
     SettleEmitterBatchOutcome, SettleEmitterBatchRequest,
 };
 use nervix_models::{
-    CLIENT_CONSUMER_SESSION_BYTES, ClientEndpointContract, CreateEmitter, DomainStatus, EmitSink,
-    FlushPolicy, MAX_CLIENT_CONSUMERS_PER_SESSION, SchemaField,
+    CLIENT_CONSUMER_SESSION_BYTES, ClientEndpointContract, CreateEmitter, DomainStatus,
+    EmitterEntity, FlushPolicy, MAX_CLIENT_CONSUMERS_PER_SESSION, SchemaField,
 };
 use nervix_primitives::sync::{
     Arc, Mutex as AsyncMutex, StdArc, StdWeak,
@@ -223,10 +223,10 @@ impl SessionConsumers {
                 "emitter is not scheduled",
             ));
         };
-        if !matches!(model.sink.as_ref(), EmitSink::Client(_)) {
+        if !matches!(model.connector.as_ref(), EmitterEntity::Client(_)) {
             return Err(refuse(
                 EmitterOpenRefusal::NotClientEmitter,
-                "emitter has an external sink",
+                "emitter has an external emitter",
             ));
         }
         let Some(owner) = scheduled.execution_node() else {

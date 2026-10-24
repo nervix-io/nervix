@@ -225,7 +225,7 @@ fn a_bare_keyword_is_not_accepted_as_a_duration() {
     .expect("an identifier parses and is validated where it is consumed");
 }
 
-/// A codec is required by the sink, so the grammar asks for it right after the sink.
+/// A codec is required by the emitter, so the grammar asks for it right after the emitter.
 ///
 /// Written before `TO`, the requirement could only be checked once the whole statement was
 /// read, and a `try_map` over the whole statement reports its failure at the statement's first
@@ -237,10 +237,10 @@ fn a_cross_clause_constraint_is_reported_where_it_was_broken() {
         "CREATE KAFKA TOPIC EMITTER e FROM r TO c TOPIC 't' MODE NO ACK RETRY POLICY BACKOFF \
          250ms MAX 30s FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG",
     )
-    .expect_err("an encoded sink needs a codec");
+    .expect_err("an encoded emitter needs a codec");
     assert!(
         format!("{error:?}").contains("expected ENCODE USING"),
-        "the codec is required by the sink, so the grammar should ask for it: {error:?}"
+        "the codec is required by the emitter, so the grammar should ask for it: {error:?}"
     );
 }
 
@@ -1309,8 +1309,8 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
         &[]
     )]
 #[case::alter_emitter(
-        "ALTER ZEROMQ PUSH EMITTER event_sink SET TO sink_b MODE NO ACK RETRY POLICY BACKOFF 250ms \
-             MAX 30s ENCODE USING event_codec, SET CLIENT sink_c, SET ENCODE USING event_codec, SET COLLECT FOR 10ms MAX \
+        "ALTER ZEROMQ PUSH EMITTER event_emitter SET TO emitter_b MODE NO ACK RETRY POLICY BACKOFF 250ms \
+             MAX 30s ENCODE USING event_codec, SET CLIENT emitter_c, SET ENCODE USING event_codec, SET COLLECT FOR 10ms MAX \
              BATCH SIZE 1MiB, SET DETACHED, SET FLUSH IMMEDIATE;",
         None,
         &[]

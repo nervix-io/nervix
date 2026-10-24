@@ -2104,10 +2104,10 @@ mod tests {
                     schema("event_schema"),
                     wire_schema("event_wire"),
                     codec("event_codec", "event_schema"),
-                    client_model("sink_a"),
-                    client_model("sink_b"),
+                    client_model("emitter_a"),
+                    client_model("emitter_b"),
                     relay("outgoing", "event_schema"),
-                    emitter("event_sink", "outgoing", "event_codec", "sink_a"),
+                    emitter("event_emitter", "outgoing", "event_codec", "emitter_a"),
                 ],
             )
             .expect("initial graph should succeed");
@@ -2116,8 +2116,10 @@ mod tests {
             .plan_mutations(
                 &domain,
                 &[RegistryMutation::AlterEmitter(AlterEmitter {
-                    kind: nervix_models::EmitSinkKind::Kafka(nervix_models::KafkaSinkEntity::Topic),
-                    emitter: named("event_sink"),
+                    kind: nervix_models::EmitterEntityKind::Kafka(
+                        nervix_models::KafkaEmitterEntity::Topic,
+                    ),
+                    emitter: named("event_emitter"),
                     operations: vec![nervix_models::AlterEmitterOperation::SetFlush {
                         flush_policy: FlushPolicy::Immediate,
                     }],
@@ -2130,10 +2132,12 @@ mod tests {
             .plan_mutations(
                 &domain,
                 &[RegistryMutation::AlterEmitter(AlterEmitter {
-                    kind: nervix_models::EmitSinkKind::Kafka(nervix_models::KafkaSinkEntity::Topic),
-                    emitter: named("event_sink"),
+                    kind: nervix_models::EmitterEntityKind::Kafka(
+                        nervix_models::KafkaEmitterEntity::Topic,
+                    ),
+                    emitter: named("event_emitter"),
                     operations: vec![nervix_models::AlterEmitterOperation::SetClient {
-                        client: named("sink_b"),
+                        client: named("emitter_b"),
                     }],
                 })],
             )
@@ -2143,7 +2147,7 @@ mod tests {
             entity_pause.quiesce().affected_entities(),
             &[super::NodeRef {
                 kind: ModelKind::Emitter,
-                identifier: named("event_sink"),
+                identifier: named("event_emitter"),
             }]
         );
 

@@ -21,7 +21,7 @@ use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use meticulous::ResultExt as _;
 use nervix_primitives::sync::StdArc;
 
-use crate::{ParseAsType, SchemaField, SourceMetadataScope};
+use crate::{IngestorMetadataScope, ParseAsType, SchemaField};
 
 impl ParseAsType {
     /// The Arrow data type a value of this type is represented as. A datetime is nanoseconds in
@@ -71,7 +71,7 @@ impl SchemaField {
     }
 }
 
-impl SourceMetadataScope {
+impl IngestorMetadataScope {
     /// The Arrow schema of the typed fields this namespace exposes, in declared order and every one
     /// nullable. A scope that exposes transport headers only has no typed namespace, so it has no
     /// schema.
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn a_metadata_scope_is_carried_as_its_declared_fields_and_headers_alone_as_none() {
-        let described = |scope: SourceMetadataScope| {
+        let described = |scope: IngestorMetadataScope| {
             scope.arrow_schema().map(|schema| {
                 schema
                     .fields()
@@ -149,9 +149,9 @@ mod tests {
                     .collect::<Vec<_>>()
             })
         };
-        assert_eq!(described(SourceMetadataScope::Headers), None);
+        assert_eq!(described(IngestorMetadataScope::Headers), None);
         assert_eq!(
-            described(SourceMetadataScope::Kafka),
+            described(IngestorMetadataScope::Kafka),
             Some(vec![
                 ("topic".to_owned(), DataType::Utf8, true),
                 ("partition".to_owned(), DataType::Int32, true),
@@ -159,11 +159,11 @@ mod tests {
             ])
         );
         assert_eq!(
-            described(SourceMetadataScope::Syslog),
+            described(IngestorMetadataScope::Syslog),
             Some(vec![("peer_addr".to_owned(), DataType::Utf8, true)])
         );
         assert_eq!(
-            described(SourceMetadataScope::Websockets),
+            described(IngestorMetadataScope::Websockets),
             Some(vec![("frame_type".to_owned(), DataType::Utf8, true)])
         );
     }
@@ -171,9 +171,9 @@ mod tests {
     #[test]
     fn a_metadata_scope_s_columns_are_the_schema_fields_a_program_is_validated_against() {
         for scope in [
-            SourceMetadataScope::Kafka,
-            SourceMetadataScope::Syslog,
-            SourceMetadataScope::Websockets,
+            IngestorMetadataScope::Kafka,
+            IngestorMetadataScope::Syslog,
+            IngestorMetadataScope::Websockets,
         ] {
             assert_eq!(
                 scope.arrow_schema(),
@@ -181,7 +181,7 @@ mod tests {
                 "{scope:?}"
             );
         }
-        assert!(SourceMetadataScope::Headers.fields().is_empty());
+        assert!(IngestorMetadataScope::Headers.fields().is_empty());
     }
 
     #[test]

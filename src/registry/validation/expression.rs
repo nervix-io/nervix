@@ -16,7 +16,7 @@ use ahash::{HashMap, HashSet};
 use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 use error_stack::{Report, ResultExt};
 use nervix_models::{
-    DomainName, EmitSink, Expression, FieldName, HttpRequestSink, HttpSink, LookupName,
+    DomainName, EmitterEntity, Expression, FieldName, HttpEmitter, HttpRequestEmitter, LookupName,
     MaterializedStatePolicy, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName, NodeRef,
     ProcessorOutputs,
 };
@@ -153,13 +153,16 @@ pub(in crate::registry) fn visit_model_expressions(
                     visitor(argument);
                 }
             }
-            if let EmitSink::Http(HttpSink::Request(HttpRequestSink { method, path, .. })) =
-                model.sink.as_ref()
+            if let EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
+                method,
+                path,
+                ..
+            })) = model.connector.as_ref()
             {
                 visitor(method);
                 visitor(path);
             }
-            for value in model.sink.direct_value_mappings() {
+            for value in model.connector.direct_value_mappings() {
                 visitor(&value.expression);
             }
             visit_error_policy(&model.error_policies.message, visitor);

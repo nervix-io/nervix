@@ -26,7 +26,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/websockets/src/signaling/__fuzz__/signaling__representation_tests__bolero_protobuf_signaling_preserves_every_value/corpus"
+corpus = "crates/connectors/websockets/src/connection/signaling/__fuzz__/connection__signaling__representation_tests__bolero_protobuf_signaling_preserves_every_value/corpus"
 domain_version = 1
 features = []
 id = "websocket-signaling-protobuf-values"
@@ -35,13 +35,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 256
 package = "nervix-connector-websockets"
 random_iterations = 256
-source = "crates/connectors/websockets/src/signaling/representation_tests.rs"
-test = "signaling::representation_tests::bolero_protobuf_signaling_preserves_every_value"
+source = "crates/connectors/websockets/src/connection/signaling/representation_tests.rs"
+test = "connection::signaling::representation_tests::bolero_protobuf_signaling_preserves_every_value"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/websockets/src/signaling/__fuzz__/signaling__representation_tests__bolero_damaged_protobuf_signaling_frames_are_refused/corpus"
+corpus = "crates/connectors/websockets/src/connection/signaling/__fuzz__/connection__signaling__representation_tests__bolero_damaged_protobuf_signaling_frames_are_refused/corpus"
 domain_version = 1
 features = []
 id = "websocket-signaling-protobuf-malformed"
@@ -50,13 +50,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 256
 package = "nervix-connector-websockets"
 random_iterations = 256
-source = "crates/connectors/websockets/src/signaling/representation_tests.rs"
-test = "signaling::representation_tests::bolero_damaged_protobuf_signaling_frames_are_refused"
+source = "crates/connectors/websockets/src/connection/signaling/representation_tests.rs"
+test = "connection::signaling::representation_tests::bolero_damaged_protobuf_signaling_frames_are_refused"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/otel/src/__fuzz__/hex_id_properties__bolero_hex_ids_match_the_scalar_reference/corpus"
+corpus = "crates/connectors/otel/src/otlp/__fuzz__/otlp__hex_id_properties__bolero_hex_ids_match_the_scalar_reference/corpus"
 domain_version = 1
 features = []
 id = "otel-hex-ids"
@@ -65,8 +65,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 128
 package = "nervix-connector-otel"
 random_iterations = 256
-source = "crates/connectors/otel/src/hex_id_properties.rs"
-test = "hex_id_properties::bolero_hex_ids_match_the_scalar_reference"
+source = "crates/connectors/otel/src/otlp/hex_id_properties.rs"
+test = "otlp::hex_id_properties::bolero_hex_ids_match_the_scalar_reference"
 test_target = "lib"
 
 [[target]]
@@ -1001,7 +1001,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/syslog/src/__fuzz__/source__tests__bolero_stream_framing_matches_the_reference_however_reads_split_it/corpus"
+corpus = "crates/connectors/syslog/src/listener/__fuzz__/listener__tests__bolero_stream_framing_matches_the_reference_however_reads_split_it/corpus"
 domain_version = 1
 features = []
 id = "syslog-stream-framing"
@@ -1010,8 +1010,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-syslog"
 random_iterations = 256
-source = "crates/connectors/syslog/src/source_tests.rs"
-test = "source::tests::bolero_stream_framing_matches_the_reference_however_reads_split_it"
+source = "crates/connectors/syslog/src/listener/tests.rs"
+test = "listener::tests::bolero_stream_framing_matches_the_reference_however_reads_split_it"
 test_target = "lib"
 
 [[target]]
@@ -2519,7 +2519,7 @@ corpus = "src/runtime/__fuzz__/runtime__emitter_client__properties__bolero_clien
 domain_version = 1
 features = []
 id = "client-emitter-deliveries"
-invariant = "The rows a client emitter sink writes for one delivery decode in the client library to the Arrow schema of exactly the fields the emitter declares and to every delivered row, value and null in order, with floats by their bits, and the same bytes are refused under one row more or fewer and under fields of another optionality, order or number."
+invariant = "The rows a client emitter connector writes for one delivery decode in the client library to the Arrow schema of exactly the fields the emitter declares and to every delivered row, value and null in order, with floats by their bits, and the same bytes are refused under one row more or fewer and under fields of another optionality, order or number."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"
@@ -2830,7 +2830,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/pulsar/src/__fuzz__/receipt_tests__bolero_receipts_keep_exact_unanswered_counts_and_the_first_failure/corpus"
+corpus = "crates/connectors/pulsar/src/topic/__fuzz__/topic__receipt_tests__bolero_receipts_keep_exact_unanswered_counts_and_the_first_failure/corpus"
 domain_version = 1
 features = []
 id = "pulsar-unconfirmed-receipts"
@@ -2839,8 +2839,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-pulsar"
 random_iterations = 256
-source = "crates/connectors/pulsar/src/receipt_tests.rs"
-test = "receipt_tests::bolero_receipts_keep_exact_unanswered_counts_and_the_first_failure"
+source = "crates/connectors/pulsar/src/topic/receipt_tests.rs"
+test = "topic::receipt_tests::bolero_receipts_keep_exact_unanswered_counts_and_the_first_failure"
 test_target = "lib"
 
 [[target]]
@@ -2909,7 +2909,7 @@ corpus = "src/runtime/__fuzz__/runtime__emitter_record_writes__tests__bolero_ret
 domain_version = 1
 features = []
 id = "emitter-retained-payloads"
-invariant = "Across generated packing and write steps with delivered, rejected and unanswered records and failed writes, every write hands the sink the retained payloads in packing order with exactly the bytes, key, headers and group they were prepared with; a delivery resolves every member, a rejection rejects every member with one error and leaves them awaiting it, and an unanswered payload stays retained unchanged."
+invariant = "Across generated packing and write steps with delivered, rejected and unanswered records and failed writes, every write hands the emitter the retained payloads in packing order with exactly the bytes, key, headers and group they were prepared with; a delivery resolves every member, a rejection rejects every member with one error and leaves them awaiting it, and an unanswered payload stays retained unchanged."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-server"
@@ -2920,7 +2920,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/sqs/src/__fuzz__/tests__bolero_batch_requests_hold_their_records_within_every_sqs_limit/corpus"
+corpus = "crates/connectors/sqs/src/queue/__fuzz__/queue__tests__bolero_batch_requests_hold_their_records_within_every_sqs_limit/corpus"
 domain_version = 1
 features = []
 id = "sqs-batch-requests"
@@ -2929,13 +2929,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-connector-sqs"
 random_iterations = 256
-source = "crates/connectors/sqs/src/lib.rs"
-test = "tests::bolero_batch_requests_hold_their_records_within_every_sqs_limit"
+source = "crates/connectors/sqs/src/queue/mod.rs"
+test = "queue::tests::bolero_batch_requests_hold_their_records_within_every_sqs_limit"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/iceberg/src/__fuzz__/tests__bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth/corpus"
+corpus = "crates/connectors/iceberg/src/table/__fuzz__/table__tests__bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth/corpus"
 domain_version = 1
 features = []
 id = "iceberg-nested-datetime-staging"
@@ -2944,13 +2944,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 160
 package = "nervix-connector-iceberg"
 random_iterations = 256
-source = "crates/connectors/iceberg/src/lib.rs"
-test = "tests::bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth"
+source = "crates/connectors/iceberg/src/table/mod.rs"
+test = "table::tests::bolero_nested_iceberg_datetimes_are_narrowed_at_every_depth"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/iceberg/src/table_projection/__fuzz__/table_projection__tests__bolero_staged_columns_land_in_the_table_columns_of_their_names/corpus"
+corpus = "crates/connectors/iceberg/src/table/table_projection/__fuzz__/table__table_projection__tests__bolero_staged_columns_land_in_the_table_columns_of_their_names/corpus"
 domain_version = 1
 features = []
 id = "iceberg-table-projection"
@@ -2959,13 +2959,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-iceberg"
 random_iterations = 256
-source = "crates/connectors/iceberg/src/table_projection/tests.rs"
-test = "table_projection::tests::bolero_staged_columns_land_in_the_table_columns_of_their_names"
+source = "crates/connectors/iceberg/src/table/table_projection/tests.rs"
+test = "table::table_projection::tests::bolero_staged_columns_land_in_the_table_columns_of_their_names"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/mqtt/src/__fuzz__/tests__bolero_measured_packets_are_the_bytes_the_client_writes/corpus"
+corpus = "crates/connectors/mqtt/src/topic/__fuzz__/topic__tests__bolero_measured_packets_are_the_bytes_the_client_writes/corpus"
 domain_version = 1
 features = []
 id = "mqtt-publish-packets"
@@ -2974,13 +2974,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-mqtt"
 random_iterations = 256
-source = "crates/connectors/mqtt/src/lib.rs"
-test = "tests::bolero_measured_packets_are_the_bytes_the_client_writes"
+source = "crates/connectors/mqtt/src/topic/mod.rs"
+test = "topic::tests::bolero_measured_packets_are_the_bytes_the_client_writes"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/postgres/src/__fuzz__/tests__bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes/corpus"
+corpus = "crates/connectors/postgres/src/table/__fuzz__/table__tests__bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes/corpus"
 domain_version = 1
 features = []
 id = "postgres-insert-measures"
@@ -2989,13 +2989,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-connector-postgres"
 random_iterations = 256
-source = "crates/connectors/postgres/src/lib.rs"
-test = "tests::bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes"
+source = "crates/connectors/postgres/src/table/mod.rs"
+test = "table::tests::bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/mongodb/src/__fuzz__/tests__bolero_failed_write_answers_partition_the_write/corpus"
+corpus = "crates/connectors/mongodb/src/collection/__fuzz__/collection__tests__bolero_failed_write_answers_partition_the_write/corpus"
 domain_version = 1
 features = []
 id = "mongodb-write-answers"
@@ -3004,8 +3004,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 256
 package = "nervix-connector-mongodb"
 random_iterations = 256
-source = "crates/connectors/mongodb/src/lib.rs"
-test = "tests::bolero_failed_write_answers_partition_the_write"
+source = "crates/connectors/mongodb/src/collection/mod.rs"
+test = "collection::tests::bolero_failed_write_answers_partition_the_write"
 test_target = "lib"
 
 [[target]]
@@ -3085,7 +3085,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/kafka/src/__fuzz__/source__tests__bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition/corpus"
+corpus = "crates/connectors/kafka/src/topic/__fuzz__/topic__ingestor__tests__bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition/corpus"
 domain_version = 1
 features = []
 id = "kafka-partition-offsets"
@@ -3094,13 +3094,13 @@ manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-connector-kafka"
 random_iterations = 256
-source = "crates/connectors/kafka/src/source.rs"
-test = "source::tests::bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition"
+source = "crates/connectors/kafka/src/topic/ingestor.rs"
+test = "topic::ingestor::tests::bolero_partition_offsets_fold_to_the_latest_and_earliest_per_partition"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/sentry/src/__fuzz__/envelope_properties__bolero_prepared_envelopes_preserve_complete_events_across_attempts/corpus"
+corpus = "crates/connectors/sentry/src/event/__fuzz__/event__envelope_properties__bolero_prepared_envelopes_preserve_complete_events_across_attempts/corpus"
 domain_version = 1
 features = []
 id = "sentry-prepared-envelopes"
@@ -3109,23 +3109,23 @@ manifest = "Cargo.toml"
 max_input_bytes = 128
 package = "nervix-connector-sentry"
 random_iterations = 128
-source = "crates/connectors/sentry/src/envelope_properties.rs"
-test = "envelope_properties::bolero_prepared_envelopes_preserve_complete_events_across_attempts"
+source = "crates/connectors/sentry/src/event/envelope_properties.rs"
+test = "event::envelope_properties::bolero_prepared_envelopes_preserve_complete_events_across_attempts"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/http/src/sink/__fuzz__/sink__request_head_tests__bolero_request_heads_carry_every_prepared_field_and_their_declared_framing/corpus"
+corpus = "crates/connectors/http/src/request/emitter/__fuzz__/request__emitter__request_head_tests__bolero_request_heads_carry_every_prepared_field_and_their_declared_framing/corpus"
 domain_version = 1
 features = []
 id = "http-request-heads"
-invariant = "For valid prepared requests over content-defining, contentless and extension methods in their case variants, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without Accept, and bounded bodies, the head the sink writes parses as exactly one complete HTTP/1.1 request head carrying the prepared request line, Host, Connection, the Accept default and every application field in order, and declaring a body's length, an empty length for a bodyless POST, PUT or PATCH in any ASCII case, and no length otherwise."
+invariant = "For valid prepared requests over content-defining, contentless and extension methods in their case variants, named, IPv4 and IPv6 origins with and without default ports, plain targets, application headers with and without Accept, and bounded bodies, the head the emitter writes parses as exactly one complete HTTP/1.1 request head carrying the prepared request line, Host, Connection, the Accept default and every application field in order, and declaring a body's length, an empty length for a bodyless POST, PUT or PATCH in any ASCII case, and no length otherwise."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-http"
 random_iterations = 256
-source = "crates/connectors/http/src/sink/request_head_tests.rs"
-test = "sink::request_head_tests::bolero_request_heads_carry_every_prepared_field_and_their_declared_framing"
+source = "crates/connectors/http/src/request/emitter/request_head_tests.rs"
+test = "request::emitter::request_head_tests::bolero_request_heads_carry_every_prepared_field_and_their_declared_framing"
 test_target = "lib"
 
 [[target]]
@@ -3175,7 +3175,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/connectors/websockets/src/signaling/__fuzz__/signaling__representation_tests__bolero_acknowledgement_frames_preserve_the_complete_outcome_value/corpus"
+corpus = "crates/connectors/websockets/src/connection/signaling/__fuzz__/connection__signaling__representation_tests__bolero_acknowledgement_frames_preserve_the_complete_outcome_value/corpus"
 domain_version = 1
 features = []
 id = "websocket-acknowledgement-values"
@@ -3184,8 +3184,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 64
 package = "nervix-connector-websockets"
 random_iterations = 256
-source = "crates/connectors/websockets/src/signaling/representation_tests.rs"
-test = "signaling::representation_tests::bolero_acknowledgement_frames_preserve_the_complete_outcome_value"
+source = "crates/connectors/websockets/src/connection/signaling/representation_tests.rs"
+test = "connection::signaling::representation_tests::bolero_acknowledgement_frames_preserve_the_complete_outcome_value"
 test_target = "lib"
 
 [[target]]
@@ -3205,7 +3205,7 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "src/runtime/ingestors/__fuzz__/runtime__ingestors__source__metadata_tests__bolero_websockets_retained_metadata_preserves_every_field/corpus"
+corpus = "src/runtime/ingestors/__fuzz__/runtime__ingestors__connector__metadata_tests__bolero_websockets_retained_metadata_preserves_every_field/corpus"
 domain_version = 1
 features = []
 id = "websocket-retained-metadata"
@@ -3214,8 +3214,8 @@ manifest = "Cargo.toml"
 max_input_bytes = 32
 package = "nervix-server"
 random_iterations = 256
-source = "src/runtime/ingestors/source_metadata_tests.rs"
-test = "runtime::ingestors::source::metadata_tests::bolero_websockets_retained_metadata_preserves_every_field"
+source = "src/runtime/ingestors/connector_metadata_tests.rs"
+test = "runtime::ingestors::connector::metadata_tests::bolero_websockets_retained_metadata_preserves_every_field"
 test_target = "lib"
 
 [[target]]

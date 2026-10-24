@@ -3,8 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The emitter Model with its body, batching contract and attachment, its `ALTER`
-//!   operations and their typed failures, and the publishing modes a sink accepts.
-//! - **Depends on.** The sink union, the batching policy, processor inputs and route
+//!   operations and their typed failures, and the publishing modes an emitter accepts.
+//! - **Depends on.** The emitter union, the batching policy, processor inputs and route
 //!   construction, and the acknowledgement and retry vocabulary.
 //! - **Must not know.** How an emitter is validated, planned, hosted or driven.
 
@@ -20,9 +20,9 @@ use strum::{AsRefStr, EnumIter, EnumString, IntoStaticStr};
 use thiserror::Error;
 
 use crate::{
-    AckWindow, BatchUnavailability, ClientName, CodecName, EmitSink, EmitterBatchLegality,
-    EmitterName, ErrorPolicies, FlushPolicy, IcebergSink, InputCollectPolicy, ProcessorInputWhere,
-    ProcessorInputs, RelayName, RetryPolicy,
+    AckWindow, BatchUnavailability, ClientName, CodecName, EmitterBatchLegality, EmitterEntity,
+    EmitterName, ErrorPolicies, FlushPolicy, IcebergEmitter, InputCollectPolicy,
+    ProcessorInputWhere, ProcessorInputs, RelayName, RetryPolicy,
 };
 
 #[derive(
@@ -32,9 +32,9 @@ pub struct CreateEmitter {
     pub name: EmitterName,
     pub from: ProcessorInputs,
     pub body: EmitterBody,
-    pub sink: Box<EmitSink>,
+    pub connector: Box<EmitterEntity>,
     /// `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, absent when the emitter publishes one record per
-    /// message. A sink whose [`EmitSink::batch_legality`] requires it never omits it.
+    /// message. A emitter whose [`EmitterEntity::batch_legality`] requires it never omits it.
     pub batch: Option<crate::EmitterBatchPolicy>,
     pub flush_policy: FlushPolicy,
     pub error_policies: ErrorPolicies,
@@ -46,7 +46,7 @@ pub struct CreateEmitter {
 }
 
 /// The complete payload selection of an emitter. HTTP distinguishes an encoded body from an
-/// explicit absence of content; direct-value sinks construct their own destination values.
+/// explicit absence of content; direct-value emitters construct their own destination values.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -74,9 +74,9 @@ impl CreateEmitter {
         &mut self,
         alter: &AlterEmitter,
     ) -> error_stack::Result<(), AlterEmitterError> {
-        if self.sink.kind() != alter.kind {
+        if self.connector.kind() != alter.kind {
             return Err(Report::new(AlterEmitterError::EmitterKindMismatch {
-                stored: self.sink.kind(),
+                stored: self.connector.kind(),
                 requested: alter.kind,
             }));
         }
@@ -98,8 +98,8 @@ impl CreateEmitter {
         Ok(())
     }
 
-    /// Checks the batching clause against what this emitter's sink requires of it: present where
-    /// the sink has no unbounded write, and no larger than a payload the destination can carry.
+    /// Checks the batching clause against what this emitter's emitter requires of it: present where
+    /// the emitter has no unbounded write, and no larger than a payload the destination can carry.
     pub fn validate_batch(&self) -> error_stack::Result<(), EmitterBatchContractError> {
         match self.batch_contract_violation() {
             Some(violation) => Err(Report::new(violation)),
@@ -107,17 +107,17 @@ impl CreateEmitter {
         }
     }
 
-    /// The requirement of its sink's batching contract that this emitter's clause breaks, if any.
+    /// The requirement of its emitter's batching contract that this emitter's clause breaks, if any.
     ///
     /// Both the standalone check and an alteration report a violation from here, each in its own
     /// error, so neither has to rebuild the other's report.
     fn batch_contract_violation(&self) -> Option<EmitterBatchContractError> {
-        let sink = self.sink.kind().phrase();
-        let legality = self.sink.batch_legality();
+        let connector = self.connector.kind().phrase();
+        let legality = self.connector.batch_legality();
         let Some(batch) = &self.batch else {
             return match legality {
                 EmitterBatchLegality::Required { .. } => {
-                    Some(EmitterBatchContractError::Required { sink })
+                    Some(EmitterBatchContractError::Required { connector })
                 }
                 EmitterBatchLegality::Optional { .. }
                 | EmitterBatchLegality::Unavailable { .. } => None,
@@ -125,15 +125,15 @@ impl CreateEmitter {
         };
         let maximum = match legality {
             EmitterBatchLegality::Unavailable { reason } => {
-                return Some(EmitterBatchContractError::Unavailable { sink, reason });
+                return Some(EmitterBatchContractError::Unavailable { connector, reason });
             }
             EmitterBatchLegality::Required { maximum }
             | EmitterBatchLegality::Optional { maximum } => maximum,
         };
         let maximum = maximum?;
         if batch.max_size.bytes() > maximum.bytes() {
-            return Some(EmitterBatchContractError::SizeAboveSinkMaximum {
-                sink,
+            return Some(EmitterBatchContractError::SizeAboveEmitterMaximum {
+                connector,
                 declared: batch.max_size,
                 maximum,
             });
@@ -207,20 +207,20 @@ impl CreateEmitter {
                 body,
                 construction,
             } => {
-                if self.sink.kind() != destination.kind() {
+                if self.connector.kind() != destination.kind() {
                     return Err(Report::new(AlterEmitterError::DestinationKindMismatch {
-                        stored: self.sink.kind(),
+                        stored: self.connector.kind(),
                         requested: destination.kind(),
                     }));
                 }
-                self.sink = destination.clone();
+                self.connector = destination.clone();
                 self.body = body.clone();
                 if let Some(construction) = construction {
                     self.construction = construction.clone();
                 }
             }
             AlterEmitterOperation::SetClient { client } => {
-                let Some(current) = self.sink.client_mut() else {
+                let Some(current) = self.connector.client_mut() else {
                     return Err(Report::new(AlterEmitterError::ClientUnsupported));
                 };
                 *current = client.clone();
@@ -231,7 +231,7 @@ impl CreateEmitter {
                 };
             }
             AlterEmitterOperation::DropEncode => {
-                if let EmitSink::Http(_) = self.sink.as_ref() {
+                if let EmitterEntity::Http(_) = self.connector.as_ref() {
                     return Err(Report::new(AlterEmitterError::HttpDropEncode));
                 }
                 if self.body.codec().is_none() {
@@ -249,7 +249,7 @@ impl CreateEmitter {
                 self.mode = *mode;
             }
             AlterEmitterOperation::SetPublishingMode { mode } => {
-                self.sink.replace_mode(mode)?;
+                self.connector.replace_mode(mode)?;
             }
             AlterEmitterOperation::SetBatch { policy } => {
                 self.batch = Some(*policy);
@@ -266,7 +266,8 @@ impl CreateEmitter {
                 commit_each,
                 max_commit_size,
             } => {
-                let EmitSink::Iceberg(IcebergSink::Table(table)) = self.sink.as_mut() else {
+                let EmitterEntity::Iceberg(IcebergEmitter::Table(table)) = self.connector.as_mut()
+                else {
                     return Err(Report::new(AlterEmitterError::CommitPolicyUnsupported));
                 };
                 table.commit_each = commit_each.clone();
@@ -304,7 +305,7 @@ impl CreateEmitter {
 )]
 pub struct AlterEmitter {
     pub emitter: EmitterName,
-    pub kind: crate::EmitSinkKind,
+    pub kind: crate::EmitterEntityKind,
     pub operations: Vec<AlterEmitterOperation>,
 }
 
@@ -327,7 +328,7 @@ pub enum AlterEmitterOperation {
         relay: RelayName,
     },
     SetTo {
-        destination: Box<EmitSink>,
+        destination: Box<EmitterEntity>,
         body: EmitterBody,
         construction: Option<crate::RouteConstruction>,
     },
@@ -365,13 +366,13 @@ pub enum AlterEmitterOperation {
 pub enum AlterEmitterError {
     #[error("ALTER {requested} EMITTER targets an emitter declared as {stored}")]
     EmitterKindMismatch {
-        stored: crate::EmitSinkKind,
-        requested: crate::EmitSinkKind,
+        stored: crate::EmitterEntityKind,
+        requested: crate::EmitterEntityKind,
     },
     #[error("{stored} EMITTER cannot change its destination to {requested}")]
     DestinationKindMismatch {
-        stored: crate::EmitSinkKind,
-        requested: crate::EmitSinkKind,
+        stored: crate::EmitterEntityKind,
+        requested: crate::EmitterEntityKind,
     },
     #[error("ALTER targets emitter `{requested}`, but the stored emitter is `{stored}`")]
     EmitterNameMismatch {
@@ -400,25 +401,25 @@ pub enum AlterEmitterError {
     Batch(EmitterBatchContractError),
 }
 
-/// Why an emitter's batching clause does not fit the sink it publishes to.
+/// Why an emitter's batching clause does not fit the emitter it publishes to.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum EmitterBatchContractError {
-    #[error("{sink} emitters {reason} and do not support BATCH")]
+    #[error("{connector} emitters {reason} and do not support BATCH")]
     Unavailable {
-        sink: &'static str,
+        connector: &'static str,
         reason: BatchUnavailability,
     },
     #[error(
-        "{sink} emitters require BATCH MAX MESSAGES <n> MAX SIZE <bytes>, because every write \
-         carries several rows"
+        "{connector} emitters require BATCH MAX MESSAGES <n> MAX SIZE <bytes>, because every \
+         write carries several rows"
     )]
-    Required { sink: &'static str },
+    Required { connector: &'static str },
     #[error(
-        "{sink} emitters accept BATCH MAX SIZE up to {maximum}, the largest message the \
+        "{connector} emitters accept BATCH MAX SIZE up to {maximum}, the largest message the \
          destination carries, found {declared}"
     )]
-    SizeAboveSinkMaximum {
-        sink: &'static str,
+    SizeAboveEmitterMaximum {
+        connector: &'static str,
         declared: crate::PayloadSizeLimit,
         maximum: crate::PayloadSizeLimit,
     },
