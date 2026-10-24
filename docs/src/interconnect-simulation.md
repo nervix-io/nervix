@@ -587,6 +587,8 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | backup owner restart during transfer | `transport::backup::restart_during_backup_transfer_discards_the_process_stage` | 102 | 320 s / 400,000 / 90 s | An incomplete section cannot finish after owner restart, and the replacement process has no prior capture stage |
 | backup inventory partition and held link | `transport::backup::backup_inventory_is_bounded_across_a_partition_and_a_held_link` | 104 | 85 s / 100,000 / 90 s | An inventory request across a partition, and another across a held link, each fails at the request's five-second deadline; after repair and after release the capture owner lists its complete six-section stage unchanged, from its single capture |
 | stalled peer isolation | `transport::isolation::stalled_peer_cannot_consume_unrelated_capacity_or_leak_reservations` | 91–93 | 120 s / 120,000 / 120 s | A stalled peer holds only its own connection's slots, unrelated work progresses, and every reservation is released |
+| join refusal across a partition | `transport::prerequisites::a_joiner_beyond_the_heartbeat_bound_is_refused_once_a_partition_heals` | 111 | 30 s / 50,000 / 90 s | A joiner whose heartbeat is beyond the bound stays joining for three seconds of partition, is refused by its member naming the heartbeat and both values once the partition heals, and counts the refusal under its own reason; the member's own join is untouched, and a compatible latecomer joins through it |
+| rolling heartbeat change | `transport::prerequisites::a_rolling_heartbeat_change_joins_within_the_bound_and_is_refused_beyond_it` | 113 | 30 s / 50,000 / 90 s | Three hosts join; one crashes and restarts with a heartbeat within the bound and rejoins; another crashes and restarts with one beyond the bound and is refused by the first peer it reaches, while the two others stay joined and connected |
 
 The simulation target also holds 26 runner and driver checks, such as the supervision, bound, clock,
 entropy, and trace checks and the fresh-process record and replay checks, and two ignored scenarios
@@ -696,6 +698,27 @@ connections the hub opened to it at once, together with the handlers still waiti
 releasing the link closes the hub's inbound connections from the torn-down peer. The [Traffic And
 Resource Isolation](./interconnect.md#traffic-and-resource-isolation) contract is what these values
 check.
+
+### Join Refusal And Rolling Timing Changes
+
+The prerequisite cases bind each host's transport with its own join terms and judge the handshake
+the production transport performs: the record each hello and acceptance carries, the refusal an
+acceptor answers with, and the join progress outbound connections move. The partition case dials a
+member across a partition for three simulated seconds: no handshake completes, so the joiner is still
+joining and has counted no prerequisite refusal. Once the link is repaired, the member answers the
+next hello with a refusal, and the joiner's progress becomes that refusal, seen from the joiner, with
+the heartbeat and both values. The member never dials anyone, and refusing the joiner leaves its own
+progress where it was; a latecomer within the bound then joins through the same member.
+
+The rolling case starts three hosts with one heartbeat and lets each join. The control then crashes
+one host and bounces it, and its new run carries a heartbeat within the bound of both others, as a
+rolling restart does, and rejoins. Once it has, the control crashes and bounces another host, whose
+new run carries a heartbeat beyond the bound of both, and whichever peer its first connection
+reaches refuses it, naming that peer's heartbeat. After each restart the hosts that kept running
+dial the restarted one from fresh targets, as gossip does once it sees a node's new run. They stay
+joined to each other and connected, and count the refusals of their own dials to the refused host. These cases
+cover the transport's judgment and join progress; the server's stop on a refusal, the membership's
+admission rule and the clock-skew probe are covered by the Cucumber prerequisites feature.
 
 ## Simulated Restart And Real Process Crash
 

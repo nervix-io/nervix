@@ -2,8 +2,8 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Sentry client Model, the event sink Model, and what it declares.
-//! - **Depends on.** The shared sink declarations and the names a body references.
+//! - **Owns.** The Sentry client Model, the event emitter Model, and what it declares.
+//! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The Sentry envelope protocol, its configuration keys, or how an event is
 //!   submitted.
 
@@ -18,11 +18,12 @@ use serde::{Deserialize, Serialize};
 use super::{
     bounds::{DeadlineKey, DeclaredBounds, DeclaredWait, OmittedDeadline, WaitBound},
     configured_client::configured_client,
-    entity_union::connector_sinks,
+    entity_union::connector_emitters,
 };
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
+    ClientName, ConnectorKind, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
+    EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
+    EmitterReferenceKind,
 };
 
 configured_client!(Sentry: unpooled, config Nervix, CreateClientSentry => SentryConfigEntry);
@@ -31,7 +32,7 @@ configured_client!(Sentry: unpooled, config Nervix, CreateClientSentry => Sentry
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct SentryEventSink {
+pub struct SentryEventEmitter {
     pub mode: SentryEventPublishingMode,
     pub client: ClientName,
 }
@@ -49,12 +50,12 @@ const SENTRY_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["An event above 1,000,000 bytes is rejected."],
 };
 
-impl SinkEntity for SentryEventSink {
+impl EmitterDeclaration for SentryEventEmitter {
     /// A Sentry envelope carries at most one `event` item, so a batch is one event, and only the
     /// codec's batch transformation can say where in that event the members go.
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         headers: None,
-        reference: SinkReferenceKind::Client(ConnectorKind::Sentry),
+        reference: EmitterReferenceKind::Client(ConnectorKind::Sentry),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: true,
@@ -67,9 +68,9 @@ impl SinkEntity for SentryEventSink {
     };
 }
 
-impl SinkBody for SentryEventSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for SentryEventEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::Sentry,
         })
@@ -80,15 +81,15 @@ impl SinkBody for SentryEventSink {
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector Sentry = "SENTRY";
-    /// What a Sentry sink writes.
-    pub enum SentrySink;
+    /// What a Sentry emitter writes.
+    pub enum SentryEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum SentryEmitterMode;
-    /// The entities a Sentry sink writes.
-    pub enum SentrySinkEntity {
-        Event(SentryEventSink, SentryEventPublishingMode) = "EVENT";
+    pub enum SentryEventEmitterMode;
+    /// The entities a Sentry emitter writes.
+    pub enum SentryEmitterEntity {
+        Event(SentryEventEmitter, SentryEventPublishingMode) = "EVENT";
     }
 }
 

@@ -3,8 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The syslog client Model, the listener source Model with its delivery mode, the
-//!   collector sink Model, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//!   collector emitter Model, and what each entity declares.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** Syslog framing, its configuration keys, or how a listener is bound or a
 //!   collector is written to.
 
@@ -22,14 +22,15 @@ use super::{
         DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
-    entity_union::{connector_sinks, connector_sources},
+    entity_union::{connector_emitters, connector_ingestors},
 };
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, IngestAcknowledgement,
-    IngestQuiesceMode, IngestSourceCapabilities, PositionClass, SinkBody, SinkClientReference,
-    SinkEntity, SinkReference, SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind,
+    EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
+    EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
+    IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
+    IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference, IngestorReferenceKind,
+    PositionClass,
 };
 
 configured_client!(Syslog: unpooled, config Nervix, CreateClientSyslog => SyslogConfigEntry);
@@ -38,7 +39,7 @@ configured_client!(Syslog: unpooled, config Nervix, CreateClientSyslog => Syslog
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct SyslogListenerSource {
+pub struct SyslogListenerIngestor {
     pub client: ClientName,
     pub mode: SyslogIngestMode,
     pub quiesce: IngestQuiesceMode,
@@ -99,12 +100,12 @@ const SYSLOG_COLLECTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &[],
 };
 
-impl SourceEntity for SyslogListenerSource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
+impl IngestorDeclaration for SyslogListenerIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         headers: None,
-        metadata: SourceMetadataScope::Syslog,
+        metadata: IngestorMetadataScope::Syslog,
         executes_on_every_cluster_node: true,
-        reference: SourceReferenceKind::Client(ConnectorKind::Syslog),
+        reference: IngestorReferenceKind::Client(ConnectorKind::Syslog),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK],
@@ -119,9 +120,9 @@ impl SourceEntity for SyslogListenerSource {
     };
 }
 
-impl SourceBody for SyslogListenerSource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Client(&self.client)
+impl IngestorEntityBody for SyslogListenerIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Client(&self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -154,15 +155,15 @@ impl SyslogIngestMode {
     }
 }
 
-connector_sources! {
+connector_ingestors! {
     connector Syslog = "SYSLOG";
     /// What a syslog source reads.
-    pub enum SyslogSource;
+    pub enum SyslogIngestor;
     /// The alterations of the ingestors that read a syslog entity.
-    pub enum SyslogIngestorAlteration;
+    pub enum SyslogListenerIngestorAlteration;
     /// The entities a syslog source reads.
-    pub enum SyslogSourceEntity {
-        Listener(SyslogListenerSource) = "LISTENER", "Syslog";
+    pub enum SyslogIngestorEntity {
+        Listener(SyslogListenerIngestor) = "LISTENER", "Syslog";
     }
 }
 
@@ -170,15 +171,15 @@ connector_sources! {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct SyslogCollectorSink {
+pub struct SyslogCollectorEmitter {
     pub mode: SyslogCollectorPublishingMode,
     pub client: ClientName,
 }
 
-impl SinkEntity for SyslogCollectorSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+impl EmitterDeclaration for SyslogCollectorEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         headers: None,
-        reference: SinkReferenceKind::Client(ConnectorKind::Syslog),
+        reference: EmitterReferenceKind::Client(ConnectorKind::Syslog),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
@@ -191,9 +192,9 @@ impl SinkEntity for SyslogCollectorSink {
     };
 }
 
-impl SinkBody for SyslogCollectorSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for SyslogCollectorEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::Syslog,
         })
@@ -204,15 +205,15 @@ impl SinkBody for SyslogCollectorSink {
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector Syslog = "SYSLOG";
-    /// What a syslog sink writes.
-    pub enum SyslogSink;
+    /// What a syslog emitter writes.
+    pub enum SyslogEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum SyslogEmitterMode;
-    /// The entities a syslog sink writes.
-    pub enum SyslogSinkEntity {
-        Collector(SyslogCollectorSink, SyslogCollectorPublishingMode) = "COLLECTOR";
+    pub enum SyslogCollectorEmitterMode;
+    /// The entities a syslog emitter writes.
+    pub enum SyslogEmitterEntity {
+        Collector(SyslogCollectorEmitter, SyslogCollectorPublishingMode) = "COLLECTOR";
     }
 }
 

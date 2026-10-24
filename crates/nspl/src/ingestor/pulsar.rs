@@ -16,8 +16,8 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership, PulsarTopicName,
-    PulsarTopicSource,
+    PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership, PulsarTopicIngestor,
+    PulsarTopicName,
 };
 
 use super::{
@@ -32,7 +32,7 @@ use crate::{
 /// `FROM <client> TOPIC '<topic>' SUBSCRIPTION '<subscription>' OWNED BY INGESTOR|PROVISIONED
 /// [INSTANCES <n>] MODE … ON QUIESCE SUSPEND`.
 pub(super) fn topic_body<'src>()
--> impl Parser<'src, &'src [Token], PulsarTopicSource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], PulsarTopicIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Topic))
         .then(external_name::<PulsarTopicName>())
@@ -42,7 +42,7 @@ pub(super) fn topic_body<'src>()
         .then(kafka::mode())
         .then(suspend_only_quiesce_clause())
         .map(
-            |(((((client, topic), subscription), instances), mode), quiesce)| PulsarTopicSource {
+            |(((((client, topic), subscription), instances), mode), quiesce)| PulsarTopicIngestor {
                 client,
                 topic,
                 subscription,

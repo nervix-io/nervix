@@ -147,7 +147,10 @@ impl ArchiveLayout {
     pub fn write_to<W: Write>(
         &self,
         writer: &mut W,
-        mut write_section: impl FnMut(&SectionEntry, &mut SectionSink<'_, W>) -> std::io::Result<()>,
+        mut write_section: impl FnMut(
+            &SectionEntry,
+            &mut SectionRecordWriter<'_, W>,
+        ) -> std::io::Result<()>,
     ) -> Result<(), Report<ArchiveWriteError>> {
         for piece in self.pieces() {
             match piece {
@@ -157,15 +160,15 @@ impl ArchiveLayout {
                     }
                 }
                 ArchivePiece::Section(entry) => {
-                    let mut sink = SectionSink {
+                    let mut connector = SectionRecordWriter {
                         writer,
                         digester: SectionDigester::new(),
                     };
-                    if let Err(error) = write_section(entry, &mut sink) {
+                    if let Err(error) = write_section(entry, &mut connector) {
                         return Err(Report::new(error).change_context(ArchiveWriteError::Write));
                     }
-                    if sink.digester.length() != entry.length
-                        || sink.digester.finish() != entry.digest
+                    if connector.digester.length() != entry.length
+                        || connector.digester.finish() != entry.digest
                     {
                         return Err(Report::new(ArchiveWriteError::SectionMismatch {
                             path: entry.path.to_string(),
@@ -182,12 +185,12 @@ impl ArchiveLayout {
 }
 
 /// Where one section's bytes are written, measured as they pass.
-pub struct SectionSink<'writer, W> {
+pub struct SectionRecordWriter<'writer, W> {
     writer: &'writer mut W,
     digester: SectionDigester,
 }
 
-impl<W: Write> Write for SectionSink<'_, W> {
+impl<W: Write> Write for SectionRecordWriter<'_, W> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let written = self.writer.write(bytes)?;
         self.digester.update(&bytes[..written]);

@@ -297,14 +297,14 @@ where
 }
 
 fn head<'src>(
-    kind: EmitSinkKind,
+    kind: EmitterEntityKind,
 ) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
     connector_entity_head(kind.connector(), kind.entity_keyword(), Identifier::Emitter)
 }
 
 pub(crate) fn head_kind<'src>()
--> impl Parser<'src, &'src [Token], EmitSinkKind, extra::Err<ParseError<'src>>> + Clone {
-    let heads = EmitSinkKind::all()
+-> impl Parser<'src, &'src [Token], EmitterEntityKind, extra::Err<ParseError<'src>>> + Clone {
+    let heads = EmitterEntityKind::all()
         .map(|kind| head(kind).to(kind).boxed())
         .collect::<Vec<_>>();
     choice(heads).boxed()
@@ -342,14 +342,14 @@ struct DeclaredEmitter {
     name: EmitterName,
     from: ProcessorInputs,
     materialized_state: Vec<MaterializedStateDependency>,
-    destination: ParsedDestination<EmitSink>,
+    destination: ParsedDestination<EmitterEntity>,
 }
 
 fn creation<'src, S, P>(
     definition: P,
 ) -> impl Parser<'src, &'src [Token], DeclaredEmitter, extra::Err<ParseError<'src>>> + Clone
 where
-    S: EmitterEntityModel + Into<EmitSink> + Clone + 'src,
+    S: EmitterEntityModel + Into<EmitterEntity> + Clone + 'src,
     P: Parser<'src, &'src [Token], ParsedDestination<S>, extra::Err<ParseError<'src>>>
         + Clone
         + 'src,
@@ -396,7 +396,7 @@ pub fn create_emitter_parser<'src>()
                         name: declared.name,
                         from: declared.from,
                         materialized_state: declared.materialized_state,
-                        sink: Box::new(parsed.destination),
+                        connector: Box::new(parsed.destination),
                         body: parsed.body,
                         batch: parsed.batch,
                         construction: parsed.construction.unwrap_or_default(),
@@ -416,7 +416,7 @@ fn alteration<'src, S, P, M>(
     mode: M,
 ) -> impl Parser<'src, &'src [Token], AlterEmitter, extra::Err<ParseError<'src>>> + Clone
 where
-    S: EmitterEntityModel + Into<EmitSink> + Clone + 'src,
+    S: EmitterEntityModel + Into<EmitterEntity> + Clone + 'src,
     S::PublishingMode: Into<EmitterModeChange> + Clone + 'src,
     P: Parser<'src, &'src [Token], ParsedDestination<S>, extra::Err<ParseError<'src>>>
         + Clone
@@ -452,7 +452,7 @@ fn operation<'src, S, P, M>(
     mode: M,
 ) -> impl Parser<'src, &'src [Token], AlterEmitterOperation, extra::Err<ParseError<'src>>> + Clone
 where
-    S: EmitterEntityModel + Into<EmitSink> + Clone + 'src,
+    S: EmitterEntityModel + Into<EmitterEntity> + Clone + 'src,
     S::PublishingMode: Into<EmitterModeChange> + Clone + 'src,
     P: Parser<'src, &'src [Token], ParsedDestination<S>, extra::Err<ParseError<'src>>>
         + Clone
@@ -517,7 +517,7 @@ where
         set_flush.boxed(),
     ];
     let capabilities = S::KIND.capabilities();
-    if let SinkReferenceKind::Client(_) | SinkReferenceKind::StorageClient(_) =
+    if let EmitterReferenceKind::Client(_) | EmitterReferenceKind::StorageClient(_) =
         capabilities.reference
     {
         choices.push(
@@ -572,78 +572,81 @@ where
 fn declared_creation<'src>()
 -> impl Parser<'src, &'src [Token], DeclaredEmitter, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
-        creation::<ClientConsumerSink, _>(client::consumer_body(EmitterContext::Create)),
-        creation::<HttpRequestSink, _>(http::request_body(EmitterContext::Create)),
-        creation::<KafkaTopicSink, _>(kafka::topic_body(EmitterContext::Create)),
-        creation::<PulsarTopicSink, _>(pulsar::topic_body(EmitterContext::Create)),
-        creation::<RabbitMqQueueSink, _>(rabbitmq::queue_body(EmitterContext::Create)),
-        creation::<RedisPubSubSink, _>(redis::pubsub_body(EmitterContext::Create)),
-        creation::<MqttTopicSink, _>(mqtt::topic_body(EmitterContext::Create)),
-        creation::<NatsSubjectSink, _>(nats::subject_body(EmitterContext::Create)),
-        creation::<ZeroMqPushSink, _>(zeromq::push_body(EmitterContext::Create)),
-        creation::<SqsQueueSink, _>(sqs::queue_body(EmitterContext::Create)),
-        creation::<SentryEventSink, _>(sentry::event_body(EmitterContext::Create)),
-        creation::<SyslogCollectorSink, _>(syslog::collector_body(EmitterContext::Create)),
-        creation::<OtelLogsSink, _>(otel::logs_body()),
-        creation::<OtelTracesSink, _>(otel::traces_body()),
-        creation::<OtelMetricsSink, _>(otel::metrics_body()),
-        creation::<ClickHouseTableSink, _>(clickhouse::table_body()),
-        creation::<PostgresTableSink, _>(postgres::table_body()),
-        creation::<MySqlTableSink, _>(mysql::table_body()),
-        creation::<MongoDbCollectionSink, _>(mongodb::collection_body()),
-        creation::<IcebergTableSink, _>(iceberg::table_body())
+        creation::<ClientConsumerEmitter, _>(client::consumer_body(EmitterContext::Create)),
+        creation::<HttpRequestEmitter, _>(http::request_body(EmitterContext::Create)),
+        creation::<KafkaTopicEmitter, _>(kafka::topic_body(EmitterContext::Create)),
+        creation::<PulsarTopicEmitter, _>(pulsar::topic_body(EmitterContext::Create)),
+        creation::<RabbitMqQueueEmitter, _>(rabbitmq::queue_body(EmitterContext::Create)),
+        creation::<RedisPubSubEmitter, _>(redis::pubsub_body(EmitterContext::Create)),
+        creation::<MqttTopicEmitter, _>(mqtt::topic_body(EmitterContext::Create)),
+        creation::<NatsSubjectEmitter, _>(nats::subject_body(EmitterContext::Create)),
+        creation::<ZeroMqPushEmitter, _>(zeromq::push_body(EmitterContext::Create)),
+        creation::<SqsQueueEmitter, _>(sqs::queue_body(EmitterContext::Create)),
+        creation::<SentryEventEmitter, _>(sentry::event_body(EmitterContext::Create)),
+        creation::<SyslogCollectorEmitter, _>(syslog::collector_body(EmitterContext::Create)),
+        creation::<OtelLogsEmitter, _>(otel::logs_body()),
+        creation::<OtelTracesEmitter, _>(otel::traces_body()),
+        creation::<OtelMetricsEmitter, _>(otel::metrics_body()),
+        creation::<ClickHouseTableEmitter, _>(clickhouse::table_body()),
+        creation::<PostgresTableEmitter, _>(postgres::table_body()),
+        creation::<MySqlTableEmitter, _>(mysql::table_body()),
+        creation::<MongoDbCollectionEmitter, _>(mongodb::collection_body()),
+        creation::<IcebergTableEmitter, _>(iceberg::table_body())
     )
 }
 fn declared_alteration<'src>()
 -> impl Parser<'src, &'src [Token], AlterEmitter, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
-        alteration::<ClientConsumerSink, _, _>(
+        alteration::<ClientConsumerEmitter, _, _>(
             client::consumer_body(EmitterContext::Alter),
             client::mode()
         ),
-        alteration::<HttpRequestSink, _, _>(
+        alteration::<HttpRequestEmitter, _, _>(
             http::request_body(EmitterContext::Alter),
             http::mode()
         ),
-        alteration::<KafkaTopicSink, _, _>(kafka::topic_body(EmitterContext::Alter), kafka::mode()),
-        alteration::<PulsarTopicSink, _, _>(
+        alteration::<KafkaTopicEmitter, _, _>(
+            kafka::topic_body(EmitterContext::Alter),
+            kafka::mode()
+        ),
+        alteration::<PulsarTopicEmitter, _, _>(
             pulsar::topic_body(EmitterContext::Alter),
             pulsar::mode()
         ),
-        alteration::<RabbitMqQueueSink, _, _>(
+        alteration::<RabbitMqQueueEmitter, _, _>(
             rabbitmq::queue_body(EmitterContext::Alter),
             rabbitmq::mode()
         ),
-        alteration::<RedisPubSubSink, _, _>(
+        alteration::<RedisPubSubEmitter, _, _>(
             redis::pubsub_body(EmitterContext::Alter),
             redis::mode()
         ),
-        alteration::<MqttTopicSink, _, _>(mqtt::topic_body(EmitterContext::Alter), mqtt::mode()),
-        alteration::<NatsSubjectSink, _, _>(
+        alteration::<MqttTopicEmitter, _, _>(mqtt::topic_body(EmitterContext::Alter), mqtt::mode()),
+        alteration::<NatsSubjectEmitter, _, _>(
             nats::subject_body(EmitterContext::Alter),
             nats::mode()
         ),
-        alteration::<ZeroMqPushSink, _, _>(
+        alteration::<ZeroMqPushEmitter, _, _>(
             zeromq::push_body(EmitterContext::Alter),
             zeromq::mode()
         ),
-        alteration::<SqsQueueSink, _, _>(sqs::queue_body(EmitterContext::Alter), sqs::mode()),
-        alteration::<SentryEventSink, _, _>(
+        alteration::<SqsQueueEmitter, _, _>(sqs::queue_body(EmitterContext::Alter), sqs::mode()),
+        alteration::<SentryEventEmitter, _, _>(
             sentry::event_body(EmitterContext::Alter),
             sentry::mode()
         ),
-        alteration::<SyslogCollectorSink, _, _>(
+        alteration::<SyslogCollectorEmitter, _, _>(
             syslog::collector_body(EmitterContext::Alter),
             syslog::mode()
         ),
-        alteration::<OtelLogsSink, _, _>(otel::logs_body(), otel::logs_mode()),
-        alteration::<OtelTracesSink, _, _>(otel::traces_body(), otel::traces_mode()),
-        alteration::<OtelMetricsSink, _, _>(otel::metrics_body(), otel::metrics_mode()),
-        alteration::<ClickHouseTableSink, _, _>(clickhouse::table_body(), clickhouse::mode()),
-        alteration::<PostgresTableSink, _, _>(postgres::table_body(), postgres::mode()),
-        alteration::<MySqlTableSink, _, _>(mysql::table_body(), mysql::mode()),
-        alteration::<MongoDbCollectionSink, _, _>(mongodb::collection_body(), mongodb::mode()),
-        alteration::<IcebergTableSink, _, _>(iceberg::table_body(), iceberg::mode())
+        alteration::<OtelLogsEmitter, _, _>(otel::logs_body(), otel::logs_mode()),
+        alteration::<OtelTracesEmitter, _, _>(otel::traces_body(), otel::traces_mode()),
+        alteration::<OtelMetricsEmitter, _, _>(otel::metrics_body(), otel::metrics_mode()),
+        alteration::<ClickHouseTableEmitter, _, _>(clickhouse::table_body(), clickhouse::mode()),
+        alteration::<PostgresTableEmitter, _, _>(postgres::table_body(), postgres::mode()),
+        alteration::<MySqlTableEmitter, _, _>(mysql::table_body(), mysql::mode()),
+        alteration::<MongoDbCollectionEmitter, _, _>(mongodb::collection_body(), mongodb::mode()),
+        alteration::<IcebergTableEmitter, _, _>(iceberg::table_body(), iceberg::mode())
     )
 }
 

@@ -12,7 +12,7 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{ZeroMqIngestMode, ZeroMqPullSource};
+use nervix_models::{ZeroMqIngestMode, ZeroMqPullIngestor};
 
 use super::delivery::{flexible_quiesce_clause, no_ack};
 use crate::{
@@ -22,12 +22,12 @@ use crate::{
 
 /// `FROM <client> MODE NO ACK ON QUIESCE SUSPEND|BUFFER …|DROP`.
 pub(super) fn pull_body<'src>()
--> impl Parser<'src, &'src [Token], ZeroMqPullSource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], ZeroMqPullIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(ZeroMqIngestMode::NoAck))
         .then(flexible_quiesce_clause())
-        .map(|((client, mode), quiesce)| ZeroMqPullSource {
+        .map(|((client, mode), quiesce)| ZeroMqPullIngestor {
             client,
             mode,
             quiesce,

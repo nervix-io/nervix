@@ -78,6 +78,38 @@ async fn default_limits_validate_together() {
 }
 
 #[test]
+fn charged_bytes_keep_their_own_size_and_the_room_their_only_holder_keeps() {
+    let executor = Executor::default();
+    let operation = executor
+        .try_reserve(MemoryClass::Relay, 10_000)
+        .expect("an empty relay budget takes a small operation");
+    let mut body = crate::ChargedBytes::from_owned(vec![7; 100], operation);
+    let shared = body.clone();
+
+    body.keep_charge_for(250);
+    assert_eq!(
+        executor.memory(MemoryClass::Relay).reserved_bytes,
+        10_000,
+        "an allocation another handle shares keeps its whole charge"
+    );
+
+    drop(shared);
+    body.keep_charge_for(250);
+    assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, 350);
+    assert_eq!(&*body, &[7; 100][..]);
+
+    body.keep_charge_for(u64::MAX);
+    body.keep_charge_for(1000);
+    assert_eq!(
+        executor.memory(MemoryClass::Relay).reserved_bytes,
+        350,
+        "keeping more room than the charge holds returns nothing and takes nothing"
+    );
+    drop(body);
+    assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, 0);
+}
+
+#[test]
 fn connector_worker_capacity_is_a_validated_node_capability() {
     use nervix_models::{NodeCapabilities, SettingClass as _, SettingDefinition as _};
 

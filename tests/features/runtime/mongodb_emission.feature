@@ -414,6 +414,7 @@ Feature: MongoDB emission
       | 3            | ON CONFLICT ("mongodb_user_id") DO UPDATE | VEC<STRING>          |
 
   @database_emitter_modes
+  @mongodb_write_concern
   Scenario Outline: A MongoDB write concern the replica set cannot satisfy keeps the documents the server wrote and retries only the rest
     Given MQTT is running
     And MongoDB replica set is running
@@ -473,6 +474,12 @@ Feature: MongoDB emission
       ON GENERAL ERROR LOG;
       START;
       """
+    Then within "20s" DESCRIBE EMITTER "to_mongodb" on the leader node contains
+      """
+      status: OK
+      """
+    And the last command output owner is saved as placeholder "write_concern_owner"
+    When client "write_concern_observer" connects to node "{{write_concern_owner}}"
     When these MQTT messages are rapidly published to topic "mongodb_write_concern_in_{{test_id}}"
       """
       {"user_id":1,"action":"FIRST"}
@@ -482,11 +489,7 @@ Feature: MongoDB emission
       {"user_id":5,"action":"FIFTH"}
       {"user_id":6,"action":"SIXTH"}
       """
-    Then within "20s" DESCRIBE EMITTER "to_mongodb" on the leader node contains
-      """
-      write concern failed
-      """
-    And the MongoDB collection eventually holds exactly these documents
+    Then the MongoDB collection eventually holds exactly these documents
       """
       {"mongodb_user_id":1,"mongodb_action":"first"}
       {"mongodb_user_id":2,"mongodb_action":"second"}
@@ -495,10 +498,19 @@ Feature: MongoDB emission
       {"mongodb_user_id":5,"mongodb_action":"fifth"}
       {"mongodb_user_id":6,"mongodb_action":"sixth"}
       """
+    When physical time passes for "3s"
+    Then within "20s" DESCRIBE EMITTER "to_mongodb" on the leader node contains
+      """
+      status: OK
+      """
+    And within "20s" client "write_concern_observer" observes a server error containing
+      """
+      MongoDB <write_operation> write concern failed with code 100 (UnsatisfiableWriteConcern)
+      """
 
     Examples:
-      | nodes | collection                 | conflict_clause                           |
-      | 1     | exists                     |                                           |
-      | 3     | exists                     |                                           |
-      | 1     | with unique user id exists | ON CONFLICT ("mongodb_user_id") DO UPDATE |
-      | 3     | with unique user id exists | ON CONFLICT ("mongodb_user_id") DO UPDATE |
+      | nodes | collection                 | conflict_clause                           | write_operation |
+      | 1     | exists                     |                                           | insert_many     |
+      | 3     | exists                     |                                           | insert_many     |
+      | 1     | with unique user id exists | ON CONFLICT ("mongodb_user_id") DO UPDATE | bulk_write      |
+      | 3     | with unique user id exists | ON CONFLICT ("mongodb_user_id") DO UPDATE | bulk_write      |

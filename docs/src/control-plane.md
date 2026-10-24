@@ -449,7 +449,7 @@ operator `PAUSE` or `RESUME` statement.
   tasks and hands pending materialized-state work to their replacements. Deduplicator key changes
   also purge the old keyspace before the replacement starts; reorderer ordering changes flush the
   old ordering buffers before swapping. Relay materialized-state changes update membership in
-  place. Emitter source-predicate, sink, publishing-mode (including any confirmation window,
+  place. Emitter source-predicate, emitter, publishing-mode (including any confirmation window,
   timeout, or retry-policy variable), client, codec, input-collection, and attachment changes
   drain and replace only the affected emitter task. Every ingestor alteration quiesces and drains
   only the affected ingestor instances under their declared source mode, then starts their desired
@@ -486,7 +486,7 @@ operator `PAUSE` or `RESUME` statement.
   eviction settings. Their consumers read that configuration when they are built, so the domain
   rebuilds around the new models rather than reconfiguring in place.
 
-For an HTTP emitter, the method and path expressions are part of its sink definition. Replacing
+For an HTTP emitter, the method and path expressions are part of its emitter definition. Replacing
 them, the client reference, body selection, or retry mode takes `ENTITY_PAUSE`; a `FLUSH`-only
 alteration remains `DYNAMIC`. The gate keeps the admitted request with its original destination
 and prepared bytes until the old task drains. If it cannot drain, the mutation remains unapplied.
@@ -782,7 +782,7 @@ started until the shutdown deadline and cancels whatever still runs then, and fi
 runtime, consensus, cluster membership, and the interconnect and releases the node's storage. A
 timeout reports the drain as abandoned, and teardown negatively acknowledges the remaining work: a
 source with external acknowledgements redelivers it after restart, and a `MODE NO ACK` source loses
-it. A sink that stays unavailable therefore holds the drain until its timeout. Pending
+it. A emitter that stays unavailable therefore holds the drain until its timeout. Pending
 `REQUIRED WAIT` records do not hold the drain open; every force flush retries them against the
 state that is present, and teardown negatively acknowledges whatever still waits. Payloads that
 other live nodes publish into this node's relays are admitted work as well, so an owner that keeps

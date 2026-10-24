@@ -27,11 +27,11 @@ use nervix_interconnect::{TlsConfigBundle, Transport, TransportClock};
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CommandExecutionReference, CreateDeduplicator,
     CreateEmitter, CreateIngestor, CreateJunction, CreateSchema, CreateWasmProcessor, DomainConfig,
-    DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, EmitSink, IngestSource,
-    KafkaOffsetMode, KafkaSource, KafkaTopicSource, Model, ModelKind, ModelName, NodeEndpoint,
-    NodeRef, NodeServiceUrl, PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs,
-    ScheduledNode, SchemaFingerprint, SyslogCollectorSink, SyslogSink, TransactionLifecycle,
-    TransactionPosition, WasmProcessorLimits,
+    DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, EmitterEntity,
+    IngestorEntity, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind,
+    ModelName, NodeEndpoint, NodeRef, NodeServiceUrl, PlacementGroupSchedule, ProcessorInputs,
+    ProcessorOutputs, ScheduledNode, SchemaFingerprint, SyslogCollectorEmitter, SyslogEmitter,
+    TransactionLifecycle, TransactionPosition, WasmProcessorLimits,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -342,6 +342,7 @@ pub(crate) async fn test_interconnect(cluster_id: &str, node_id: &ClusterNodeNam
             cluster_id: cluster_id.to_string(),
             node_id: node_id.clone(),
             advertised_host: "127.0.0.1".to_string(),
+            join_terms: super::NodeSettings::default().join_terms(),
         },
         tls,
         Default::default(),
@@ -363,7 +364,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             name: named(identifier_raw),
             output_routes: ProcessorOutputs::new(Vec::new()),
             input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-                source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+                source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                     client: named("kafka_main"),
                     topic: named("notifications"),
                     offset_mode: KafkaOffsetMode::Domain,
@@ -387,8 +388,8 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             name: named(identifier_raw),
             from: ProcessorInputs::new(Vec::new(), Vec::new()),
             body: nervix_models::EmitterBody::Values,
-            sink: Box::new(EmitSink::Syslog(SyslogSink::Collector(
-                SyslogCollectorSink {
+            connector: Box::new(EmitterEntity::Syslog(SyslogEmitter::Collector(
+                SyslogCollectorEmitter {
                     mode: nervix_models::SyslogCollectorPublishingMode::NoAck {
                         retry_policy: nervix_models::RetryPolicy {
                             backoff: "1s".to_string(),
@@ -630,12 +631,8 @@ pub(in crate::application) async fn build_test_service_inner(
         interconnect_advertise_addr: interconnect.local_addr().into(),
         interconnect: interconnect.clone(),
         executor: executor.clone(),
-        raft_timings: RaftTimings::resolve(
-            Some(Duration::from_millis(50)),
-            Some(Duration::from_millis(150)),
-            Some(Duration::from_millis(300)),
-        )
-        .expect("the fixture's Raft timings are valid"),
+        raft_timings: RaftTimings::resolve(Some(Duration::from_millis(25)))
+            .expect("the fixture's Raft heartbeat is valid"),
         raft_retention: RaftRetentionSettings::default(),
     };
     #[cfg(feature = "testing")]
@@ -685,7 +682,8 @@ pub(in crate::application) async fn build_test_service_inner(
             bootstrap_host: None,
             recovery_endpoints: Default::default(),
             interconnect: interconnect.clone(),
-            node_unavailability_timeout: Duration::from_secs(10),
+            membership: crate::cluster::MembershipSettings::default(),
+            prerequisites: interconnect.local_prerequisites(),
             fault_injection: Default::default(),
         })
         .await

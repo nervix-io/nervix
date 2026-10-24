@@ -11,7 +11,7 @@ failure leaves behind.
 
 The central rule is that guest state and message delivery are separate guarantees. A checkpoint
 makes the guest's computation state durable before the source acknowledgements it covers are
-released. It does not make the guest, its output, and external sinks one transaction, so a path
+released. It does not make the guest, its output, and external emitters one transaction, so a path
 through a WASM processor is at least once.
 
 [Execution Plans](./execution-plans.md) explains how the committed schedule carries a pinned
@@ -692,7 +692,7 @@ an input, the guest state that reflects the input is on the stable storage of th
 of every replica the checkpoint was confirmed by. It is not an exactly-once guarantee for the guest
 or for external delivery:
 
-- output is dispatched before its checkpoint, so a sink can publish output whose input is later
+- output is dispatched before its checkpoint, so an emitter can publish output whose input is later
   negatively acknowledged and redelivered, and the redelivered input produces it again;
 - the state a branch continues from can already reflect a redelivered input: a guest counts buffered
   input as it accepts it, a checkpoint that failed at its replicas stays on the owner's storage, and
@@ -703,7 +703,7 @@ or for external delivery:
   local durability.
 
 A guest therefore applies a redelivered input again unless it recognizes the input itself, and
-exactly-once external effects need a sink whose writes are idempotent. See [Recovery, Replay And
+exactly-once external effects need an emitter whose writes are idempotent. See [Recovery, Replay And
 Duplicates](./wasm-processor-guests.md#recovery-replay-and-duplicates) and [ACK Semantics And
 Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery).
 

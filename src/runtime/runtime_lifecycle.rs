@@ -71,11 +71,12 @@ impl Runtime {
             executor,
             dns,
             db,
+            restore_staging_max_bytes,
             fault_injection,
             temp_dir,
         } = environment;
         let state_snapshot_interval = settings.state_snapshot_interval();
-        let restore_staging_max_bytes = settings.restore_staging_max_bytes();
+        let restore_staging_max_bytes = restore_staging_max_bytes.as_u64();
         let events = RuntimeEvents::new();
         let (domain_status_changed, _) = watch::channel(0);
         let state_store = db
@@ -292,13 +293,13 @@ impl Runtime {
         super::branch_task_stop_timeout(self.inner.domain_drain_timeout)
     }
 
-    /// When the emitters of a domain execution that stops now finish their sinks: the domain drain
+    /// When the emitters of a domain execution that stops now finish their emitters: the domain drain
     /// timeout from now, the same bound a stop command gives an emitter.
     pub(in crate::runtime) fn emitter_finish_deadline(&self) -> Instant {
         self.emitter_finish_deadline_within(self.inner.domain_drain_timeout)
     }
 
-    /// When the emitters of a domain execution that stops now finish their sinks, no later than
+    /// When the emitters of a domain execution that stops now finish their emitters, no later than
     /// `limit` from now.
     fn emitter_finish_deadline_within(&self, limit: Duration) -> Instant {
         let budget = limit.min(self.inner.domain_drain_timeout);
@@ -373,6 +374,18 @@ impl Runtime {
         self.inner
             .fault_injection
             .take_shutdown_cordon_release_delay(stopping_node)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_transaction_cleanup_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_transaction_cleanup_if_armed(node, domain)
+            .await;
     }
 
     #[cfg(feature = "testing")]
@@ -671,7 +684,7 @@ impl Runtime {
     }
 
     /// Stops `execution` and waits for its tasks. Every emitter task the stop ends finishes its
-    /// sink by `emitter_finish_deadline`, which it learns before the shutdown is signalled.
+    /// emitter by `emitter_finish_deadline`, which it learns before the shutdown is signalled.
     pub(in crate::runtime) async fn stop_domain_execution(
         &self,
         domain: &DomainName,
@@ -729,7 +742,7 @@ impl Runtime {
         // this node holds all of them up at the same moment. Neither kind owns state the node
         // persists or replicates, so the waits of one kind run together: each task keeps the whole
         // stop grace, and the kind costs the domain that grace once however many of its tasks
-        // outlast it. The kinds around them persist or replicate state they own, or drain a sink,
+        // outlast it. The kinds around them persist or replicate state they own, or drain an emitter,
         // as they stop, and are waited for in turn, each with a grace of its own.
         let mut generators = Vec::with_capacity(execution.generator_tasks.len());
         for (entity, task) in execution.generator_tasks {
@@ -826,7 +839,7 @@ impl Runtime {
     }
 
     /// Stops every domain's execution and the runtime services behind them. `left` is the time the
-    /// node's shutdown leaves the runtime: an emitter finishes its sink within it, and within the
+    /// node's shutdown leaves the runtime: an emitter finishes its emitter within it, and within the
     /// domain drain timeout.
     pub(crate) async fn shutdown(&self, left: Duration) {
         let emitter_finish_deadline = self.emitter_finish_deadline_within(left);

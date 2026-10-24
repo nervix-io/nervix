@@ -13,7 +13,7 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{RabbitMqIngestMode, RabbitMqQueueName, RabbitMqQueueSource};
+use nervix_models::{RabbitMqIngestMode, RabbitMqQueueIngestor, RabbitMqQueueName};
 
 use super::delivery::{
     SequentialAck, ack_sequential, optional_instances, suspend_only_quiesce_clause,
@@ -25,7 +25,7 @@ use crate::{
 
 /// `FROM <client> QUEUE '<queue>' [INSTANCES <n>] MODE ACK SEQUENTIAL … ON QUIESCE SUSPEND`.
 pub(super) fn queue_body<'src>()
--> impl Parser<'src, &'src [Token], RabbitMqQueueSource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], RabbitMqQueueIngestor, extra::Err<ParseError<'src>>> + Clone {
     let mode = ack_sequential().map(
         |SequentialAck {
              timeout,
@@ -43,7 +43,7 @@ pub(super) fn queue_body<'src>()
         .then(mode)
         .then(suspend_only_quiesce_clause())
         .map(
-            |((((client, queue), instances), mode), quiesce)| RabbitMqQueueSource {
+            |((((client, queue), instances), mode), quiesce)| RabbitMqQueueIngestor {
                 client,
                 queue,
                 instances,

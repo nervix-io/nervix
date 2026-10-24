@@ -23,7 +23,7 @@ use nervix_primitives::sync::{
 };
 
 #[derive(Debug, Clone)]
-pub(in crate::runtime) struct SourceInstanceReadiness {
+pub(in crate::runtime) struct IngestorInstanceReadiness {
     inner: Arc<InstanceReadiness>,
 }
 
@@ -33,7 +33,7 @@ struct InstanceReadiness {
     state: AtomicU8,
 }
 
-impl SourceInstanceReadiness {
+impl IngestorInstanceReadiness {
     pub(super) fn new() -> Self {
         Self {
             inner: Arc::new(InstanceReadiness {
@@ -84,12 +84,12 @@ mod tests {
 
     #[test]
     fn a_retired_instance_cannot_publish_readiness_into_its_replacement() {
-        let predecessor = SourceInstanceReadiness::new();
+        let predecessor = IngestorInstanceReadiness::new();
         let retained = predecessor.clone();
         predecessor.mark_ready();
         assert!(retained.is_ready());
         predecessor.retire();
-        let replacement = SourceInstanceReadiness::new();
+        let replacement = IngestorInstanceReadiness::new();
         retained.mark_ready();
         assert!(!retained.is_ready());
         assert!(!replacement.is_ready());
@@ -111,9 +111,9 @@ mod shuttle_tests {
     use super::*;
 
     #[test]
-    fn shuttle_retirement_racing_source_polling_is_final_and_instance_local() {
+    fn shuttle_retirement_racing_ingestor_polling_is_final_and_instance_local() {
         check_interleavings(|| {
-            let instance = SourceInstanceReadiness::new();
+            let instance = IngestorInstanceReadiness::new();
             let reader = instance.clone();
             let publisher = thread::spawn(move || {
                 reader.mark_ready();
@@ -129,7 +129,7 @@ mod shuttle_tests {
             assert!(!instance.is_ready());
             instance.mark_ready();
             assert!(!instance.is_ready());
-            let replacement = SourceInstanceReadiness::new();
+            let replacement = IngestorInstanceReadiness::new();
             replacement.mark_ready();
             instance.mark_unready();
             assert!(replacement.is_ready());

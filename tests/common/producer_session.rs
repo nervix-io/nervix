@@ -204,7 +204,7 @@ impl RawProducerSession {
         let (socket, _) = tokio_tungstenite::connect_async(url)
             .await
             .map_err(io::Error::other)?;
-        let (mut sink, mut stream) = socket.split();
+        let (mut connector, mut stream) = socket.split();
         let (frames, mut outgoing) = mpsc::channel::<EncodedFrame<ClientFrame>>(OUTBOUND_FRAMES);
         let inbox = Arc::new(Inbox::default());
         let writer_inbox = inbox.clone();
@@ -212,7 +212,7 @@ impl RawProducerSession {
             while let Some(frame) = outgoing.recv().await {
                 nervix_primitives::task::consume_budget().await;
                 let message = WsMessage::Binary(frame.into_bytes().to_vec());
-                if let Err(error) = sink.send(message).await {
+                if let Err(error) = connector.send(message).await {
                     writer_inbox.end(format!("the WebSocket refused a frame: {error}"));
                     return;
                 }

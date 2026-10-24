@@ -856,9 +856,9 @@ mod tests {
     use std::fs;
 
     use nervix_models::{
-        AlterPlacement, AlterPlacementOperation, ClusterNodeName, DropModel, HttpEndpointSource,
-        HttpSource, IngestSource, MaterializedRelayState, MaterializedStateDependency,
-        MaterializedStatePolicy, SyslogListenerSource, SyslogSource,
+        AlterPlacement, AlterPlacementOperation, ClusterNodeName, DropModel, HttpEndpointIngestor,
+        HttpIngestor, IngestorEntity, MaterializedRelayState, MaterializedStateDependency,
+        MaterializedStatePolicy, SyslogIngestor, SyslogListenerIngestor,
     };
     use nonzero_ext::nonzero;
 
@@ -1162,7 +1162,7 @@ mod tests {
         let nervix_models::IngestorInput::Transport(transport) = &mut ingestor.input else {
             panic!("the full graph's ingestor reads a transport");
         };
-        transport.source = IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+        transport.source = IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
             endpoint: named("ingest_http"),
             mode: nervix_models::EndpointIngestMode::NoAck,
             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
@@ -1208,11 +1208,12 @@ mod tests {
         let nervix_models::IngestorInput::Transport(transport) = &mut ingestor.input else {
             panic!("the full graph's ingestor reads a transport");
         };
-        transport.source = IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
-            client: named("syslog_listener"),
-            mode: nervix_models::SyslogIngestMode::NoAck,
-            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-        }));
+        transport.source =
+            IngestorEntity::Syslog(SyslogIngestor::Listener(SyslogListenerIngestor {
+                client: named("syslog_listener"),
+                mode: nervix_models::SyslogIngestMode::NoAck,
+                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+            }));
         syslog_models.extend([
             syslog_client("syslog_listener"),
             placement(

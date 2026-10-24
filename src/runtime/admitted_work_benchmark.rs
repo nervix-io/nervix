@@ -25,7 +25,7 @@ use nervix_models::{
 
 use super::{
     BranchInstanceAckBoundary, BranchKey, CompiledCodec, DomainClockLifecycle,
-    DomainRoutingSnapshot, EmitterPublishBatch, EmitterSinkContext, Executor, RelayMessage,
+    DomainRoutingSnapshot, EmitterConnectorContext, EmitterPublishBatch, Executor, RelayMessage,
     RelayRecordBatch, Runtime, emitter_encoding::encode_pending_broker_payloads,
     prepare_branched_entrypoint_input,
 };
@@ -165,10 +165,10 @@ impl BranchedInputBenchmark {
 }
 
 /// One emitter batch whose every row is encoded through an `ON EMITTING` JAQ program, as a record
-/// sink's rows are before they are published.
+/// emitter's rows are before they are published.
 pub struct TransformedEncodingBenchmark {
     runtime: nervix_primitives::runtime::Runtime,
-    context: EmitterSinkContext,
+    context: EmitterConnectorContext,
     codec: nervix_primitives::sync::Arc<CompiledCodec>,
     batch: EmitterPublishBatch,
     rows: Vec<usize>,
@@ -228,7 +228,7 @@ impl TransformedEncodingBenchmark {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
         Self {
             runtime: benchmark_runtime(),
-            context: EmitterSinkContext {
+            context: EmitterConnectorContext {
                 routing: node_runtime
                     .stage_domain_routing(&domain, DomainRoutingSnapshot::default())
                     .shared(),

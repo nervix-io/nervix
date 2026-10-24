@@ -2871,7 +2871,7 @@ async fn an_end_its_session_lost_before_it_was_read_is_still_reported() {
     within_deadline(async {
         loop {
             nervix_primitives::task::consume_budget().await;
-            if client.inner.events.sinks.subscriptions.is_closed() {
+            if client.inner.events.emitters.subscriptions.is_closed() {
                 return;
             }
             nervix_primitives::time::sleep(Duration::from_millis(10)).await;

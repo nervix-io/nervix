@@ -148,9 +148,10 @@ mod tests {
 
     use nervix_models::{
         ClusterNodeName, CreateIngestor, CreateRelay, DomainName, DomainSchedule,
-        EndpointIngestMode, GeneralErrorPolicy, HttpEndpointSource, HttpSource, IngestQuiesceMode,
-        IngestSource, IngestorInput, MaterializedRelayState, Model, ModelKind, NodeRef,
-        ProcessorOutputs, RelayBranching, ScheduledNode, SchemaFingerprint, TransportIngestorInput,
+        EndpointIngestMode, GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor,
+        IngestQuiesceMode, IngestorEntity, IngestorInput, MaterializedRelayState, Model, ModelKind,
+        NodeRef, ProcessorOutputs, RelayBranching, ScheduledNode, SchemaFingerprint,
+        TransportIngestorInput,
     };
     use nonzero_ext::nonzero;
 
@@ -186,7 +187,7 @@ mod tests {
                 name: named(raw),
                 output_routes: ProcessorOutputs::new(Vec::new()),
                 input: IngestorInput::Transport(TransportIngestorInput {
-                    source: IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+                    source: IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
                         endpoint: named("payment_ingress"),
                         mode: EndpointIngestMode::NoAck,
                         quiesce: IngestQuiesceMode::EndpointBuffer {

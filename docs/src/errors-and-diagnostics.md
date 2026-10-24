@@ -39,7 +39,7 @@ chapter that owns its subsystem:
 | Missing values, distinct semantic states and the boundary that validates them | [Typed States And Validation Boundaries](./typed-states.md#validation-and-failure-boundaries) |
 | Row and batch errors of the expression VM, and each function's error contract | [VM Functions](./vm-functions.md#row-errors-and-batch-errors) and [Expression Functions](./filter-map-functions.md#errors) |
 | Guest result codes, rejected saved state and failed checkpoints | [WASM State And Recovery](./wasm-state.md#rejected-state-recovery) and [Rust WASM Guest SDK](./wasm-guest-sdk.md#error-handling) |
-| Source and sink failures, per-record outcomes, retry and acknowledgement | [Connector Crates And The Connector Contract](./connector-contract.md#failure-and-observation) |
+| Source and emitter failures, per-record outcomes, retry and acknowledgement | [Connector Crates And The Connector Contract](./connector-contract.md#failure-and-observation) |
 | Lookup outcomes and which caller owns a failed lookup | [Name Resolution](./name-resolution.md#failure-ownership) |
 | Exchange forms, remote failure classes on the wire and relay acknowledgements | [Cluster Interconnect](./interconnect.md#failure-ownership-and-persistence) |
 | Durable appends, uncertain writes and a failed consensus store | [Consensus Storage And Replication](./consensus-storage-and-replication.md#appended-batches) |
@@ -101,7 +101,7 @@ connection error.
 Attachments are not contexts, and the rendered chain does not show them. A printable attachment
 carries the description a connector or a task gives its own failure, and one reader uses it: an
 emitter shows the first printable attachment of a failure as its transient error, and only without
-one the outermost context. A typed attachment carries a value for one consumer, as a sink attaches
+one the outermost context. A typed attachment carries a value for one consumer, as an emitter attaches
 the retry delay its receiver stated for the emitter host to read. Neither replaces a context: a
 caller decides from contexts and typed fields.
 
@@ -124,9 +124,9 @@ provides.
 | Session edge | `ConsensusError::LeadershipLost` as the current context of a proposal report | A leader redirect in place of a failed command |
 | Transaction application | `RuntimeError`'s revision preparation and readiness timeouts as the current context | Apply the cluster state again and retry, in place of failing the transaction |
 | Session transaction binding | `SessionTransactionBindingError` as the current context | The `TransactionTakenOver` or `TransactionDetached` disposition |
-| Postgres, MySQL and ClickHouse sinks | The driver's SQLSTATE, code or named rejection in the current context | Whether the destination refused rows for good or the attempt failed as infrastructure |
+| Postgres, MySQL and ClickHouse emitters | The driver's SQLSTATE, code or named rejection in the current context | Whether the destination refused rows for good or the attempt failed as infrastructure |
 | Connectors that resolve through a driver's DNS hook | `DnsLookupError::find_in` over the causes the driver wraps around the lookup | Keep the typed lookup failure beneath the connection failure |
-| Emitter host | The retry delay a sink attached to its publish failure | Lengthen the retry schedule to the delay the receiver stated |
+| Emitter host | The retry delay an emitter attached to its publish failure | Lengthen the retry schedule to the delay the receiver stated |
 | WASM runtime | The saved-state verdict of the guest-call failure, an invalid emission, or an exhausted execution limit | The stage the failure is reported under, whether rejected-state recovery starts, and whether the instance is discarded |
 | Restore conversion | An execution admission or staging refusal among the report's contexts | Release what the conversion holds and convert again within its wait for room |
 
@@ -140,7 +140,7 @@ below says which outcomes of its boundary are ordinary.
 
 A failure of one row or one record is a typed value in its batch's outcome too. The expression VM
 returns the row errors of a batch beside its result, each a `SideError` with its reason and
-expression span. A sink answers a write with the records it delivered, the records it rejected,
+expression span. A emitter answers a write with the records it delivered, the records it rejected,
 each with a structured message error, and at most one infrastructure failure of the attempt, which
 is a report; a record in neither list stays unresolved. Branch construction keeps the outcome of
 each row. None of these builds a report or formats a message per row: the typed value becomes a
@@ -177,6 +177,7 @@ attempt, so reporting an immediate local refusal does not create an unpaced retr
 | Replicated transaction mutation | The Raft response's `TransactionMutationError` | The state machine's typed refusal, cloned from the report's current context when the response is built | The proposer creates a new report from the typed refusal |
 | Consensus append stream | The stream's wire records | A matching, conflicting or higher-vote answer, or the request error | The leader hands Raft an unreachable-peer error that names the target and the reason |
 | Interconnect remote operation | The failure's class and subject, with the answering node's description for an executed failure only | The classified result; the local chain is not serialized | The requester keeps the class beside its own target and placement context |
+| Interconnect connection handshake | The answer's refusal | The `PrerequisiteMismatch` the accepting node judged, seen from that node | The dialing node creates `TransportError::RefusedByPeer` from the mismatch, reversed to its own side |
 | Remote relay payload refused before admission | The refusal's reason text | The rendered chain | The forwarding node receives the reason as text |
 | WASM guest ABI | An integer result code, and the reason on the global-error channel | The code of the guest error's current context, or the rendered chain as the reason of a guest failure | The host creates a guest-call report that holds the code or the reason |
 | Structured message error | The record's reference, code, operation, affected fields, time and message | The typed reason that selects the code and a non-sensitive message | The error route receives the record, never the report |
@@ -217,7 +218,7 @@ reports retain the VM or Arrow cause.
 Three renderings are not the whole chain, each by its owner's decision. An ingestor's transient
 status shows the most specific cause of a source failure, because the connector contract's own
 context names only the operation that failed. An emitter's transient status shows the description
-its sink attached, which for the HTTP sink is the description of the whole chain. A failed
+its emitter attached, which for the HTTP emitter is the description of the whole chain. A failed
 consensus proposal's message is its context followed by the storage or Raft error beneath it. A
 node and the benchmark command return their report from `main`, so the process that exits with it
 prints the report's debug form: every context, with its attachments.
@@ -249,7 +250,7 @@ subsections after the boundary table follow this order.
 | Primitives | Modeled adapters keep the error types of the library they stand in for, such as the watch channel's `RecvError` and `SendError` | The library's own error shape, never a report |
 | Vocabulary | Model alteration errors, `CanonicalNsplError`, `ArchivedCountError`, `DurationTextError` and the name and value errors of the shared types | A report that names the Model, field or value refused, with nothing above it yet |
 | Language | `ParseFromSourceError` for the lexer and parser, `FormatError` for the formatter | A report whose context holds the stage, the rejected text and every diagnostic's byte span |
-| Engines and infrastructure | The VM's `CompileError`, `RuntimeError` and row errors; `UdfError`; `JaqProgramError` and `JaqFormatError`; `CodecError`; the WASM `ProtocolError`, `GuestError` and `WasmGuestError`; the connector contract's `SourceError`, `SinkStartError`, `SinkPublishError` and `SinkFinishError` above each connector's own errors; `ConsensusError` and `StorageFailure`; the interconnect's `TransportError`, `RequestError` and `RemoteOperationFailure`; `DnsConfigurationError` and `DnsLookupError`; `AdmissionError` and `ExecutionError`; `ArchiveWriteError` and `ArchiveReadError` | A report, a typed per-row or per-record outcome, or a typed class of a remote result. An engine decides nothing about the graph, so its errors name no node policy |
+| Engines and infrastructure | The VM's `CompileError`, `RuntimeError` and row errors; `UdfError`; `JaqProgramError` and `JaqFormatError`; `CodecError`; the WASM `ProtocolError`, `GuestError` and `WasmGuestError`; the connector contract's `IngestorError`, `EmitterOpenError`, `EmitterWriteError` and `EmitterFinishError` above each connector's own errors; `ConsensusError` and `StorageFailure`; the interconnect's `TransportError`, `RequestError` and `RemoteOperationFailure`; `DnsConfigurationError` and `DnsLookupError`; `AdmissionError` and `ExecutionError`; `ArchiveWriteError` and `ArchiveReadError` | A report, a typed per-row or per-record outcome, or a typed class of a remote result. An engine decides nothing about the graph, so its errors name no node policy |
 | Decisions | `RegistryError`, `RelocationPlanError`, `RestorePlanError` and `TransactionPlanningError` | A report that names the node, route, operation and fields of the refused model or plan |
 | Data plane | `RuntimeError` above `ExecutionBuildError`; `IngestorStartError`, `EmitterStartError` and `GeneratorError`; `PlannedGeneralError`, `RouteOutputError`, `RelayProcessorError` and the other node contexts; `RuntimePersistenceError`; the domain clock's `DomainClockAccessError` and `DomainClockWaitError` | A report for the node's policy, with the acknowledgements of the work that failed, or a structured message error for a route |
 | Control plane | `AppError`, `DomainAlterError`, `BackupError`, `RestoreRefusal` and the transaction and lifecycle errors | A report the session edge turns into a command result |
@@ -262,10 +263,10 @@ subsections after the boundary table follow this order.
 | Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical NSPL cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
 | NSPL language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
-| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. The unfolding of a payload a quiesce buffer retained, or of a poll a paced source handed over, is not refused at all: nothing could present it again, so it waits for a place. The job that admits one key group into a keyspace a restore is converting waits for a place too, because the keys admitted so far could be presented again only by converting the keyspace from its first group. So does a payload a source handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. An Iceberg commit's read of the staged files its sink already accepted waits for a place as well, while the bulk memory charge it takes first, without queueing, is refused when the class has no room and the emitter retries the commit with its policy. A panic is the job's own defect. |
+| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. The unfolding of a payload a quiesce buffer retained, or of a poll a paced ingestor handed over, is not refused at all: nothing could present it again, so it waits for a place. The job that admits one key group into a keyspace a restore is converting waits for a place too, because the keys admitted so far could be presented again only by converting the keyspace from its first group. So does a payload a source handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. An Iceberg commit's read of the staged files its emitter already accepted waits for a place as well, while the bulk memory charge it takes first, without queueing, is refused when the class has no room and the emitter retries the commit with its policy. A panic is the job's own defect. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures, and a processor task's restore of the branches its lifecycle checkpoint names (`ProcessorBranchTaskError`) | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. A restore that fails installs no branch and stays pending: the task retries it after a backoff, holds its input, and refuses a lifecycle checkpoint or guest-state reset with `BranchesUnrestored` until an attempt succeeds. [Shutdown And Recovery](./shutdown.md#restoring-processor-branches) owns that sequence. |
-| Connector crates and host | Integration-specific configuration, decoding, external source and sink outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from a source or sink failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
+| Connector crates and host | Integration-specific configuration, decoding, external ingestor and emitter outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from a source or emitter failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
 | Materialized state and lookups | Dependency resolution, field and schema checks, defaults, lookup evaluation, snapshot opening, and state exchange | Use a declared absence policy only for unavailable state; report a genuine failed read or invalid state. |
 | Ingest grouping and relay batching | Route grouping, branch-key construction, Arrow batch assembly, relay admission, and delivery failures | Keep the affected concrete branch and fail or retry the correct in-memory attempt. |
 | Client ingestor endpoint | Whether a submitted batch is a canonical Arrow IPC stream of the input schema (`ClientBatchError`), whether the node had capacity to validate it, and how its acknowledgement root resolved | Answer the batch as not admitted with its defect or a temporary refusal, or with its terminal outcome, and end a producer with the reason its attachment ended. |
@@ -495,14 +496,14 @@ authority.
 ### Name Resolution
 
 The node resolver's own errors belong to `nervix-dns`. A resolver configuration that cannot be
-loaded is a `DnsConfigurationError`, which fails node startup beneath
-`failed to load the name resolver configuration` and a native client's connection as
-`ClientError::LoadDnsConfiguration`. A lookup that fails is a `DnsLookupError`: the host as the
-caller wrote it and one `DnsLookupFailure`, the closed set that
+loaded is a `DnsConfigurationError`, which fails node startup beneath the startup preflight's
+`PreflightError::Resolver`, `failed to load the name resolver configuration`, and a native client's
+connection as `ClientError::LoadDnsConfiguration`. A lookup that fails is a `DnsLookupError`: the
+host as the caller wrote it and one `DnsLookupFailure`, the closed set that
 [Lookup Outcomes](./name-resolution.md#lookup-outcomes) lists. A client library that resolves
 through one of the resolver's hooks receives the `DnsLookupError` itself and keeps it among the
 causes of its own connection error, where `DnsLookupError::find_in` recovers it. The HTTP request
-sink, RabbitMQ, Syslog, WebSocket, Redis, MQTT, ClickHouse, SQS and the native session client keep
+emitter, RabbitMQ, Syslog, WebSocket, Redis, MQTT, ClickHouse, SQS and the native session client keep
 it beneath their own failure, as the paragraphs below describe. HTTP polling, Prometheus, Sentry,
 OTEL and Iceberg report their failed request, export or catalog call without it, so their
 diagnostics do not name the lookup failure.
@@ -517,18 +518,18 @@ The node's own trace export waits for the resolver installed by startup. Its con
 `TraceConnectError` distinguishes a closed installation, a connection timeout, and a Hyper
 connection failure retaining its `DnsLookupError` cause. Tonic and the OTLP SDK report the failed
 export. The export timeout encloses DNS and TCP after resolver installation; a missing DNS
-configuration still fails startup as
-`AppError::LoadDnsConfiguration`. Telemetry failures have no connector retry or ACK disposition.
+configuration still fails startup, in the startup preflight, as `PreflightError::Resolver` beneath
+`AppError::Preflight`. Telemetry failures have no connector retry or ACK disposition.
 
 ### Connectors
 
 A connector reports through the contract's own contexts and keeps its integration's error beneath
-them. `SourceError` names the connector and the operation that failed: opening, reading,
-acknowledging, rejecting, suspending, resuming or closing. `SinkStartError` separates an invalid
-configuration and a missing external entity from a failed initialization. `SinkPublishError`
+them. `IngestorError` names the connector and the operation that failed: opening, reading,
+acknowledging, rejecting, suspending, resuming or closing. `EmitterOpenError` separates an invalid
+configuration and a missing external entity from a failed initialization. `EmitterWriteError`
 separates a failed publish or commit, which the host retries on its backoff, from a
-misconfiguration, which it does not retry. `SinkFinishError` reports a finish that did not send
-everything the sink's client still held when the emitter stopped: `Unsent` when the deadline passed,
+misconfiguration, which it does not retry. `EmitterFinishError` reports a finish that did not send
+everything the emitter's client still held when the emitter stopped: `Unsent` when the deadline passed,
 with the count of records the client still held, and `Flush` when the client failed while it sent
 them. The host does not retry a finish; a stop that asked for it fails, and teardown records it as
 the emitter's transient error. A record the destination refuses for good is none of
@@ -552,9 +553,9 @@ injector follows the same typed path. WebSocket signaling compilation and execut
 frame encoding and transport causes. The runtime's Syslog source-plan and signaling compilation
 errors keep those reports as typed fields while preserving their startup messages.
 
-An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP sink: a timeout, a
+An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP emitter: a timeout, a
 DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
-authentication status with its number. The sink keeps the resolver's `DnsLookupError`, the
+authentication status with its number. The emitter keeps the resolver's `DnsLookupError`, the
 response-header failure, the socket or TLS error, or the `AddressShareElapsed` of an address that
 accepted no connection within its share of `timeout_ms` as the context beneath it, and attaches the
 description of the whole chain, such as
@@ -566,9 +567,9 @@ request is not an attempt failure: it is a record rejection with code `external`
 `publish` and its numeric status.
 
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
-and attaches its safe message for diagnostics; an invalid request program never starts the sink.
+and attaches its safe message for diagnostics; an invalid request program never starts the emitter.
 
-A Prometheus query that fails is a `PrometheusSourceError` beneath `SourceError::Read`: a request
+A Prometheus query that fails is a `PrometheusQueryIngestorError` beneath `IngestorError::Read`: a request
 that could not be sent, a status other than success, a response whose announced length or body
 exceeds the ingestor's `MAX BODY SIZE`, a body that could not be read, a payload that does not
 decode, a query Prometheus answers with an error status, or a result that is not a vector. The
@@ -582,7 +583,7 @@ Iceberg object storage retains the Iceberg storage error contract when it instal
 HTTP resolver. Invalid object URLs are `DataInvalid`, and an unsupported Azure connection string
 is `FeatureUnsupported`. Building the storage HTTP client or an OpenDAL operation can fail as
 `Unexpected`, with the underlying error retained as its source. Those failures enter the existing
-sink failure and retry path; they do not release a staged record's acknowledgement before commit.
+emitter failure and retry path; they do not release a staged record's acknowledgement before commit.
 
 A RabbitMQ connection that fails is a `RabbitMqConnectError`, owned by the connector's connection
 module: an invalid address or CA file, a lookup failure that keeps the resolver's `DnsLookupFailure`
@@ -591,50 +592,50 @@ second handle on that ends an unopened connection, a failed or overdue TLS hands
 runtime that could not be created, or a failed or overdue AMQP handshake, each naming the broker
 host where one is involved. An overdue step keeps the elapsed `connect_timeout_ms` as its typed
 cause. A step of opening the entity's channel that fails or runs out of the same deadline is
-reported beneath the source's or sink's own context for that step, with the elapsed deadline as its
+reported beneath the source's or emitter's own context for that step, with the elapsed deadline as its
 typed cause and its text leading the report. The source keeps these beneath its connect and resume
 contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the resolver's own lookup error or
-the deadline that ran out. The sink changes them into a configuration failure for an invalid
+the deadline that ran out. The emitter changes them into a configuration failure for an invalid
 address, CA file or deadline key and an initialization failure otherwise, leading with the failure's
 chain, down to a `connect_timeout_ms` it ran out of, which `DESCRIBE EMITTER` shows. Neither
 attaches credentials from the address. A `NO ACK` round trip that runs out of the client's
 `timeout_ms` fails the write as a publish failure with the elapsed deadline as its typed cause and
 its text leading the report.
 
-A RabbitMQ publish that ends with the broker closing the sink's channel is classified by the
-broker's own reason, which the sink reads from its connection. A refusal of a message body larger
-than `max_message_size` is a `RabbitMqRecordError`, owned by the RabbitMQ sink, which carries the
+A RabbitMQ publish that ends with the broker closing the emitter's channel is classified by the
+broker's own reason, which the emitter reads from its connection. A refusal of a message body larger
+than `max_message_size` is a `RabbitMqRecordError`, owned by the RabbitMQ emitter, which carries the
 body size and the limit as typed fields and becomes a record rejection of that message with code
 `external` and operation `publish`, reaching every member of a batch message. Any other close, a
 lost connection, and a close whose reason never arrives fail the attempt as an infrastructure
 failure, which the emitter retries on its backoff.
 
 Syslog emission and WebSocket-client ingestion retain DNS failures from the node resolver beneath
-their existing infrastructure contexts: `SinkStartError::Initialize` while a Syslog sender opens
-and `SourceError::Resume` while a WebSocket source connects or reconnects. The resolver's typed
+their existing infrastructure contexts: `EmitterOpenError::Initialize` while a Syslog sender opens
+and `IngestorError::Resume` while a WebSocket source connects or reconnects. The resolver's typed
 missing-name, no-address, timeout, invalid-name or transport cause stays in the error report.
 Address, TLS and WebSocket-upgrade failures remain connection outcomes. None is a record rejection,
 and a DNS result by itself never marks a Syslog record delivered.
 
 Redis command connections receive the node resolver through the driver's DNS hook. A failed
 initial or later pool connection keeps the resolver's typed failure in
-`RedisClientError::Resolve`; a later failure sits beneath `SinkPublishError::Publish` for the
+`RedisClientError::Resolve`; a later failure sits beneath `EmitterWriteError::Publish` for the
 emitter host to retry.
 A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLookupError` beneath
-`RedisPubSubSourceError::Resolve` and `SourceError::Resume`. A refused address, failed TLS name
+`RedisPubSubIngestorError::Resolve` and `IngestorError::Resume`. A refused address, failed TLS name
 check or failed Redis protocol setup is also a connection failure. None rejects an input message
 or changes Redis Pub/Sub's server-acceptance boundary for `PUBLISH`.
 
 A Redis source client must declare `subscription_buffer_messages` and `idle_timeout_ms`.
-A missing key is `RedisPubSubSourceError::MissingConfiguration`, naming only that key; a capacity
+A missing key is `RedisPubSubIngestorError::MissingConfiguration`, naming only that key; a capacity
 outside the bounded channel's range is `InvalidBufferCapacity`, and an invalid idle deadline keeps
 `ClientConfigError::InvalidDeadline` beneath `InvalidIdleTimeout`. These are source configuration
 failures before a subscription opens, not record rejections.
 
 Redis subscription protocol and read failures retain their driver causes beneath
-`RedisPubSubSourceError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
+`RedisPubSubIngestorError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
 the shared `DeadlineElapsed` with `idle_timeout_ms` and its configured bound beneath `IdleProbe`
-and `SourceError::Read`. The host displays that transient failure and reconnects on its existing
+and `IngestorError::Read`. The host displays that transient failure and reconnects on its existing
 policy. Reader task failures retain the typed join cause. A source explicitly ending its lifetime
 joins its reader; it owes no further read outcome after intake ends.
 
@@ -642,24 +643,24 @@ A connection that runs out of the client's `connect_timeout_ms` keeps the connec
 `DeadlineElapsed` as its innermost cause, naming the step that did not finish, the key and its
 bound, beneath the connector's own context: `RabbitMqConnectError::Unreachable` or `TlsHandshake`
 for a broker connection, `RedisClientError::Connect` for a new pool connection,
-`SinkPublishError::Publish` for a pool checkout, `RedisPubSubSourceError::NotEstablished` or
-`Subscribe` for a subscription, `SinkStartError::Initialize` for a Syslog sender and
-`SourceError::Resume` for a WebSocket connection. `DESCRIBE INGESTOR` shows it as the deepest cause.
-An emitter shows the message its sink attached last, so a Redis or Syslog sink attaches the
-deadline's message after its other attachments, and a RabbitMQ sink attaches its connection
+`EmitterWriteError::Publish` for a pool checkout, `RedisPubSubIngestorError::NotEstablished` or
+`Subscribe` for a subscription, `EmitterOpenError::Initialize` for a Syslog sender and
+`IngestorError::Resume` for a WebSocket connection. `DESCRIBE INGESTOR` shows it as the deepest cause.
+An emitter shows the message its emitter attached last, so a Redis or Syslog emitter attaches the
+deadline's message after its other attachments, and a RabbitMQ emitter attaches its connection
 failure's whole chain. A deadline key whose value breaks the vocabulary's rule is
 `ClientConfigError::InvalidDeadline`, naming the key above the `ClientDeadlineError` that says why,
 and each connector reports it as a configuration failure.
 
 A Core NATS write that runs out of the client's `timeout_ms` keeps `DeadlineElapsed` beneath
-`SinkPublishError::Publish` and attaches its message, which `DESCRIBE EMITTER` shows; the write's
-records stay unresolved for the emitter's retry. A NATS sink whose client still holds records when
-its finish deadline passes fails its finish with `SinkFinishError::Unsent` and their count, and one
-whose client fails while it flushes them with `SinkFinishError::Flush`, the driver's flush error
+`EmitterWriteError::Publish` and attaches its message, which `DESCRIBE EMITTER` shows; the write's
+records stay unresolved for the emitter's retry. A NATS emitter whose client still holds records when
+its finish deadline passes fails its finish with `EmitterFinishError::Unsent` and their count, and one
+whose client fails while it flushes them with `EmitterFinishError::Flush`, the driver's flush error
 beneath.
 
 A Syslog frame write that runs out of the client's `timeout_ms` keeps `DeadlineElapsed` beneath
-`SinkPublishError::Publish`, and the sink attaches the deadline's message last, so
+`EmitterWriteError::Publish`, and the emitter attaches the deadline's message last, so
 `DESCRIBE EMITTER` leads with it; the emitter rebuilds its connection and retries on its policy. A Syslog
 listener's connection whose TLS handshake runs out of `connect_timeout_ms`, or which sends nothing
 for its `idle_timeout_ms`, ends with `DeadlineElapsed` beneath the listener's connection failure.
@@ -676,26 +677,26 @@ cause of its connection error. The connector finds it there and reports
 and the `DnsLookupError` beneath it. Any other failure keeps the driver's own description, such as
 an address that refused the connection, a failed TLS handshake, including a certificate that does
 not name the configured host, or a refused MQTT handshake. A source keeps the error beneath
-`MqttSourceError::Connect` while it connects and `MqttSourceError::Receive` while it reads, and
-those beneath `SourceError`, so `DESCRIBE INGESTOR` shows the deepest cause: the resolver's lookup
-error or the driver's description. The task that drives a source's connection hands the lost
-connection to the source's next read, or to an acknowledgement that finds the connection ended,
-which keeps it beneath `MqttSourceError::Acknowledge`; a task that fails without a report keeps its
-`JoinError` beneath `MqttSourceError::Driver`. An acknowledgement that meets the task holding a
-publish for room in a full read-ahead fails as `MqttSourceError::ReadAheadFull`, naming the
+`MqttTopicIngestorError::Connect` while it connects and `MqttTopicIngestorError::Receive` while it reads, and
+those beneath `IngestorError`, so `DESCRIBE INGESTOR` shows the deepest cause: the resolver's lookup
+error or the driver's description. The task that drives a ingestor's connection hands the lost
+connection to the ingestor's next read, or to an acknowledgement that finds the connection ended,
+which keeps it beneath `MqttTopicIngestorError::Acknowledge`; a task that fails without a report keeps its
+`JoinError` beneath `MqttTopicIngestorError::Driver`. An acknowledgement that meets the task holding a
+publish for room in a full read-ahead fails as `MqttTopicIngestorError::ReadAheadFull`, naming the
 read-ahead's capacity, because nothing would write it before the host reads again, and one whose
 connection wrote nothing for a keep-alive interval fails as
-`MqttSourceError::AcknowledgementDeadline`, naming the keep-alive. A sink's event
+`MqttTopicIngestorError::AcknowledgementDeadline`, naming the keep-alive. A emitter's event
 loop records the connection error's message as the emitter's transient error, which
 `DESCRIBE EMITTER` shows, and reconnects on the emitter's retry policy. None rejects a record or
 acknowledges input. A QoS 1 or 2 publish keeps the driver's `ClientError` when the client refuses
 to take a record, and its `PublishNoticeError` when an answer leaves a record unresolved, beneath
-`SinkPublishError::Publish`, each with the connector's description of the failure for the
+`EmitterWriteError::Publish`, each with the connector's description of the failure for the
 emitter's transient error. A missed `ACK TIMEOUT` is the confirmation window's
 `ConfirmationWindowError`, which the window describes the same way.
 
-MQTT input retirement reports `RuntimeError::RetireIngestorSource`, naming its domain and
-ingestor, above the connector's `MqttSourceError::RetireInstance` and instance index. The report
+MQTT input retirement reports `RuntimeError::RetireIngestorEntity`, naming its domain and
+ingestor, above the connector's `MqttTopicIngestorError::RetireInstance` and instance index. The report
 keeps typed client and connection causes, an unsubscribe refusal's reason codes, or the cleanup
 deadline's budget. Invalid endpoint URLs retain their parse cause, and client construction keeps
 its driver cause. Cleanup failures at the preceding endpoint are rendered once into runtime error
@@ -703,23 +704,23 @@ events and do not fail a drop or prevent moving to another reachable endpoint. F
 the replacement's changed sessions remains an installation failure. Neither path rejects a record
 or confirms payload delivery.
 
-Pulsar input retirement reports `RuntimeError::RetireIngestorSource` above the connector's
-`PulsarSourceError::RemoveSubscription`, which names the subscription and its qualified topic.
+Pulsar input retirement reports `RuntimeError::RetireIngestorEntity` above the connector's
+`PulsarTopicIngestorError::RemoveSubscription`, which names the subscription and its qualified topic.
 Beneath it is the step that failed: the client's connection failure, `JoinSubscription` or
 `Unsubscribe` above the driver's `pulsar::Error`, which keeps a refusal's server error and reason,
 or `RemovalDeadline` with the connection budget it exceeded. A client whose configuration does not
-resolve keeps `SourceStartError::ClientConfiguration` beneath the retirement context instead. Each
+resolve keeps `IngestorConnectorStartError::ClientConfiguration` beneath the retirement context instead. Each
 report is rendered once into runtime error events and never fails the drop or replacement.
-Comparing a replacement's subscription retains URL parse causes beneath `PulsarSourceError::ClientConfig`,
+Comparing a replacement's subscription retains URL parse causes beneath `PulsarTopicIngestorError::ClientConfig`,
 or uses `InvalidServiceAddress` for an unsupported service scheme or missing host, beneath the
 retirement context. A comparison failure preserves the subscription and is reported separately
 from any failure to start the replacement. A provisioned
-subscription that does not exist is `PulsarSourceError::MissingSubscription` beneath the source's
+subscription that does not exist is `PulsarTopicIngestorError::MissingSubscription` beneath the source's
 resume context, which the ingestor's transient status shows by its subscription and topic; a check
 that could not learn whether the subscription exists is `VerifySubscription` above the driver's
 error.
 
-A Kafka sink keeps librdkafka's `KafkaError` beneath `SinkPublishError::Publish` when a producer
+A Kafka emitter keeps librdkafka's `KafkaError` beneath `EmitterWriteError::Publish` when a producer
 failure ends admission or a delivery report leaves a confirmed publish's record unresolved.
 Temporary `QueueFull` applies confirmation-window backpressure in `ACK`; in `NO ACK` it is the
 producer failure that ends the attempt. A payload exceeding the entire native queue byte capacity
@@ -732,43 +733,43 @@ the connector's description of the failure for the emitter's transient error, an
 TIMEOUT` is again the confirmation window's `ConfirmationWindowError`. A delivery error about the
 record itself, an invalid or oversized message, timestamp or record, rejects that record through
 `ON MESSAGE ERROR` instead. A producer that librdkafka cannot create keeps its `KafkaError` beneath
-`SinkStartError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `message.timeout.ms` can
-hold is `KafkaMessageTimeoutError::TooLong` beneath `SinkStartError::InvalidConfiguration`. A
+`EmitterOpenError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `message.timeout.ms` can
+hold is `KafkaMessageTimeoutError::TooLong` beneath `EmitterOpenError::InvalidConfiguration`. A
 finish whose producer queue does not empty before its deadline keeps librdkafka's `KafkaError`
-beneath `SinkFinishError::Unsent`, which counts the records whose delivery report has not been
+beneath `EmitterFinishError::Unsent`, which counts the records whose delivery report has not been
 served and never the errors, statistics or other events waiting in the producer's queue; a flush
 that gives up only after every record's report was served is no failure. A flush that fails
 otherwise, or whose blocking task does not complete, keeps that cause beneath
-`SinkFinishError::Flush`.
+`EmitterFinishError::Flush`.
 
 A Kafka source classifies an unknown topic from a subscription or topic metadata as
-`KafkaSourceError::MissingTopic`, retaining the driver's typed `KafkaError` as an attachment.
+`KafkaTopicIngestorError::MissingTopic`, retaining the driver's typed `KafkaError` as an attachment.
 The named topic is the semantic failure shown in `DESCRIBE INGESTOR` until the operator provisions
 it. Partition watches recognize this variant as an empty topology; other inspection failures keep
 their existing reporting path. A Kafka client's attempt to set `allow.auto.create.topics` is
 `RegistryError::NervixOwnedClientConfigKey`, naming the domain, client and owned key without its
 configured value. The source and both inspectors enforce `false` after pass-through configuration.
 
-A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaSourceError::CommitOffset`, which names
+A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaTopicIngestorError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
-does not answer within thirty seconds is `KafkaSourceError::CommitUnanswered`, and a blocking-pool
-job that ends without the answer keeps its `JoinError` beneath `KafkaSourceError::CommitTask`. The
-commit of an acknowledged batch fails beneath `SourceError::Acknowledge`, so the ingestor's
+does not answer within thirty seconds is `KafkaTopicIngestorError::CommitUnanswered`, and a blocking-pool
+job that ends without the answer keeps its `JoinError` beneath `KafkaTopicIngestorError::CommitTask`. The
+commit of an acknowledged batch fails beneath `IngestorError::Acknowledge`, so the ingestor's
 transient status in `DESCRIBE INGESTOR` shows the deepest cause, such as the driver's description of
 the refusal, and the host rejects the batch's positions, which the source reads again. The commit a
-`MODE NO ACK` consumer makes as it leaves its group fails beneath `SourceError::Suspend` or
-`SourceError::Close`, which the source loop reports as a runtime event. None rejects a record.
+`MODE NO ACK` consumer makes as it leaves its group fails beneath `IngestorError::Suspend` or
+`IngestorError::Close`, which the source loop reports as a runtime event. None rejects a record.
 
-Kafka control-call admission keeps `AdmissionError` beneath `KafkaSourceError::ControlAdmission`,
+Kafka control-call admission keeps `AdmissionError` beneath `KafkaTopicIngestorError::ControlAdmission`,
 and a refused queue or failed admitted worker keeps `ExecutionError` beneath
-`KafkaSourceError::ControlExecution`. These are transient failures of resume, rejection or
+`KafkaTopicIngestorError::ControlExecution`. These are transient failures of resume, rejection or
 acknowledgement, rather than failures to decode a record. A control call that exhausts its native
-`socket.timeout.ms` budget reports `KafkaSourceError::ControlTimeout` with that bound. Metadata,
+`socket.timeout.ms` budget reports `KafkaTopicIngestorError::ControlTimeout` with that bound. Metadata,
 watermark, timestamp and seek failures preserve the driver's typed cause beneath the operation
 that failed.
 
 A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
-and a refused charge keeps `AdmissionError` beneath `KafkaSourceError::RetirementAdmission`. It
+and a refused charge keeps `AdmissionError` beneath `KafkaTopicIngestorError::RetirementAdmission`. It
 fails the source's open or the partition inspector's start, as transiently as a refused control
 call. A Kafka producer takes the same charge, and a refused one keeps `AdmissionError` beneath
 `KafkaProducerStartError::RetirementAdmission` beneath `SinkStartError::Initialize`, whose
@@ -779,11 +780,11 @@ caller to fail, so its supervisor reports a destruction job that panicked at `de
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
 cause of its connection error, and the connector finds it there by type and keeps it as the context
-beneath its existing infrastructure failure: `SinkPublishError::Publish` for a ClickHouse insert or
-an SQS send, `SinkStartError::Initialize` while an SQS sink looks up its queue, and the
-`SqsSourceError` of looking its queue up, receiving or deleting beneath the source's `SourceError`.
-An SQS source looks its queue up when an instance resumes, so that failure is `SourceError::Resume`
-above the typed lookup failure: a queue the service does not have is `SqsSourceError::MissingQueue`,
+beneath its existing infrastructure failure: `EmitterWriteError::Publish` for a ClickHouse insert or
+an SQS send, `EmitterOpenError::Initialize` while an SQS emitter looks up its queue, and the
+`SqsQueueIngestorError` of looking its queue up, receiving or deleting beneath the source's `IngestorError`.
+An SQS source looks its queue up when an instance resumes, so that failure is `IngestorError::Resume`
+above the typed lookup failure: a queue the service does not have is `SqsQueueIngestorError::MissingQueue`,
 which names it, and the source host shows the deepest cause as the source's transient error and
 retries it. The failure's message names the host and the lookup failure, which `DESCRIBE EMITTER`
 and `DESCRIBE INGESTOR` show. Any other failure to reach the service, such as a refused connection
@@ -792,35 +793,35 @@ connection error, which describes the connection and carries neither credentials
 response from the service keeps its existing description. None is a record rejection, and none
 acknowledges input. A source read the host cancelled still waits for its receive in flight, and a
 service that has not answered it within 10 seconds of the cancellation ends the read with
-`SqsSourceError::CancelledReceiveUnanswered`, which names that budget, beneath `SourceError::Read`.
+`SqsQueueIngestorError::CancelledReceiveUnanswered`, which names that budget, beneath `IngestorError::Read`.
 The host shows it as the source's transient error; nothing is rejected or acknowledged, and a message
 the receive was returning stays invisible until its visibility timeout.
 
 OTEL keeps a row conversion failure in the invalid-record channel and names its mapped key as the
 affected field. A lower OTEL value type or range error stays in the internal report until the
-rejection is constructed. Database sink insert reports keep transport driver or pool causes while the
+rejection is constructed. Database emitter insert reports keep transport driver or pool causes while the
 connector inspects the current typed error for definite row rejection. Postgres SQLSTATE, MySQL
 SQLSTATE and code, and ClickHouse named rejection remain the same external classifications.
 Database response text that could quote a bound value is discarded after extracting that safe
 classification; diagnostics do not quote the row payload.
 
-A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
+A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar emitter: a message
 larger than the maximum message size the broker announced, which carries the measured size of its
 metadata and payload and the limit as typed fields, or a message the broker answered with
 `NotAllowedError`, which carries the broker's reason. Either becomes a record rejection with code
 `external` and operation `publish`. Every other failure of the client, its connection or the broker
 stays an infrastructure failure of the attempt, which the emitter retries.
 
-The Pulsar sink preserves the driver's `pulsar::Error` beneath `SinkPublishError::Publish` for
+The Pulsar emitter preserves the driver's `pulsar::Error` beneath `EmitterWriteError::Publish` for
 enqueue failures and failed receipts, with its description in a printable attachment. Its shared
 confirmation window owns a missed `ACK TIMEOUT` as `ConfirmationWindowError`. A `NO ACK` finish
-keeps the first failed receipt beneath `SinkFinishError::Flush`; if its deadline expires with
-receipts still unanswered, `SinkFinishError::Unsent` counts those receipts, retaining an earlier
+keeps the first failed receipt beneath `EmitterFinishError::Flush`; if its deadline expires with
+receipts still unanswered, `EmitterFinishError::Unsent` counts those receipts, retaining an earlier
 driver failure beneath it when present. An unanswered receipt leaves delivery unknown rather
 than proving that the broker did not store the message.
 
 A Pulsar source classifies an acknowledgement or a redelivery request that did not take effect in
-`PulsarSourceError`, beneath `SourceError::Acknowledge` or `SourceError::Reject`. An
+`PulsarTopicIngestorError`, beneath `IngestorError::Acknowledge` or `IngestorError::Reject`. An
 acknowledgement the broker answered with a server error is `AcknowledgementRefused`, whose typed
 `PulsarRefusal` keeps the server error, absent for a code the client does not know, and the reason
 the broker gave. An acknowledgement nothing answered is `AcknowledgementUnconfirmed`, and a
@@ -832,18 +833,18 @@ client failure the source does not classify keeps the driver's error as the type
 shows.
 
 A NATS source whose client loses its connection to the server reports
-`NatsSourceError::ConnectionLost` beneath `SourceError::Read` once it has handed over what the client
-received, and each reconnect that fails reports `NatsSourceError::Connect` beneath
-`SourceError::Resume`; the source host shows the deepest cause as the ingestor's transient error. A
-NATS JetStream publish keeps the driver's `PublishError` beneath `SinkPublishError::Publish` when the
+`NatsSubjectIngestorError::ConnectionLost` beneath `IngestorError::Read` once it has handed over what the client
+received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath
+`IngestorError::Resume`; the source host shows the deepest cause as the ingestor's transient error. A
+NATS JetStream publish keeps the driver's `PublishError` beneath `EmitterWriteError::Publish` when the
 client does not take a record within `ACK TIMEOUT` and when a record's `PubAck` fails, each with the
 connector's description of the failure for the emitter's transient error. A message above the
 server's `max_payload` becomes a record rejection with code `external` and operation `publish`, and a
 missed `ACK TIMEOUT` is the confirmation window's `ConfirmationWindowError`.
 
-A ZeroMQ source keeps the driver's `ZmqError` as the typed cause of its `ZeroMqSourceError`. `Bind`
-and `Connect` name the configured address and sit beneath `SourceError::Resume`, and `Receive` sits
-beneath `SourceError::Read`. The rendered chain therefore names both the address and the driver's
+A ZeroMQ source keeps the driver's `ZmqError` as the typed cause of its `ZeroMqPullIngestorError`. `Bind`
+and `Connect` name the configured address and sit beneath `IngestorError::Resume`, and `Receive` sits
+beneath `IngestorError::Read`. The rendered chain therefore names both the address and the driver's
 cause, and the source host shows the deepest cause as the ingestor's transient error, such as the
 operating system refusing a bind because another socket holds the address.
 
@@ -851,14 +852,14 @@ operating system refusing a bind because another socket holds the address.
 
 An outbound WebSocket peer's Close is a typed read failure preserving its status code and reason;
 an end without a status has its own typed state. Transport failures keep the WebSocket driver's
-error beneath `SourceError::Read`. A locally initiated close whose handshake exceeds its one-second
+error beneath `IngestorError::Read`. A locally initiated close whose handshake exceeds its one-second
 budget keeps a typed timeout beneath the suspend or close context. The broker host retains a read
 failure and its growing retry delay across successful reconnects until a batch is accepted. A
-broker source's acknowledgement that its transport fails to confirm, and a rejection it fails to
+broker ingestor's acknowledgement that its transport fails to confirm, and a rejection it fails to
 take back, become the ingestor's transient status with the innermost context of the source's
 report as the reason, and only a later confirmed acknowledgement clears it.
 
-Each source or sink publishes its safe transient error and optional retry together. An emitter
+Each source or emitter publishes its safe transient error and optional retry together. An emitter
 retains task-owned and connector-owned failures independently in one atomic publication. A publish
 or commit outcome clears the task failure; a retained connector's progress clears the connector
 failure. MQTT packet progress therefore preserves the host's unanswered-publish diagnostic until
@@ -958,11 +959,11 @@ A `WEBSOCKETS CLIENT` uses the same validation boundary with
 TLS keys on `ws`, and unpaired identity files are typed refusals naming their key, client and domain.
 `WebsocketsUpgradeHeadersError` names the connection ingestor and offending field without printing
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
-cause if a source cannot produce its validated header collection. Rendered client values are
+cause if a ingestor cannot produce its validated header collection. Rendered client values are
 validated again by the connector before opening transport.
-An emitter whose sink keeps one value per header name and whose `INVOKE` clause writes one literal
+An emitter whose connector keeps one value per header name and whose `INVOKE` clause writes one literal
 header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
-emitter, the sink's connector and entity, the header as the sink's
+emitter, the emitter's connector and entity, the header as the emitter's
 [header model](./connector-contract.md#header-models) records it, and both `INVOKE` positions, such as
 `emitter 'out' in domain 'shop' writes header 'route' at INVOKE #1 and again at #3, but PULSAR TOPIC
 emitters keep one value per header name, so the later write would replace the earlier one on every
@@ -1070,7 +1071,7 @@ Starting an ingestor on a node returns an `IngestorStartError` report. An ingest
 a domain execution or codec the node has not instantiated, and a binding failure beneath the
 binding context are start failures of their own. Every failure to compose or open the source is
 `IngestorStartError::Initialize`, naming the ingestor and its domain, with the cause beneath it: a
-`SourceStartError` for a missing node resolver, signaling protocol or endpoint, Kafka `DOMAIN`
+`IngestorConnectorStartError` for a missing node resolver, signaling protocol or endpoint, Kafka `DOMAIN`
 offsets this node does not own, or a delivery-mode duration that does not parse, or else the report
 of the client configuration, connector plan, source instance or domain cadence that failed. The
 runtime keeps the whole report beneath its own context: the domain build's
@@ -1089,9 +1090,9 @@ HTTP request fields or SQS ordering group, empty or invalid row mappings, nonlit
 attributes, and invalid Iceberg commit settings. Each report names the emitter and, for a source
 predicate, its relay. The decision fails before a new emitter plan or remote consumer edge is
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
-opening an external sink may fail independently and follows the emitter's retry policy.
+opening an external emitter may fail independently and follows the emitter's retry policy.
 
-The Iceberg sink plans how its commits write the mapped columns into the table, matching them to
+The Iceberg emitter plans how its commits write the mapped columns into the table, matching them to
 the table's columns by name, once while opening and again against the table's current schema before
 each commit writes data files. A plan the table cannot take is an `IcebergColumnError` naming the
 column: a mapped column absent from the table (`Missing`) or of an incompatible Iceberg type
@@ -1099,8 +1100,8 @@ column: a mapped column absent from the table (`Missing`) or of an incompatible 
 (`UnmappedRequired`), and a required column mapped from an expression that can produce a null
 (`NullableIntoRequired`), or whose nested values the table requires and the expression can leave
 null (`NullableNestedIntoRequired`). While opening, the error stays beneath
-`SinkStartError::InvalidConfiguration`, before staging records; before a commit, beneath
-`SinkPublishError::Commit`, so the commit keeps its staged rows and their acknowledgements. Either
+`EmitterOpenError::InvalidConfiguration`, before staging records; before a commit, beneath
+`EmitterWriteError::Commit`, so the commit keeps its staged rows and their acknowledgements. Either
 way the report attaches the error's own description, which the emitter shows as its transient error
 while it retries. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg conversion
 error beneath `IcebergColumnError::MappedSchema`. The plan compares names and nested types after
@@ -1108,7 +1109,7 @@ narrowing UTC datetimes to microseconds.
 
 An Iceberg commit charges the bulk memory class for the staged files it reads back with
 `Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The
-refusal keeps the typed `AdmissionError` beneath `SinkPublishError::Commit` and attaches the
+refusal keeps the typed `AdmissionError` beneath `EmitterWriteError::Commit` and attaches the
 description the emitter shows as its transient error: `Iceberg commit waits for room in the bulk
 memory class for <bytes> staged bytes` when the class has no room now, and `Iceberg commit waits
 for the whole bulk memory class of <capacity> bytes for a staged file of <bytes> bytes` when one
@@ -1121,7 +1122,7 @@ names the emitter and its domain, and the step that failed stays beneath it: an 
 node has no schema or resolved branching for, a client whose configuration does not resolve, a
 codec the node has not instantiated or that cannot hold a batch, a route, HTTP request fields,
 ordering group or `FROM WHERE` that does not compile, with the compile failure beneath it, and an
-invalid sink client configuration or input collection policy. Starting a generator returns a
+invalid emitter client configuration or input collection policy. Starting a generator returns a
 `GeneratorError` report the same way: `GeneratorError::Start` names the generator and its domain
 above an output relay the node has not instantiated, an output program that does not compile, a
 cadence the domain clock cannot bind, an invalid output flush policy, or a source relay without a
@@ -1136,8 +1137,8 @@ the byte-size parser's reason in its message. The node that declares the setting
 context above it, so the setting's error does not repeat the node: `GeneratorError::FlushPolicy`
 names the output relay, `EmitterStartError::CollectPolicy` the emitter's input collection, and
 `MessageErrorHandlingError::FlushPolicy` the message-error route and its relay. An emitter's
-`VALUES` mapping that does not compile is a `MappedValuesError` naming the sink and the emitter, with
-the VM's failure beneath, under the emitter's sink initialization failure.
+`VALUES` mapping that does not compile is a `MappedValuesError` naming the connector and the emitter, with
+the VM's failure beneath, under the emitter's connector initialization failure.
 
 Stopping an emitter's task to swap it fails as a `ScheduledEmitterStopFailure`, which keeps the
 task running beside a `ScheduledEmitterStopError` report: the task was unavailable, did not accept
@@ -1148,8 +1149,8 @@ and fails with `ExecutionBuildError::StopEmitter` above the stop report, beneath
 drain as a printable attachment, which a rendered chain does not show, so `StopEmitter` carries that
 description and its message ends with it. A later stop can still end the retained task.
 
-The task bounds buffer draining by its deadline, then lets the sink's finish answer within half the
-supervisor's response grace while still passing the original deadline to the sink. A finish that
+The task bounds buffer draining by its deadline, then lets the emitter's finish answer within half the
+supervisor's response grace while still passing the original deadline to the emitter. A finish that
 reports unsent records at its deadline supplies its own count to the stop report. A buffer drain
 that misses the deadline, or a finish that never answers within that reporting window, reports the
 stop deadline instead.
@@ -1183,12 +1184,36 @@ transaction.
 The node converts its settings once, where it reads its options, and before it opens a store. Each
 owner's definition validates its own value and its relationships with the settings it depends on,
 so defaults and an operator's values cross the same check, and each refusal names the settings by
-their option names with their values. A minimum election timeout that does not exceed the heartbeat
-interval, or a maximum that does not exceed the minimum, is a `RaftTimingError` beneath
-`AppError::InvalidRaftTimings`. A drain timeout above the shutdown timeout is a
-`ShutdownSettingsError` beneath `AppError::InvalidShutdownTimeouts`. A setting that a test names for
-a node but that the server's command line does not read keeps clap's error beneath
-`AppError::ReadSettings`.
+their option names with their values. A Raft heartbeat below one millisecond, or one so long that
+twelve of it do not fit the milliseconds consensus counts an election timeout in, is a
+`RaftTimingError` beneath `AppError::InvalidRaftTimings`. A gossip interval or a clock-skew
+tolerance below one millisecond, or a gossip interval twenty of which do not fit a duration, is a
+`MembershipSettingsError` beneath `AppError::InvalidMembershipSettings`, and a memory limit of zero
+a `CapacitySettingsError` beneath `AppError::InvalidCapacitySettings`. A drain timeout above the
+shutdown timeout is a `ShutdownSettingsError` beneath `AppError::InvalidShutdownTimeouts`. A
+setting that a test names for a node but that the server's command line does not read keeps clap's
+error beneath `AppError::ReadSettings`.
+
+The startup preflight runs once the settings have converted and before the node binds a listener
+or opens a store. Each check that fails is a `PreflightError` beneath `AppError::Preflight`, and
+each variant names what it judged with the values involved: `ExecutionLimits` for execution limits
+the memory budgets cannot hold, `Execution` for preflight work the executor could not admit,
+`UnaddressableBudgets` for budgets whose sum is no byte count, `MemoryBelowBudgets` and
+`WatermarkAboveMemory` with the memory limit and where it came from, `DirectoryUnavailable` and
+`DirectoryNotWritable` with the directory and its path, `VolumeUnreadable` for a volume whose size
+cannot be read, `QuotaExceedsVolume` with the setting, the quota, the volume's capacity and the
+directory, and `Resolver` for a name resolver that does not load. A check that failed on an
+operation keeps that operation's report beneath its variant: the operating system's error for a
+directory or a volume, the executor's for its limits or its admission, and the resolver loader's.
+The node logs the whole chain at `error` as `the startup preflight refused this node` and exits
+with it. [The Startup Preflight](./node-settings.md#the-startup-preflight) lists the checks.
+
+A node that is refused as it joins stops with `AppError::JoinRefused` above a `JoinRefusedError`.
+`Prerequisite` holds the `JoinRefusal` that names the peer and the `PrerequisiteMismatch` from this
+node's side, and `ClockSkew` names the peer whose clock was judged, the skew one probe proved and
+this node's tolerance. The refusal is logged at `error` as
+`this node was refused at join and stops` when the node requests its own stop, and returned once
+its shutdown phases have run, so the exit renders the whole chain.
 
 Memory-pressure watermarks are validated the same way. A watermark set without its pair, a low
 watermark that is not below the high one, or a zero check interval while the watermarks are set is
@@ -1240,7 +1265,7 @@ installing the new worker and drains the earlier task, preserving its pending ac
 Changing to immediate delivery or withdrawing the route also retires its buffered worker.
 
 `ON MESSAGE ERROR` belongs to the route and handles record-specific work. Ingestor and emitter
-`ON GENERAL ERROR` handles node-wide source and sink failures, and an ingestor's also reports the
+`ON GENERAL ERROR` handles node-wide ingestor and emitter failures, and an ingestor's also reports the
 [decode rejections](#decode-rejections) of payloads that never reached a route. A WASM processor's node-wide `ON
 GLOBAL ERROR` handles guest failures outside an individual message route. Error delivery preserves
 the branch in which the operation failed; ingestor errors are unbranched. See [Runtime Node Error
@@ -1281,28 +1306,28 @@ every mode it counts the payload in `nervix_ingestor_decode_rejections_total` an
 record as the ingestor's last decode rejection, which `DESCRIBE INGESTOR` reads from the node that
 runs the ingestor through the typed fields of its describe envelope.
 
-### Sink And Emitter Rejections
+### Emitter And Emitter Rejections
 
-A batch payload's rejection becomes one message error per member, each a copy of the sink's
+A batch payload's rejection becomes one message error per member, each a copy of the emitter's
 structured error: the members share its reference, so an operator can see that they failed
 together, while each keeps its own occurrence time and branch. A prepared row request's rejection,
 such as an OTEL Export request the receiver refused, does the same for every row the request
-carried. A sink answer that breaks the write contract, by naming a record the write did not carry
-or answering twice for one, is not a message error of any member. Neither is a row request sink's
+carried. A emitter answer that breaks the write contract, by naming a record the write did not carry
+or answering twice for one, is not a message error of any member. Neither is a row request emitter's
 preparation that breaks its contract: one that answers for a row the write did not hand over,
 answers twice for a row, prepares rows out of source order, prepares a request that carries no row,
 or leaves a handed-over row unanswered. Either fails the attempt without a retry as the typed
 emitter error that names the violation, the preparation keeps nothing, and the emitter's unresolved
 rows then follow `ON MESSAGE ERROR` as a failed publish.
 
-The Sentry sink prepares its envelope before the host retains the payload. Invalid event JSON,
+The Sentry emitter prepares its envelope before the host retains the payload. Invalid event JSON,
 invalid event fields and a final serialized event above its decompressed limit become definitive
 payload rejections at that boundary. The full typed preparation report is projected into the
 external message error once; all source members share its reference while keeping their own
-execution times. No refused envelope is sent or retained for a transport retry. The Syslog sink
+execution times. No refused envelope is sent or retained for a transport retry. The Syslog emitter
 rejects a UDP datagram above its payload limit, a stream frame whose
 octet count needs more than ten digits, or an LF-bearing non-transparent TCP frame before writing.
-A row sink — ClickHouse, Postgres, MySQL or MongoDB — and a batching OTEL sink, which prepares
+A row emitter — ClickHouse, Postgres, MySQL or MongoDB — and a batching OTEL emitter, which prepares
 its requests from mapped rows, measure each request they would send. If halving still leaves one
 row whose own request exceeds `MAX SIZE`, that row receives a `validation` message error of the
 `encode` operation naming the measured size and the limit, such as
@@ -1449,10 +1474,11 @@ The materialized relay reads that clock before rebuilding its branch activity re
 unreadable activation time ends the task with this event; record event watermarks cannot supply
 the missing domain time.
 
-An owner-delivery admission failure logs the domain, relay, branch scope and target together with
-the transport report, including retained cancellation and rejection causes, before returning the
-undelivered batch. This keeps admission and connection failures visible even when the batch
-carries no acknowledgement, without logging branch field values.
+An owner-delivery admission failure, and an owner delivery whose acknowledgement records could not
+be stored, log the domain, relay, branch scope and target together with the report, including
+retained cancellation, rejection and admission causes, before returning the undelivered batch.
+This keeps admission and connection failures visible even when the batch carries no
+acknowledgement, without logging branch field values.
 
 ## Cross-Node And Public Boundaries
 
@@ -1464,13 +1490,18 @@ the total time to transfer a frame. Expiry resets the exact stream; steady byte 
 the stream even when a large frame spans several progress intervals.
 
 The interconnect owns three kinds of failure. `TransportError` is a connection, TLS, framing,
-limit, deadline or relay delivery failure of the transport itself. `RequestError` is a typed
-request that could not be admitted, encoded, delivered or answered, with the peer's own
-`RemoteRequestFailure` when the peer's transport refused it. `RemoteOperationFailure` is the
-answering node's classified result of an operation it received, `Rejected`, `Unavailable`,
-`NotReady` or `Failed`, with a subject that is a domain, an entity, a state or a subscription
-interest. [Failure Ownership And Persistence](./interconnect.md#failure-ownership-and-persistence)
-owns what each means for a requester.
+limit, deadline or relay delivery failure of the transport itself, or a prerequisite refusal:
+`RefusedByPeer` when the dialed node refused this node and `IncompatiblePeer` when this node
+refused a peer, each with the peer and the typed `PrerequisiteMismatch`. A judged mismatch, and the
+`JoinRefusal` the transport's join progress holds, are declared outcome boundaries: they are what a
+join decided, not a failure of the node that judged it, and the server decides from their typed
+values. `RequestError` is a typed request that could not be admitted, encoded, delivered or
+answered, with the peer's own `RemoteRequestFailure` when the peer's transport refused it.
+`RemoteOperationFailure` is the answering node's classified result of an operation it received,
+`Rejected`, `Unavailable`, `NotReady` or `Failed`, with a subject that is a domain, an entity, a
+state or a subscription interest.
+[Failure Ownership And Persistence](./interconnect.md#failure-ownership-and-persistence) owns what
+each means for a requester.
 
 A bulk stream that cannot back its receive window sends nothing. Waiting for a window past the
 request's deadline reports `RequestTimeout`, like waiting for a stream slot. A `bulk_window` budget
@@ -1480,8 +1511,19 @@ with `BulkReceiveWindowUnbacked`, which carries the window and the budget as num
 
 The interconnect validates and bounds the wire request before its operation handler runs. A
 delivery correlation that has no free position reports `CorrelationCapacity`; an exhausted
-generation reports `CorrelationIdentityExhausted`; failure to reserve record storage reports
-`CorrelationMemory`. A receiver whose relay budget has no room for a batch's acknowledgement watches
+generation reports `CorrelationIdentityExhausted`. Record storage the sender's relay budget has no
+room for waits for room before the delivery's body is encoded, because that lack of room is
+temporary, and reports `CorrelationMemory`, with the budget's typed `AdmissionError` beneath it,
+only when it is larger than the whole budget or still without room when the delivery's five-minute
+bound has passed. A receiver that cannot issue a relay grant answers with a typed
+`RelayGrantRefusal`, never an HTTP status, and the sender decides from the refusal's class, a
+method of the refusal, without reading any text. The sender's transport reports the refusal as
+`TransportError::RelayGrantRefused`. A capacity refusal is temporary: the delivery is held back, the
+refusal counts as the receiver's progress, and the sender asks for the grant again. A permanent
+refusal fails the delivery at once with `RemoteDispatchError::GrantRefused`, which names the target
+and the refusal and keeps the transport report beneath it. A delivery still held when its bound
+passes fails with `AdmissionTotalTimeout`, with the last capacity refusal beneath it. A receiver
+whose relay budget has no room for a batch's acknowledgement watches
 holds the batch back unadmitted rather than failing it, because that lack of room is temporary. It
 reports `RemoteAckAdmission`, with the typed `AdmissionError` beneath it rather than rendered into
 its own text, only for watches larger than the whole budget or a hold still without room when the
@@ -1662,6 +1704,12 @@ context into the response where the response is built; the report's frames stay 
 evaluated it. The proposer wraps the typed refusal in a new report as
 `ConsensusTransactionError::Mutation`, beside `Consensus` for a proposal that failed and
 `InvalidResponse` for a response of another kind.
+
+A leader that leaves a gossip-discovered node outside the membership records why as a typed
+admission refusal rather than a report: the node has published no prerequisite record the leader
+can read, or it cannot run beside a live voter, which it names with the mismatch. The refusal is an
+outcome of membership reconciliation, logged once while it holds, and never fails the
+reconciliation.
 
 The durable store's own failure is a `StorageFailure`: a write beyond its admitted byte budget, a
 record that does not encode, a failed database write, stored state of an unrecognized shape, a
@@ -2194,7 +2242,7 @@ is where a key's other field values are read.
 The fingerprint is a plain digest of the key text, computed without a secret. It hides a key only
 as far as the key's values are hard to guess: someone who can guess a sensitive key value can
 compute its fingerprint and confirm the guess against a diagnostic. The rule also governs only text
-that names a branch in a failure, an event, a log or a statistic. A statement or a sink that an
+that names a branch in a failure, an event, a log or a statistic. A statement or an emitter that an
 operator directs at branch data follows its own contract: `SHOW RELAY <relay> MATERIALIZED STATE`
 prints each entry's key and payload ([Relay](./relay.md)), and an SQS emitter's `FROM BRANCH` group
 is the record's branch key ([Emitters](./emitters.md)).
@@ -2256,7 +2304,7 @@ format allows. The scan alone opens Arrow's reader over such a stream. A stream 
 before the reader sees it: as misframed or undecodable for a relay body or a snapshot section; as
 malformed, of another schema or of invalid data for a producer's batch; and as unreadable, or as
 declaring a field Nervix does not carry, for a generated pool. Two readers of Arrow IPC stay
-outside the scan because neither reads a stream from outside the node: the Iceberg sink reads back
+outside the scan because neither reads a stream from outside the node: the Iceberg emitter reads back
 the staged files the node itself wrote, inside a storage job whose panic the executor reports as a
 failed commit, and the Rust client reads the deliveries a node wrote.
 `DurationTextError` describes only the reason, `humantime`'s own for malformed text or
@@ -2460,7 +2508,7 @@ failed output/recording and a recording deadline are diagnostic execution failur
 cancellable ten-second deadline for each finding. Expiry exits without another write, because the
 same descriptor may be blocked. No error is returned to the code whose locks deadlocked. Nothing
 logs protected application values or uploads artifacts. The detector callback performs bounded
-handoff rather than reporting I/O; a sink panic aborts so a swallowed callback failure cannot look
+handoff rather than reporting I/O; an emitter panic aborts so a swallowed callback failure cannot look
 clean. A tracked constructor before installation panics with a configuration failure.
 
 `nervix-deadlock` owns `EvidenceError` and review refusals: unsupported format version, malformed or
@@ -2596,3 +2644,10 @@ The shipped code falls short of the model in these places:
   to a statement is reported at line 1.
 - **A literal canonical NSPL cannot spell.** A float literal too large for `F64` reads as infinity,
   which canonical rendering then refuses.
+
+Connector terminology follows entity ownership: `IngestorError` and `EmitterOpenError` /
+`EmitterWriteError` retain typed transport causes until their existing reporting boundaries.
+`RejectedEmitterMember` remains the fixed per-record outcome, distinct from the host's rejected
+record. Renaming and grouping entity owners changes neither retry classification nor what is
+rendered at the boundary. The ingestor planner's input identity/kind errors cover client, endpoint
+and native schema references before composition.

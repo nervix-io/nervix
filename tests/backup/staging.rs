@@ -55,7 +55,7 @@ async fn reclaimed_restore_bytes(world: &ScenarioWorld) -> f64 {
 
 #[given(expr = "restore checkpoint staging is limited to {int} bytes")]
 fn given_restore_staging_limit(world: &mut ScenarioWorld, bytes: u64) {
-    world.cluster_config.restore_staging_max_bytes = bytes;
+    world.cluster_config.restore_staging_max_bytes = Some(bytes);
 }
 
 #[then("restore checkpoint staging usage is zero on every node")]
