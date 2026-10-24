@@ -303,6 +303,16 @@ configures as a typed kind, so a source or an emitter is matched with its client
 rather than labels. A session producer's source is no transport, so the transport union holds no
 Model of it; the kind union still names it, because capability decisions ask about every source.
 
+RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
+and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch
+timeout; both acknowledged variants own an ACK timeout and retry policy. Zero cannot accidentally
+request AMQP's unlimited prefetch. The
+composed Plexus parser rejects a count outside `1..=65535` instead of truncating it. Runtime
+composition passes either automatic consumption or that exact nonzero count to the engine plan.
+The engine does not recover the mode from a missing timeout or a numeric marker. The host's
+settlement contract separately distinguishes batch commit boundaries from independent per-delivery
+ACK/NACK boundaries.
+
 Each emitter destination also owns its closed publishing enum: a Kafka topic can hold its own
 `NO ACK` or acknowledged policy, while an HTTP request can hold only its request acknowledgement
 policy. Capability metadata comes from those enum declarations. Shared inspection borrows the

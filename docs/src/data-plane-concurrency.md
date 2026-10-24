@@ -1179,6 +1179,24 @@ on `REQUIRED WAIT` state, which a drain does not wait for, and a completion that
 root resolved has the counts released as the root resolves. See
 [Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements).
 
+An independently settled transport, currently RabbitMQ, gives every delivery in a parallel batch
+its own graph acknowledgement. The task-local `IndividualBatch` polls those waits concurrently;
+a refusal does not cancel a sibling's wait or requeue a sibling that succeeded. Each completed
+wait keeps its confirmation guard through its own transport ACK or NACK. The batch owns one
+optional position per wait and takes it exactly once. If settlement loses the connection, only
+the failed and still-pending positions enter recovery; positions already confirmed or requeued
+are excluded. This state is task-owned, bounded by the requested batch, and adds no lock or
+concurrent map.
+
+Each delivery's intake group reads the immutable `domain_routings` publication once. The
+[concurrent map inventory](https://github.com/nervix-io/nervix/blob/main/tests/concurrent-map-inventory-ledger.md) records that cadence;
+drain, status and clock handles remain retained by the source host.
+
+Transport failure does not drop the graph waits of admitted siblings. The same task retains them
+to their outcomes before the source reconnects and replays the retained positions; those outcomes
+cause no more writes on the failed transport. Shutdown still ends the waits and counts both
+retained positions and unresolved graph waits as unconfirmed.
+
 An ingestor route's force-flush participant releases its partial batches into branch execution;
 the admitted client submission's tracked ACK root stays outstanding until its downstream work
 settles. For a model alteration with a shared relay gate, the control plane suspends the affected
@@ -2319,7 +2337,14 @@ check runs twice, each time in its own process: under the exploration it declare
 Shuttle's uncontrolled-nondeterminism detector, which runs 100 random schedules twice each and
 fails when the second run diverges. A run counts only when its test passed and the runner printed
 its record, and the command reports how many checks it discovered, selected, executed and saw
-complete. `just test-shuttle <filter>` selects the checks whose full name contains the filter in
+complete. Checks run beside each other, one per CPU the runner may use, so a run lasts about as
+long as its longest check rather than as long as every check added together. A check's own two
+runs stay one after the other, because both persist a failing schedule in its one failure
+directory. The runner starts checks in selection order, records each one in its evidence as it
+starts, and prints a check's output, with how long each run took, once the check ends. Nothing in a
+check depends on what runs beside it: every process explores its own model under its own
+scheduler, and a check opens no socket and writes no fixed path.
+`just test-shuttle <filter>` selects the checks whose full name contains the filter in
 every package; a package with no match is fine, and a filter that selects nothing at all fails. The
 recipe uses the repository's kache-backed build and prepares the server's test dependencies; `just
 test` continues to run the ordinary suite.
@@ -2384,6 +2409,25 @@ A family of names means each member runs independently through the recipe.
 | Replica catch-up announcements (`src/runtime/branch_lifecycle_state_shuttle_tests.rs`) | `shuttle_an_announced_branch_racing_the_replica_round_is_never_missed` races an owner's announcement of a branch checkpoint against the replica task taking the pending announcements and waiting for the next: the task takes it whether it lands before the take, between the take and the wait, or during the wait. `shuttle_announcements_of_one_branch_keep_the_newest_pending` delivers two announcements of one branch in either order while the task takes them: an older one never replaces a newer one still pending. |
 | Backup capture, restore publication and reclamation (`src/runtime/backup_capture_fence.rs`, `src/runtime/branch_state_capture_shuttle_tests.rs`, `crates/consensus/src/restore.rs`, `materialized_state.rs`) | `shuttle_backup_cut_includes_pre_cut_branch_publication` includes every registered publication before a cut. `shuttle_a_forced_deduplicator_publication_holds_every_key_acknowledged_before_the_cut` and `shuttle_a_forced_window_publication_holds_every_step_acknowledged_before_the_cut` race a branch task's admissions or window steps against the cut's checkpoint request over the branch task's own command and input channels: once the task answers, the keyspace or window the capture reads holds every change acknowledged before the cut asked. The cut waits for the first acknowledged change and then races the second, because an unwaited cut reads before any acknowledgement in almost every schedule and bounds nothing. `shuttle_backup_cut_includes_pre_cut_branch_publication` explores random and PCT schedules only, since its publisher and its cut each spin while waiting for the other. Restored deduplicator and window checkpoints install through the same staged publisher and domain handle clear as the other kinds, so the restore checks below hold their installation order too; the unit test `a_restored_domain_drops_its_deduplicator_and_window_handles` requires that clear to drop both kinds' handles of the restored domain and only its own. `shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers` drives the applied-state authority guard against a successor generation and RESUME, requiring complete publication and cleared handles before activation. `shuttle_materialized_capture_names_exactly_its_branch_generation` races capture with an update and eviction. `shuttle_replica_synchronization_preserves_the_restored_materialized_revision` races delayed and current owner snapshots. `shuttle_restore_reclamation_holds_the_revision_through_queued_installation` races the reclamation guard with a successor generation and queued installer, requiring the borrowed revision to stay fixed through deletion and preserving the current installation. They register in the shared Shuttle inventory and use its exploration, nondeterminism and replay contract. |
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
+
+RabbitMQ's production batch reader has two registered Shuttle checks:
+`shuttle_a_cancelled_read_hands_over_every_delivery_once_and_in_order` and
+`shuttle_a_batch_deadline_racing_cancellation_preserves_every_delivery`. Modeled delivery,
+cancellation and physical-deadline events race the real reader; handover plus the unread stream
+must contain every delivery exactly once and in order. Lapin deliveries are opaque payload
+storage, so these checks make no claim about Lapin's synchronization or network implementation.
+The host check `shuttle_individual_settlement_preserves_every_delivery_until_its_own_graph_outcome`
+races three independent graph completions through `IndividualBatch`: successful positions are
+ACKed individually, only the refused position is NACKed, and no sibling loses its graph waiter.
+`shuttle_individual_settlement_keeps_admitted_graph_work_until_transport_recovery` makes one
+rejection fail while a sibling's graph wait remains unresolved. That sibling must still deliver
+its outcome before recovery, and confirmed plus retained positions partition the original batch.
+Ordinary owner tests additionally measure the real drain-root counts during each transport
+confirmation and partition confirmed versus retained positions after a failed rejection.
+The four `@rabbitmq_consumer_modes` public outlines cover eight one-/three-node examples in the
+ordinary and Deloxide active, order and stress selections. All four diagnostic lanes apply to
+their shared host lifecycle paths; restore stress keeps its existing selection. No new atomic
+publication or memory-ordering contract is introduced, so no new Loom model is required.
 
 The broker ingestor confirmation, refused payload confirmation, reconnect and read interruption
 checks, the brokered emitter confirmation window's checks and the MQTT and SQS read cancellation

@@ -3101,18 +3101,34 @@ impl IngestorBodyNspl for RabbitMqQueueIngestor {
             mode,
             quiesce,
         } = self;
-        let RabbitMqIngestMode::AckSequential {
-            timeout,
-            retry_policy,
-        } = mode;
+        let mode = mode.to_canonical_plexus();
         format!(
             "{} QUEUE {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             string_literal(queue.as_str()),
             optional_instances_to_nspl(*instances),
-            ack_sequential_to_nspl(timeout, retry_policy),
+            mode,
             ingest_quiesce_to_nspl(quiesce)
         )
+    }
+}
+
+impl RabbitMqIngestMode {
+    /// The complete, canonical Plexus body after `MODE` for this consumer policy.
+    pub fn to_canonical_plexus(&self) -> String {
+        match self {
+            RabbitMqIngestMode::NoAck => NO_ACK.to_string(),
+            RabbitMqIngestMode::AckSequential {
+                timeout,
+                retry_policy,
+            } => ack_sequential_to_nspl(timeout, retry_policy),
+            RabbitMqIngestMode::AckParallel {
+                max,
+                batch_timeout,
+                timeout,
+                retry_policy,
+            } => ack_parallel_to_plexus((*max).into(), batch_timeout, timeout, retry_policy),
+        }
     }
 }
 
@@ -3298,6 +3314,19 @@ fn ack_sequential_to_nspl(timeout: &str, retry_policy: &RetryPolicy) -> String {
     )
 }
 
+fn ack_parallel_to_plexus(
+    max: std::num::NonZeroU64,
+    batch_timeout: &str,
+    timeout: &str,
+    retry_policy: &RetryPolicy,
+) -> String {
+    format!(
+        "ACK PARALLEL MAX {max} BATCH TIMEOUT {batch_timeout} ACK TIMEOUT {timeout} RETRY POLICY \
+         {}",
+        retry_policy_to_nspl(retry_policy)
+    )
+}
+
 fn kafka_offset_mode_to_nspl(offset_mode: &KafkaOffsetMode) -> String {
     match offset_mode {
         KafkaOffsetMode::ConsumerGroup(group) => {
@@ -3314,11 +3343,7 @@ fn kafka_mode_to_nspl(mode: &KafkaIngestMode) -> String {
             batch_timeout,
             timeout,
             retry_policy,
-        } => format!(
-            "ACK PARALLEL MAX {max} BATCH TIMEOUT {batch_timeout} ACK TIMEOUT {timeout} RETRY \
-             POLICY {}",
-            retry_policy_to_nspl(retry_policy)
-        ),
+        } => ack_parallel_to_plexus(*max, batch_timeout, timeout, retry_policy),
         KafkaIngestMode::AckSequential {
             timeout,
             retry_policy,

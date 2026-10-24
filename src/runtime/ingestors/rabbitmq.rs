@@ -16,7 +16,10 @@
 
 use error_stack::ResultExt as _;
 use nervix_connector::IngestorConnector as _;
-use nervix_connector_rabbitmq::{RabbitMqQueueIngestor, RabbitMqQueueIngestorPlan};
+use nervix_connector_rabbitmq::{
+    RabbitMqConsumerMode, RabbitMqQueueIngestor, RabbitMqQueueIngestorPlan,
+};
+use nervix_models::RabbitMqIngestMode;
 
 use super::{
     super::*,
@@ -49,19 +52,29 @@ impl RabbitMqQueueIngestorStartPlan {
                 ingestor.connector_start_failure(IngestorConnectorStartError::NodeDnsUnavailable)
             );
         };
+        let consumer_mode = match &mode {
+            RabbitMqIngestMode::NoAck => RabbitMqConsumerMode::NoAck,
+            RabbitMqIngestMode::AckSequential { .. } => RabbitMqConsumerMode::Ack {
+                prefetch: std::num::NonZeroU16::MIN,
+            },
+            RabbitMqIngestMode::AckParallel { max, .. } => {
+                RabbitMqConsumerMode::Ack { prefetch: *max }
+            }
+        };
         BrokerIngestorStart {
             connector: RabbitMqQueueIngestorPlan::new(
                 resolved.entries,
                 dns.clone(),
                 queue,
                 ingestor.name.as_str().to_string(),
+                consumer_mode,
             ),
             instances,
             acknowledgement: mode.acknowledgement(),
             buffered_intake: false,
             flush_each_intake: false,
-            // Every delivery mode of this ingestor is acknowledged: a batch the extension workers
-            // refuse is rejected and delivered again, and no payload is taken in unacknowledged.
+            // Auto-ack deliveries cannot be presented again. Refuse and count a payload when
+            // the extension workers are full rather than holding the transport's read loop.
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
         }

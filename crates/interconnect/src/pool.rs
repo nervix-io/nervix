@@ -81,6 +81,14 @@ impl PoolClass {
         )
     }
 
+    /// Whether this pool's client connections grant each stream the bulk receive window, backed
+    /// by a `bulk_window` reservation for as long as the stream is open. Only bulk streams carry
+    /// responses large enough to be paced by the other pools' small windows: resource archives,
+    /// runtime checkpoints and snapshots.
+    pub(crate) const fn grants_bulk_receive_window(self) -> bool {
+        matches!(self, Self::Bulk)
+    }
+
     pub(crate) fn preconnected_connections_per_peer() -> usize {
         let mut connections = 0usize;
         for class in Self::PRECONNECTED {

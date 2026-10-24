@@ -1054,7 +1054,8 @@ in one of these ways:
 | --- | --- |
 | `KAFKA TOPIC`, `PULSAR TOPIC` | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
 | `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the connection had already read when the read stopped waiting stays in the connection's read-ahead, which hands it to the next read first. |
-| `NATS SUBJECT`, `REDIS PUBSUB`, `RABBITMQ QUEUE`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
+| `RABBITMQ QUEUE` | Ends at once while waiting for the first delivery or between deliveries of a parallel batch, returning every gathered delivery. A transport failure found after gathering is retained and reported on the next read, after the gathered deliveries reach the host. |
+| `NATS SUBJECT`, `REDIS PUBSUB`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
 | `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
 
 An MQTT read takes its publishes from its connection's read-ahead, which the connection's driver
@@ -1239,6 +1240,28 @@ again. A Pulsar rejection is a redelivery request, which the broker does not ans
 returns once the consumer sent the request. It fails when the consumer could not send it within the
 operation timeout, such as while it reconnects to a broker it cannot reach, or when its connection
 closed first, and the broker redelivers the message once the consumer's connection is replaced.
+
+RabbitMQ registers `NO ACK` as an automatically acknowledging AMQP consumer, with no `basic.qos`
+request and no later ACK or NACK traffic. Its existing Lapin delivery queue is unbounded without
+broker prefetch; the host refuses and counts an unacknowledged payload its extension workers
+cannot admit. Closing the connection drops any auto-acknowledged deliveries it still held, and
+there is no transport position to recover. The gathered batch itself is bounded by the host's
+request: one delivery under `NO ACK` or `ACK SEQUENTIAL`, and at most the parallel maximum otherwise.
+
+Acknowledged RabbitMQ consumers use prefetch one under `ACK SEQUENTIAL` and their typed nonzero
+16-bit maximum under `ACK PARALLEL`. The connector declares individual settlement. The host admits
+each delivery with its own confirmed root, waits for those outcomes concurrently, and settles
+each position separately with AMQP `multiple = false`. A successful sibling is never negatively
+acknowledged because another root failed. Each resolved root remains outstanding for drain and
+handoff until its own transport settlement completes. If the connection is lost, only unresolved
+positions follow the broker-redelivered recovery path; already confirmed positions are not counted
+again. Commit-oriented sources retain their declared batch settlement boundary.
+
+Once an individual transport settlement fails, the host retains the other admitted graph waits
+until they finish, without sending more operations on that transport. Only then does it reopen
+the consumer and hand the retained positions to recovery. This prevents broker replay from
+overtaking downstream work admitted on the preceding connection. A stop ends those waits and
+reports every still-unconfirmed retained or pending position.
 
 The host reports progress for a batch only once acknowledging it returns. Until then the
 ingestor's transient status stays as it was, and the batch's work stays outstanding: the last of

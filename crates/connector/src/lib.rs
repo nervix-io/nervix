@@ -89,7 +89,7 @@ pub use ingestor::{
     IngestorConnector, IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError,
     IngestorIntakeMessage, IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll,
     IngestorPollMessage, IngestorReadCancellation, IngestorResult, IngestorResume,
-    PacedIngestorConnector,
+    IngestorSettlement, PacedIngestorConnector,
 };
 pub use row_requests::{
     ExceededLimit, MeasuredRequest, RowOversize, RowRequest, RowRequestLimits, RowRequests,

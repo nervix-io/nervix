@@ -1505,12 +1505,16 @@ mod tests {
     }
 
     #[test]
-    fn rabbitmq_mode_context_does_not_offer_kafka_only_modes() {
+    fn rabbitmq_mode_context_offers_declared_consumer_modes() {
         let input = "CREATE RABBITMQ QUEUE INGESTOR i FROM t QUEUE 'q' MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
-        assert!(!suggestions.contains(&"NO ACK".to_string()));
-        assert!(!suggestions.contains(&"PARALLEL".to_string()));
+        assert!(suggestions.contains(&"NO ACK".to_string()));
+
+        let input = format!("{input}ACK ");
+        let suggestions = suggest_create_ingestor(&input, input.len());
+        assert!(suggestions.contains(&"SEQUENTIAL".to_string()));
+        assert!(suggestions.contains(&"PARALLEL".to_string()));
     }
 
     #[test]

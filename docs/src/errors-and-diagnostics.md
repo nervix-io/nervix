@@ -602,6 +602,15 @@ attaches credentials from the address. A `NO ACK` round trip that runs out of th
 `timeout_ms` fails the write as a publish failure with the elapsed deadline as its typed cause and
 its text leading the report.
 
+RabbitMQ consumption keeps a failed Lapin receive, ACK or NACK as the typed cause beneath
+`RabbitMqQueueIngestorError`; the host reports that chain through its ordinary ingestor-failure boundary.
+A requested batch deadline that cannot be represented is `RabbitMqQueueIngestorError::BatchDeadline`.
+If a stream failure or invalid deadline follows gathered deliveries, the reader hands those
+deliveries to the host before reporting the deferred failure on its next read. A parallel
+delivery's graph refusal rejects only its own position. A failed transport settlement retains
+the unresolved positions for the broker-redelivery recovery path, without counting positions
+already confirmed or requeued on that connection.
+
 A RabbitMQ publish that ends with the broker closing the emitter's channel is classified by the
 broker's own reason, which the emitter reads from its connection. A refusal of a message body larger
 than `max_message_size` is a `RabbitMqRecordError`, owned by the RabbitMQ emitter, which carries the
@@ -1175,10 +1184,12 @@ owns these harness bounds and the distinction from product shutdown deadlines.
 
 The WebSocket declaration fixture treats `Protocol(HandshakeIncomplete)` during an opening
 upgrade as a cancelled attempt. It records that outcome and keeps its payload gate for the next
-completed upgrade. Other handshake errors and established-stream failures preserve their typed
-tungstenite cause beneath the I/O error; a fixture task ending with one still fails the scenario's
-After hook. [Fixture cleanup](./integration-test-lifecycle.md#what-cleanup-releases) owns the
-listener's lifetime.
+completed upgrade. A received Close frame supplies the graceful-close observation. When flushing
+its reply, `ConnectionClosed`, a TCP reset or a broken pipe means the initiator already ended its
+transport, so that observed close completes normally. Other handshake errors, established-stream
+reads and unexpected reply failures preserve their typed tungstenite cause beneath the I/O error;
+a fixture task ending with one still fails the scenario's After hook.
+[Fixture cleanup](./integration-test-lifecycle.md#what-cleanup-releases) owns the listener's lifetime.
 
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
@@ -1509,6 +1520,12 @@ answered, with the peer's own `RemoteRequestFailure` when the peer's transport r
 state or a subscription interest.
 [Failure Ownership And Persistence](./interconnect.md#failure-ownership-and-persistence) owns what
 each means for a requester.
+
+A bulk stream that cannot back its receive window sends nothing. Waiting for a window past the
+request's deadline reports `RequestTimeout`, like waiting for a stream slot. A `bulk_window` budget
+that refuses the reservation reports `BulkReceiveWindowRefused` naming the peer, with the typed
+`AdmissionError` beneath it. A transport whose budget cannot back even one window refuses to bind
+with `BulkReceiveWindowUnbacked`, which carries the window and the budget as numbers.
 
 The interconnect validates and bounds the wire request before its operation handler runs. A
 delivery correlation that has no free position reports `CorrelationCapacity`; an exhausted

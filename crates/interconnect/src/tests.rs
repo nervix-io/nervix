@@ -735,6 +735,7 @@ mod resolver;
 use resolver::{localhost_identity, test_resolver};
 
 mod lease;
+mod receive_window;
 
 #[nervix_primitives::test]
 async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {

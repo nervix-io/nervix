@@ -92,6 +92,13 @@ name = "nervix-connector-sqs"
 
 [[package]]
 checks = [
+  "queue::ingestor::reader::shuttle_tests::shuttle_a_batch_deadline_racing_cancellation_preserves_every_delivery",
+  "queue::ingestor::reader::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_delivery_once_and_in_order",
+]
+name = "nervix-connector-rabbitmq"
+
+[[package]]
+checks = [
   "application::backup::retained::shuttle_tests::shuttle_a_download_stays_bounded_and_waits_for_its_client",
   "application::backup::retained::shuttle_tests::shuttle_a_lost_client_releases_its_hold_exactly_once",
   "application::backup::retained::shuttle_tests::shuttle_concurrent_downloads_collect_an_archive_exactly_once",
@@ -167,6 +174,8 @@ checks = [
   "runtime::ingestors::connector::shuttle_tests::shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch",
   "runtime::ingestors::connector::shuttle_tests::shuttle_a_reconnect_discards_rejections_the_broker_redelivers",
   "runtime::ingestors::connector::shuttle_tests::shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took",
+  "runtime::ingestors::connector::tests::shuttle_individual_settlement_preserves_every_delivery_until_its_own_graph_outcome",
+  "runtime::ingestors::connector::tests::shuttle_individual_settlement_keeps_admitted_graph_work_until_transport_recovery",
   "runtime::ingestors::connector::shuttle_tests::shuttle_broker_ingestor_observes_engagement_during_dispatch",
   "runtime::ingestors::connector::shuttle_tests::shuttle_paced_ingestor_observes_engagement_during_dispatch",
   "runtime::ingestors::connector::shuttle_tests::shuttle_request_ingestor_observes_engagement_during_dispatch",

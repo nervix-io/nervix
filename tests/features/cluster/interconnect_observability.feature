@@ -13,6 +13,10 @@ Feature: Interconnection observability
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_interconnect_quota_failures_total"
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_execution_memory_reserved_bytes"
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_execution_memory_rejections_total"
+    And node "<node_id>" observability metric "nervix_execution_memory_capacity_bytes" with labels eventually equals 16777216
+      """
+      class="bulk_window"
+      """
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_execution_job_queue_seconds_total"
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_execution_job_work_seconds_total"
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_node_scheduler_delay_seconds_total"
@@ -134,6 +138,16 @@ Feature: Interconnection observability
       """
       class="bulk"
       direction="received"
+      """
+    # The receiving node backed the receive window of every bulk stream it opened for the
+    # transfer, and gave each window back when its stream ended.
+    And node "node-3" observability metric "nervix_execution_memory_reservations_total" with labels eventually reaches at least 1
+      """
+      class="bulk_window"
+      """
+    And node "node-3" observability metric "nervix_execution_memory_reserved_bytes" with labels eventually equals 0
+      """
+      class="bulk_window"
       """
     And node "node-1" observability metric "nervix_interconnect_connection_failures_total" with labels eventually equals 0
       """
