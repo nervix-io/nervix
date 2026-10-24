@@ -41,9 +41,12 @@ pub(super) fn mode<'src>()
 {
     request_mode!(PostgresTablePublishingMode)
 }
-pub(super) fn table_body<'src>()
--> impl Parser<'src, &'src [Token], ParsedDestination<PostgresTableSink>, extra::Err<ParseError<'src>>>
-+ Clone {
+pub(super) fn table_body<'src>() -> impl Parser<
+    'src,
+    &'src [Token],
+    ParsedDestination<PostgresTableEmitter>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
     values_destination(
         client_ref()
             .then_ignore(kw(Identifier::Table))
@@ -66,7 +69,7 @@ pub(super) fn table_body<'src>()
                              VALUES column to update",
                         ));
                     }
-                    Ok(PostgresTableSink {
+                    Ok(PostgresTableEmitter {
                         client,
                         table,
                         mode,

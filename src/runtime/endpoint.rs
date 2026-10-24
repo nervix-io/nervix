@@ -386,7 +386,7 @@ impl Runtime {
         protocol: &str,
     ) -> EndpointRequestOutcome {
         let mut collector =
-            IngestRouteCollector::new(SourceMetadataScope::Headers, 1, binding.metrics.clone());
+            IngestRouteCollector::new(IngestorMetadataScope::Headers, 1, binding.metrics.clone());
         let (root, mut completion) = binding.handles.tracked_root();
         let observed_at = actual_utc_now();
         let metadata = BufferedIngestMetadata::Headers(RetainedIngestHeaders::capture(headers));
@@ -489,7 +489,7 @@ impl Runtime {
         // One request is one group, so its builders are sized for the single payload this binding
         // decodes; a payload that unfolds into several messages grows them.
         let mut collector =
-            IngestRouteCollector::new(SourceMetadataScope::Headers, 1, binding.metrics.clone());
+            IngestRouteCollector::new(IngestorMetadataScope::Headers, 1, binding.metrics.clone());
         // The sender is answered, so a body the extension workers have no room for is refused
         // rather than held.
         let decoded = collector

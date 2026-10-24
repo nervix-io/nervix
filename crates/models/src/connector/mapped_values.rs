@@ -14,7 +14,7 @@
 #[cfg(feature = "arrow")]
 use arrow_schema::{DataType, TimeUnit};
 
-use crate::SinkValueMapping;
+use crate::EmitterValueMapping;
 
 /// The group in which a statement declares a mapping. Keys in separate groups are independent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -29,7 +29,7 @@ pub enum MappedValueSection {
 #[derive(Debug, Clone, Copy)]
 pub struct DeclaredValueMapping<'a> {
     pub section: MappedValueSection,
-    pub mapping: &'a SinkValueMapping,
+    pub mapping: &'a EmitterValueMapping,
 }
 
 /// An exact type or a declared type family, without coercion between its members.

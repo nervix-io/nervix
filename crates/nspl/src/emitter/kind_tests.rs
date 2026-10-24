@@ -21,8 +21,8 @@ fn connector_and_entity_head_preserves_external_name() {
     )
     .unwrap_or_else(|error| panic!("the complete Plexus emitter must parse: {error:#}"));
     assert_eq!(parsed.name.as_str(), "outgoing");
-    let nervix_models::EmitSink::Kafka(nervix_models::KafkaSink::Topic(destination)) =
-        parsed.sink.as_ref()
+    let nervix_models::EmitterEntity::Kafka(nervix_models::KafkaEmitter::Topic(destination)) =
+        parsed.connector.as_ref()
     else {
         panic!("Kafka topic");
     };

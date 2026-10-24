@@ -2,7 +2,7 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The command-line form of the Raft timings and the Raft log retention bounds, their
+//! - **Owns.** The command-line form of the Raft heartbeat and the Raft log retention bounds, their
 //!   conversion into the consensus settings groups, and the rendering of those groups back into
 //!   options.
 //! - **Depends on.** The consensus settings definitions and the edge's duration and byte forms.
@@ -16,10 +16,9 @@
 use error_stack::Report;
 use meticulous::ResultExt as _;
 use nervix_consensus::{
-    RaftCoveredLogBytesRetained, RaftCoveredLogEntriesRetained, RaftElectionTimeoutMax,
-    RaftElectionTimeoutMin, RaftHeartbeatInterval, RaftRetainedLogCap, RaftRetentionBounds,
-    RaftRetentionSettings, RaftSnapshotByteThreshold, RaftSnapshotEntryThreshold, RaftTimingError,
-    RaftTimings,
+    RaftCoveredLogBytesRetained, RaftCoveredLogEntriesRetained, RaftHeartbeatInterval,
+    RaftRetainedLogCap, RaftRetentionBounds, RaftRetentionSettings, RaftSnapshotByteThreshold,
+    RaftSnapshotEntryThreshold, RaftTimingError, RaftTimings,
 };
 use nervix_models::SettingDefinition;
 
@@ -33,25 +32,10 @@ pub struct ConsensusArgs {
         long = RaftHeartbeatInterval::NAME,
         env = "NERVIX_RAFT_HEARTBEAT_INTERVAL",
         default_value_t = HumanDuration(RaftHeartbeatInterval::default_value(&())),
-        help = "How often a leader tells its followers it is still leading"
+        help = "How often a leader tells its followers it is still leading; a follower stands for \
+                election after six to twelve of these without hearing from one"
     )]
     pub raft_heartbeat_interval: HumanDuration,
-    #[arg(
-        long = RaftElectionTimeoutMin::NAME,
-        env = "NERVIX_RAFT_ELECTION_TIMEOUT_MIN",
-        default_value_t = HumanDuration(RaftTimings::default().election_timeout_min()),
-        help = "The shortest time a follower waits without hearing from a leader before it stands \
-                for election"
-    )]
-    pub raft_election_timeout_min: HumanDuration,
-    #[arg(
-        long = RaftElectionTimeoutMax::NAME,
-        env = "NERVIX_RAFT_ELECTION_TIMEOUT_MAX",
-        default_value_t = HumanDuration(RaftTimings::default().election_timeout_max()),
-        help = "The longest time a follower waits without hearing from a leader before it stands \
-                for election"
-    )]
-    pub raft_election_timeout_max: HumanDuration,
     #[arg(
         long = RaftSnapshotEntryThreshold::NAME,
         env = "NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD",
@@ -92,11 +76,7 @@ pub struct ConsensusArgs {
 
 impl ConsensusArgs {
     pub(super) fn timings(&self) -> Result<RaftTimings, Report<RaftTimingError>> {
-        RaftTimings::resolve(
-            Some(self.raft_heartbeat_interval.0),
-            Some(self.raft_election_timeout_min.0),
-            Some(self.raft_election_timeout_max.0),
-        )
+        RaftTimings::resolve(Some(self.raft_heartbeat_interval.0))
     }
 
     pub(super) fn retention(&self) -> RaftRetentionSettings {
@@ -113,8 +93,6 @@ impl ConsensusArgs {
     pub(super) fn from_settings(timings: &RaftTimings, retention: &RaftRetentionSettings) -> Self {
         Self {
             raft_heartbeat_interval: HumanDuration(timings.heartbeat_interval()),
-            raft_election_timeout_min: HumanDuration(timings.election_timeout_min()),
-            raft_election_timeout_max: HumanDuration(timings.election_timeout_max()),
             raft_snapshot_entry_threshold: *retention.snapshot_entry_threshold.value(),
             raft_snapshot_byte_threshold: HumanBytes(*retention.snapshot_byte_threshold.value()),
             raft_covered_log_entries_retained: *retention.covered_entries_retained.value(),
@@ -125,8 +103,6 @@ impl ConsensusArgs {
 
     pub(super) fn render(&self, command_line: &mut CommandLine) {
         command_line.option(RaftHeartbeatInterval::NAME, self.raft_heartbeat_interval);
-        command_line.option(RaftElectionTimeoutMin::NAME, self.raft_election_timeout_min);
-        command_line.option(RaftElectionTimeoutMax::NAME, self.raft_election_timeout_max);
         command_line.option(
             RaftSnapshotEntryThreshold::NAME,
             self.raft_snapshot_entry_threshold,

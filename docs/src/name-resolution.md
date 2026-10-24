@@ -51,14 +51,14 @@ port and a time budget, and receives addresses or a typed failure.
 | Owner | What it owns about name resolution |
 | --- | --- |
 | `nervix-dns` | The resolver, its policy and bounds, its failures, its client-library hooks, and the connection budget and ordered address attempts |
-| The server, as composition root | Loading the node's resolver once at startup from the node's DNS options, and handing clones to the runtime, the interconnect, and the node's own trace exporter |
+| The server, as composition root | Loading the node's resolver once, in its startup preflight, from the node's DNS options, and handing clones to the runtime, the interconnect, and the node's own trace exporter |
 | `nervix-interconnect` | When and where a peer endpoint is resolved, the TLS and HTTP/2 identity of the connection, and peer failure classification |
 | `nervix-connector` | The shared HTTP client configuration that installs the resolver on the Reqwest clients of HTTP polling, Prometheus, Sentry and OTEL HTTP |
 | Each connector crate | Installing the resolver its typed plan carries at its driver's hook, or resolving and dialling itself; its TLS, framing, protocol handshake, and the error it reports |
 | The host data plane | Retry, acknowledgement, intake, quiesce and shutdown decisions around a connection that could not be opened |
 | `nervix-client-core` | The native session client's resolver and the Tonic connector that dials through it |
 
-Connector crates receive the resolver as a value in their typed source or sink plan, so a connector
+Connector crates receive the resolver as a value in their typed source or emitter plan, so a connector
 never loads configuration or chooses a resolver itself, and the registry, which names no connector
 crate, never sees DNS at all. The interconnect receives it wrapped in its `PeerResolver`, the one
 seam where the Turmoil build substitutes simulated names, as
@@ -66,25 +66,27 @@ seam where the Turmoil build substitutes simulated names, as
 
 ## Resolver Lifetime
 
-A node loads its resolver once, at startup, after its TLS material and before it opens its runtime
-state or binds the interconnect. Loading reads the resolver configuration and the hosts file on the
-blocking pool, so a slow filesystem never stalls a reactor thread, and then builds Hickory's
-resolver on the node's Tokio runtime. The read is one of the declared owners of the blocking pool
-outside the bounded executor, because a node loads its resolver before it builds its executor and a
-client tool loads the same resolver without one; see
-[Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor). Neither file is read again: a changed resolver configuration
-or hosts file takes effect when the node next starts.
+A node loads its resolver once, at startup, as the last check of its
+[startup preflight](./node-settings.md#the-startup-preflight): after the TLS material of its client
+listeners, and before it binds any listener, reads its interconnect credentials or opens a store.
+Loading reads the resolver configuration and the hosts file on the blocking pool, so a slow
+filesystem never stalls a reactor thread, and then builds Hickory's resolver on the node's Tokio
+runtime. The read is one of the declared owners of the blocking pool outside the bounded executor,
+because the Rust client and the CLI load the same resolver without an executor; see
+[Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor).
+Neither file is read again: a changed resolver configuration or hosts file takes effect when the
+node next starts.
 
 Clones of the resolver share its configuration, hosts snapshot, answer cache and concurrency bound.
 The node hands one clone to the runtime, which passes it into the typed plan of every source and
-sink that resolves through it, one to the interconnect, and one to its own OTLP trace exporter
+emitter that resolves through it, one to the interconnect, and one to its own OTLP trace exporter
 when enabled. Nothing about the resolver is process-wide: it lives in no static, its
 name-server connections and background tasks run on the runtime that built it, and they end when
 its last clone is dropped. A runtime that shuts down with a lookup in flight is not held open by
 that lookup.
 
 A runtime built without a resolver exists only in unit tests that start no external connector. A
-source or sink that needs the resolver fails to start there with the reason
+source or emitter that needs the resolver fails to start there with the reason
 `the node DNS resolver is not installed`; it never falls back to another resolver.
 
 A native session client loads its resolver once per client, before its first connection, from the
@@ -97,10 +99,10 @@ shared C binding always loads the host's `/etc/resolv.conf` and `/etc/hosts`.
 
 With `--otel-enabled`, the process installs its subscriber and batch span exporter before node
 startup. The lazy Tonic 0.14 connector waits for startup to publish the node's resolver. Creating
-the channel performs no lookup or dial. Startup loads DNS at its usual point, after TLS material
-and before runtime state, then publishes a clone to this service. Early spans remain in the batch
-exporter's existing bounded queue. No second resolver is constructed, and a DNS configuration
-failure remains a node startup failure.
+the channel performs no lookup or dial. The startup preflight loads DNS before the node binds a
+listener, and startup publishes a clone to this service once it has bound its listeners and read
+its interconnect credentials. Early spans remain in the batch exporter's existing bounded queue.
+No second resolver is constructed, and a DNS configuration failure remains a node startup failure.
 
 Every new collector connection uses the node's configuration, hosts snapshot, cache and concurrency
 bound. The endpoint retains its hostname and authority. Waiting for resolver installation stays
@@ -112,7 +114,7 @@ defines. Compression and metadata environment settings remain interpreted by `op
 
 The node's exporter configures no Tonic TLS roots or identity. An `https` collector therefore fails
 at export time with Tonic's TLS-required error even though the connector dependencies enable TLS
-support. The OTEL sink's explicit TLS configuration is a separate contract.
+support. The OTEL emitter's explicit TLS configuration is a separate contract.
 
 Export failures belong to the telemetry SDK. They neither stop a running node nor enter connector
 retry or acknowledgement paths. If startup ends before installing DNS, dropping the tracing guard
@@ -157,7 +159,7 @@ exist and be readable, and its search list and options still apply. The hosts fi
 readable too; an empty file is valid.
 
 Loading fails, and the node does not start, with `failed to load the name resolver configuration`
-above one of these causes:
+beneath `the startup preflight refused this node` and above one of these causes:
 
 | Cause | When |
 | --- | --- |
@@ -291,20 +293,20 @@ name again for every new connection it opens.
 | --- | --- | --- | --- |
 | Interconnect at startup: the node's own advertised endpoint, its bootstrap endpoint, and the recovered Raft members' endpoints | `PeerResolver`, which calls the resolver directly | The connection setup timeout, five seconds, for each lookup | [Where The Interconnect Resolves](./interconnect.md#where-the-interconnect-resolves) |
 | Interconnect: every pool connection to a discovered peer | `PeerResolver` inside each connection attempt | The attempt's five-second connection setup timeout | [Where The Interconnect Resolves](./interconnect.md#where-the-interconnect-resolves) |
-| HTTP polling and Prometheus sources, Sentry and OTEL HTTP sinks | Reqwest 0.13's `dns_resolver`, installed by the shared `HttpClientConfig` | The client's `timeout_ms` for the whole request when it is set, which a Prometheus client must, otherwise the thirty-second hook budget | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
+| HTTP polling and Prometheus sources, Sentry and OTEL HTTP emitters | Reqwest 0.13's `dns_resolver`, installed by the shared `HttpClientConfig` | The client's `timeout_ms` for the whole request when it is set, which a Prometheus client must, otherwise the thirty-second hook budget | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | Iceberg REST catalog and its OAuth token request | Reqwest 0.12's `dns_resolver` on the client given to `RestCatalogBuilder::with_client` | The thirty-second hook budget | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | Iceberg S3, GCS and Azure object storage and its credential providers | Reqwest 0.13's `dns_resolver` on the client the connector installs through OpenDAL's `HttpClientLayer`; one initialized operator survives table metadata refreshes | The storage client's `timeout_ms` bounds an operation or I/O call, DNS, connection and TLS included; without it, the thirty-second hook ceiling sits inside the operator's 60-second metadata/delete and 10-second read/write bounds | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | HTTP request emitter | The connector resolves each request's target host itself | At most half of the request's one physical `timeout_ms`, whose rest bounds the address attempts, TLS and the request | [Request Preparation And Transport Ownership](./http-emitter-architecture.md#request-preparation-and-transport-ownership) |
-| RabbitMQ sources and sinks | The connector resolves and dials, then hands the transport to Lapin's `Connection::connector` | The client's `connect_timeout_ms`, 30 seconds by default, shared with the address attempts, TLS, the AMQP handshake and the entity's channel | [DNS for RabbitMQ](./connector-contract.md#dns-for-rabbitmq) |
+| RabbitMQ sources and emitters | The connector resolves and dials, then hands the transport to Lapin's `Connection::connector` | The client's `connect_timeout_ms`, 30 seconds by default, shared with the address attempts, TLS, the AMQP handshake and the entity's channel | [DNS for RabbitMQ](./connector-contract.md#dns-for-rabbitmq) |
 | Syslog UDP, TCP and TLS senders | The connector resolves and dials each new sender | The client's `connect_timeout_ms`, 30 seconds by default, shared with socket setup, or with the attempts and TLS | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
 | WebSocket `ws` and `wss` client sources | The connector resolves and dials each connection and resume | The client's `connect_timeout_ms`, 30 seconds by default, shared with the attempts, TLS and the upgrade | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
-| ClickHouse sinks, with and without TLS entries | Hyper's resolver service on `hyper-util`'s `HttpConnector` | The insert's `timeout_ms` when it is set, otherwise the thirty-second hook budget | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
-| SQS sources and sinks, with and without a custom CA | Smithy's `ResolveDns`, installed with `build_with_resolver` | The SDK's 3.1-second connect timeout, which encloses the lookup, and a sink's `timeout_ms` as its attempt and operation timeouts | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
+| ClickHouse emitters, with and without TLS entries | Hyper's resolver service on `hyper-util`'s `HttpConnector` | The insert's `timeout_ms` when it is set, otherwise the thirty-second hook budget | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
+| SQS sources and emitters, with and without a custom CA | Smithy's `ResolveDns`, installed with `build_with_resolver` | The SDK's 3.1-second connect timeout, which encloses the lookup, and an emitter's `timeout_ms` as its attempt and operation timeouts | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
 | The node's own OTLP trace export | Tonic 0.14's lazy custom connector, which waits for the node resolver installed during startup | The OTLP export timeout, ten seconds by default, enclosing DNS and TCP attempts after resolver installation; the same timeout bounds the request | [Node Trace Export](#node-trace-export) |
-| OTEL gRPC sinks | Tonic 0.14's lazy channel over `hyper-util`'s `HttpConnector` with Hyper's resolver service | `timeout_ms` when it is set, as the connection and request timeout; otherwise the thirty-second hook budget alone | [DNS for OTEL gRPC](./connector-contract.md#dns-for-otel-grpc) |
+| OTEL gRPC emitters | Tonic 0.14's lazy channel over `hyper-util`'s `HttpConnector` with Hyper's resolver service | `timeout_ms` when it is set, as the connection and request timeout; otherwise the thirty-second hook budget alone | [DNS for OTEL gRPC](./connector-contract.md#dns-for-otel-grpc) |
 | Redis command pools | Redis's `AsyncConnectionConfig::set_dns_resolver`, installed for every new physical `bb8` connection | The thirty-second hook budget, inside the connection timeout the pool sets on the driver and its checkout from the client's `connect_timeout_ms`, 30 seconds by default | [DNS for Redis](./connector-contract.md#dns-for-redis) |
 | Redis Pub/Sub sources | The connector resolves and dials a dedicated stream; its bounded reader uses Redis's encoder and asynchronous parser on that stream | The client's `connect_timeout_ms`, 30 seconds by default, shared with the attempts, TLS, Redis setup and `SUBSCRIBE`; a failed idle probe ends that connection and the next resume resolves again | [DNS for Redis](./connector-contract.md#dns-for-redis) |
-| MQTT sources, sinks and input retirement | The connector's socket connector, installed with `MqttOptions::set_socket_connector`, for every connection the driver's event loop opens | The driver's five-second connect timeout; retirement also encloses its unsubscribe and disconnect within that budget | [DNS for MQTT](./connector-contract.md#dns-for-mqtt), [MQTT session retirement](./connector-contract.md#mqtt-session-retirement) |
+| MQTT sources, emitters and input retirement | The connector's socket connector, installed with `MqttOptions::set_socket_connector`, for every connection the driver's event loop opens | The driver's five-second connect timeout; retirement also encloses its unsubscribe and disconnect within that budget | [DNS for MQTT](./connector-contract.md#dns-for-mqtt), [MQTT session retirement](./connector-contract.md#mqtt-session-retirement) |
 | Native CLI and SDK sessions | The client's resolver, as Hyper's resolver service under Tonic 0.13's connector, for the first connection, seeds, redirects and reconnects | The session's connect timeout, ten seconds by default, which encloses the lookup, the attempts and TLS | [Leader Discovery, Redirect, And Reconnect](./client-session-protocol.md#leader-discovery-redirect-and-reconnect) |
 
 Two interconnect uses are resolved once, when the node starts: the address that identifies the
@@ -327,13 +329,13 @@ before any IPv6 answer and no attempt races another:
 | Caller | Budget | One address attempt | After an address succeeds |
 | --- | --- | --- | --- |
 | Interconnect pool connection | The connection setup timeout, five seconds | TCP connection | TLS, HTTP/2 and the connection hello within the same timeout; a failure there fails the attempt |
-| RabbitMQ source or sink | `connect_timeout_ms`, 30 seconds by default | TCP connection | TLS, then Lapin's AMQP handshake and the entity's channel, all within the same budget; a step that runs out of it shuts the socket down, which ends Lapin's IO thread |
+| RabbitMQ source or emitter | `connect_timeout_ms`, 30 seconds by default | TCP connection | TLS, then Lapin's AMQP handshake and the entity's channel, all within the same budget; a step that runs out of it shuts the socket down, which ends Lapin's IO thread |
 | Syslog TCP sender | `connect_timeout_ms`, 30 seconds by default | TCP connection | No further step |
 | Syslog TLS sender | `connect_timeout_ms`, 30 seconds by default | TCP connection and TLS | No further step |
 | WebSocket client source | `connect_timeout_ms`, 30 seconds by default | TCP connection, TLS and the opening upgrade | The client's signaling protocol, when it declares one, under that protocol's own `TIMEOUT` |
 | Redis Pub/Sub source | `connect_timeout_ms`, 30 seconds by default | TCP connection and TLS | Redis setup and `SUBSCRIBE` within the same budget |
 | HTTP request emitter | `timeout_ms`, of which the lookup takes at most half | TCP connection | TLS, sending the request and reading its final response headers within the same timeout |
-| MQTT source, sink or input retirement | The driver's connect timeout, five seconds | TCP connection with the driver's network options | TLS and the MQTT handshake by the driver within the same timeout; retirement's unsubscribe and disconnect also share that budget |
+| MQTT source, emitter or input retirement | The driver's connect timeout, five seconds | TCP connection with the driver's network options | TLS and the MQTT handshake by the driver within the same timeout; retirement's unsubscribe and disconnect also share that budget |
 
 Syslog UDP has no connection to confirm, so a sender binds a socket in the family of each answer in
 turn and sends to the first answer whose socket setup succeeds.
@@ -377,7 +379,7 @@ the identity of the connection, whichever address accepted it:
 A failed lookup is a connection failure of the path that asked, reported through that owner's
 existing error and handled by its existing policy. It never rejects a record, never acknowledges or
 commits input, and never marks a message delivered: a source that cannot connect holds no delivery,
-and a sink that cannot connect confirms nothing, so the input stays unacknowledged until a later
+and an emitter that cannot connect confirms nothing, so the input stays unacknowledged until a later
 connection delivers it.
 
 | Owner | What a failed lookup does | What tries again |
@@ -385,7 +387,7 @@ connection delivers it.
 | Interconnect pool slot | Fails that connection attempt and counts it with reason `resolution` | The slot's reconnect backoff, described in [Connection And Credential Lifecycle](./interconnect.md#connection-and-credential-lifecycle) |
 | Node startup | Fails startup when its own endpoint does not resolve, or when the bootstrap endpoint does not resolve and there are no recovered Raft peer endpoints; otherwise logs and skips an unresolved bootstrap or recovered peer endpoint | The operator or process supervisor for a failed start; reachable recovered peers for a restart with an unresolved bootstrap endpoint |
 | A source | Fails its connection or its resume | The ingestor host, on the source's retry policy or, for a source in `MODE NO ACK`, its reconnect cadence |
-| A sink | Fails its start, its reopening or its publish | The emitter host, on its backoff and retry policy |
+| A emitter | Fails its start, its reopening or its publish | The emitter host, on its backoff and retry policy |
 | A Redis command pool | Fails the physical connection the pool was opening | The emitter that borrows from the pool, on its retry policy |
 | A native session | Fails the connection attempt as `ClientError::ConnectServer` | The session's bounded reconnect policy until its command wait ends; `BACKUP` uses `backup_wait_timeout` |
 
@@ -404,10 +406,10 @@ Nervix selects each library's resolver deliberately. The locked versions and sel
 | Reqwest | 0.13.5 | `hickory-dns` is selected. Every client Nervix builds replaces Reqwest's own Hickory adapter with the node's resolver before its first request, so that adapter never reads the host's configuration; left to itself it would fall back to Google's public name servers when it could not |
 | Reqwest, for Iceberg REST | 0.12.28, with Hickory 0.25.2 | Required by `iceberg-catalog-rest` 0.10.1. `hickory-dns` is selected and the client installs the node's resolver the same way; its TLS stays on AWS-LC with bundled roots |
 | OpenDAL | 0.57.0 | Iceberg object storage receives a Reqwest 0.13 client through `HttpClientLayer`, which also serves OpenDAL's credential providers. OpenDAL's standalone S3 `detect_region` helper builds its own client, and Nervix never calls it |
-| `hyper-util` | 0.1.21 | `HttpConnector::new_with_resolver` with the node's resolver as its resolver service, for ClickHouse, OTEL gRPC sinks, native sessions and the node's own trace exporter |
+| `hyper-util` | 0.1.21 | `HttpConnector::new_with_resolver` with the node's resolver as its resolver service, for ClickHouse, OTEL gRPC emitters, native sessions and the node's own trace exporter |
 | Smithy's HTTP client | 1.4.2 | `build_with_resolver` with the node's resolver as its `ResolveDns`, for SQS |
 | Tonic | 0.13.1 | `connect_with_connector` over that `HttpConnector`, for native sessions |
-| Tonic, for OpenTelemetry | 0.14.6 | `connect_with_connector_lazy` over that `HttpConnector`, for OTEL gRPC sinks and the node's own trace exporter |
+| Tonic, for OpenTelemetry | 0.14.6 | `connect_with_connector_lazy` over that `HttpConnector`, for OTEL gRPC emitters and the node's own trace exporter |
 | Lapin and `async-rs` | 4.12.0 and 0.8.12 | `hickory-dns` deliberately off: it resolves through one process-wide resolver built on first use from `/etc/resolv.conf`, which ignores the node's configuration and bounds and keeps name-server connections of the first Tokio runtime that used it. The connector hands Lapin an established transport through `Connection::connector` instead |
 | Redis | 1.7.1 | `AsyncConnectionConfig::set_dns_resolver` for pooled command connections; the Pub/Sub reader uses `parse_redis_value_async` on a stream the connector dialled itself |
 | `rumqttc-next` | 0.34.0 | `MqttOptions::set_socket_connector` in place of the driver's `lookup_host` connector; its proxy and WebSocket transports are not selected |
@@ -447,13 +449,13 @@ is assumed to be covered:
 
 | Path | Who resolves, and how | Why the node's resolver is not used |
 | --- | --- | --- |
-| MongoDB sources and sinks, `mongodb` 3.9.1 | For a `mongodb+srv` address, the driver's own Hickory resolver, selected by its `dns-resolver` feature and built from the host's `/etc/resolv.conf`, looks up the SRV and TXT records, and repeats the SRV lookup while it monitors the deployment. The host of every server address it connects to, whether listed in the address or discovered through SRV, is resolved with Tokio's `lookup_host` | The driver accepts no resolver for the addresses its sockets connect to. Its Hickory feature covers discovery only and does not replace that lookup |
-| NATS sources and sinks, `async-nats` 0.49.1 | The driver resolves each server address with Tokio's `lookup_host` before its per-address connection timeout | No resolver or socket hook |
+| MongoDB sources and emitters, `mongodb` 3.9.1 | For a `mongodb+srv` address, the driver's own Hickory resolver, selected by its `dns-resolver` feature and built from the host's `/etc/resolv.conf`, looks up the SRV and TXT records, and repeats the SRV lookup while it monitors the deployment. The host of every server address it connects to, whether listed in the address or discovered through SRV, is resolved with Tokio's `lookup_host` | The driver accepts no resolver for the addresses its sockets connect to. Its Hickory feature covers discovery only and does not replace that lookup |
+| NATS sources and emitters, `async-nats` 0.49.1 | The driver resolves each server address with Tokio's `lookup_host` before its per-address connection timeout | No resolver or socket hook |
 | PostgreSQL pools, `sqlx-postgres` 0.9.0 | The driver connects with Tokio's `TcpStream::connect((host, port))` | No resolver or socket hook at the pool's connection boundary |
 | MySQL pools, `mysql_async` 0.36.2 | The driver connects with Tokio's `TcpStream::connect((host, port))` | Its `resolved_ips` option fixes one address list for the life of the pool, which would pin a name to one answer |
-| Pulsar sources, their subscription removal, and sinks, `pulsar` 6.9.0 | The driver resolves broker and proxy URLs with `Url::socket_addrs` on a blocking worker, then dials the addresses. A subscription removal's lookup falls within its ten-second removal budget, which ends the removal but not a lookup the blocking worker already runs | No resolver hook |
-| Kafka sources and sinks, `rdkafka` 0.39.0 with librdkafka 2.12.1 | librdkafka resolves bootstrap and broker hosts in its own native threads | librdkafka's resolver callback is not exposed by the Rust binding |
-| ZeroMQ sources and sinks, `zeromq` 0.4.1 | The driver's TCP transport connects with Tokio's `TcpStream::connect((host, port))`. A connect-mode sink's connection, its lookups included, ends at its client's `connect_timeout_ms`, which ends the connection but not a lookup the blocking pool already runs | No socket hook |
+| Pulsar sources, their subscription removal, and emitters, `pulsar` 6.9.0 | The driver resolves broker and proxy URLs with `Url::socket_addrs` on a blocking worker, then dials the addresses. A subscription removal's lookup falls within its ten-second removal budget, which ends the removal but not a lookup the blocking worker already runs | No resolver hook |
+| Kafka sources and emitters, `rdkafka` 0.39.0 with librdkafka 2.12.1 | librdkafka resolves bootstrap and broker hosts in its own native threads | librdkafka's resolver callback is not exposed by the Rust binding |
+| ZeroMQ sources and emitters, `zeromq` 0.4.1 | The driver's TCP transport connects with Tokio's `TcpStream::connect((host, port))`. A connect-mode emitter's connection, its lookups included, ends at its client's `connect_timeout_ms`, which ends the connection but not a lookup the blocking pool already runs | No socket hook |
 | The web console | The browser resolves the page's origin and its WebSocket and fetch requests | The browser owns resolution |
 
 Postgres observation clients in the test harness use that same SQLx resolution path. Their suite
@@ -661,7 +663,7 @@ These follow from the contract above; [Evidence](#evidence) names the checks beh
   `DESCRIBE INGESTOR` shows, and tries again on its retry policy. It receives nothing and
   acknowledges nothing meanwhile, so what its system keeps for it, such as a queue's messages, is
   delivered after it reconnects, while a system that keeps nothing for an absent subscriber, such
-  as Redis Pub/Sub, delivers only what is published after the reconnection. A sink that cannot
+  as Redis Pub/Sub, delivers only what is published after the reconnection. A emitter that cannot
   reconnect confirms nothing, so its input stays unacknowledged and a Kafka source feeding it holds
   its offset, while `DESCRIBE EMITTER` shows the failure. Once the name is published again, the
   first attempt after the cached negative answer expires, at most thirty seconds after it was

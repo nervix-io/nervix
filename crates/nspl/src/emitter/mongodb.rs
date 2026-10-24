@@ -73,7 +73,7 @@ pub(super) fn mode<'src>()
 pub(super) fn collection_body<'src>() -> impl Parser<
     'src,
     &'src [Token],
-    ParsedDestination<MongoDbCollectionSink>,
+    ParsedDestination<MongoDbCollectionEmitter>,
     extra::Err<ParseError<'src>>,
 > + Clone {
     values_destination(
@@ -88,7 +88,7 @@ pub(super) fn collection_body<'src>() -> impl Parser<
             .try_map(
                 |((((client, collection), mode), values), conflict_action), span| {
                     validate_mongodb_conflict_action(&values, &conflict_action, span)?;
-                    Ok(MongoDbCollectionSink {
+                    Ok(MongoDbCollectionEmitter {
                         client,
                         collection,
                         mode,

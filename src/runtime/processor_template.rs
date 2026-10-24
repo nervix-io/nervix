@@ -785,7 +785,7 @@ impl BranchInstanceTemplate {
                 .metrics
                 .resolve_node_batch_metrics(NodeBatchMetricsSpec {
                     domain,
-                    kind: self.source_kind,
+                    kind: self.entity_kind,
                     node: &ModelName::from(&self.source),
                     relay: &self.root_relay,
                     physical_node_id,
@@ -793,10 +793,10 @@ impl BranchInstanceTemplate {
                     branch,
                 });
         let source_input_metrics = match branch {
-            Some(branch) if self.source_kind == ModelKind::Ingestor => {
+            Some(branch) if self.entity_kind == ModelKind::Ingestor => {
                 Some(runtime.inner.metrics.resolve_branch_node_message_metrics(
                     domain,
-                    self.source_kind,
+                    self.entity_kind,
                     &ModelName::from(&self.source),
                     physical_node_id,
                     "received",
@@ -869,7 +869,7 @@ impl BranchInstanceTemplate {
             routing: runtime.domain_routing_cache(domain),
             routing_snapshot: None,
             domain_clock,
-            source_kind: self.source_kind,
+            entity_kind: self.entity_kind,
             source: self.source.clone(),
             root_relay: self.root_relay.clone(),
             relays,
@@ -878,7 +878,7 @@ impl BranchInstanceTemplate {
             processors,
             error_policies: self.error_policies.clone(),
             metrics: BranchRuntimeMetrics {
-                source_dirty: runtime.branch_metrics_mark(domain, self.source_kind, &self.source),
+                source_dirty: runtime.branch_metrics_mark(domain, self.entity_kind, &self.source),
                 processor_dirty,
                 source: source_metrics,
                 source_input: source_input_metrics,

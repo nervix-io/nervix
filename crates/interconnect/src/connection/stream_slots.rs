@@ -444,9 +444,10 @@ pub(super) fn configure_client_builder(
     let streams = u32::try_from(stream_slots).map_err(|_| TransportError::InvalidOptions {
         reason: "pool stream slots exceed the HTTP/2 setting width".to_string(),
     })?;
+    let windows = options.receive_windows(class);
     builder
-        .initial_window_size(options.initial_stream_window_bytes)
-        .initial_connection_window_size(options.initial_connection_window_bytes)
+        .initial_window_size(windows.stream)
+        .initial_connection_window_size(windows.connection)
         .max_header_list_size(options.max_header_bytes)
         .max_concurrent_streams(streams)
         .initial_max_send_streams(stream_slots)

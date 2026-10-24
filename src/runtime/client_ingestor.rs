@@ -718,7 +718,7 @@ impl Runtime {
     /// Starts a client ingestor's execution on this node: its admission worker and the watch that
     /// tells its endpoint when admission opens or stops. The endpoint task is created the first
     /// time its ingestor starts here and kept across restarts.
-    pub(in crate::runtime) fn host_client_source(
+    pub(in crate::runtime) fn host_client_ingestor(
         &self,
         ingestor: &IngestorSpec,
         plan: &ClientIngestorStartPlan,

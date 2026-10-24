@@ -15,7 +15,7 @@ For Plexus connector choices, read [Connector Capabilities](https://docs.nervix.
 alongside the entity's Ingestors or Emitters section. Its generated tables show modes, option
 requirements, metadata types, each side's header model, batching and the reasons ingest and emit
 differ. Read headers the way the source's model records them, such as lowercase HTTP field names,
-and on a sink that keeps one value per header name write each literal header name once: a repeated
+and on an emitter that keeps one value per header name write each literal header name once: a repeated
 literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, response-header reads, frame metadata and the closed client CONFIG key set.
@@ -23,6 +23,13 @@ headers, response-header reads, frame metadata and the closed client CONFIG key 
 For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
 direct-value sections. Nervix validates the entity's declared limits and exact mapping types at
 `CREATE` and `ALTER`; correct a refused declaration before starting the domain.
+
+For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
+`MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
+Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each delivery settles
+on its own graph outcome. Automatic consumption has no prefetch or transport acknowledgement;
+work already accepted by the broker can be lost before the graph completes. Read the RabbitMQ
+Ingestors section for the exact clause order, host admission and recovery limits.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
@@ -42,7 +49,7 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Domain: paced or unpaced, clock period/skew, start behavior, and default placement policy.
 - Payload: sample input, wire format, exact internal field types, optional fields, and sensitive
   fields.
-- Source and sink: connector kinds, externally provisioned entity names, whether an operator
+- Source and emitter: connector kinds, externally provisioned entity names, whether an operator
   provisions a Pulsar subscription or its ingestor owns it, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
   ordering, and offsets.
@@ -179,7 +186,7 @@ and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, sup
 deduplicator, reorderer, emitter, ingestor, reingestor, generator, and placement changes;
 Nervix classifies the complete model diff and no user-facing pause command exists. Capacity and
 expression-only junction changes and emitter flush changes are dynamic; relay schema or branching
-changes pause the domain; structural junction, emitter sink/client/codec/collect/publishing-mode or
+changes pause the domain; structural junction, emitter/client/codec/collect/publishing-mode or
 attachment changes, ingestor,
 emitter source-predicate, and relay materialized-state changes gate and drain only affected
 entities. Changing emitter `FROM` membership pauses the domain because it changes topology.
@@ -261,7 +268,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   start a fresh lifetime for every branch of each WASM processor it moves, but only as the
   consequence of changing the module, and it cannot select a branch.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
-  casts between wire, internal, branch, processor, lookup, state, and sink values.
+  casts between wire, internal, branch, processor, lookup, state, and emitter values.
 - For every expression, read `Expression Functions`: `Where Expressions Run` for the functions each
   context allows, `Function Properties` and `Errors` for optional results, sensitivity, and where a
   failure goes, then the section of each operator and function the expression uses. Check that:
@@ -378,7 +385,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   branches. Keep collection separate per source relay and concrete branch, and remember that one
   node-wide materialized dependency or message-error relay must be exact-branch compatible with
   every source.
-- Give every emitter an explicit transport-supported `MODE` as the final sink subclause before
+- Give every emitter an explicit transport-supported `MODE` as the final emitter subclause before
   `ENCODE USING`. Include every required variable: all modes declare `RETRY POLICY BACKOFF <d> MAX
   <d>`; asynchronous confirming modes also declare `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` and
   `ACK TIMEOUT <d>`. Do not invent a default mode, window, timeout, or retry cadence.
@@ -387,7 +394,7 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   Follow route construction with required `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` and an
   explicit `FLUSH` policy. The output schema is exact, and every sensitive value copied into a
   non-sensitive output field needs `leak_sensitive(...)`. Do not create a `CLIENT` model, codec,
-  header operation, or direct `VALUES` body for this sink. An application opens a competing
+  header operation, or direct `VALUES` body for this emitter. An application opens a competing
   consumer with the Rust client's `subscribe_emitter` or the session protocol, receives native
   Arrow, then explicitly ACKs, retries, or rejects each attempt. `ATTACHED` holds source ACKs
   until the application ACKs; `DETACHED` releases the source earlier. Retries preserve the bytes
@@ -449,11 +456,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   record once and never a refused one, and a `WITHOUT BODY` emitter sends zero payload bytes; see
   [HTTP inspection](../../../docs/src/emitters.md#http-inspection-and-metrics).
 - Write a supported emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
-  sink clause and route construction, before `FLUSH`; it is required for CLIENT, ClickHouse,
+  emitter clause and route construction, before `FLUSH`; it is required for CLIENT, ClickHouse,
   Postgres, MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
   codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. Compatible
   rows from successive Arrow carriers in one flush may share a payload, but rows from different
-  source relays or concrete branches cannot. For the database sinks, the clause bounds each insert
+  source relays or concrete branches cannot. For the database emitters, the clause bounds each insert
   or bulk write by row count and the exact size of what it carries; for OTEL, it bounds each
   protobuf export request by successful source-record count and uncompressed encoded size; see
   [Emitters](../../../docs/src/emitters.md#batching).
@@ -491,18 +498,18 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   data. Never add it to an ingestor.
 - Add `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` to every flush-based
   route. `FLUSH EACH` is domain-logical and branch-local, in emitters and the Iceberg `COMMIT EACH`
-  exactly as elsewhere, while emitter retry backoff, acknowledgement keepalive, sink
+  exactly as elsewhere, while emitter retry backoff, acknowledgement keepalive, emitter
   acknowledgement timeouts, and an HTTP `Retry-After` stay physical. Treat `FLUSH IMMEDIATE` as the
   physical, system-owned 100 µs minimum batching window, not a one-message batch guarantee; domain
   pacing never scales it. Both timers start when an empty route buffer receives data. `MAX BATCH SIZE`
   counts logical Arrow value, offset, and validity bytes, not unused buffer capacity or object
   overhead. Windows use `WIDTH` and `STEP`; WASM output cadence is controlled by the guest. Choose
   `FLUSH` values as latency and boundary-cost controls, not as a throughput lever: `MAX BATCH SIZE`
-  only clamps a batch, and the flush tuning guidance in the docs records which sinks benefit from
+  only clamps a batch, and the flush tuning guidance in the docs records which emitters benefit from
   larger batches.
 - Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; an ingestor's `NO ACK` and an emitter's
   `NO ACK` have no in-flight ACK window and never accept `MAX`.
-- Do not promise that an emitter's `NO ACK` survives a stop on every sink. A `STOP`, a replacement
+- Do not promise that an emitter's `NO ACK` survives a stop on every emitter. A `STOP`, a replacement
   or a node shutdown sends what a Kafka producer still queues, awaits the receipts of what a Pulsar
   producer accepted and waits for an MQTT QoS 0 client to send what it holds, all within its
   deadline, reporting what is outstanding when it passes. Choose an `ACK` mode where a stop must not
@@ -580,8 +587,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - For syslog, read the dedicated `Common` → `Syslog` documentation entry. Reference the predefined
   singleton wire schema directly with `FROM SYSLOG`, keep the format independent of the UDP/TCP/TLS
   client transport, and use only the documented `SYSLOG LISTENER INGESTOR ... MODE NO ACK` source
-  and `NO ACK` sink forms.
-- For a Sentry sink, reference a `SENTRY CLIENT` containing the project DSN and use a codec
+  and `NO ACK` emitter forms.
+- For a Sentry emitter, reference a `SENTRY CLIENT` containing the project DSN and use a codec
   that emits one Sentry event JSON object per record. Do not add header writes to the Sentry route.
 - List topics, queues, streams, tables, buckets, catalogs, namespaces, collections, and other
   external prerequisites separately. Nervix does not create them as a side effect of starting a

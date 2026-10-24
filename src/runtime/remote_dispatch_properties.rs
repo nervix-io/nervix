@@ -15,8 +15,9 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain};
+use nervix_execution::{ChargedBytes, MemoryClass};
 use nervix_interconnect::{RelayDelivery, RelayPayload};
 use nervix_models::{
     AckMode, ClusterNodeName, DomainName, RelayName, RemoteAckRegistration, RemoteRuntimeField,
@@ -33,7 +34,7 @@ use crate::{
     },
     runtime_ack::AckSet,
     runtime_schema::{
-        RuntimeRecordMetadata,
+        RuntimeRecordMetadata, batch_payload_bytes,
         generated_batches::{GeneratedDomain, GeneratedSchema, assert_same_batch},
     },
 };
@@ -227,6 +228,59 @@ fn bolero_routed_batches_arrive_with_their_rows_branch_and_watermarks() {
                 assert_eq!(rows.record_batch().num_rows(), case.acks.len());
             });
         });
+}
+
+/// A body received under a grant keeps its own bytes and its decoded columns charged once it is
+/// decoded, and returns the rest of the room its grant reserved to decode it.
+#[test]
+fn a_decoded_body_keeps_its_bytes_and_columns_charged_and_returns_the_rest_of_its_grant() {
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .assured("the test runtime opens");
+    let input = (0..=u8::MAX).collect::<Vec<_>>();
+    runtime.block_on(async {
+        let receiver = Runtime::new();
+        let mut arbitrary = Arbitrary::new(&input, Domain::Vocabulary);
+        let case = RoutedCase::new(&mut arbitrary);
+        let mut payload = case.payload(&receiver).await;
+        let executor = receiver.executor();
+        let limits = executor.limits();
+        let body = payload.batch_ipc.to_vec();
+        let body_bytes = u64::try_from(body.len()).assured("a bounded body's length fits in u64");
+        let decode_room = limits
+            .relay_decoded_bytes
+            .as_u64()
+            .checked_add(limits.relay_scratch_bytes.as_u64())
+            .assured("the relay operation limits fit in u64");
+        let granted = body_bytes
+            .checked_add(decode_room)
+            .assured("a bounded body and its decode room fit in u64");
+        let grant = executor
+            .try_reserve(MemoryClass::Relay, granted)
+            .assured("an idle relay budget takes one grant");
+        // The body arrives as a grant delivers it: charged for its own bytes and the room to
+        // decode them. Replacing the sender's body returns that body's own charge.
+        payload.batch_ipc = ChargedBytes::from_owned(body, grant);
+        assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, granted);
+
+        let decoded = receiver
+            .decode_remote_rows(&case.schema.compiled, &mut payload)
+            .await
+            .assured("a routed payload decodes on the receiver");
+
+        let columns = batch_payload_bytes(decoded.batch.batch());
+        let kept = body_bytes
+            .checked_add(columns)
+            .assured("a decoded batch within its limit and its body fit in u64");
+        assert!(
+            kept < granted,
+            "decoding a bounded body needs less than its grant"
+        );
+        assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, kept);
+        drop(payload);
+        assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, 0);
+    });
 }
 
 /// One way a routed payload's parts can disagree with each other.

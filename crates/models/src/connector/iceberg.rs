@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The table sink Model with its storage backend, catalog and commit policy, the
-//!   object-store and catalog client Models it writes and commits through, and what the sink
+//! - **Owns.** The table emitter Model with its storage backend, catalog and commit policy, the
+//!   object-store and catalog client Models it writes and commits through, and what the emitter
 //!   declares.
-//! - **Depends on.** The shared sink declarations and the names a body references.
+//! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The Iceberg, object-store or catalog drivers, their configuration keys, or
 //!   how data files are staged and committed.
 
@@ -26,13 +26,13 @@ use super::{
         DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
-    entity_union::connector_sinks,
+    entity_union::connector_emitters,
 };
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SinkValueMapping,
-    SinkValueMappings,
+    ClientName, ConnectorKind, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
+    EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
+    EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, LocatorDeclaration,
+    LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
 };
 
 configured_client!(S3: unpooled, config NervixWithPropertyNamespaces, CreateClientS3 => S3ConfigEntry);
@@ -40,14 +40,14 @@ configured_client!(Gcs: unpooled, config NervixWithPropertyNamespaces, CreateCli
 configured_client!(AzureBlob: unpooled, config NervixWithPropertyNamespaces, CreateClientAzureBlob => AzureBlobConfigEntry);
 configured_client!(IcebergRest: unpooled, config NervixWithPropertyNamespaces, CreateClientIcebergRest => IcebergRestConfigEntry);
 
-pub type IcebergValueMapping = SinkValueMapping;
+pub type IcebergValueMapping = EmitterValueMapping;
 
 /// One Iceberg table, whose data files an object-store client writes and whose snapshots a
 /// catalog client commits.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct IcebergTableSink {
+pub struct IcebergTableEmitter {
     pub mode: IcebergTablePublishingMode,
     /// The object-store client, whose connector selects the planned storage backend.
     pub client: ClientName,
@@ -75,9 +75,9 @@ impl IcebergCatalog {
     }
 
     /// The client the catalog is reached through, with the connector it must configure.
-    pub const fn client_reference(&self) -> SinkClientReference<'_> {
+    pub const fn client_reference(&self) -> EmitterClientReference<'_> {
         match self {
-            Self::Rest { client } => SinkClientReference {
+            Self::Rest { client } => EmitterClientReference {
                 client,
                 connector: self.connector(),
             },
@@ -150,10 +150,10 @@ const ICEBERG_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &[],
 };
 
-impl SinkEntity for IcebergTableSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+impl EmitterDeclaration for IcebergTableEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         headers: None,
-        reference: SinkReferenceKind::StorageClient(&[
+        reference: EmitterReferenceKind::StorageClient(&[
             ConnectorKind::S3,
             ConnectorKind::Gcs,
             ConnectorKind::AzureBlob,
@@ -198,16 +198,16 @@ impl SinkEntity for IcebergTableSink {
     };
 }
 
-impl SinkBody for IcebergTableSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::StorageClient(&self.client)
+impl EmitterEntityBody for IcebergTableEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::StorageClient(&self.client)
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {
         Some(&mut self.client)
     }
 
-    fn catalog_client(&self) -> Option<SinkClientReference<'_>> {
+    fn catalog_client(&self) -> Option<EmitterClientReference<'_>> {
         Some(self.catalog.client_reference())
     }
 
@@ -215,8 +215,8 @@ impl SinkBody for IcebergTableSink {
         Some(crate::MappedValueTypes::Columns)
     }
 
-    fn value_mappings(&self) -> SinkValueMappings<'_> {
-        SinkValueMappings::values(&self.values)
+    fn value_mappings(&self) -> EmitterValueMappings<'_> {
+        EmitterValueMappings::values(&self.values)
     }
 
     fn commit_policy(&self) -> Option<(&str, &str)> {
@@ -224,15 +224,15 @@ impl SinkBody for IcebergTableSink {
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector Iceberg = "ICEBERG";
-    /// What an Iceberg sink writes.
-    pub enum IcebergSink;
+    /// What an Iceberg emitter writes.
+    pub enum IcebergEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum IcebergEmitterMode;
-    /// The entities an Iceberg sink writes.
-    pub enum IcebergSinkEntity {
-        Table(IcebergTableSink, IcebergTablePublishingMode) = "TABLE";
+    pub enum IcebergTableEmitterMode;
+    /// The entities an Iceberg emitter writes.
+    pub enum IcebergEmitterEntity {
+        Table(IcebergTableEmitter, IcebergTablePublishingMode) = "TABLE";
     }
 }
 

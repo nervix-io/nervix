@@ -51,7 +51,7 @@ names it. The contracts its scenarios verify stay with the chapters that own the
 - backup cuts, archives and restore installation:
   [Backup And Restore Architecture](./backup-and-restore-architecture.md), and the statements and
   their reports: [Backup And Restore](./backup-and-restore.md)
-- source and sink acknowledgement:
+- ingestor and emitter acknowledgement:
   [Connector Crates And The Connector Contract](./connector-contract.md)
 - the deadlock detector:
   [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection)
@@ -288,7 +288,7 @@ inspection where a verdict depends on them:
 
 | Setting | Default deployment | Changed for |
 | --- | --- | --- |
-| Raft heartbeat and election window | 250 ms; 1.5 to 3 seconds | 250 ms; 10 to 12 seconds for `pause-resume`, `--fault owner-pause` and `--fault voter-pause` |
+| Raft heartbeat, and the election window derived from it | 250 ms, so 1.5 to 3 seconds | 1.5 seconds, so 9 to 18 seconds, for `pause-resume`, `--fault owner-pause` and `--fault voter-pause` |
 | Node unavailability timeout | 10 seconds | 15 seconds for the same pause deployments |
 | Raft snapshot entry threshold, covered log entries retained | 10,000; 1,000 | 64; 16 for `stale-follower` |
 | State snapshot interval, replica count | 30 seconds; 0 | 1 second, and on three nodes one replica, for `stateful`; one replica for `restore-fault` and `restore-volume` |
@@ -362,7 +362,7 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-rate-probe` | The production link transfer and ICMP probes, with delayed Docker launches and starts, stalled, partial, lost and refused transfers, failed log reads and cleanup, and invalid clocks |
 | `just test-chaos-degraded-evidence` | The degraded-link controller, parser and effect limits at 40 and 400 packets |
 | `just test-chaos-hold-quorum` | The mixed-instability hold check for a degraded link that leaves every voter in a quorum |
-| `just test-chaos-pause-delivery` | A failover-length pause's sink check on the retained leader and relay-owner pause timelines: the source consumer group's handoff from a paused ingestor owner, read before the relocated consumer joins and after the handoff deadline; a handoff that never comes or comes after the unpause; a stalled sink; the window that opens at placement when the consumer stayed in place; and sink progress sampled after the unpause |
+| `just test-chaos-pause-delivery` | A failover-length pause's emitter check on the retained leader and relay-owner pause timelines: the source consumer group's handoff from a paused ingestor owner, read before the relocated consumer joins and after the handoff deadline; a handoff that never comes or comes after the unpause; a stalled emitter; the window that opens at placement when the consumer stayed in place; and emitter progress sampled after the unpause |
 | `just test-chaos-output-boundary [SELECTION]` | The suite preparation and baseline execution budgets and the Kafka end-offset observations, without Docker |
 | `just test-chaos-verifier-self-check` | The identity of the chaos scripts, every reason a verifier self-check record does not apply, and a run's refusal of such a record before it creates anything, without Docker |
 | `just test-chaos-image-package` | The image-package check and its refused or invalid observations |
@@ -483,7 +483,7 @@ still fails on any missing, unexpected, corrupt or wrong-branch record.
 
 When a fault scenario's output stays short of the accepted input past its bound, the runner still
 saves the available output and runs the exact verifier, so the ledger names the missing IDs. The
-run then exits with status 124. A recovery scenario gives the final source-boundary query, a
+run then exits with status 124. A recovery scenario gives the final ingestor-boundary query, a
 disposable Kafka administration command, 60 seconds of its own. That allows for JVM startup on a
 loaded worker. A failed query is a controller failure and cannot qualify delivery.
 
@@ -877,7 +877,7 @@ that breaks this run fails every scenario's self-check.
 
 The run proceeds in order:
 
-1. It observes healthy source and sink progress.
+1. It observes healthy ingestor and emitter progress.
 2. While the load continues, the packaged CLI creates a quiesced archive of the domain. The report
    must show a completed quiesced cut.
 3. The packaged CLI verifies the archive offline with `DESCRIBE BACKUP`. It must name the domain and
@@ -886,7 +886,7 @@ The run proceeds in order:
    `chaos_restored`, backs that domain up and describes its archive offline. The run compares the
    two archives' public checkpoint identities, revisions, branch counts and exact Kafka positions.
    The run never starts the restored domain, while the source traffic continues.
-5. After the cut, the runner requires renewed source and sink progress, stops the producer and
+5. After the cut, the runner requires renewed ingestor and emitter progress, stops the producer and
    checks the exact ledger, counting replay duplicates separately.
 
 `results/backup-progress.json` records the cut's engagement and release times and its freeze
@@ -1004,7 +1004,7 @@ The fault backup must end in an outcome the backup contract allows:
 - **Interrupted download.** The failure must carry the backup's execution reference, and recovering
   by that reference must report that the restarted holder no longer retains the archive.
 
-Whatever the outcome, the cluster must settle, the source and the sink must move past the records
+Whatever the outcome, the cluster must settle, the source and the emitter must move past the records
 the fault found, and a fresh backup must verify offline, restore and compare. A product violation is
 a recovery finding: the run still reaches the final exact ledger, then fails with every finding.
 
@@ -1166,7 +1166,7 @@ The run then judges what the fault left:
 - **Staging returns to zero.** On every node, two consecutive samples taken after the restores ended
   must report zero staging bytes and keys, with the count of completed sweeps rising between them.
   A restart restarts that count, so a pair across a restart does not qualify.
-- **The source domain is unaffected.** After a crash, the cluster must settle and the source and sink
+- **The source domain is unaffected.** After a crash, the cluster must settle and the ingestor and emitter
   must move past the boundaries recorded at the fault. Every fault ends with the exact ledger.
 - **Deduplicator and window outputs.** After `leader-partition`, which crashes no node, the
   deduplicator and window verdict of [Backup Cycles](#backup-cycles) judges the outputs of both
@@ -1252,7 +1252,7 @@ While a node is stopped:
 
 - within 20 seconds, the observer must report the node unavailable and the source broker must
   advance
-- on three nodes, the survivors must agree on a caught-up leader within 90 seconds, and the sink
+- on three nodes, the survivors must agree on a caught-up leader within 90 seconds, and the emitter
   must then progress within 60 seconds
 
 After the explicit start, the node's listeners must answer within 120 seconds and the observer must
@@ -1293,7 +1293,7 @@ before:
 
 - a caught-up survivor leader, within 90 seconds
 - replacement owners for every graph node, within 120 seconds
-- sink progress, within 60 seconds
+- emitter progress, within 60 seconds
 
 A one-node run requires listener, cluster and delivery recovery after the restart. In both
 topologies, recovery proceeds in order after the explicit restart:
@@ -1319,9 +1319,9 @@ replay duplicates.
 just chaos run pause-resume --image nervix:debian
 ```
 
-The three-node pause deployment uses a 250 ms heartbeat, a 10 to 12 second election window and a
-15-second unavailability timeout. The run verifies these in each target's Docker inspection. It then
-runs four cases:
+The three-node pause deployment uses a 1.5-second heartbeat, from which consensus derives a 9 to 18
+second election window, and a 15-second unavailability timeout. The run verifies these in each
+target's Docker inspection. It then runs four cases:
 
 1. a one-second pause of the leader
 2. a one-second pause of an execution owner
@@ -1338,7 +1338,7 @@ target is still paused:
 - when the paused node ran the ingestor, the source consumer group to have members only on the
   relocated ingestor's node, one of which holds the partition, within 60 seconds of the pause
   request
-- sink progress, within 20 seconds of that handoff, or of the relocation when the paused node did not
+- emitter progress, within 20 seconds of that handoff, or of the relocation when the paused node did not
   run the ingestor
 - a control canary through a peer to finish before the unpause
 
@@ -1348,7 +1348,7 @@ group coordinator hands it the partition only after that expiry, `session.timeou
 member's last heartbeat ([Kafka ingestors](./ingestors.md#kafka)). The baseline graph keeps
 librdkafka's 45-second default. The 60-second bound adds 15 seconds for the rebalance and one read of
 the group through the broker's CLI. Placement usually completes 22 to 26 seconds into a leader pause,
-so a sink window opened at placement would close before the partition can move.
+so an emitter window opened at placement would close before the partition can move.
 
 After the long leader pause, the recovered leader must also differ from the paused one.
 
@@ -1375,7 +1375,7 @@ just chaos run partition-recovery --image nervix:debian --case quorum-loss --par
 - `quorum-loss` leaves no two nodes able to exchange a packet
 
 `--partition-seconds` sets the minimum verified isolation window. The deployment keeps the standard
-election and unavailability settings and records them.
+heartbeat and unavailability settings and records them.
 
 **During each fault.**
 
@@ -1644,7 +1644,7 @@ and output topic:
 
 The deployment uses a one-second state snapshot interval and, on three nodes, one state replica, so
 the loss of an owner promotes a replica of each processor's state instead of resetting it. A pause
-fault also deploys the pause scenario's election and unavailability settings. On three nodes, one
+fault also deploys the pause scenario's heartbeat and unavailability settings. On three nodes, one
 acknowledged `RELOCATE` moves the stateful entities onto the observed follower that the faults
 target, and both stateful ingestors onto another node. A fault on the state owner therefore leaves
 the Kafka consumers in place.
@@ -1776,8 +1776,17 @@ requirements:
   the first report's generation and mapping. No `START` follows the first, so the generation never
   changes.
 - **Ticks.** Every tick must lie on the mapping's period grid, with its boundary at
-  `logical origin + (id - 1) * period`, in that generation, and no later than the serving node's own
-  logical time. Tick IDs must increase within each attachment.
+  `logical origin + (id - 1) * period`, in that generation. The boundary must have been reached by
+  the mapping at the authority's UTC observation. The serving-node logical reading must not
+  precede the boundary and must lie between the mapping's projections at authority UTC and at the
+  independent observer's receipt timestamp, with a ten-logical-millisecond measurement tolerance.
+  The containers share the Docker host's UTC. Accepted progress and the serving reading are
+  sampled separately: a pause between those samples can pair an earlier boundary with a current
+  reading, and a delayed frame can carry an earlier reading. Every such tick is checked against
+  this observation interval; its age does not supply a freshness bound. The interval cannot
+  establish the exact snapshot time or distinguish projection errors that stay inside it. Tick
+  IDs must increase within each attachment; the stall and handover checks separately establish
+  progress and recovery.
 - **Stalls.** A tick stall longer than two physical seconds, on an observer whose node stayed up,
   must fall inside a fault and end within 60 physical seconds. That is the authority bound the
   result records beside the deployed `NERVIX_NODE_UNAVAILABILITY_TIMEOUT`.
@@ -1925,7 +1934,7 @@ container.
 
 - After the last heal of a step, every node must settle within 150 seconds and output must advance
   within 90 seconds.
-- Within 120 seconds, the source may run at most `--max-recovery-backlog` records ahead of the sink
+- Within 120 seconds, the source may run at most `--max-recovery-backlog` records ahead of the emitter
   (default 20).
 - A canary through every faulted node must be acknowledged.
 - The public metrics may report at most `--max-pending` pending interconnect operations (default
@@ -1941,13 +1950,13 @@ container.
 
 **Sampling.**
 
-- A background sampler records the source and sink end offsets and every node's Docker state, memory
+- A background sampler records the ingestor and emitter end offsets and every node's Docker state, memory
   and CPU every 10 seconds for the whole fault phase, in `mixed/samples.ndjson`.
 - A node whose memory exceeds `--max-memory-bytes` (default 1 GiB) is a product finding.
 - Two samples more than 120 seconds apart fail the run, because the continuous observation had a
   gap.
 - `results/mixed-resources.json` summarizes each node's first, last and peak memory, the peak
-  backlog, and the longest source and sink stalls.
+  backlog, and the longest ingestor and emitter stalls.
 - `results/mixed-instability-progress.json` records every step's nodes, timings and recovery, with
   the distribution of settle, delivery and drain times across the run.
 
@@ -1987,8 +1996,8 @@ for the samples it took.
   unless `--records` asks for more.
 - The run is bounded by its duration plus the larger of that duration and 20 minutes, at most six
   hours, unless `--timeout` sets a bound from the duration plus 10 minutes through six hours.
-- The deployment uses the standard heartbeat, election and unavailability settings, and the
-  manifest records them as Compose renders them.
+- The deployment uses the standard heartbeat and unavailability settings, and the manifest records
+  them as Compose renders them.
 
 ### Replay
 
@@ -2104,7 +2113,7 @@ Two kinds of violation are handled differently:
 | 0 | Passed |
 | 1 | Failed, with the category above |
 | 2 | Setup error before any product verdict |
-| 124 | A bounded command or wait, or the whole-run bound, ran out before the verdict. Also used when sink output stayed short of the accepted input past its bound, after the exact ledger was written |
+| 124 | A bounded command or wait, or the whole-run bound, ran out before the verdict. Also used when emitter output stayed short of the accepted input past its bound, after the exact ledger was written |
 | 129, 130, 143 | Interrupted by HUP, INT or TERM. The exit trap still heals, captures and cleans up |
 
 ## Budgets And Timing
@@ -2136,7 +2145,7 @@ The controller's own bounds:
 | Consumer offsets at the source boundary | 120 s |
 | Output containing the accepted input | 120 s; `--drain-seconds` for degraded links |
 | Output stability window | 30 s |
-| Final source-boundary query of a recovery scenario | 60 s |
+| Final ingestor-boundary query of a recovery scenario | 60 s |
 | Docker launch of an ICMP helper, transfer receiver, Pumba dry run or injector | 60 s |
 | ICMP sample; link transfer; helper log read and removal | 30 s; 90 s; 20 s each |
 | Deadlock evidence qualification | 300 s in all, at most 60 s per file |

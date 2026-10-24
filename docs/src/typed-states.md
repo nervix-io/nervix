@@ -21,16 +21,16 @@ the group's row bound and the vocabulary's frame labels. An estimate that exceed
 is a typed error before allocation; the ingest group adds the opening operation's context and
 retains the cause for its general-error policy.
 
-The Pulsar sink's running publishing choice keeps related state together: the `NO ACK` variant
+The Pulsar emitter's running publishing choice keeps related state together: the `NO ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
 confirmation settings. An empty receipt collection means there are no outstanding receipts,
 and an absent failure means none has been observed. These are task-owned execution values,
 never persisted state or substitutes for a missing publishing mode. The
-[connector contract](./connector-contract.md#finishing-a-sink) owns their completion semantics.
+[connector contract](./connector-contract.md#finishing-an-emitter) owns their completion semantics.
 
-The Kafka sink installs its effective native queue byte capacity as `NonZeroU64` after librdkafka
+The Kafka emitter installs its effective native queue byte capacity as `NonZeroU64` after librdkafka
 validates the client configuration. Its confirmation window's on-demand settlement returns
-`Some(SinkRecordId)` for an answered record and `None` for an empty window. A refused enqueue
+`Some(EmitterRecordId)` for an answered record and `None` for an empty window. A refused enqueue
 keeps the same record until admission succeeds or its wait fails. The optional admission deadline
 is absent while outstanding confirmation answers can provide progress, and is established only
 when a full native queue has no current-window answer left to await. These values are private,
@@ -124,7 +124,7 @@ The outbound WebSocket source distinguishes a peer Close carrying its code and r
 without a status, an ended stream and a local close-handshake timeout as typed failure states.
 No fabricated close code stands for an absent status. The source removes the exact transport
 before its bounded closing wait, so cancellation leaves it needing a new resume. The
-[connector contract](./connector-contract.md#source-boundary) owns the retry and payload lifetime
+[connector contract](./connector-contract.md#ingestor-boundary) owns the retry and payload lifetime
 effects.
 
 WebSockets upgrade fields cross from literal semantic Models into `WebsocketsUpgradeHeaders`,
@@ -132,6 +132,15 @@ whose private representation enforces HTTP bounds and WebSocket protocol-name re
 an execution plan receives it. `WebsocketDataFrame` carries either text or binary payload, so a
 text tag cannot accompany invalid UTF-8. Each message retains its connection's immutable response
 header snapshot; the quiesce buffer retains the same handle beside the typed frame kind.
+
+The validated WebSockets client configuration carries the handshake capacity as `NonZeroU16` and
+message/frame limits as `NonZeroU32`. Decimal CONFIG values cross this boundary once; zero,
+overflow and an unschedulable ping-derived idle deadline are typed configuration refusals. The
+effective idle duration is already established before planning. A handshake attempt owns its
+bounded queue until signaling succeeds; only the completed queue moves into ordinary source
+reads. Dropping or failing the negotiating future drops that exact queue, so its frames cannot
+become data for a replacement connection. After a completed queue drains, its absent channel is
+represented by `None`, and steady reads use only task-owned connection state.
 
 Zero work outstanding, an initial sequence value, an empty payload, and a genuinely empty result
 remain ordinary values. A documented scalar function may return zero for a particular input;
@@ -271,11 +280,11 @@ that opened it, and a forwarded producer's link key is never reused within its p
 has a reserved value meaning none. The client ingestor endpoint's published counts are genuine
 zero counts, never markers.
 
-**Sources and sinks.** A source or a sink is addressed by the connector that serves it and the
+**Sources and emitters.** A source or an emitter is addressed by the connector that serves it and the
 entity it consumes, and its Model states both in its shape: the union holds one variant per
 connector, that variant holds one variant per entity, and each entity has its own Model with only
 the fields its statement writes. A Kafka topic source therefore cannot hold a Pub/Sub channel, and
-an OpenTelemetry sink is a logs, a traces or a metrics sink, so only a metrics sink carries a
+an OpenTelemetry emitter is a logs, a traces or a metrics emitter, so only a metrics emitter carries a
 metric and no signal value sits beside mappings that might contradict it. The kind that names a
 pair is read from the Model and never stored beside it. An ingestor alteration is nested the same
 way: its head selects one connector and entity, and the operations of that entity set a source of
@@ -285,12 +294,12 @@ its payloads, so a client producer alteration cannot hold one. A stored ingestor
 refused by comparing the two kinds. The names an external system owns, such as a Kafka topic or a NATS subject, are distinct
 types from Nervix names: each is checked against its entity's own rule once, when it is parsed or
 decoded, and keeps its text exactly as written, case included, so a connector sends what the
-statement says. What every source or sink of a pair
+statement says. What every source or emitter of a pair
 declares, whatever its statement says, is declared once on that entity's Model in the vocabulary:
 whether its messages carry headers, the typed `metadata` namespace they expose, whether it runs on
-every node, what its body references, and for a sink whether it writes headers, needs a codec,
+every node, what its body references, and for an emitter whether it writes headers, needs a codec,
 requires batching and which publishing modes it accepts. A client Model names the connector it
-configures as a typed kind, so a source or a sink is matched with its client by comparing kinds
+configures as a typed kind, so a source or an emitter is matched with its client by comparing kinds
 rather than labels. A session producer's source is no transport, so the transport union holds no
 Model of it; the kind union still names it, because capability decisions ask about every source.
 
@@ -300,6 +309,16 @@ contracts. The registry infers each mapping's type and checks it without coercio
 the candidate graph. It also establishes required batching and schedulable transport delivery
 durations there. Planning consumes those guarantees, including the presence of a required batch,
 and an invalid alteration leaves the accepted configuration intact.
+
+RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
+and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch
+timeout; both acknowledged variants own an ACK timeout and retry policy. Zero cannot accidentally
+request AMQP's unlimited prefetch. The
+composed Plexus parser rejects a count outside `1..=65535` instead of truncating it. Runtime
+composition passes either automatic consumption or that exact nonzero count to the engine plan.
+The engine does not recover the mode from a missing timeout or a numeric marker. The host's
+settlement contract separately distinguishes batch commit boundaries from independent per-delivery
+ACK/NACK boundaries.
 
 Each emitter destination also owns its closed publishing enum: a Kafka topic can hold its own
 `NO ACK` or acknowledged policy, while an HTTP request can hold only its request acknowledgement
@@ -436,7 +455,7 @@ no eligible destination.
 
 ## External Encodings And Conversion Failure
 
-The emitter sink state owns its stop drain and returns one typed answer: finished with its
+The emitter connector state owns its stop drain and returns one typed answer: finished with its
 publish report and finish outcome, failed with the typed connector/runtime cause, or elapsed
 without an answer within the host bound. A connector reporting its own finish-deadline failure
 remains a failed finish with that cause. It does not become an absent answer because a host timer
@@ -467,7 +486,7 @@ Unix-nanosecond timestamps beside the payload. A kernel reads them as `i64` lane
 on its own, the interconnect wire, and a materialized-state snapshot receive typed timestamps,
 converted once where the row leaves the batch.
 
-A conversion failure never becomes another valid payload value. The MongoDB sink returns a typed
+A conversion failure never becomes another valid payload value. The MongoDB emitter returns a typed
 per-record failure if a value cannot be represented in BSON, including an unsigned value above
 BSON's signed range. It does not publish that record with a replacement BSON null or a changed
 conflict key. An actual null remains null, and other valid records in the batch can proceed under
@@ -590,7 +609,7 @@ execution or recovery. Connectors and the session edge validate external represe
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
 
-The Iceberg sink validates its configured location into a URL before creating its storage factory.
+The Iceberg emitter validates its configured location into a URL before creating its storage factory.
 The initialized operator belongs to that storage root: a later object path must match its scheme,
 host, port and container identity before its relative key reaches the operator. Table metadata
 refreshes retain the first table's initialized `FileIO`; they do not install a different storage
@@ -857,3 +876,10 @@ assignment available for storage-backed synchronization. Force-flush
 readiness is privately encoded as idle=0, available=1 and closed=2. Only its owning type writes or
 decodes that byte; the coordinator remains the authority for generation and claim state. The hint
 has no cross-location data-publication contract.
+
+Connector execution identity is a nested connector/entity variant. An ingestor plan's Kafka topic
+leaf can only compose the Kafka topic ingestor, and OTEL logs, traces and metrics have distinct
+emitter plans, configurations and concrete types. `IngestorConnector::KIND` and
+`EmitterLifecycle::kind()` expose the vocabulary identity; composition asserts the declared kind
+at compile time. Shared private encoding or endpoint intake state does not add an entity selector
+to those public configurations. A new entity adds a typed variant and implementation.

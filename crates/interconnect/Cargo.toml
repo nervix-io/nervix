@@ -52,6 +52,7 @@ rand_core = { workspace = true }
 rkyv = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
+sha2 = { workspace = true }
 shuttle = { workspace = true, optional = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
@@ -59,6 +60,7 @@ tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
 tracing = { workspace = true }
 turmoil = { workspace = true, optional = true }
+ubyte = { workspace = true }
 url = { workspace = true }
 x509-parser = { workspace = true }
 
@@ -74,7 +76,5 @@ nervix-model-harness = { workspace = true }
 rcgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
 sorted-vec = { workspace = true }
 tempfile = { workspace = true }
-ubyte = { workspace = true }

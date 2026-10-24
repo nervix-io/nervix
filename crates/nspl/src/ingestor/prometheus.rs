@@ -13,7 +13,7 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{PrometheusIngestMode, PrometheusQuerySource};
+use nervix_models::{PrometheusIngestMode, PrometheusQueryIngestor};
 
 use super::delivery::{no_ack, polling_quiesce_clause};
 use crate::{
@@ -26,7 +26,7 @@ use crate::{
 /// `FROM <client> QUERY '<promql>' [MAX BODY SIZE <bytes>] EVERY <period> MODE NO ACK ON QUIESCE
 /// SUSPEND|BUFFER …`.
 pub(super) fn query_body<'src>()
--> impl Parser<'src, &'src [Token], PrometheusQuerySource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], PrometheusQueryIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Query))
         .then(string_lit())
@@ -37,13 +37,15 @@ pub(super) fn query_body<'src>()
         .then(no_ack().to(PrometheusIngestMode::NoAck))
         .then(polling_quiesce_clause())
         .map(
-            |(((((client, query), max_body_size), every), mode), quiesce)| PrometheusQuerySource {
-                client,
-                query,
-                max_body_size,
-                every,
-                mode,
-                quiesce,
+            |(((((client, query), max_body_size), every), mode), quiesce)| {
+                PrometheusQueryIngestor {
+                    client,
+                    query,
+                    max_body_size,
+                    every,
+                    mode,
+                    quiesce,
+                }
             },
         )
         .boxed()

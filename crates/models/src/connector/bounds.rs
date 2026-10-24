@@ -127,6 +127,9 @@ pub enum BufferOverflow {
     /// A response that exceeds the bound fails the poll that read it: the ingestor reports the
     /// failure as its transient error, and the next poll reads again.
     FailPoll,
+    /// An incoming message or frame above the bound fails the source read and ends its
+    /// connection. The host reconnects on its declared retry policy.
+    FailRead,
 }
 
 /// One network wait a connector performs.
@@ -179,9 +182,9 @@ pub enum DeadlineKey {
     /// TLS and the protocol's own handshake included.
     #[strum(serialize = "connect_timeout_ms")]
     ConnectTimeout,
-    /// `idle_timeout_ms`: silence while a connector actively reads an established connection,
-    /// including its liveness probe; expiry closes the connection. Transport backpressure is
-    /// outside an active read.
+    /// `idle_timeout_ms`: silence while waiting for peer activity on an established connection,
+    /// including its liveness probe; expiry closes the connection. Each entity declares its
+    /// activity and whether cancellation or handoff backpressure retains the activity deadline.
     #[strum(serialize = "idle_timeout_ms")]
     IdleTimeout,
 }
@@ -200,6 +203,8 @@ pub enum OmittedDeadline {
     Required,
     /// The wait takes this deadline.
     Default(Duration),
+    /// A bound derived from another declared client value, with its omission rule.
+    Derived(&'static str),
     /// Nothing bounds the wait.
     Unbounded,
 }

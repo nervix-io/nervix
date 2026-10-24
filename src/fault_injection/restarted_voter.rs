@@ -1,8 +1,10 @@
-//! Holding a restarted voter's first relayed heartbeat while its leader decides whether to wait.
+//! Holding a restarted voter's first relayed heartbeat while its leader decides whether to wait,
+//! and telling a restart fixture when the restarted cluster's leader stops waiting.
 //!
 //! Layer: test harness, outside the product layer order.
 //!
-//! - **Owns.** A receiver-scoped heartbeat freeze and a one-shot scheduling observation barrier.
+//! - **Owns.** A receiver-scoped heartbeat freeze, a one-shot scheduling observation barrier, and
+//!   the end of a restarted leader's startup voter observation.
 //! - **Depends on.** Typed node identities and the fault harness's existing pause primitive.
 //! - **Must not know.** Schedules, runtime state, or the gossip failure detector's decisions.
 
@@ -25,6 +27,19 @@ pub(super) struct StartupVoterGossip {
 struct CapturedHeartbeat {
     identity: ClusterNodeIdentity,
     heartbeat: u64,
+}
+
+/// Whether a restart fixture waits for the restarted cluster's leader to end its startup voter
+/// observation, and whether one has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StartupObservationEnd {
+    /// No restart fixture waits for it.
+    Unarmed,
+    /// A fixture armed the wait after every node stopped, and no leader has ended it yet.
+    Awaited,
+    /// A leader of the restarted cluster passed its startup voter observation: it observed every
+    /// voter live or its grace expired, so its automatic scheduling now decides.
+    Ended,
 }
 
 impl FaultInjection {
@@ -149,6 +164,35 @@ impl FaultInjection {
         pause.release();
         pause.wait_until_delivered().await;
         self.inner.startup_voter_gossip.remove(observer);
+    }
+
+    /// Arm only after every node has stopped, so the end a fixture waits for belongs to a leader
+    /// of the restarted cluster, not to a process that ran before the restart.
+    pub fn await_startup_voter_observation_end(&self) {
+        self.inner
+            .startup_observation_end
+            .send_replace(StartupObservationEnd::Awaited);
+    }
+
+    /// Records that this process, leading, has passed its startup voter observation. A pass reaches
+    /// this only once no voter is left unobserved, and it may make an automatic scheduling decision
+    /// right after.
+    pub(crate) fn end_startup_voter_observation(&self) {
+        self.inner.startup_observation_end.send_if_modified(|end| {
+            let StartupObservationEnd::Awaited = *end else {
+                return false;
+            };
+            *end = StartupObservationEnd::Ended;
+            true
+        });
+    }
+
+    /// Waits until a leader of the restarted cluster has passed its startup voter observation.
+    pub async fn wait_for_startup_voter_observation_end(&self) {
+        let mut end = self.inner.startup_observation_end.subscribe();
+        end.wait_for(|end| *end == StartupObservationEnd::Ended)
+            .await
+            .assured("the fault state holds the observation sender for as long as a waiter does");
     }
 
     fn startup_voter_observation(&self, observer: &ClusterNodeName) -> Arc<TestPause> {

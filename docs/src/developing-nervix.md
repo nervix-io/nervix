@@ -245,14 +245,14 @@ Start Nervix with `--otel-enabled` and keep the default OTLP endpoint when `just
 ## Connector Crates
 
 [Connector Crates And The Connector Contract](./connector-contract.md) is the architecture
-reference for ownership, source and sink lifecycle, and the cross-layer checklist for adding an
+reference for ownership, ingestor and emitter lifecycle, and the cross-layer checklist for adding an
 integration. The notes here identify the repository locations and validation commands.
 
 The shared contract is in `crates/connector`, and each external integration is in
 `crates/connectors/<name>`. The server's `src/runtime/ingestors` and emitter modules compose the
 typed plans with those crates. Keep driver dependencies in their integration crates; the server
 test harness may name a driver in `[dev-dependencies]` to provision or inspect an external system.
-The node's own endpoint source lives in `src/runtime/ingestors/endpoint.rs` because it has no
+The node's own endpoint ingestor lives in `src/runtime/ingestors/endpoint.rs` because it has no
 external driver. Follow the architecture chapter's [integration checklist](./connector-contract.md#adding-an-integration)
 when extending this layout.
 
@@ -462,12 +462,14 @@ just test-shuttle
 ```
 
 Each check runs in its own process under the exploration it declares, then again under the
-uncontrolled-nondeterminism detector. `crates/model-harness/shuttle-inventory.toml` registers every
-check by package and test name, and the run fails when a registered check is missing, ignored or did
-not complete its exploration, and when a `shuttle_` test is not registered; add a new check to its
-package's list, and rename a renamed one there, in the same change. The command reports how many
-checks it discovered, selected, executed and saw complete. A substring selects a focused check or
-protocol family in every package, and a substring that selects nothing fails:
+uncontrolled-nondeterminism detector. Checks run beside each other, one per CPU the command may use,
+so restrict its CPUs, for example with `taskset -c 0-3 just test-shuttle`, to share a busy machine.
+`crates/model-harness/shuttle-inventory.toml` registers every check by package and test name, and
+the run fails when a registered check is missing, ignored or did not complete its exploration, and
+when a `shuttle_` test is not registered; add a new check to its package's list, and rename a
+renamed one there, in the same change. The command reports how many checks it discovered, selected,
+executed and saw complete. A substring selects a focused check or protocol family in every package,
+and a substring that selects nothing fails:
 
 ```bash
 just test-shuttle force_flush

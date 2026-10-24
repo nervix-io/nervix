@@ -6,7 +6,7 @@
 //!   a relay consumer asks for while it holds deadlines in more than one clock coordinate, and
 //!   the failures of holding a route's output under its flush policy and releasing it.
 //! - **Depends on.** Bound domain clocks, physical deadline capabilities and relay batches.
-//! - **Must not know.** Graph planning, connector retries, source-group idle collection or sinks.
+//! - **Must not know.** Graph planning, connector retries, source-group idle collection or emitters.
 
 #![cfg_attr(
     nervix_lint,

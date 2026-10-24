@@ -140,7 +140,7 @@ impl HeaderModel {
     /// The first of an emitter's literal header writes, in written order, whose name an earlier
     /// literal write already wrote, where this model keeps one value per name.
     ///
-    /// On such a sink the later write replaces the earlier one on every record, so the earlier
+    /// On such an emitter the later write replaces the earlier one on every record, so the earlier
     /// write can never reach a message. Names compare as this model records them, and a model
     /// that keeps every value of a name has no such write.
     pub fn replaced_write<'a>(
@@ -186,7 +186,7 @@ pub struct LiteralHeaderWrite<'a> {
     pub name: &'a str,
 }
 
-/// Two literal header writes of one name on a sink that keeps one value per name.
+/// Two literal header writes of one name on an emitter that keeps one value per name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplacedHeaderWrite<'a> {
     /// The write whose value the later one replaces.
