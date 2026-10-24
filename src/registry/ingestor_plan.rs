@@ -25,18 +25,18 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
     AckWindow, ClientConfigEntry, ClientEndpointContract, ClientName, ClientProducerPolicy,
-    ClientProducerSource, ClientResourceMount, ClusterNodeName, CodecName, CreateIngestor,
-    CreateSchema, DomainName, EndpointIngestMode, EndpointName, FlushPolicy, GeneralErrorPolicy,
-    HttpEndpointSource, HttpRequestSource, HttpSource, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSource, IngestSourceKind, IngestTimestampSource, IngestorInput, IngestorName,
-    KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource, MessageErrorOperation, Model,
-    ModelName, MqttIngestMode, MqttSource, MqttTopicSource, NatsSource, NatsSubjectSource,
-    PrometheusSource, PulsarIngestMode, PulsarSource, PulsarSubscriptionOwnership,
-    PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource, RabbitMqSource, RedisPubSubSource,
-    RedisSource, ResolvedBranching, ScheduledNode, SchemaField, SchemaName, SignalingProtocolName,
-    SqsIngestMode, SqsQueueSource, SqsSource, SyslogListenerSource, SyslogSource,
-    WebsocketsConnectionSource, WebsocketsEndpointSource, WebsocketsSource, ZeroMqPullSource,
-    ZeroMqSource, parse_duration_text,
+    ClientProducerSource, ClientResourceMount, ClusterNodeName, CodecName, CreateClientWebsockets,
+    CreateIngestor, CreateSchema, DomainName, EndpointIngestMode, EndpointName, FlushPolicy,
+    GeneralErrorPolicy, HttpEndpointSource, HttpRequestSource, HttpSource, IngestAcknowledgement,
+    IngestQuiesceMode, IngestSource, IngestSourceKind, IngestTimestampSource, IngestorInput,
+    IngestorName, KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource,
+    MessageErrorOperation, Model, ModelName, MqttIngestMode, MqttSource, MqttTopicSource,
+    NatsSource, NatsSubjectSource, PrometheusSource, PulsarIngestMode, PulsarSource,
+    PulsarSubscriptionOwnership, PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource,
+    RabbitMqSource, RedisPubSubSource, RedisSource, ResolvedBranching, ScheduledNode, SchemaField,
+    SchemaName, SignalingProtocolName, SqsIngestMode, SqsQueueSource, SqsSource,
+    SyslogListenerSource, SyslogSource, WebsocketsConnectionSource, WebsocketsEndpointSource,
+    WebsocketsSource, ZeroMqPullSource, ZeroMqSource, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 
@@ -202,6 +202,7 @@ client_plan!(SqsIngestorStartPlan {
     mode: SqsIngestMode,
 });
 client_plan!(WebsocketsIngestorStartPlan {
+    headers: nervix_models::WebsocketsUpgradeHeaders,
     mode: nervix_models::WebsocketsIngestMode,
     signaling_protocol: Option<SignalingProtocolName>,
 });
@@ -690,6 +691,30 @@ fn client_endpoint_contract(
     ))
 }
 
+impl WebsocketsIngestorStartPlan {
+    fn decide(
+        name: &IngestorName,
+        source: &WebsocketsConnectionSource,
+        client: &CreateClientWebsockets,
+    ) -> Result<Self, Report<EntrypointPlanError>> {
+        Ok(Self {
+            headers: nervix_models::WebsocketsUpgradeHeaders::parse(&source.headers)
+                .change_context(EntrypointPlanError::InvalidWebsocketsUpgradeHeaders {
+                    ingestor: name.clone(),
+                })?,
+            client: IngestorClientSpec::resolved(
+                name,
+                &source.client,
+                &client.name,
+                client.mount.as_ref(),
+                &client.config,
+            )?,
+            mode: source.mode.clone(),
+            signaling_protocol: client.signaling_protocol.clone(),
+        })
+    }
+}
+
 impl SourceStartPlan {
     fn decide(
         name: &IngestorName,
@@ -928,25 +953,9 @@ impl SourceStartPlan {
                 name, expected, resolved, mode, quiesce,
             )?)),
             (
-                IngestSource::Websockets(WebsocketsSource::Connection(
-                    WebsocketsConnectionSource {
-                        client: expected,
-                        mode,
-                        ..
-                    },
-                )),
+                IngestSource::Websockets(WebsocketsSource::Connection(source)),
                 Model::ClientWebsockets(resolved),
-            ) => Ok(Self::Websockets(WebsocketsIngestorStartPlan {
-                client: IngestorClientSpec::resolved(
-                    name,
-                    expected,
-                    &resolved.name,
-                    resolved.mount.as_ref(),
-                    &resolved.config,
-                )?,
-                mode: mode.clone(),
-                signaling_protocol: resolved.signaling_protocol.clone(),
-            })),
+            ) => WebsocketsIngestorStartPlan::decide(name, source, resolved).map(Self::Websockets),
             (
                 IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
                     client: expected,
@@ -1373,6 +1382,7 @@ mod tests {
             source: IngestSource::Websockets(WebsocketsSource::Connection(
                 WebsocketsConnectionSource {
                     client: named("upstream"),
+                    headers: Vec::new(),
                     mode: nervix_models::WebsocketsIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Drop,
                 },
@@ -1384,11 +1394,12 @@ mod tests {
                 config: Vec::new(),
             }),
             plan: SourceStartPlan::Websockets(WebsocketsIngestorStartPlan {
+                headers: nervix_models::WebsocketsUpgradeHeaders::default(),
                 client: client(),
                 mode: nervix_models::WebsocketsIngestMode::NoAck,
                 signaling_protocol: None,
             }),
-            reads_headers: false,
+            reads_headers: true,
         }
     }
 
