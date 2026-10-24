@@ -49,18 +49,18 @@ pub(crate) enum EntrypointPlanError {
     #[error("scheduled {kind:?} '{node}' is configured as another node")]
     NodeIdentityMismatch { kind: ModelKind, node: ModelName },
     #[error("ingestor '{ingestor}' reads missing {kind:?} '{reference}'")]
-    MissingSource {
+    MissingReference {
         ingestor: IngestorName,
         kind: ModelKind,
         reference: ModelName,
     },
-    #[error("ingestor '{ingestor}' reads its source through a {resolved:?} of another kind")]
-    SourceKindMismatch {
+    #[error("ingestor '{ingestor}' reads through a {resolved:?} of another kind")]
+    InputKindMismatch {
         ingestor: IngestorName,
         resolved: ModelKind,
     },
-    #[error("ingestor '{ingestor}' reads '{expected}', but its source resolved to '{resolved}'")]
-    SourceIdentityMismatch {
+    #[error("ingestor '{ingestor}' reads '{expected}', but its input resolved to '{resolved}'")]
+    InputIdentityMismatch {
         ingestor: IngestorName,
         expected: ModelName,
         resolved: ModelName,
@@ -102,7 +102,7 @@ pub(crate) enum EntrypointPlanError {
         ingestor: IngestorName,
         endpoint: nervix_models::EndpointName,
     },
-    #[error("ingestor '{ingestor}' has an endpoint contract canonical NSPL cannot render")]
+    #[error("ingestor '{ingestor}' has an endpoint contract canonical Plexus cannot render")]
     UnrenderableClientContract { ingestor: IngestorName },
     #[error("{kind:?} '{node}' declares no input relay")]
     MissingInput { kind: ModelKind, node: ModelName },
@@ -528,13 +528,13 @@ impl EntrypointPlans {
                             node: node.identifier.clone(),
                         }));
                     }
-                    let source_kind = ingestor.input.source_model_kind();
+                    let entity_kind = ingestor.input.source_model_kind();
                     let source_ref = ingestor.input.source_ref();
-                    let Some(source) = nodes.get(&NodeRef::new(source_kind, source_ref.clone()))
+                    let Some(source) = nodes.get(&NodeRef::new(entity_kind, source_ref.clone()))
                     else {
-                        return Err(Report::new(EntrypointPlanError::MissingSource {
+                        return Err(Report::new(EntrypointPlanError::MissingReference {
                             ingestor: ingestor.name.clone(),
-                            kind: source_kind,
+                            kind: entity_kind,
                             reference: source_ref,
                         }));
                     };

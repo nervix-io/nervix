@@ -249,7 +249,7 @@ impl Client {
                                 generation,
                                 closed: AtomicBool::new(false),
                             });
-                            let registry = client.inner.events.sinks.consumers.clone();
+                            let registry = client.inner.events.emitters.consumers.clone();
                             let inner = StdArc::new(ConsumerHandle {
                                 client,
                                 request,

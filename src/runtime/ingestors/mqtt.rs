@@ -1,4 +1,4 @@
-//! MQTT source runtime composition.
+//! MQTT ingestor runtime composition.
 //!
 //! Layer: data plane.
 //!
@@ -6,7 +6,7 @@
 //!   instance, the node resolver its connections resolve the broker through, the declared
 //!   acknowledgement policy, and host-owned intake whose quiesce either disconnects the session or
 //!   buffers and drops what stays subscribed, and retiring inputs through their connector plans.
-//! - **Depends on.** The connector source contract, the MQTT connector, and pre-resolved runtime
+//! - **Depends on.** The connector ingestor contract, the MQTT connector, and pre-resolved runtime
 //!   execution handles.
 //! - **Must not know.** The MQTT driver, session protocol, Plexus parsing, registry validation, or
 //!   placement computation.
@@ -17,25 +17,32 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector::ClientResourceMounts;
-use nervix_connector_mqtt::{MqttSource, MqttSourceError, MqttSourcePlan, MqttSourceSettings};
+use nervix_connector::{ClientResourceMounts, IngestorConnector as _};
+use nervix_connector_mqtt::{
+    MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorPlan, MqttTopicIngestorSettings,
+};
 
 use super::{
     super::*,
-    IngestorStartError, SourceStartError,
-    source::{BrokerSourceStart, SourceStart},
+    IngestorConnectorStartError, IngestorStartError,
+    connector::{BrokerIngestorStart, IngestorStart},
 };
 
 /// The resolved connector plan and the resource mounts kept alive while it is used.
-struct ResolvedMqttSource {
-    connector: MqttSourcePlan,
+struct ResolvedMqttIngestor {
+    connector: MqttTopicIngestorPlan,
     client_mounts: Vec<Arc<ClientResourceMounts>>,
 }
 
-impl ResolvedMqttSource {
+const _: () = assert!(matches!(
+    MqttTopicIngestor::KIND,
+    nervix_models::IngestorEntityKind::Mqtt(nervix_models::MqttIngestorEntity::Topic)
+));
+
+impl ResolvedMqttIngestor {
     /// Runs at most the declared instance count of cleanup connections concurrently. The resource
     /// mounts remain borrowed until every attempt finishes; all typed failures are returned.
-    async fn retire_instances(&self, instances: Vec<u64>) -> Vec<Report<MqttSourceError>> {
+    async fn retire_instances(&self, instances: Vec<u64>) -> Vec<Report<MqttTopicIngestorError>> {
         let mut cleanups = FuturesUnordered::new();
         for instance in instances {
             cleanups.push(self.connector.retire(instance));
@@ -51,20 +58,20 @@ impl ResolvedMqttSource {
     }
 }
 
-impl MqttIngestorStartPlan {
+impl MqttTopicIngestorStartPlan {
     pub(super) async fn compose(
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
-        let ResolvedMqttSource {
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
+        let ResolvedMqttIngestor {
             connector,
             client_mounts,
         } = self
             .resolve(runtime, ingestor)
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        BrokerSourceStart {
+        BrokerIngestorStart {
             connector,
             instances: self.instances,
             acknowledgement: self.mode.acknowledgement(),
@@ -73,12 +80,11 @@ impl MqttIngestorStartPlan {
             // The connection reads a bounded number of publishes ahead of the loop and then stops
             // reading, which stops its keep-alive too, so a held loop would let the broker close
             // the connection once one and a half keep-alive intervals pass without a packet from
-            // it, and lose what was published until the source reconnects.
+            // it, and lose what was published until the ingestor reconnects.
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts,
-            connector_label: "mqtt",
         }
-        .open::<MqttSource>(ingestor)
+        .open::<MqttTopicIngestor>(ingestor)
         .await
     }
 
@@ -86,7 +92,7 @@ impl MqttIngestorStartPlan {
         &self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<ResolvedMqttSource, SourceStartError> {
+    ) -> error_stack::Result<ResolvedMqttIngestor, IngestorConnectorStartError> {
         let mut instance_configs = Vec::with_capacity(self.instances.get().arch_into());
         let mut client_mounts = Vec::new();
         for instance_index in 0..self.instances.get() {
@@ -98,19 +104,19 @@ impl MqttIngestorStartPlan {
                     &self.client.config,
                     instance_index,
                 )
-                .change_context(SourceStartError::ClientConfiguration)?;
+                .change_context(IngestorConnectorStartError::ClientConfiguration)?;
             instance_configs.push(resolved.entries);
             if let Some(mounts) = resolved.mounts {
                 client_mounts.push(mounts);
             }
         }
         let Some(dns) = runtime.dns() else {
-            return Err(Report::new(SourceStartError::NodeDnsUnavailable));
+            return Err(Report::new(IngestorConnectorStartError::NodeDnsUnavailable));
         };
         let default_client_id = format!("{}~{}", ingestor.domain.as_str(), ingestor.name.as_str());
-        let connector = MqttSourcePlan::new(MqttSourceSettings {
+        let connector = MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
             instances: instance_configs,
-            client_id_conflict: MqttSourcePlan::client_id_conflict(
+            client_id_conflict: MqttTopicIngestorPlan::client_id_conflict(
                 &self.client.config,
                 self.instances,
             ),
@@ -122,7 +128,7 @@ impl MqttIngestorStartPlan {
             acknowledgement_window: self.mode.acknowledgement_window(),
             dns: dns.clone(),
         });
-        Ok(ResolvedMqttSource {
+        Ok(ResolvedMqttIngestor {
             connector,
             client_mounts,
         })
@@ -134,7 +140,7 @@ impl MqttIngestorStartPlan {
         ingestor: &IngestorSpec,
         replacement: Option<&Self>,
     ) -> error_stack::Result<(), RuntimeError> {
-        let context = || RuntimeError::RetireIngestorSource {
+        let context = || RuntimeError::RetireIngestorEntity {
             domain: ingestor.domain.clone(),
             ingestor: ingestor.name.clone(),
         };

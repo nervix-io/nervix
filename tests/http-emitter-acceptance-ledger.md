@@ -6,7 +6,7 @@ This is the shared-contract agreement and executable acceptance plan for
 [the HTTP emitter specification](../docs/specifications/http-emitter.md). The audit ran against
 `6bd2ee58` on 24 September 2026, the tip of `main` when this task started.
 
-This ledger records who owns every overlapping contract, how the HTTP sink relates to optional
+This ledger records who owns every overlapping contract, how the HTTP emitter relates to optional
 emitter batching, what current `main` already provides and what it lacks, the receiver fixture the
 delivery tasks share, and which delivery task owns each of the specification's fourteen acceptance
 criteria. [HTTP Emitter 02](https://app.clickup.com/t/86bc78n9q) starts from this record, and
@@ -22,15 +22,15 @@ it, and a ticket that consumes it coordinates through that ticket rather than ed
 
 | Shared contract | Owning ticket | The HTTP emitter's part | HTTP delivery task |
 | --- | --- | --- | --- |
-| Emitter grammar, completion, formatting and the emitter Model shape | [Emitter Batching 02](https://app.clickup.com/t/86bc73jbb) for the shared optional batching clause and the emitter Model it reshapes | The `TO HTTP` sink form, its `METHOD`/`PATH` expressions, its body selection, its `WITHOUT` and `BODY` keywords, and its `ALTER` forms, built on the reshaped Model | [02](https://app.clickup.com/t/86bc78n9q) |
-| Sink capability declaration | The vocabulary's `EmitSinkCapabilities` and `EmitSink` in `crates/models`, owned by whichever ticket adds a sink | The HTTP sink writes headers, accepts only the request/response `MODE ACK` publishing mode, and declares no batch container | [02](https://app.clickup.com/t/86bc78n9q) |
+| Emitter grammar, completion, formatting and the emitter Model shape | [Emitter Batching 02](https://app.clickup.com/t/86bc73jbb) for the shared optional batching clause and the emitter Model it reshapes | The `TO HTTP` emitter form, its `METHOD`/`PATH` expressions, its body selection, its `WITHOUT` and `BODY` keywords, and its `ALTER` forms, built on the reshaped Model | [02](https://app.clickup.com/t/86bc78n9q) |
+| Emitter capability declaration | The vocabulary's `EmitterEntityCapabilities` and `EmitterEntity` in `crates/models`, owned by whichever ticket adds an emitter | The HTTP emitter writes headers, accepts only the request/response `MODE ACK` publishing mode, and declares no batch container | [02](https://app.clickup.com/t/86bc78n9q) |
 | HTTP client settings, TLS and mounted resources | The connector-crate epic's shared `HttpClientConfig` in `crates/connector`, and the resource-version binding contract | Validation of an emitter-bound client's origin and required `timeout_ms`, extending the shared builder rather than forking it | [03](https://app.clickup.com/t/86bc78na5) |
 | Expression scopes, types, sensitivity and URL semantics | The typed-states and columnar VM epics | Exact non-null `STRING` request fields, the codec and bodyless scopes, explicit leakage, and WHATWG normalization through the `url` crate the URL functions already use | [03](https://app.clickup.com/t/86bc78na5), [04](https://app.clickup.com/t/86bc78nb2) |
 | Prepared payloads and source membership | [Emitter Batching 06](https://app.clickup.com/t/86bc73jd6) | One prepared request per eligible record, carried as a prepared payload with exactly one member; no second retry carrier or acknowledgement map | [04](https://app.clickup.com/t/86bc78nb2) |
-| The outbound HTTP sink in the connector crate | The connector-crate epic, qualified by [Connectors 14](https://app.clickup.com/t/86bc21vve) | The sink half of `crates/connectors/http` and the contract's HTTP request sink; driver, header and response interpretation stay in the crate, and the host keeps lifecycle, retry cadence and acknowledgements | [04](https://app.clickup.com/t/86bc78nb2) sends each prepared request and answers `2xx` as delivered and every other outcome as a failed attempt, so its scenarios reach the receiver; [05](https://app.clickup.com/t/86bc78nbh) classifies responses and qualifies the transport |
+| The outbound HTTP emitter in the connector crate | The connector-crate epic, qualified by [Connectors 14](https://app.clickup.com/t/86bc21vve) | The emitter half of `crates/connectors/http` and the contract's HTTP request emitter; driver, header and response interpretation stay in the crate, and the host keeps lifecycle, retry cadence and acknowledgements | [04](https://app.clickup.com/t/86bc78nb2) sends each prepared request and answers `2xx` as delivered and every other outcome as a failed attempt, so its scenarios reach the receiver; [05](https://app.clickup.com/t/86bc78nbh) classifies responses and qualifies the transport |
 | Retry, acknowledgement and backpressure in the emitter host | [Collapse the emitter task loop's repeated publish-outcome handling](https://app.clickup.com/t/86bc6r9m9), consumed through Emitter Batching 06 | Response classification, `Retry-After`, and the one-request-in-flight rule, applied through the consolidated outcome owner | [06](https://app.clickup.com/t/86bc78nqt) |
 | Deterministic checks of completion, cancellation and force flush | The Shuttle epic | Extensions to the landed production-type checks wherever HTTP changes completion or cancellation ownership | [06](https://app.clickup.com/t/86bc78nqt) |
-| `ALTER` impact classification, gates, drain and transaction inspection | The transaction-quiesce epic | The HTTP sink's `ENTITY_PAUSE`, `DYNAMIC` and `DOMAIN_PAUSE` classification and its drain scenarios, through the existing planner and report | [07](https://app.clickup.com/t/86bc78nr7) |
+| `ALTER` impact classification, gates, drain and transaction inspection | The transaction-quiesce epic | The HTTP emitter's `ENTITY_PAUSE`, `DYNAMIC` and `DOMAIN_PAUSE` classification and its drain scenarios, through the existing planner and report | [07](https://app.clickup.com/t/86bc78nr7) |
 | Shutdown, drain deadline and source recovery | The canonical [Shutdown And Recovery](../docs/src/shutdown.md) chapter and the WASM durability epic's upstream acknowledgement boundary | Prepared requests stay volatile; a forced ending leaves attached work to the source's redelivery | [07](https://app.clickup.com/t/86bc78nr7) |
 | `SHOW CREATE`, `DESCRIBE`, message errors and metrics | The Client Wire epic for transport, the typed-errors epic for error types | HTTP's rendering, its error attribution, and its delivery counters, through the existing typed interfaces | [08](https://app.clickup.com/t/86bc78nrk) |
 | Scenario lifecycle, deadlines and cleanup | The Cucumber-lifecycle epic and [Integration Test Lifecycle](../docs/src/integration-test-lifecycle.md) | The [HTTP receiver fixture](#the-http-receiver-fixture) below, which nests inside that lifecycle | This task; every later task consumes it |
@@ -43,12 +43,12 @@ it, and a ticket that consumes it coordinates through that ticket rather than ed
 This HTTP contract sends one request for each eligible source record. `FLUSH` and `COLLECT FOR`
 keep their ordinary meanings and never merge records into one body.
 
-The HTTP sink declares no batch container, so optional batching's clause is rejected on it. The
+The HTTP emitter declares no batch container, so optional batching's clause is rejected on it. The
 specification's
 [relationship to optional emitter batching](../docs/specifications/http-emitter.md#relationship-to-optional-emitter-batching)
-states the public behavior. The rejection lives in the HTTP sink's own capability declaration,
-added by HTTP Emitter 02. The batching epic's sink matrix, validation list and qualification keep
-exactly the sixteen sinks they name, so neither contract is widened or weakened. The shared
+states the public behavior. The rejection lives in the HTTP emitter's own capability declaration,
+added by HTTP Emitter 02. The batching epic's emitter matrix, validation list and qualification keep
+exactly the sixteen emitters they name, so neither contract is widened or weakened. The shared
 machinery flows the other way: the batching epic owns prepared payloads and membership, and the
 HTTP emitter consumes them with one member per payload.
 
@@ -81,13 +81,13 @@ These gaps are the delivery tasks' work, and none of them contradicts the specif
 
 | Current main | Owning delivery task |
 | --- | --- |
-| No `TO HTTP` sink: the emitter grammar accepts sixteen sink keywords after `TO`, and `HTTP` is not one of them | 02 |
+| No `TO HTTP` emitter: the emitter grammar accepts sixteen emitter keywords after `TO`, and `HTTP` is not one of them | 02 |
 | `METHOD`, `WITHOUT` and `BODY` are not language tokens; `PATH` already is | 02 |
 | `write_header` is declared only for Kafka, Pulsar, RabbitMQ, NATS and SQS | 02 |
 | `timeout_ms` is optional for every HTTP client, and `endpoint` is never validated as a URL | 03 |
 | HTTP client configuration is documented only on the ingestor page | 03 |
-| `crates/connectors/http` implements only the source contract | 04, which added the request sink its scenarios send through; 05 completes response classification |
-| `docs/src/emitters.md` has no HTTP sink and lists request/response sinks without it | 02 through 08, each with its own surface |
+| `crates/connectors/http` implements only the ingestor contract | 04, which added the request emitter its scenarios send through; 05 completes response classification |
+| `docs/src/emitters.md` has no HTTP emitter and lists request/response emitters without it | 02 through 08, each with its own surface |
 
 ## The HTTP receiver fixture
 
@@ -172,7 +172,7 @@ three nodes:
   record-computed path with a declared header and no body.
 
 On 24 September 2026 both failed at the statement that created the emitter, because the grammar had
-no `TO HTTP` sink. Once HTTP Emitter 02 and 03 landed they failed at activation instead, with
+no `TO HTTP` emitter. Once HTTP Emitter 02 and 03 landed they failed at activation instead, with
 `cannot plan emitter 'deliver_event': HTTP emitter requires a HTTP client, found HTTP 'api'`, as did
 the request scenarios HTTP Emitter 04 added first, on 27 September 2026 with `--retry 0`. Its
 encode-failure scenario came once requests reached the receiver. The same day, on one and three
@@ -193,12 +193,12 @@ counts and value-byte limits, and malformed final framing. Its 58 one- and three
 wrong-host TLS handshakes, physical timeout and lost-response retries, a manually supplied
 `Accept`, startup without a probe, and one awaiting request across two source relays. Its 12
 one- and three-node cases pass. The status-`400` response case was red against the HTTP Emitter 04
-sink because it retried the refusal instead of routing its message error, then green after the
+emitter because it retried the refusal instead of routing its message error, then green after the
 connector change.
 
-The sink uses a bounded HTTP/1.1 exchange per request. This permits inspecting every interim
+The emitter uses a bounded HTTP/1.1 exchange per request. This permits inspecting every interim
 header block before the final one, while the existing HTTP polling source keeps its shared
-reqwest client. The sink uses the shared node DNS resolver and rustls TLS configuration, adds
+reqwest client. The emitter uses the shared node DNS resolver and rustls TLS configuration, adds
 `Accept: */*` only when the application has not supplied `Accept`, and sends no default
 `Accept-Encoding` or `Content-Type`. The connector has no separate retry mechanism; the host
 retains the prepared request and owns every resend.
@@ -230,9 +230,9 @@ retains the prepared request and owns every resend.
 
 On 27 September 2026, run with `--retry 0` against the fixture and scenarios alone, 14 of its 40
 cases failed, every one at a measured gap: each retry the server asked to delay arrived 120 to
-150 milliseconds after the response, because the sink did not read `Retry-After`. The other 26
+150 milliseconds after the response, because the emitter did not read `Retry-After`. The other 26
 passed, since the host already retried only unresolved requests, held later work, kept attached
-leases, routed terminal records and kept its waits physical. With the sink reading `Retry-After`,
+leases, routed terminal records and kept its waits physical. With the emitter reading `Retry-After`,
 all 40 pass, and so do the 102 cases of `http_emitter.feature`, `http_emitter_responses.feature`,
 `http_emitter_transport.feature` and `http_receiver.feature`.
 
@@ -285,9 +285,9 @@ retry policy.
 
 On 29 September 2026, with `--retry 0` against `main` before the change, all eight inspection and
 TLS cases failed at their `DESCRIBE EMITTER` steps. While a retried request was held, the emitter
-read `status: OK` and `transient error: -`, because every retry reopened the sink and the
+read `status: OK` and `transient error: -`, because every retry reopened the emitter and the
 reopening cleared the failure; a TLS failure read `failed to publish emitter batch`, the host's
-own context, because the sink attached no description. A probe that stopped short of those steps
+own context, because the emitter attached no description. A probe that stopped short of those steps
 then read, once the held request was delivered, `messages_total` `sent` `2` for both emitters,
 counting the refused record, and `bytes_total` `sent` `538` with a codec body and `574` without a
 body: both counted every request's method, target and headers, and the bodyless emitter also
@@ -391,13 +391,13 @@ fourth combines what the endpoint and the source observe.
 | Bound | Evidence |
 | --- | --- |
 | One request awaits a response per execution, across its source relays and branches | The receiver's high-water mark of requests awaiting their final head stays at one while every response is delayed: in `One HTTP emitter waits across its source relays`, where the second relay's request arrives at least a second after the first, and in the composed scenario, where six requests of two relays and two branches each wait 100 ms for their answer. The regression `requests_awaiting_a_response_are_counted_until_their_final_head_begins` shows the same measure reading two for two concurrent clients |
-| Response bodies are neither awaited nor buffered | The next record is sent while record 1's body stalls or holds 32 MiB, record 1 is captured once, and the receiver sees the client abandon the body. A 32 MiB body is many times what a loopback connection buffers, so the receiver finishes writing it only if the client reads it, and the client never does. The sink's head reader keeps one bounded head buffer, whose limits `every_header_block_accepts_the_exact_field_limits`, `too_many_fields_and_invalid_framing_fail_before_status_classification` and `interim_headers_are_checked_separately_from_final_headers` pin |
+| Response bodies are neither awaited nor buffered | The next record is sent while record 1's body stalls or holds 32 MiB, record 1 is captured once, and the receiver sees the client abandon the body. A 32 MiB body is many times what a loopback connection buffers, so the receiver finishes writing it only if the client reads it, and the client never does. The emitter's head reader keeps one bounded head buffer, whose limits `every_header_block_accepts_the_exact_field_limits`, `too_many_fields_and_invalid_framing_fail_before_status_classification` and `interim_headers_are_checked_separately_from_final_headers` pin |
 | Resources are released after cancellation | The receiver sees the client abandon every timed-out attempt, the retry still held when the drain deadline forces the node's ending, and the request still held when `STOP` ends the domain. The Shuttle checks `shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once`, `shuttle_terminal_shutdown_leaves_an_unanswered_request_unacknowledged` and `shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained` cover the production owner of cancelled attempts |
 | Memory and backpressure stay under their owning limits | Later work waits: while record 1 keeps failing, `POST /events/2` is never captured, and a later relay's record follows the retried flush. An attached Kafka source keeps its offset while a request is pending and commits once it resolves, in the attached, `ON GENERAL ERROR IGNORE`, shutdown-deadline and stop scenarios. Each attempt is bounded by `timeout_ms`, by 128 fields and 64 KiB per response header block, and by its own connection. A retained request is an ordinary allocation of the node, which the node's memory-pressure supervisor samples; the emitter publishes no memory figure of its own, so no per-emitter memory bound beyond its pending requests is claimed here |
 
 ### Affected suites
 
-The task re-runs the suites whose contracts the HTTP sink shares, against the landed connector and
+The task re-runs the suites whose contracts the HTTP emitter shares, against the landed connector and
 batching foundations: HTTP polling, the shared publishing modes, emitter input, `ALTER` and cadence,
 branches and error routes, and node shutdown.
 
@@ -433,7 +433,7 @@ branches and error routes, and node shutdown.
 The lost batch follows the documented contract rather than an HTTP emitter rule. A transport failure
 while reading a remote materialized dependency is a failure, not absence, so the emitter reports it
 and negatively acknowledges the batch: an acknowledged source redelivers it, while the
-unencodable-body scenario's `NO ACK` endpoint source does not. [Errors And
+unencodable-body scenario's `NO ACK` endpoint ingestor does not. [Errors And
 Diagnostics](../docs/src/errors-and-diagnostics.md#absence-validation-and-planning) owns that
 boundary.
 

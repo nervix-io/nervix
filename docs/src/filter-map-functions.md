@@ -854,7 +854,7 @@ another instant instead.
 | `write_header(name, value)` | nothing | Emitter-only side effect. Valid only as a top-level call in the final `INVOKE` block |
 
 Header names may be dynamic `STRING` expressions, and a name matches exactly, letter case included,
-the names the connector recorded. A null name reads as absent. Each source and sink declares a
+the names the connector recorded. A null name reads as absent. Each ingestor and emitter declares a
 [header model](connector-contract.md#header-models): what a repeated name keeps, the order names
 travel in, and whether names are recorded in lowercase, as HTTP field names are. Header reads are available on
 `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `HTTP REQUEST`, `KAFKA TOPIC`, `NATS SUBJECT`,
@@ -868,9 +868,9 @@ read_headers`, or `MQTT emitters do not support write_header`.
 `write_header` arguments must be statically non-null `STRING` expressions, and a sensitive argument
 requires `leak_sensitive(...)`. They are evaluated after payload construction and route filtering.
 Calls are staged in source order in a route-local envelope; if any call fails, no payload or partial
-header envelope is published. Where the sink keeps one value per name, a second call whose name is a
-string literal equal, as the sink compares names, to an earlier literal one is refused when the
-statement is validated. See [Header invocations](emitters.md#header-invocations) for each sink's
+header envelope is published. Where the emitter keeps one value per name, a second call whose name is a
+string literal equal, as the emitter compares names, to an earlier literal one is refused when the
+statement is validated. See [Header invocations](emitters.md#header-invocations) for each emitter's
 header model.
 
 ## Lookups And UDF Calls

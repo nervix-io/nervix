@@ -61,7 +61,7 @@ fn scanned_value_specials(bytes: &[u8]) -> usize {
     specials
 }
 
-/// The SQS body check the sink ran before: standard UTF-8 validation, then one decoded character
+/// The SQS body check the emitter ran before: standard UTF-8 validation, then one decoded character
 /// at a time against the XML 1.0 `Char` production.
 fn scalar_xml_text(bytes: Vec<u8>) -> Option<String> {
     let text = String::from_utf8(bytes).ok()?;

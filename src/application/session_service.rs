@@ -722,7 +722,7 @@ impl CompletionSnapshot<'_> {
                 })
                 .map(|model| model.name().to_string())
                 .collect(),
-            SemanticReference::SourceReference(source) => self
+            SemanticReference::IngestorReference(source) => self
                 .models
                 .iter()
                 .filter(|model| source.admits(model) && model.name().as_str().starts_with(&prefix))
@@ -785,7 +785,7 @@ impl CompletionSnapshot<'_> {
                 let mut names = FunctionName::ordinary_completion_names();
                 match scope {
                     BuiltinFunctionScope::Ordinary => {}
-                    BuiltinFunctionScope::IngestSource(kind) if kind.reads_headers() => {
+                    BuiltinFunctionScope::IngestorEntity(kind) if kind.reads_headers() => {
                         names.push(FunctionName::ReadHeader.as_str().to_string());
                         names.push(FunctionName::ReadHeaders.as_str().to_string());
                     }
@@ -794,7 +794,7 @@ impl CompletionSnapshot<'_> {
                     {
                         names.push(FunctionName::WriteHeader.as_str().to_string());
                     }
-                    BuiltinFunctionScope::IngestSource(_)
+                    BuiltinFunctionScope::IngestorEntity(_)
                     | BuiltinFunctionScope::EmitterInvocation(_) => {}
                 }
                 names
@@ -1927,8 +1927,8 @@ pub(in crate::application) fn conflicting_reference(
 )]
 mod tests {
     use nervix_models::{
-        ClientName, ConnectorKind, EndpointName, EndpointType, HttpSourceEntity, IngestSourceKind,
-        ModelKind, NodeRef, SyslogSourceEntity,
+        ClientName, ConnectorKind, EndpointName, EndpointType, HttpIngestorEntity,
+        IngestorEntityKind, ModelKind, NodeRef, SyslogIngestorEntity,
     };
 
     use super::{
@@ -2251,7 +2251,7 @@ mod tests {
         let err = error_stack::Report::new(RegistryError::IngestorClientConnectorMismatch {
             domain: domain.clone(),
             ingestor: ingestor.clone(),
-            kind: IngestSourceKind::Syslog(SyslogSourceEntity::Listener),
+            kind: IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener),
             client: ClientName::parse("cache").expect("valid client name"),
             required: ConnectorKind::Syslog,
             found: ConnectorKind::Redis,
@@ -2272,7 +2272,7 @@ mod tests {
         let err = error_stack::Report::new(RegistryError::IngestorEndpointTypeMismatch {
             domain: domain.clone(),
             ingestor: ingestor.clone(),
-            kind: IngestSourceKind::Http(HttpSourceEntity::Endpoint),
+            kind: IngestorEntityKind::Http(HttpIngestorEntity::Endpoint),
             endpoint: EndpointName::parse("socket").expect("valid endpoint name"),
             required: EndpointType::Http,
             found: EndpointType::Websockets,
@@ -2535,15 +2535,15 @@ mod tests {
         let kafka = suggestion_values(
             &service,
             &subscriptions,
-            "CREATE KAFKA TOPIC EMITTER sink FROM incoming TO broker TOPIC 'events' MODE NO ACK \
-             RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_",
+            "CREATE KAFKA TOPIC EMITTER emitter FROM incoming TO broker TOPIC 'events' MODE NO \
+             ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_",
         )
         .await;
         assert_eq!(kafka, vec!["write_header"]);
         let sentry = suggestion_values(
             &service,
             &subscriptions,
-            "CREATE SENTRY EVENT EMITTER sink FROM incoming TO client MODE ACK RETRY POLICY \
+            "CREATE SENTRY EVENT EMITTER emitter FROM incoming TO client MODE ACK RETRY POLICY \
              BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_",
         )
         .await;

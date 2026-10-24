@@ -19,7 +19,7 @@ pub(super) fn mode<'src>()
 }
 
 fn definition<'src>()
--> impl Parser<'src, &'src [Token], HttpRequestSink, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], HttpRequestEmitter, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Method))
         .then(embedded_expression("string_expression"))
@@ -27,7 +27,7 @@ fn definition<'src>()
         .then(embedded_expression("string_expression"))
         .then_ignore(kw(Identifier::Mode))
         .then(mode())
-        .map(|(((client, method), path), mode)| HttpRequestSink {
+        .map(|(((client, method), path), mode)| HttpRequestEmitter {
             client,
             method,
             path,
@@ -37,8 +37,12 @@ fn definition<'src>()
 }
 pub(super) fn request_body<'src>(
     context: EmitterContext,
-) -> impl Parser<'src, &'src [Token], ParsedDestination<HttpRequestSink>, extra::Err<ParseError<'src>>>
-+ Clone {
+) -> impl Parser<
+    'src,
+    &'src [Token],
+    ParsedDestination<HttpRequestEmitter>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
     let encoded = encoded_destination(context, definition());
     let absent = definition()
         .then_ignore(kw_phrase2(Identifier::Without, Identifier::Body))

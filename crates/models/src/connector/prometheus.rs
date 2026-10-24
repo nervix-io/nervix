@@ -30,14 +30,15 @@ use super::{
         DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
-    entity_union::connector_sources,
+    entity_union::connector_ingestors,
 };
 use crate::{
     AcknowledgementConfirmation, ByteSizeUnit, ClientConfigEntry, ClientDeadline,
     ClientDeadlineError, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    DomainClockPeriod, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    OptionDeclaration, OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass,
-    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    DomainClockPeriod, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
+    IngestorReferenceKind, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PayloadSizeLimit, PositionClass,
 };
 
 configured_client!(Prometheus: unpooled, config Nervix, CreateClientPrometheus => PrometheusConfigEntry);
@@ -220,7 +221,7 @@ pub const PROMETHEUS_DEFAULT_MAX_BODY_SIZE: PayloadSizeLimit =
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct PrometheusQuerySource {
+pub struct PrometheusQueryIngestor {
     pub client: ClientName,
     pub query: String,
     /// `MAX BODY SIZE <bytes>`, where the statement writes it. A statement that leaves it out reads
@@ -231,7 +232,7 @@ pub struct PrometheusQuerySource {
     pub quiesce: IngestQuiesceMode,
 }
 
-impl PrometheusQuerySource {
+impl PrometheusQueryIngestor {
     /// The most bytes of one query response a poll reads: the statement's `MAX BODY SIZE`, or the
     /// declared default where it writes none.
     pub fn max_body_size_in_effect(&self) -> PayloadSizeLimit {
@@ -241,7 +242,7 @@ impl PrometheusQuerySource {
 }
 
 /// What the connector of a PROMETHEUS QUERY holds and how long it waits.
-const PROMETHEUS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const PROMETHEUS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
             holds: "the query response",
@@ -273,12 +274,12 @@ const PROMETHEUS_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 /// A query answer carries each sample's labels, which its payload holds, and no transport headers
 /// of its own, so a query source reads none.
-impl SourceEntity for PrometheusQuerySource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
+impl IngestorDeclaration for PrometheusQueryIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         headers: None,
-        metadata: SourceMetadataScope::Headers,
+        metadata: IngestorMetadataScope::Headers,
         executes_on_every_cluster_node: false,
-        reference: SourceReferenceKind::Client(ConnectorKind::Prometheus),
+        reference: IngestorReferenceKind::Client(ConnectorKind::Prometheus),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK],
@@ -312,13 +313,13 @@ impl SourceEntity for PrometheusQuerySource {
                 },
             },
         ],
-        bounds: PROMETHEUS_SOURCE_BOUNDS,
+        bounds: PROMETHEUS_INGESTOR_BOUNDS,
     };
 }
 
-impl SourceBody for PrometheusQuerySource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Client(&self.client)
+impl IngestorEntityBody for PrometheusQueryIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Client(&self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -351,15 +352,15 @@ impl PrometheusIngestMode {
     }
 }
 
-connector_sources! {
+connector_ingestors! {
     connector Prometheus = "PROMETHEUS";
     /// What a Prometheus source reads.
-    pub enum PrometheusSource;
+    pub enum PrometheusIngestor;
     /// The alterations of the ingestors that read a Prometheus entity.
-    pub enum PrometheusIngestorAlteration;
+    pub enum PrometheusQueryIngestorAlteration;
     /// The entities a Prometheus source reads.
-    pub enum PrometheusSourceEntity {
-        Query(PrometheusQuerySource) = "QUERY", "Prometheus";
+    pub enum PrometheusIngestorEntity {
+        Query(PrometheusQueryIngestor) = "QUERY", "Prometheus";
     }
 }
 
@@ -396,7 +397,7 @@ mod tests {
     /// leaves it out reads with.
     #[test]
     fn the_declared_response_bound_default_is_the_one_in_effect() {
-        let [_, max_body_size, _] = PrometheusQuerySource::CAPABILITIES.options else {
+        let [_, max_body_size, _] = PrometheusQueryIngestor::CAPABILITIES.options else {
             panic!("a query source declares QUERY, MAX BODY SIZE and EVERY");
         };
         assert_eq!(max_body_size.keywords, "MAX BODY SIZE");

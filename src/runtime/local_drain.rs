@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** The admitted-work view shared by shutdown and backup, the intake boundary a
 //!   terminating node closes, the force-flush generations that release its buffered work while
-//!   downstream relays and sinks stay alive, and the proof of a completed local drain.
+//!   downstream relays and emitters stay alive, and the proof of a completed local drain.
 //! - **Depends on.** Ingestor quiesce controls, generator activity, relay boundary fan-outs, node
 //!   quiesce counters, emitter publishing state, in-flight acknowledgement roots and the domain
 //!   force-flush coordinator.
@@ -84,7 +84,7 @@ pub(crate) struct LocalDomainDrainStatus {
     /// Mailbox, in-flight, collected and route-buffered work of the domain's graph nodes.
     pub(crate) node_work_items: usize,
     pub(crate) buffered_emitter_messages: usize,
-    /// Emitter publishes awaiting sink confirmation or retrying, counted once per state.
+    /// Emitter publishes awaiting emitter confirmation or retrying, counted once per state.
     pub(crate) publishing_emitters: usize,
     pub(crate) required_waits: usize,
     pub(crate) force_flush_obligations: usize,
@@ -214,7 +214,7 @@ trait LocalDomainDrainSources {
     fn buffered_relay_batches(&self) -> usize;
     fn node_work(&self) -> LocalNodeWork;
     fn buffered_emitter_messages(&self) -> usize;
-    /// Emitter publishes awaiting sink confirmation or retrying, counted once per state.
+    /// Emitter publishes awaiting emitter confirmation or retrying, counted once per state.
     fn publishing_emitters(&self) -> usize;
 }
 

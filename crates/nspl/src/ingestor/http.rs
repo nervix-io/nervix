@@ -15,7 +15,7 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{HttpEndpointSource, HttpRequestIngestMode, HttpRequestSource};
+use nervix_models::{HttpEndpointIngestor, HttpRequestIngestMode, HttpRequestIngestor};
 
 use super::{
     delivery::{no_ack, polling_quiesce_clause},
@@ -28,14 +28,14 @@ use crate::{
 
 /// `FROM <client> EVERY <period> MODE NO ACK ON QUIESCE SUSPEND|BUFFER …`.
 pub(super) fn request_body<'src>()
--> impl Parser<'src, &'src [Token], HttpRequestSource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], HttpRequestIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Every))
         .then(domain_clock_period_lit())
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(HttpRequestIngestMode::NoAck))
         .then(polling_quiesce_clause())
-        .map(|(((client, every), mode), quiesce)| HttpRequestSource {
+        .map(|(((client, every), mode), quiesce)| HttpRequestIngestor {
             client,
             every,
             mode,
@@ -46,13 +46,13 @@ pub(super) fn request_body<'src>()
 
 /// The body of an ingestor of an HTTP endpoint this cluster serves.
 pub(super) fn endpoint_body<'src>()
--> impl Parser<'src, &'src [Token], HttpEndpointSource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], HttpEndpointIngestor, extra::Err<ParseError<'src>>> + Clone {
     intake().map(
         |EndpointIntake {
              endpoint,
              mode,
              quiesce,
-         }| HttpEndpointSource {
+         }| HttpEndpointIngestor {
             endpoint,
             mode,
             quiesce,

@@ -92,7 +92,7 @@ fn quickstart() -> TestGraph {
         pill("relay:high_value_orders"),
         pill("relay:routine_orders"),
         card("emitter:redis_high_value"),
-        card("client_sink:redis_local"),
+        card("client_emitter:redis_local"),
     ];
     let edges = vec![
         flow("client:kafka_local", "ingestor:kafka_orders"),
@@ -102,8 +102,8 @@ fn quickstart() -> TestGraph {
         flow("junction:route_orders", "relay:high_value_orders"),
         flow("junction:route_orders", "relay:routine_orders"),
         flow("relay:high_value_orders", "emitter:redis_high_value"),
-        flow("emitter:redis_high_value", "client_sink:redis_local"),
-        flow("emitter:redis_orders", "client_sink:redis_local"),
+        flow("emitter:redis_high_value", "client_emitter:redis_local"),
+        flow("emitter:redis_orders", "client_emitter:redis_local"),
     ];
     TestGraph { items, edges }
 }
@@ -336,7 +336,7 @@ fn identical_topology_produces_identical_geometry() {
 fn branch_group_bands_hold_members_and_nothing_else() {
     let items = vec![
         card("ingestor:source"),
-        card("emitter:sink"),
+        card("emitter:emitter"),
         card("emitter:other"),
         in_group(pill("relay:branched"), "by_tenant"),
         in_group(card("junction:split"), "by_tenant"),
@@ -344,7 +344,7 @@ fn branch_group_bands_hold_members_and_nothing_else() {
     let edges = vec![
         flow("ingestor:source", "relay:branched"),
         flow("relay:branched", "junction:split"),
-        flow("junction:split", "emitter:sink"),
+        flow("junction:split", "emitter:emitter"),
         flow("ingestor:source", "emitter:other"),
     ];
     let layout = TestLayout::build(&items, &edges);

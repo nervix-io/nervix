@@ -31,9 +31,9 @@ use nervix_interconnect::{
     RequestError, StoppingNodeDrainAction, StoppingNodeDrainRequest, StoppingNodeDrainResponse,
 };
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeName, DomainName, IngestSource, IngestorName, KafkaOffsetMode,
-    KafkaPartitionSchedule, KafkaSource, KafkaTopicSource, Model, ModelKind, ModelName, NodeRef,
-    PlacementGroupSchedule, PlacementPolicy, QuiesceLevel, ScheduledNode,
+    ClusterNodeIdentity, ClusterNodeName, DomainName, IngestorEntity, IngestorName, KafkaIngestor,
+    KafkaOffsetMode, KafkaPartitionSchedule, KafkaTopicIngestor, Model, ModelKind, ModelName,
+    NodeRef, PlacementGroupSchedule, PlacementPolicy, QuiesceLevel, ScheduledNode,
 };
 use nervix_primitives::{
     sync::CancellationToken,
@@ -2200,13 +2200,13 @@ impl SessionServiceImpl {
                 let Model::Ingestor(ingestor) = node.config.as_ref() else {
                     continue;
                 };
-                let Some(IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+                let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                     client,
                     topic,
                     offset_mode: KafkaOffsetMode::Domain,
                     instances,
                     ..
-                }))) = ingestor.input.transport_source()
+                }))) = ingestor.input.transport_entity()
                 else {
                     continue;
                 };
@@ -2263,12 +2263,12 @@ impl SessionServiceImpl {
         let Model::Ingestor(ingestor_model) = ingestor_node.config.as_ref() else {
             return Ok(());
         };
-        let Some(IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+        let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
             topic: scheduled_topic,
             offset_mode: KafkaOffsetMode::Domain,
             instances: scheduled_instances,
             ..
-        }))) = ingestor_model.input.transport_source()
+        }))) = ingestor_model.input.transport_entity()
         else {
             return Ok(());
         };

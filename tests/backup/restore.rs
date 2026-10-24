@@ -1659,13 +1659,13 @@ pub(super) fn write_archive(
         .open(target)
         .expect("the altered archive is created");
     layout
-        .write_to(&mut file, |entry, sink| {
+        .write_to(&mut file, |entry, connector| {
             let path = entry.path.as_str();
             let bytes = match replaced.get(path) {
                 Some(bytes) => bytes,
                 None => &copy.sections[path],
             };
-            sink.write_all(bytes)
+            connector.write_all(bytes)
         })
         .unwrap_or_else(|report| panic!("the altered archive is written: {report:?}"));
 }
@@ -1860,7 +1860,7 @@ async fn then_native_metadata_matches(world: &mut ScenarioWorld, source: String)
     use nervix_backup::KafkaOffsetsRecord;
 
     /// The native metadata records the source archive holds.
-    struct SourceMetadata {
+    struct IngestorMetadata {
         lifecycles: Vec<BranchLifecycleRecord>,
         offsets: KafkaOffsetsRecord,
     }
@@ -1873,7 +1873,7 @@ async fn then_native_metadata_matches(world: &mut ScenarioWorld, source: String)
     }
 
     let source = archive_path(world, &source);
-    let SourceMetadata {
+    let IngestorMetadata {
         lifecycles,
         offsets,
     } = off_the_runner(move || {
@@ -1896,7 +1896,7 @@ async fn then_native_metadata_matches(world: &mut ScenarioWorld, source: String)
             "the fixture holds lifecycle records"
         );
         let offsets = offsets.assured("the fixture holds Kafka offsets");
-        SourceMetadata {
+        IngestorMetadata {
             lifecycles,
             offsets,
         }
