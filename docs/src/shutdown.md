@@ -367,14 +367,21 @@ node at a time. The request gives the leader the time left in the stopping node'
 For each unit, the leader bounds its gate, state preparation, and activation waits by the time still
 left on that request minus one sixth of the request's initial budget. Preparation, including the
 entity gate's quiescence wait and state capture, has at most four fifths of that unit bound;
-activation uses the same unit deadline. The
-ordinary entity-gate limit can shorten either phase. If a unit cannot prepare within its bound,
-the gate is released, the leader records that unit and its reason as failed, and it attempts other
-units while time remains. If no unit budget remains, the leader reports the unfinished drain. A
-stopping node that receives a failed or unanswered drain reports its drain-support phase
-`Abandoned`, then still runs the in-place drain with whatever time remains. The node's own timeout
-and shutdown deadline bound its wait for a leader even when that leader continues cleanup after
-the node stops waiting.
+activation uses the same unit deadline. The ordinary entity-gate limit can shorten either phase. If
+a unit cannot prepare within its bound, the gate is released, the leader records that unit and its
+reason as failed, and it attempts other units while time remains.
+
+Activation waits for the committed revision only on the hold's participants. Once every live
+participant has prepared that revision, the destination activates it, the gate opens, and the unit
+counts as moved. A live node that runs none of the unit completes the revision through its own
+installation, and the leader does not wait for it, so a node that prepares slowly cannot spend the
+stopping node's budget. A participant that has not prepared the revision by the unit deadline fails
+the unit; the gate then stays shut until its lease ends at that same deadline, and the leader
+attempts other units while time remains. If no unit budget remains, the leader reports the
+unfinished drain. A stopping node that receives a failed or unanswered drain reports its
+drain-support phase `Abandoned`, then still runs the in-place drain with whatever time remains. The
+node's own timeout and shutdown deadline bound its wait for a leader even when that leader
+continues cleanup after the node stops waiting.
 
 **Completing admitted work in place.** The node then finishes what it has already admitted. This
 part always runs, whatever happened in the first part. It is the whole drain when no replacement
@@ -545,13 +552,20 @@ dispatch at the affected subgraph boundary on every live node that runs part of 
 each moved ingestor, and drains the work already admitted to the moved unit, including
 moved-ingestor acknowledgement roots, emitter buffers and active publishing, and an Iceberg
 emitter's staged commit. The new schedule is written only after that drain succeeds, and the fence
-opens only after the destination activates the published revision.
+opens only after every live participant has prepared the published revision and the destination
+has activated it.
 
 Only the hold's participants, which
 [Control Plane](./control-plane.md#planned-ownership-handoffs-and-failover) defines, are asked to
-hold anything. A live node that runs none of the moved unit is not one of them, so its link to the
-coordinator cannot spend the preparation deadline that the stopping node's drain budget sets, even
-when that link loses most of its packets.
+hold anything, and only they must prepare the published revision before the destination activates.
+They admit work into the moved unit, hold work it drains, or run it once it activates, so each of
+them routes by the published revision before its fence opens. A live node that runs none of the
+moved unit is not one of them. Neither its link to the coordinator nor its own installation of the
+published revision can spend the preparation or activation deadline that the stopping node's drain
+budget sets, even when that link loses most of its packets or the node prepares slowly. This is
+where shutdown differs from `DRAIN NODE`, `RELOCATE`, and placement consolidation: those commands
+activate the destination only once every live node has prepared the revision and is ready at it,
+which is their completion barrier and has no stopping node's budget to keep.
 
 Each participant closes intake and boundary gates, requests a force flush and confirms its
 admission hold. The coordinator polls the exact operation's drain status while installed routes

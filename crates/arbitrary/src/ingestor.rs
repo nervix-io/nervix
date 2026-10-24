@@ -291,8 +291,16 @@ impl Arbitrary<'_> {
 
     /// The connection a WebSockets client opens.
     pub fn websockets_connection_source(&mut self) -> WebsocketsConnectionSource {
+        let mut headers = Vec::new();
+        for index in 0..(self.entropy().byte() % 3) {
+            headers.push(nervix_models::WebsocketsUpgradeHeader {
+                name: format!("x-nervix-event-{index}"),
+                value: format!("fixture-{}'\"\\", self.entropy().byte()),
+            });
+        }
         let source = WebsocketsConnectionSource {
             client: self.name(),
+            headers,
             mode: WebsocketsIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,
         };

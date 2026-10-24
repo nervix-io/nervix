@@ -2,12 +2,11 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The WebSockets client Model with the signaling protocol it speaks, the connection
-//!   source Model with its delivery mode, the source that reads a WebSockets endpoint this cluster
-//!   serves, and what each entity declares.
-//! - **Depends on.** The shared source declarations and the names a body references.
-//! - **Must not know.** The WebSockets driver, its configuration keys, how a connection is opened,
-//!   signaled or read, or how an endpoint is published, routed to or served.
+//! - **Owns.** The client's closed configuration schema and signaling reference, the connection's
+//!   literal upgrade fields and frame kind, the endpoint source Model, and their declarations.
+//! - **Depends on.** Shared source/client declarations, HTTP field rules and referenced names.
+//! - **Must not know.** Drivers, sockets, TLS file contents, signaling execution, or how endpoints
+//!   are published, routed to or served.
 
 #![cfg_attr(
     nervix_lint,
@@ -18,6 +17,23 @@ use std::time::Duration;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
+
+mod config;
+#[cfg(test)]
+mod config_tests;
+mod frame;
+mod upgrade_headers;
+#[cfg(test)]
+mod upgrade_headers_tests;
+
+pub use config::{WebsocketsClientConfig, WebsocketsClientConfigError, WebsocketsClientKey};
+pub use frame::WebsocketsFrameType;
+pub use upgrade_headers::{
+    WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, WebsocketsUpgradeHeadersError,
+};
+
+/// The existing transport budget shared by ping writes and the close handshake.
+pub const WEBSOCKETS_CONTROL_FRAME_BUDGET: Duration = Duration::from_secs(1);
 
 use super::{
     bounds::{
@@ -72,6 +88,7 @@ impl<Version> CreateClientWebsockets<Version> {
 )]
 pub struct WebsocketsConnectionSource {
     pub client: ClientName,
+    pub headers: Vec<WebsocketsUpgradeHeader>,
     pub mode: WebsocketsIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -99,8 +116,12 @@ const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Unbounded,
         },
         DeclaredWait {
+            wait: "writing a configured ping",
+            bound: WaitBound::Fixed(WEBSOCKETS_CONTROL_FRAME_BUDGET),
+        },
+        DeclaredWait {
             wait: "close",
-            bound: WaitBound::Fixed(Duration::from_secs(1)),
+            bound: WaitBound::Fixed(WEBSOCKETS_CONTROL_FRAME_BUDGET),
         },
     ],
     driver_limits: &["A message above 64 MiB or a frame above 16 MiB ends the connection."],
@@ -134,16 +155,24 @@ const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl SourceEntity for WebsocketsConnectionSource {
     const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        headers: None,
-        metadata: SourceMetadataScope::Headers,
+        headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
+        metadata: SourceMetadataScope::Websockets,
         executes_on_every_cluster_node: false,
         reference: SourceReferenceKind::Client(ConnectorKind::Websockets),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK],
+        // Both keep reading: stopping reads would starve ping/pong and disconnect the peer.
         quiesce: &[DeclaredQuiesce::BUFFER, DeclaredQuiesce::DROP],
         locator: None,
-        options: &[],
+        options: &[OptionDeclaration {
+            keywords: "HEADERS",
+            presence: OptionPresence::Optional { default: None },
+            form: OptionForm::Value {
+                value: OptionValue::Clause,
+                example: "HEADERS { 'authorization' = 'Bearer token' }",
+            },
+        }],
         bounds: WEBSOCKETS_CONNECTION_BOUNDS,
     };
 }

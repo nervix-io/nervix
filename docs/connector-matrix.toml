@@ -78,9 +78,7 @@ mirror = "Receiving uses a visibility timeout and deletion; publishing uses sing
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."WEBSOCKETS CONNECTION"]
-ingest_headers = "A frame carries its payload; handshake headers are not a per-frame header map."
 ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
-metadata = "The current frame declaration has no typed frame or handshake metadata namespace."
 mirror = "An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload."
 
 [entity."WEBSOCKETS ENDPOINT"]

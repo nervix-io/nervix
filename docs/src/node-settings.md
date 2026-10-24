@@ -250,4 +250,3 @@ order and observe the refusal naming both settings, and restart a node of a one-
 three-node cluster with such a setting, through the harness step that names a setting for one
 node, before restarting it with a valid one. Converting and validating the options takes no lock
 and adds no lifecycle path, so the deadlock detector has nothing of it to observe.
-

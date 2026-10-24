@@ -157,7 +157,7 @@ fn source_surface(kind: IngestSourceKind) -> SourceSurface {
             unlocated(NO_ACK, FLEXIBLE, &[])
         }
         IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
-            unlocated(NO_ACK, PUSH, &[])
+            unlocated(NO_ACK, PUSH, &[("HEADERS", false)])
         }
     }
 }

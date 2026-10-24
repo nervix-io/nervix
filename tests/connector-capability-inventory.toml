@@ -1030,3 +1030,17 @@ scenarios = [
   { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must acknowledge them after its connection was lost" },
   { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another delivery is rejected" },
 ]
+
+[[capability]]
+capability = "HEADERS"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
+]
+
+[[capability]]
+capability = "metadata.frame_type"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
+]

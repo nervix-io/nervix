@@ -45,8 +45,8 @@ Feature: Connector names head client definitions
       | 3            | ZEROMQ       |                       |                                                         |
       | 1            | SQS          |                       |                                                         |
       | 3            | SQS          |                       |                                                         |
-      | 1            | WEBSOCKETS   |                       |                                                         |
-      | 3            | WEBSOCKETS   |                       |                                                         |
+      | 1            | WEBSOCKETS   |                       | 'endpoint' = 'ws://127.0.0.1:19080/events'              |
+      | 3            | WEBSOCKETS   |                       | 'endpoint' = 'ws://127.0.0.1:19080/events'              |
       | 1            | SYSLOG       |                       |                                                         |
       | 3            | SYSLOG       |                       |                                                         |
       | 1            | CLICKHOUSE   |                       |                                                         |

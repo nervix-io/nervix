@@ -169,7 +169,8 @@ relay. Do not use them to scan across branches.
   membership because their listeners execute on every cluster node. Every other ingestor, a
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
   schedule recomputation.
-- For `WEBSOCKETS CONNECTION` recovery and graceful close, read `Ingestors` →
+- For `WEBSOCKETS CONNECTION` literal upgrade headers, frame metadata, strict client CONFIG,
+  recovery and graceful close, read `Ingestors` →
   `WEBSOCKETS CONNECTION` in the selected documentation index.
   A successful upgrade does not establish data delivery or reset repeated-failure backoff.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
@@ -292,6 +293,9 @@ relay. Do not use them to scan across branches.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
+- A Kafka client never sets `allow.auto.create.topics`; `CREATE KAFKA CLIENT` refuses it. Provision each
+  topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
+  it exists.
 - For Kafka source control-call deadlines and bounded execution, follow `Ingestors` → `Client
   Deadlines`. Keep `socket.timeout.ms` distinct from the consumer-group commit caller deadline;
   an unanswered commit is retained before another can start.

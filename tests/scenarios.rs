@@ -12506,6 +12506,62 @@ async fn when_node_releases_filled_relay_memory(world: &mut ScenarioWorld, node_
         .release_relay_memory_fill_on(&crate::common::cluster::node_name(&node_id));
 }
 
+/// Takes all of a node's free relay memory now, except the little the node needs to read and
+/// answer the relay grant requests it receives, so every grant another node asks it for finds no
+/// room for its delivery.
+#[when(expr = "node {string} fills its relay memory, leaving room for no relay grant")]
+async fn when_node_fills_relay_memory_leaving_room_for_no_grant(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .fill_relay_memory_leaving_room_for_no_grant_on(&crate::common::cluster::node_name(
+            &node_id,
+        ));
+}
+
+/// Arms a node to take all of its free relay memory just before it stores the acknowledgement
+/// records of the next delivery it sends another node, so that delivery finds its own relay
+/// budget full exactly when it needs room for them.
+#[when(
+    expr = "node {string} fills its relay memory before it stores the records of its next delivery"
+)]
+async fn when_node_fills_relay_memory_before_record_storage(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .fill_relay_memory_before_next_record_storage_on(crate::common::cluster::node_name(
+            &node_id,
+        ));
+}
+
+/// Keeps the relay memory a node's fill took for `duration` longer and then returns it.
+///
+/// The duration is the length of the shortage the scenario imposes, not a wait for anything to
+/// happen: a shortage that outlasts the sender's five-second dispatch bound is what tells a
+/// delivery held back apart from one its sender gave up on.
+#[when(expr = "node {string} keeps its relay memory filled for {string} before releasing it")]
+async fn when_node_keeps_relay_memory_filled_before_releasing(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    duration: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node = crate::common::cluster::node_name(&node_id);
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    assert!(
+        world.fault_injection.relay_memory_fill_holds_on(&node),
+        "node '{node_id}' holds no filled relay memory to keep"
+    );
+    nervix_primitives::time::sleep(duration).await;
+    world.fault_injection.release_relay_memory_fill_on(&node);
+}
+
 #[given(expr = "relay owner fan-out for domain {string} is paused before dispatch")]
 async fn given_owner_relay_fanout_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -13404,6 +13460,61 @@ async fn then_kafka_consumer_group_eventually_has_consumers(
         .wait_for_kafka_consumer_group_members(&group, expected)
         .await
         .expect("kafka consumer group did not reach expected member count");
+}
+
+#[then(expr = "Kafka topic {string} does not exist")]
+async fn then_kafka_topic_does_not_exist(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    let exists = world
+        .cluster()
+        .kafka_topic_exists(&topic)
+        .expect("failed to read Kafka topic metadata");
+    assert!(
+        !exists,
+        "Kafka topic '{topic}' exists, but nothing in the scenario created it"
+    );
+}
+
+/// The consumer group names a step's docstring lists, one per line.
+fn kafka_consumer_group_names(world: &ScenarioWorld, step: &Step) -> BTreeSet<String> {
+    let mut groups = BTreeSet::new();
+    for line in docstring(step).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        groups.insert(expand_placeholders(world, line));
+    }
+    groups
+}
+
+#[then(expr = "within {string} Kafka lists these consumer groups")]
+async fn then_within_kafka_lists_these_consumer_groups(
+    world: &mut ScenarioWorld,
+    within: String,
+    #[step] step: &Step,
+) {
+    let within = parse_duration_text(&within).expect("within must be a valid duration");
+    let groups = kafka_consumer_group_names(world, step);
+    world
+        .cluster()
+        .wait_for_kafka_consumer_groups_listed(&groups, true, within)
+        .await
+        .expect("Kafka did not list the consumer groups");
+}
+
+/// A consumer group that must never exist: one check, since waiting would not strengthen it.
+#[then(expr = "Kafka lists none of these consumer groups")]
+async fn then_kafka_lists_none_of_these_consumer_groups(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let groups = kafka_consumer_group_names(world, step);
+    world
+        .cluster()
+        .wait_for_kafka_consumer_groups_listed(&groups, false, Duration::ZERO)
+        .await
+        .expect("Kafka lists consumer groups");
 }
 
 /// Joins a member that Nervix does not run to the group. It takes the topic's first partitions from
@@ -14328,6 +14439,7 @@ async fn when_these_nspl_commands_are_attempted_on_node(
 }
 
 #[when("these NSPL commands begin executing in the background")]
+#[when("these Plexus commands begin executing in the background")]
 #[when("these Plexus statements begin executing in the background")]
 async fn when_these_nspl_commands_begin_executing_in_the_background(
     world: &mut ScenarioWorld,
@@ -23693,6 +23805,7 @@ async fn given_rabbitmq_queue_exists(world: &mut ScenarioWorld, queue: String) {
 }
 
 #[given(expr = "Kafka topic {string} exists with {int} partitions")]
+#[when(expr = "the operator provisions Kafka topic {string} with {int} partitions")]
 async fn given_kafka_topic_exists_with_partitions(
     world: &mut ScenarioWorld,
     topic: String,

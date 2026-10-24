@@ -215,17 +215,24 @@ impl KafkaPartitionWatch {
         ));
     }
 
-    async fn run(self: Box<Self>, mut shutdown: watch::Receiver<bool>) {
-        let mut observed = match self.inspector.partitions(self.topic.as_str()).await {
-            Ok(mut partitions) => {
-                partitions.sort_unstable();
-                partitions
-            }
+    /// The topic's partitions in order, or `None` once a failed inspection is reported. The source
+    /// reports a topic the broker does not have itself, so the watch observes it as a topic without
+    /// partitions, and the partitions of the topic once provisioned read as a topology change.
+    async fn observe(&self) -> Option<Vec<i32>> {
+        let mut partitions = match self.inspector.partitions(self.topic.as_str()).await {
+            Ok(partitions) => partitions,
+            Err(error) if error.current_context().is_missing_topic() => Vec::new(),
             Err(error) => {
                 self.report_failure(&error);
-                Vec::new()
+                return None;
             }
         };
+        partitions.sort_unstable();
+        Some(partitions)
+    }
+
+    async fn run(self: Box<Self>, mut shutdown: watch::Receiver<bool>) {
+        let mut observed = self.observe().await.unwrap_or_default();
         loop {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::select! {
@@ -236,14 +243,9 @@ impl KafkaPartitionWatch {
                 }
                 _ = sleep(DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL) => {}
             }
-            let mut current = match self.inspector.partitions(self.topic.as_str()).await {
-                Ok(partitions) => partitions,
-                Err(error) => {
-                    self.report_failure(&error);
-                    continue;
-                }
+            let Some(current) = self.observe().await else {
+                continue;
             };
-            current.sort_unstable();
             if current != observed {
                 observed = current.clone();
                 let epoch = self
