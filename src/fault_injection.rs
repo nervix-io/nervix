@@ -61,6 +61,7 @@ mod shutdown_handoff;
 mod standalone_transaction;
 #[cfg(test)]
 mod syslog_tests;
+mod transaction_cleanup;
 
 pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
@@ -352,6 +353,10 @@ enum HandoffEngagementTransportFailure {
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
+    TransactionCleanup {
+        node: ClusterNodeName,
+        domain: DomainName,
+    },
     StandaloneTransaction {
         node: ClusterNodeName,
         domain: DomainName,

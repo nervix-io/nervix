@@ -376,6 +376,18 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_transaction_cleanup_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_transaction_cleanup_if_armed(node, domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_standalone_transaction_if_armed(
         &self,
         node: &ClusterNodeName,
