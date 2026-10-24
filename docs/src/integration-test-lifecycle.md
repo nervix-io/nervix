@@ -865,6 +865,13 @@ The harness keeps these boundaries explicit.
   cluster status. Releasing the barrier waits for that pass to finish before restoring heartbeats
   and application health. While the heartbeat is held, peer startup waits for listeners; Raft
   catch-up is checked after release, so the fixture never waits for progress its own fault prevents.
+  The slow-readiness restart fixture also stops every in-process node first. It then arms a testing
+  hook in the leader's reconciliation and restarts the whole cluster, counting one named node ready
+  only once a leader of the restarted cluster has passed its startup voter observation: it observed
+  every voter live, or its grace expired. The node runs and gossips from its start, so only the
+  harness's own readiness waits on the hook, never the product. Its scenario requires a voter
+  restarted beside that node to keep its work. A restart that started each node only once the one
+  before it was ready would start that voter after the grace expired, and its work would fail over.
   This is an in-process scheduling regression; immutable-image external
   Chaos runs retain the real-process crash and restart evidence.
   The durable follower catch-up fixture creates client writes while the restarted follower applies
@@ -1326,7 +1333,14 @@ by the cleanup record and every node that was still stopping or panicked when th
 fails the step.
 
 The other ways a scenario starts nodes reuse the same budgets. Restarting a whole cluster stops its
-nodes and builds it again with a fresh construction deadline. Adding a node, or starting one a
+nodes and then starts every one of them at once under a fresh construction deadline, each with its
+own nested startup budget, as an operator's restart of the whole cluster does. Once every node is
+ready, it waits for each to catch up with the leader and then for the same convergence checks.
+Starting the nodes one after another would hold the last voter back by every earlier node's startup.
+On a loaded host that can outlast the ten-second grace a newly started leader gives voters it has
+not yet observed before it fails their work over, as [Control Plane](./control-plane.md) describes.
+Only the restarted-voter observation fixture keeps the bootstrap node first, because its scenario
+observes scheduling while that node leads. Adding a node, or starting one a
 scenario stopped, spends one 84-second node startup and the catch-up that follows it; adding a node
 also repeats the convergence checks. A node started while its consensus connectivity is blocked
 spends the node startup without the catch-up. A scenario whose subject is a node that cannot apply
