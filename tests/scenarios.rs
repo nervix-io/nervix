@@ -105,9 +105,10 @@ use crate::common::{
         SUBSCRIBED_LINE, corpus_report,
     },
     cluster::{
-        BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
-        HttpsPublishLoopOutcome, InterconnectCredentialFault, JoinAttempt, TEST_AUTH_PASSWORD,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
+        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster,
+        DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
+        InterconnectCredentialFault, JoinAttempt, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME,
+        TestClusterConfig, TestSession, WebsocketExchangeAction,
         assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
         command_connect_options, observe_kafka_through, publish_kafka_record_through,
     },
@@ -147,7 +148,8 @@ use crate::common::{
         begin_suite_measurement, suite_summary,
     },
     scenario_schedule::{
-        FeatureLimit, ScenarioAdmission, ScenarioLength, ScenarioRunSlots, prioritize_features,
+        FeatureLimit, SCENARIO_RETRIES, ScenarioAdmission, ScenarioLength, ScenarioRunSlots,
+        prioritize_features,
     },
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
@@ -809,6 +811,21 @@ impl ScenarioWorld {
             published.age()
         );
         append_cucumber_log_line(marker.trim_end());
+    }
+
+    /// Publishes that the scenario's admission holds `run_slots` run slots and its steps start.
+    fn start_running(&self, run_slots: usize) {
+        let Some(registration) = &self.active_scenario else {
+            return;
+        };
+        let published = registration.start_running(run_slots);
+        append_cucumber_log_line(&format!(
+            "scenario {}: {} suite_age={:?} age={:?} run_slots={run_slots}",
+            published.phase,
+            published.identity,
+            ActiveScenario::suite_age(),
+            published.age()
+        ));
     }
 
     fn wait_for_admission(&self, reason: common::scenario_schedule::AdmissionWait) {
@@ -8187,6 +8204,50 @@ async fn given_transaction_tombstone_retention_is_configured(
         parse_duration_text(&retention).expect("transaction tombstone retention must be valid");
 }
 
+#[given(expr = "transaction tombstone cleanup for domain {string} pauses on every node")]
+async fn given_transaction_cleanup_pauses(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    for node in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .pause_transaction_cleanup(crate::common::cluster::node_name(&node), domain.clone());
+    }
+}
+
+#[then(expr = "transaction tombstone cleanup for domain {string} is paused on node {string}")]
+async fn then_transaction_cleanup_is_paused(
+    world: &mut ScenarioWorld,
+    domain: String,
+    node: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    let node = expand_placeholders(world, &node);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_transaction_cleanup_pause(&crate::common::cluster::node_name(&node), &domain),
+    )
+    .await
+    .expect("the node did not reach the transaction cleanup pause");
+}
+
+#[when(expr = "transaction tombstone cleanup for domain {string} is released on every node")]
+async fn when_transaction_cleanup_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    for node in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .release_transaction_cleanup_pause(&crate::common::cluster::node_name(&node), &domain);
+    }
+}
+
 #[given(expr = "command retry identities are valid for {string}")]
 async fn given_command_retry_identities_are_valid_for(world: &mut ScenarioWorld, validity: String) {
     assert!(
@@ -12734,6 +12795,19 @@ async fn when_node_keeps_relay_memory_filled_before_releasing(
 async fn given_owner_relay_fanout_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
     world.fault_injection.pause_owner_relay_fanout(domain);
+}
+
+#[given(expr = "relay owner fan-out for domain {string} waits {string} before each batch")]
+async fn given_owner_relay_fanout_waits_before_each_batch(
+    world: &mut ScenarioWorld,
+    domain: String,
+    delay: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let delay = parse_duration_text(&delay).assured("the scenario duration is valid");
+    world
+        .fault_injection
+        .delay_owner_relay_fanout(domain, delay);
 }
 
 #[given(
@@ -26573,6 +26647,57 @@ async fn when_sequential_metric_http_payloads_are_posted(
     }
 }
 
+/// How long one acknowledged metric may take to be acknowledged, its retries included. The endpoint
+/// answers each attempt within its ACK timeout, so this only bounds an endpoint that keeps refusing
+/// the metric.
+const METRIC_ACKNOWLEDGEMENT_WAIT: Duration = Duration::from_secs(300);
+
+/// Posts `{"value":1}` through `{"value":<count>}`, starting each in order once fewer than
+/// `window` posts are waiting for their graph acknowledgement, and returns once every post is
+/// answered. An acknowledged endpoint answers a post only after the relay owner handed the row to
+/// its consumers and to the nodes that subscribe to it, so the relay then holds none of the rows.
+/// An unacknowledged endpoint answers as soon as the row is queued on the node that took it.
+#[when(
+    expr = "{int} metric http payloads are posted with acknowledgement, {int} at a time, to host \
+            {string} path {string}"
+)]
+async fn when_metric_http_payloads_are_posted_with_acknowledgement(
+    world: &mut ScenarioWorld,
+    count: u64,
+    window: usize,
+    host: String,
+    path: String,
+) {
+    assert!(
+        window > 0,
+        "an acknowledged posting window holds at least one post"
+    );
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    append_cucumber_log_line(&format!(
+        "http publish acknowledged metrics: node=node-1 host={host} path={path} count={count} \
+         window={window}"
+    ));
+    let publisher = world.cluster().acknowledged_http_publisher(
+        "node-1",
+        &host,
+        &path,
+        METRIC_ACKNOWLEDGEMENT_WAIT,
+    );
+    futures_util::stream::iter(1..=count)
+        .for_each_concurrent(window, |value| post_acknowledged_metric(&publisher, value))
+        .await;
+}
+
+/// Posts `{"value":<value>}` through `publisher` and fails the step unless it is acknowledged.
+async fn post_acknowledged_metric(publisher: &AcknowledgedHttpPublisher, value: u64) {
+    let payload = format!(r#"{{"value":{value}}}"#);
+    publisher
+        .publish(&payload)
+        .await
+        .unwrap_or_else(|error| panic!("metric {value} was not acknowledged: {error}"));
+}
+
 #[when(expr = "http payload encoded as {string} is posted to host {string} path {string}")]
 async fn when_encoded_http_payload_is_posted(
     world: &mut ScenarioWorld,
@@ -32310,7 +32435,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     let run = ScenarioWorld::cucumber::<&str>()
         .with_parser(PrioritizedScenarioParser)
         .max_concurrent_scenarios(usize::MAX)
-        .retries(2)
+        .retries(SCENARIO_RETRIES)
         .before(move |feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
@@ -32331,16 +32456,17 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     scenario_line,
                     length,
                 );
-                let attempt = registration.attempt();
+                let run = registration.run();
                 world.active_scenario = Some(registration);
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, length, &feature_name, attempt, |reason| {
+                    .admit_with(limit, length, &feature_name, run, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;
+                let held_slots = admission.slots();
                 world.scenario_admission = Some(admission);
-                world.enter_phase(ScenarioPhase::Body, "");
+                world.start_running(held_slots);
             })
         })
         .after(|_feature, _rule, _scenario, finished, world| {

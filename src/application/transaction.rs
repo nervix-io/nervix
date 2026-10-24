@@ -2513,6 +2513,14 @@ impl SessionServiceImpl {
                 TransactionState::Committing(_) => {}
                 TransactionState::Finished(_) => {
                     self.inner.transaction_bindings.remove(&transaction.id);
+                    #[cfg(feature = "testing")]
+                    self.inner
+                        .runtime
+                        .pause_transaction_cleanup_if_armed(
+                            self.inner.consensus.local_node_id(),
+                            &transaction.domain,
+                        )
+                        .await;
                 }
                 TransactionState::Open(_) => {}
             }

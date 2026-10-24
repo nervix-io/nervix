@@ -380,17 +380,11 @@ impl ServerProcessCluster {
         Ok(())
     }
 
-    /// Starts all persisted voters before awaiting readiness, then waits until they converge
-    /// through each process's public status endpoint.
+    /// Restarts persisted voters concurrently, including each executable read and readiness
+    /// probe, then waits until they converge through each process's public status endpoint.
     pub(crate) async fn restart_all(&mut self) -> io::Result<()> {
-        for process in self.nodes.values_mut() {
-            nervix_primitives::task::consume_budget().await;
-            process.restart_without_waiting().await?;
-        }
-        for process in self.nodes.values_mut() {
-            nervix_primitives::task::consume_budget().await;
-            process.wait_until_ready().await?;
-        }
+        futures_util::future::try_join_all(self.nodes.values_mut().map(ServerProcess::restart))
+            .await?;
         self.convergence().wait().await.map_err(convergence_failure)
     }
 

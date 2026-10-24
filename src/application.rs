@@ -1111,6 +1111,8 @@ impl Application {
                             );
                             break;
                         }
+                        #[cfg(feature = "testing")]
+                        fault_injection_for_reconcile.end_startup_voter_observation();
                         let live_voters = live_node_ids
                             .into_iter()
                             .filter(|node| topology.voters().contains(node))

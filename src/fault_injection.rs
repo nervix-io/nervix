@@ -61,6 +61,7 @@ mod shutdown_handoff;
 mod standalone_transaction;
 #[cfg(test)]
 mod syslog_tests;
+mod transaction_cleanup;
 
 pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
@@ -72,7 +73,7 @@ pub use model_publication::ModelPublicationRefusalKind;
 use pause::TestPause;
 use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
-use restarted_voter::StartupVoterGossip;
+use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 pub use standalone_transaction::StandaloneTransactionBoundary;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +188,9 @@ struct FaultInjectionState {
     blocked_gossip_nodes: DashMap<ClusterNodeName, Duration, RandomState>,
     /// Restart regressions retain one relayed heartbeat until the first scheduling pass finishes.
     startup_voter_gossip: DashMap<ClusterNodeName, StartupVoterGossip, RandomState>,
+    /// Whether a restart fixture waits for the restarted cluster's leader to end its startup voter
+    /// observation, and whether one has.
+    startup_observation_end: watch::Sender<StartupObservationEnd>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -214,6 +218,9 @@ struct FaultInjectionState {
     relay_memory_owners: DashMap<ClusterNodeName, Executor, RandomState>,
     /// The owner pauses one buffered batch before it acquires a dispatch permit and loads routes.
     owner_relay_fanout_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// The owner waits this long before it fans out each buffered batch of a domain's relays, so
+    /// the rows its sources admitted reach their consumers slowly, as on a loaded node.
+    owner_relay_fanout_delays: DashMap<String, Duration, RandomState>,
     /// A local schedule swap pauses after removing one attached emitter from its relay.
     emitter_swap_after_detach_pauses:
         DashMap<(DomainName, EmitterName), Arc<TestPause>, RandomState>,
@@ -352,6 +359,10 @@ enum HandoffEngagementTransportFailure {
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
+    TransactionCleanup {
+        node: ClusterNodeName,
+        domain: DomainName,
+    },
     StandaloneTransaction {
         node: ClusterNodeName,
         domain: DomainName,
@@ -435,6 +446,7 @@ impl Default for FaultInjection {
     fn default() -> Self {
         let (leadership_transfers, _) = broadcast::channel(16);
         let (syslog_listener_faults, _) = watch::channel(None);
+        let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
             inner: Arc::new(FaultInjectionState {
                 emitter_faults: DashMap::default(),
@@ -467,6 +479,7 @@ impl Default for FaultInjection {
                 failed_health_links: DashMap::default(),
                 blocked_gossip_nodes: DashMap::default(),
                 startup_voter_gossip: DashMap::default(),
+                startup_observation_end,
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
@@ -477,6 +490,7 @@ impl Default for FaultInjection {
                 relay_memory_fills: DashMap::default(),
                 relay_memory_owners: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),
+                owner_relay_fanout_delays: DashMap::default(),
                 emitter_swap_after_detach_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
@@ -1740,6 +1754,13 @@ impl FaultInjection {
         );
     }
 
+    /// Makes the owner of each of `domain`'s relays wait `delay` before it fans out every batch.
+    pub fn delay_owner_relay_fanout(&self, domain: impl Into<String>, delay: Duration) {
+        self.inner
+            .owner_relay_fanout_delays
+            .insert(domain.into().to_ascii_lowercase(), delay);
+    }
+
     pub async fn wait_for_owner_relay_fanout_pause(&self, domain: &str) {
         let pause = self.owner_relay_fanout_pause(&domain.to_ascii_lowercase());
         pause.wait_until_reached().await;
@@ -2582,13 +2603,22 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "one scenario-owned relay fanout pause is claimed once",
+            reason = "a scenario-owned relay fanout delay is read for every batch, and one \
+                      scenario-owned relay fanout pause is claimed once",
             key = "one test domain",
-            bound = "one keyed read; its guard ends before the test-controlled wait"
+            bound = "two keyed reads; each guard ends before its test-controlled wait"
         )
     )]
     pub(crate) async fn pause_owner_relay_fanout_if_armed(&self, domain: &DomainName) {
         let key = domain.as_str().to_ascii_lowercase();
+        let delay = self
+            .inner
+            .owner_relay_fanout_delays
+            .get(&key)
+            .map(|delay| *delay.value());
+        if let Some(delay) = delay {
+            nervix_primitives::time::sleep(delay).await;
+        }
         let Some(pause) = self
             .inner
             .owner_relay_fanout_pauses
