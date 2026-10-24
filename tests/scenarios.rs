@@ -148,7 +148,8 @@ use crate::common::{
         begin_suite_measurement, suite_summary,
     },
     scenario_schedule::{
-        FeatureLimit, ScenarioAdmission, ScenarioLength, ScenarioRunSlots, prioritize_features,
+        FeatureLimit, SCENARIO_RETRIES, ScenarioAdmission, ScenarioLength, ScenarioRunSlots,
+        prioritize_features,
     },
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
@@ -760,6 +761,21 @@ impl ScenarioWorld {
             published.age()
         );
         append_cucumber_log_line(marker.trim_end());
+    }
+
+    /// Publishes that the scenario's admission holds `run_slots` run slots and its steps start.
+    fn start_running(&self, run_slots: usize) {
+        let Some(registration) = &self.active_scenario else {
+            return;
+        };
+        let published = registration.start_running(run_slots);
+        append_cucumber_log_line(&format!(
+            "scenario {}: {} suite_age={:?} age={:?} run_slots={run_slots}",
+            published.phase,
+            published.identity,
+            ActiveScenario::suite_age(),
+            published.age()
+        ));
     }
 
     fn wait_for_admission(&self, reason: common::scenario_schedule::AdmissionWait) {
@@ -32150,7 +32166,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     let run = ScenarioWorld::cucumber::<&str>()
         .with_parser(PrioritizedScenarioParser)
         .max_concurrent_scenarios(usize::MAX)
-        .retries(2)
+        .retries(SCENARIO_RETRIES)
         .before(move |feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
@@ -32171,16 +32187,17 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     scenario_line,
                     length,
                 );
-                let attempt = registration.attempt();
+                let run = registration.run();
                 world.active_scenario = Some(registration);
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, length, &feature_name, attempt, |reason| {
+                    .admit_with(limit, length, &feature_name, run, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;
+                let held_slots = admission.slots();
                 world.scenario_admission = Some(admission);
-                world.enter_phase(ScenarioPhase::Body, "");
+                world.start_running(held_slots);
             })
         })
         .after(|_feature, _rule, _scenario, finished, world| {

@@ -427,10 +427,24 @@ that run's 41-minute suite budget. The additional slots use the observed CPU and
 headroom; their complete-suite qualification retains runner load and the actual margin rather than
 assuming that work stays constant as concurrency changes. Cucumber may take up all parsed scenarios
 without charging a slot.
-Admission grants feature capacity and a run slot in one decision, after both are available. A
-scenario holds both through the end of teardown. The active-scenario diagnostic names the feature
-limit or run slot a waiting scenario needs. No scenario runs alone or prevents unrelated scenarios
-from starting.
+Admission grants feature capacity and the attempt's share of the run slots in one decision, after
+both are available. A scenario holds both through the end of teardown. A first run holds one slot.
+A retry holds a larger share, so it runs beside fewer scenarios than the run that failed. The first
+retry holds a sixteenth of the pool, and each later retry holds twice the share of the run before
+it. With Cucumber's two retries, the second retry holds an eighth, so the shares are 1, 3 and 6 of
+CI's 48 slots. Every run holds at least one slot, so a pool of fewer than sixteen slots gives its
+first retry one. A run past the configured retries, as a `--retry` override allows, keeps the last
+retry's share. No run holds more than a quarter of the pool, so no scenario runs alone. A retry
+whose share is not yet free keeps the slots that free up until its share fits. Otherwise the first
+attempts behind it would take those slots one at a time and starve it.
+
+The active-scenario diagnostic names the feature limit or run slot a waiting scenario needs. Each
+`scenario started` line names the run slots the attempt holds. The suite summary counts scenario
+work as each attempt's running time multiplied by the slots it holds, and it reports the
+slot-seconds retries held beyond one slot each. That figure is what the larger shares cost the run.
+Replayed against the 15 retries of Check run 40044052881, the shares cost 6,876 slot-seconds,
+about 143 seconds of a full 48-slot run. Against the 5 retries of run 39987498652, they cost about
+21 seconds.
 
 The coordinated WASM state-reset feature runs one scenario at a time. The web console REPL,
 execution graph, transaction inspector, and domain clock features share a limit of two. Both limits
@@ -440,14 +454,15 @@ available run slots favor a queued limited successor over queued ordinary work. 
 group grants its two slots to the feature with the fewest prior grants, so one feature cannot keep
 the other three waiting behind its whole queue. Their chains can therefore make progress throughout
 the suite rather than after it. Cucumber retries a failed scenario twice; `--retry 0` turns retries
-off for a focused run. The before hook reads the attempt kind from its active-scenario registration.
-Each feature queue keeps retries ahead of first attempts, and admission selects an eligible retry
-before any first attempt, including a limited feature's first attempt. A retry still needs its
-feature capacity and a run slot together: one waiting for a full feature group leaves free slots
-available to other work. Ordinary and WASM-reset queues retain FIFO order within an attempt kind;
-the web-console group retains its feature fairness. The finite retry count bounds this priority;
-first attempts cannot be kept waiting by an unlimited retry stream. Cancelled waiters return both
-capacities before dispatch continues.
+off for a focused run. The retry count is one constant, which also fixes the retries' slot shares.
+The before hook reads which run an attempt is from its active-scenario registration. Each feature
+queue keeps retries ahead of first attempts, and admission selects an eligible retry before any
+first attempt, including a limited feature's first attempt. A retry still needs its feature
+capacity and its share of the run slots together: one waiting for a full feature group leaves free
+slots available to other work. Ordinary and WASM-reset queues retain FIFO order within an attempt
+kind; the web-console group retains its feature fairness. The finite retry count bounds this
+priority; first attempts cannot be kept waiting by an unlimited retry stream. A cancelled waiter
+returns its feature capacity and its whole share before dispatch continues.
 
 A scenario whose attempts run for minutes declares itself with the `@long_running` tag, on the
 scenario, its outline's examples, its rule, or its feature. A free run slot takes a declared first
@@ -465,9 +480,9 @@ time; a declared scenario keeps the order from adding a tail to a run that would
 A scenario declares itself long-running when its attempts reach two minutes in a canonical
 producer. In the first run above, 34 attempts outside the limited features reached two minutes,
 about one in a hundred, while the median attempt took 25 seconds. The suite summary lists every
-attempt that reached two minutes without the declaration. The declaration orders admission only. A declared scenario takes one run slot like
-any other and runs beside the rest of the suite, and its retries, deadlines and budgets are
-unchanged.
+attempt that reached two minutes without the declaration. The declaration orders admission only.
+A declared scenario's attempts take the same share of the run slots as any other scenario's, and
+run beside the rest of the suite. Its retries, deadlines and budgets are unchanged.
 
 The CI jobs divide the work at the scenario boundary:
 
@@ -2732,6 +2747,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | Diagnostics are concurrent and never keep cleanup from starting | `status_snapshots_keep_a_healthy_node_while_another_node_stalls`, `failed_and_stalled_diagnostics_end_by_their_deadline_so_cleanup_starts`, `a_stalled_diagnostic_still_reaches_every_node_stop_in_a_cluster_of_one_and_of_three` |
 | One cleanup budget per cluster, and truthful phases | `stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three`, `a_node_left_stopping_keeps_what_it_holds_until_its_own_task_ends`, `a_single_node_cleanup_keeps_how_its_task_ended`, `a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports`, `the_finished_phase_is_published_only_once_cleanup_has_completed`, `an_active_scenario_publishes_its_phase_and_the_age_of_that_phase` |
 | A stop a scenario waits for is timed by the node's own ending, and a node that outlives a wait is named with its shutdown phase | `a_stop_is_timed_from_its_first_request_to_the_ending_of_the_node_task`, `a_node_that_had_ended_before_it_was_asked_to_stop_took_no_time_to_stop`, `a_stopping_node_is_read_with_its_shutdown_phase_and_its_own_deadline`, `a_stop_record_reads_as_the_transition_the_harness_prints`, `a_node_left_stopping_is_recorded_with_where_its_own_shutdown_stood` |
+| Each retry holds twice the share of the run before it, from a sixteenth of the pool and never more than a quarter; a retry keeps the slots that free up until its share fits, gives its whole share back when it ends or is cancelled, and the suite summary counts the slot time it holds beyond one slot | `each_retry_holds_twice_the_share_of_the_run_before_it`, `a_retry_holds_its_share_of_the_run_slots_until_it_ends`, `a_retry_waiting_for_its_share_keeps_the_slots_that_free_up`, `a_cancelled_retry_returns_its_whole_share`, `the_suite_summary_counts_the_slot_time_a_retry_holds_beyond_one_slot` |
 | Feature waits do not occupy run slots, and limited chains start before and progress beside bulk work | `a_queued_web_console_scenario_does_not_hold_a_run_slot`, `limited_features_are_taken_up_before_the_bulk`, `the_next_limited_scenario_gets_a_slot_beside_bulk_work`, `releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain`, `each_web_console_feature_starts_before_one_feature_consumes_the_group` |
 | A declared long-running scenario is admitted ahead of ordinary first attempts and behind retries, runs beside the bulk instead of after it, and the suite summary names every undeclared attempt of two minutes, finished or still running | `a_declared_long_scenario_is_admitted_before_queued_ordinary_first_attempts`, `a_retry_runs_before_a_declared_long_first_attempt`, `a_declared_long_scenario_queued_last_runs_beside_the_bulk_instead_of_after_it`, `long_running_is_declared_by_a_tag_of_the_scenario_its_rule_or_its_feature`, `an_undeclared_attempt_of_two_minutes_names_its_scenario_long_running`, `the_suite_summary_names_every_undeclared_attempt_of_two_minutes_finished_or_running` |
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
