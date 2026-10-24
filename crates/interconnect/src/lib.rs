@@ -23,11 +23,15 @@ use nervix_execution::{ChargedBytes, Executor, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CodecName, CoordinationIdentity,
     DomainClockProgress, DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind,
-    ModelName, NodeEndpoint, NodeRef, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    RelayName, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
-    RemoteRuntimeRecordMetadata, ResourceName, SubscriptionBinding, Timestamp, WasmStateResetScope,
+    ModelName, NodeEndpoint, NodePrerequisites, NodeRef, OwnershipStateRecoveryOutcome,
+    OwnershipStateReset, PrerequisiteMismatch, RelayName, RemoteAckRegistration,
+    RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName,
+    SubscriptionBinding, Timestamp, WasmStateResetScope,
 };
-use nervix_primitives::{sync::mpsc, unmodeled::sync::OnceLock};
+use nervix_primitives::{
+    sync::{mpsc, watch},
+    unmodeled::sync::OnceLock,
+};
 use nervix_recovery::Discarded as _;
 use rkyv::{Archive, Deserialize, Serialize};
 use strum::IntoStaticStr;
@@ -59,7 +63,7 @@ pub use connection::{
     RelayCancellationGuard,
 };
 pub use entropy::TransportEntropy;
-pub use identity::{TlsConfigBundle, TransportIdentity};
+pub use identity::{JoinTerms, TlsConfigBundle, TransportIdentity};
 pub use node_drain::{
     StoppingNodeDrainAction, StoppingNodeDrainRequest, StoppingNodeDrainResponse,
 };
@@ -98,6 +102,7 @@ pub use wasm_state::{
     WasmStateResetRuntimeAction, WasmStateResetRuntimeRequest, WasmStateResetRuntimeResponse,
     WasmStateResetTarget,
 };
+pub use wire::WIRE_CONTRACT;
 
 const DEFAULT_MAX_PEERS: usize = 64;
 const DEFAULT_MAX_CONNECTIONS: usize = 768;
@@ -999,6 +1004,17 @@ impl Transport {
         self.inner.node_id()
     }
 
+    /// Everything this node brings to the cluster as its handshakes carry it now: the trust root
+    /// is that of the credentials the transport currently holds.
+    pub fn local_prerequisites(&self) -> NodePrerequisites {
+        self.inner.local_prerequisites()
+    }
+
+    /// How far this node has come in joining the cluster through the connections it dials.
+    pub fn join_progress(&self) -> watch::Receiver<JoinProgress> {
+        self.inner.subscribe_join_progress()
+    }
+
     /// Allocates one operation identity bound to this transport process.
     pub fn next_coordination_identity(
         &self,
@@ -1182,6 +1198,48 @@ pub enum TransportError {
     RelayIndeterminate,
     #[error("relay delivery was rejected before runtime admission: {0}")]
     RelayRejected(String),
+    /// The dialed node answered this node's handshake with a refusal. The mismatch is seen from
+    /// this node: its own value is the local one.
+    #[error("node '{peer}' refused this node at join: {mismatch}")]
+    RefusedByPeer {
+        peer: ClusterNodeName,
+        mismatch: PrerequisiteMismatch,
+    },
+    /// This node refused a peer whose prerequisites it cannot run beside.
+    #[error("this node refused node '{peer}' at join: {mismatch}")]
+    IncompatiblePeer {
+        peer: ClusterNodeName,
+        mismatch: PrerequisiteMismatch,
+    },
+}
+
+/// How far this node has come in joining the cluster through the connections it dials.
+///
+/// It leaves `Joining` exactly once: for the first outbound connection this process completes, or
+/// for the first one that ends in a prerequisite refusal, whichever comes first. A connection a
+/// peer dials never moves it, so a node that has joined never leaves because a newcomer is
+/// incompatible with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinProgress {
+    Joining,
+    Joined { through: ClusterNodeName },
+    Refused(JoinRefusal),
+}
+
+/// The prerequisite that keeps this node apart from a peer, seen from this node.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("node '{peer}' cannot run beside this node: {mismatch}")]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "a judged incompatibility is the outcome of a join, not a failure of the \
+                  transport"
+    )
+)]
+pub struct JoinRefusal {
+    pub peer: ClusterNodeName,
+    pub mismatch: PrerequisiteMismatch,
 }
 
 impl TransportError {

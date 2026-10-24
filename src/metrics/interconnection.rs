@@ -1,13 +1,14 @@
 //! The interconnection series a node exposes: its transport pools, the execution admission every
-//! variable-size operation passes through, its consensus retention, and the reactor delay they all
-//! share.
+//! variable-size operation passes through, its consensus retention, the reactor delay they all
+//! share, and how many nodes run with timings that differ from the leader's.
 //!
 //! Layer: engines and infrastructure, with the same edge inside it the parent module declares.
 //!
 //! - **Owns.** The metric families that describe a node's own interconnection, the bounded
 //!   dimensions they are labelled by, and the timer that samples how late this node's reactor is
 //!   polling work that is already runnable.
-//! - **Depends on.** The transport, execution and consensus snapshots it reads at scrape time.
+//! - **Depends on.** The transport, execution and consensus snapshots it reads at scrape time, and
+//!   the prerequisite records the cluster's gossip publishes.
 //! - **Must not know.** Which peer, domain, branch or operation identity produced a value. Every
 //!   label value here comes from an enumeration fixed at compile time, so no payload can widen a
 //!   series, and the exporting node is the node the values belong to.
@@ -52,14 +53,17 @@ use prometheus::{
 };
 use strum::IntoEnumIterator as _;
 
+use crate::cluster::PrerequisitesView;
+
 /// How often the reactor delay probe asks to be woken. Short enough that one blocked poll is
 /// visible in a scrape interval, long enough that the probe itself is not the load.
 const SCHEDULER_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The live node state the interconnection series are read from.
 ///
-/// One node installs this once, when its transport, its executor and its consensus observer all
-/// exist. Until then the collector reports nothing, because there is nothing yet to report.
+/// One node installs this once, when its transport, its executor, its consensus observer and its
+/// cluster membership all exist. Until then the collector reports nothing, because there is
+/// nothing yet to report.
 #[derive(Clone)]
 pub struct NodeObservations {
     inner: Arc<NodeObservationsInner>,
@@ -69,19 +73,34 @@ struct NodeObservationsInner {
     executor: Executor,
     transport: Transport,
     consensus: Observer,
+    prerequisites: PrerequisitesView,
     scheduler: SchedulerDelay,
 }
 
 impl NodeObservations {
-    pub fn new(executor: Executor, transport: Transport, consensus: Observer) -> Self {
+    pub fn new(
+        executor: Executor,
+        transport: Transport,
+        consensus: Observer,
+        prerequisites: PrerequisitesView,
+    ) -> Self {
         Self {
             inner: Arc::new(NodeObservationsInner {
                 executor,
                 transport,
                 consensus,
+                prerequisites,
                 scheduler: SchedulerDelay::default(),
             }),
         }
+    }
+
+    /// How many live nodes run with timings that differ from the leader's, or `None` while this
+    /// node knows no leader, or no record that leader published, to compare them with.
+    fn drifting_nodes(&self) -> Option<usize> {
+        let leader = self.inner.consensus.current_leader_now()?;
+        let drift = self.inner.prerequisites.timing_drift(&leader)?;
+        Some(drift.len())
     }
 
     /// Sample how late this node's reactor is until the node shuts down.
@@ -460,6 +479,13 @@ const SERIES: &[SeriesSpec] = &[
         kind: SeriesKind::Gauge,
         labels: NO_LABELS,
     },
+    SeriesSpec {
+        name: "nervix_cluster_timing_drift_nodes",
+        help: "Live nodes whose timing prerequisites differ from the leader's, or -1 while no \
+               leader record is known.",
+        kind: SeriesKind::Gauge,
+        labels: NO_LABELS,
+    },
 ];
 
 impl InterconnectionCollector {
@@ -485,12 +511,14 @@ impl InterconnectionCollector {
         let log = sources.inner.consensus.raft_log_retention();
         let snapshots = sources.inner.consensus.snapshot_retention();
         let scheduler = sources.inner.scheduler.read();
+        let drifting_nodes = sources.drifting_nodes();
 
         let mut families = Families::new();
         transport_families(&mut families, &transport);
         execution_families(&mut families, &executor);
         scheduler_families(&mut families, &scheduler);
         consensus_families(&mut families, &log, &snapshots);
+        cluster_families(&mut families, drifting_nodes);
         families.finish()
     }
 }
@@ -957,6 +985,20 @@ fn optional_index(index: Option<u64>) -> f64 {
     }
 }
 
+fn cluster_families(families: &mut Families, drifting_nodes: Option<usize>) {
+    let mut drifting = families.open("nervix_cluster_timing_drift_nodes");
+    drifting.sample(&[], optional_count(drifting_nodes));
+}
+
+/// A count nothing can be compared for yet reports as `-1`, which no real count can take, rather
+/// than as a zero that would claim every node agrees.
+fn optional_count(count: Option<usize>) -> f64 {
+    match count {
+        Some(count) => count.approx_into(),
+        None => -1.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -1019,6 +1061,7 @@ mod tests {
         execution_families(&mut families, &executor);
         scheduler_families(&mut families, &scheduler);
         consensus_families(&mut families, &log, &snapshots);
+        cluster_families(&mut families, None);
         families.finish()
     }
 

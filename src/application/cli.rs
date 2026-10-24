@@ -11,6 +11,7 @@ use clap::Subcommand;
 
 use super::*;
 
+mod capacity;
 mod consensus;
 #[cfg(feature = "deloxide")]
 mod diagnostics;
@@ -32,6 +33,7 @@ mod transactions;
 #[cfg(feature = "deloxide")]
 pub use self::diagnostics::DiagnosticArgs;
 pub use self::{
+    capacity::CapacityArgs,
     consensus::ConsensusArgs,
     membership::MembershipArgs,
     memory_pressure::MemoryPressureArgs,

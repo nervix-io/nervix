@@ -35,6 +35,7 @@ use nervix_nspl::client_statement::ClientStatement;
 use tracing::{error, info, warn};
 
 use super::{
+    cluster_description::describe_cluster,
     cluster_status::render_cluster_status,
     command_result::{CommandDiagnostic, CommandDisposition, CommandResult},
     completion::CompletionError,
@@ -107,6 +108,7 @@ fn requires_request_domain(statement: &Statement) -> bool {
             | Statement::Restore(_)
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
+            | Statement::DescribeCluster(_)
             | Statement::ShowTransactions(_)
             | Statement::DescribeTransaction(_)
             | Statement::DropNode(_)
@@ -125,6 +127,7 @@ pub(in crate::application) fn requires_existing_domain(statement: &Statement) ->
             | Statement::Restore(_)
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
+            | Statement::DescribeCluster(_)
             | Statement::ShowTransactions(_)
             | Statement::DescribeTransaction(_)
             | Statement::DropNode(_)
@@ -138,6 +141,7 @@ fn requires_leader(statement: &Statement) -> bool {
     !matches!(
         statement,
         Statement::ShowClusterStatus(_)
+            | Statement::DescribeCluster(_)
             | Statement::ShowTransactions(_)
             | Statement::DescribeResource(_)
             | Statement::DescribeDomain(_)
@@ -2495,6 +2499,9 @@ impl SessionServiceImpl {
             }
             Statement::ShowClusterStatus(_) => {
                 command_ok(render_cluster_status(&self.inner.cluster, &self.inner.consensus).await)
+            }
+            Statement::DescribeCluster(_) => {
+                command_ok(describe_cluster(&self.inner.cluster, &self.inner.consensus).await)
             }
             Statement::ShowTransactions(_) => self.show_transactions().await,
             Statement::DescribeTransaction(describe) => {

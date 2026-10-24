@@ -221,6 +221,24 @@ pub struct MemoryBudgets {
     pub credentials: ByteUnit,
 }
 
+impl MemoryBudgets {
+    /// Every class's budget together, or `None` when they do not add up to a byte count.
+    pub fn total(&self) -> Option<ByteUnit> {
+        let mut total = 0_u64;
+        for budget in [
+            self.management,
+            self.commands,
+            self.relay,
+            self.bulk,
+            self.restore_metadata,
+            self.credentials,
+        ] {
+            total = total.checked_add(budget.as_u64())?;
+        }
+        Some(ByteUnit::Byte(total))
+    }
+}
+
 impl Default for MemoryBudgets {
     /// 275 MiB of execution buffers plus 2 GiB of admitted retained restore metadata:
     /// 8 MiB reserved for management, 24 MiB for commands and replication,

@@ -87,6 +87,8 @@ def main() -> int:
         ROOT / "crates/models/src/timestamp.rs",
         ROOT / "src/application/domain_clock.rs",
         ROOT / "src/cluster.rs",
+        # A joining node bounds its clock's skew to each peer it handshakes with.
+        ROOT / "src/cluster/prerequisites.rs",
         ROOT / "src/metrics.rs",
         ROOT / PHYSICAL_TIME_OWNER,
         ROOT / "src/runtime_schema/syslog.rs",

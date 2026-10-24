@@ -44,6 +44,7 @@ mod name_spelling;
 mod names;
 mod node_endpoint;
 mod node_ref;
+mod prerequisites;
 mod processor;
 mod quiesce;
 mod rebind_resource;
@@ -219,6 +220,12 @@ pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
+pub use prerequisites::{
+    ConsensusFloors, DescribedPrerequisite, FingerprintTextError, NodePrerequisites, Prerequisite,
+    PrerequisiteMismatch, PrerequisiteRecordError, PrerequisiteTimings, RaftLogDurability,
+    TIMING_COMPATIBILITY_FACTOR, TimingPrerequisite, TrustRootFingerprint, WireContractFingerprint,
+    timing_text,
+};
 pub use processor::{
     AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterJunction,
     AlterJunctionError, AlterProcessorError, AlterProcessorOperation, AlterReingestor,
@@ -301,14 +308,14 @@ pub use statement::{
     CodecWireFormat, CordonNode, CreateBranch, CreateCodec, CreateDomain, CreateEndpoint,
     CreateGenerator, CreateIngestor, CreateLookup, CreatePlacement, CreateRelay, CreateResource,
     CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser, CreateVhost,
-    DeleteSubscription, DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter,
-    DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement,
-    DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction,
-    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace,
-    DomainStartPoint, DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode,
-    EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource, InspectionFormat,
-    LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PlacementPolicy,
-    RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
+    DeleteSubscription, DescribeCluster, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
+    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup,
+    DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
+    DescribeTransaction, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig,
+    DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, DrainNode, DropModel,
+    DropNode, EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource,
+    InspectionFormat, LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind,
+    PlacementPolicy, RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
     RelocationPreferenceStrategy, RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat,
     RetryPolicy, ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements,
     ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,

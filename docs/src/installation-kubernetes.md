@@ -73,8 +73,16 @@ spec:
   initialDefaultUserPasswordSecretRef:
     name: nervix-initial-password
     key: password
-  storage: 5Gi
+  storage: 20Gi
+  resources:
+    memoryLimit: 3Gi
 ```
+
+Each node checks its volume and its memory before it starts, and refuses to start when they cannot
+hold its configuration: its volume must be at least as large as each resource quota, 16 GiB for
+extracted resources by default, and its memory limit must hold its execution budgets, 2.27 GiB. The
+example therefore sets the pod's memory limit above the operator's 2 GiB default.
+[Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) gives the rules.
 
 Apply it and watch the cluster become ready:
 

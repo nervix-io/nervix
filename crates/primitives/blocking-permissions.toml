@@ -51,7 +51,7 @@ bound = "Two small files, read once for each resolver built; a node builds one w
 items = ["task::spawn_blocking"]
 owner = "The resolver's configuration load in nervix-dns."
 path = "crates/dns/src/lib.rs"
-reason = "A node reads its resolver configuration before it builds its executor, and the Rust client and the CLI build the same resolver without one."
+reason = "The resolver names no executor: the Rust client and the CLI build it without one, and a node's startup preflight loads it through the same call."
 
 [[permission]]
 bound = "The flush returns by the physical deadline the host hands the sink's finish."

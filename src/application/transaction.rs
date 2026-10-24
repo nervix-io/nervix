@@ -672,7 +672,8 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         | Statement::DescribeUdf(_)
         | Statement::DescribePlacement(_)
         | Statement::DescribeRelocation(_)
-        | Statement::DescribeTransaction(_) => "DESCRIBE",
+        | Statement::DescribeTransaction(_)
+        | Statement::DescribeCluster(_) => "DESCRIBE",
         _ => "statement",
     }
 }
