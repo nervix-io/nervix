@@ -206,7 +206,7 @@ mod web_console;
 pub use command_execution::{
     CommandExecutionCapacity, CommandExecutionPolicy, CommandRetryValidity,
 };
-use join_supervision::{JoinOutcome, JoinSupervision};
+use join_supervision::{JoinOutcome, JoinStanding, JoinSupervision};
 use nervix_primitives::sync::Arc;
 pub use node_identity::NodeIdentity;
 pub use node_settings::NodeSettings;
@@ -647,6 +647,11 @@ impl Application {
         };
         let recovered_members = consensus.observer().stored_membership_nodes();
         startup.consensus = Some(consensus);
+        let join_standing = if recovered_members.contains_key(&node_id) {
+            JoinStanding::RecoveredMember
+        } else {
+            JoinStanding::Newcomer
+        };
         let mut recovery_endpoints = BTreeSet::new();
         for (member, address) in recovered_members {
             if member == node_id {
@@ -812,6 +817,7 @@ impl Application {
                 cluster: cluster.clone(),
                 observer: consensus.observer(),
                 local_node: node_id.clone(),
+                standing: join_standing,
                 clock_skew_tolerance: settings.membership.clock_skew_tolerance(),
                 probe_retry_interval: settings.membership.gossip_interval(),
             };

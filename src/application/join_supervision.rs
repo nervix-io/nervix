@@ -3,8 +3,8 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** Following one run's join from its first outbound handshake, through the clock skew
-//!   to every peer it completes a handshake with, to its admission to the membership, and the typed
-//!   refusal that stops a node the cluster cannot run beside.
+//!   to the peers it completes a handshake with, to the end of its join, and the typed refusal that
+//!   stops a node the cluster cannot run beside while it is still joining.
 //! - **Depends on.** The transport's join progress and prerequisite record, the cluster's gossip
 //!   view and clock probe, and the consensus membership this node has applied.
 //! - **Must not know.** How a handshake judges two records, how the leader admits a member, or how
@@ -18,10 +18,7 @@
     )
 )]
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use std::{collections::BTreeSet, time::Duration};
 
 use nervix_consensus::Observer;
 use nervix_interconnect::{JoinProgress, JoinRefusal, Transport};
@@ -31,7 +28,7 @@ use nervix_primitives::{
     time::sleep,
 };
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::cluster::{ClockSkew, ClockSkewTolerance, ClusterHandle};
 
@@ -41,7 +38,7 @@ pub enum JoinRefusedError {
     /// This node and a member of the cluster cannot run together.
     #[error("{0}")]
     Prerequisite(JoinRefusal),
-    /// The physical clock of the node this node joined through is too far from its own.
+    /// The physical clock of a peer this node completed a handshake with is too far from its own.
     #[error(
         "the physical clock of node '{peer}' is beyond this node's {name} of {tolerance:?}: {skew}",
         name = ClockSkewTolerance::NAME
@@ -56,12 +53,24 @@ pub enum JoinRefusedError {
 /// How one run's join ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::application) enum JoinOutcome {
-    /// The node is a member of the membership it has applied.
+    /// The join ended with the node in the cluster.
     Admitted,
     /// The cluster cannot run beside this node; it stops.
     Refused(JoinRefusedError),
     /// The node began stopping before its join ended.
     Stopping,
+}
+
+/// What one run joins as, by the membership it recovered from durable state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::application) enum JoinStanding {
+    /// A member of the membership it recovered. Its return changes neither the voters nor the
+    /// quorum, so its join ends at the first answer a peer gives to its clock probe.
+    RecoveredMember,
+    /// Outside the membership it recovered, or with none recovered. Its join ends once the
+    /// membership it has applied admits it, because from then on the cluster may count it among
+    /// its voters.
+    Newcomer,
 }
 
 /// How the first outbound handshake of this run ended.
@@ -71,11 +80,120 @@ enum FirstHandshake {
     Stopping,
 }
 
-/// How the clock skew to the peer this node joined through was judged.
-enum SkewJudgment {
-    Within,
-    Beyond(JoinRefusedError),
-    Stopping,
+/// What a joining node sees between two rounds of clock probes.
+#[derive(Debug, Default)]
+struct JoinView {
+    /// Whether the membership this node has applied holds it.
+    admitted: bool,
+    /// The first live member of that membership whose record this node cannot run beside.
+    incompatible_member: Option<JoinRefusal>,
+    /// The live peers this node has completed a handshake with.
+    connected: BTreeSet<ClusterNodeName>,
+}
+
+/// What a joining node does next.
+#[derive(Debug, PartialEq, Eq)]
+enum JoinStep {
+    /// The join ended.
+    Ended(JoinOutcome),
+    /// Probe the clocks of these peers, in this order.
+    Probe(Vec<ClusterNodeName>),
+}
+
+/// The decisions of one run's join, from what the node has seen since its first outbound
+/// handshake completed.
+struct JoinJudge {
+    standing: JoinStanding,
+    /// The peer that handshake completed with; its clock is probed first.
+    through: ClusterNodeName,
+    clock_skew_tolerance: Duration,
+    /// The peers whose clock answered within the tolerance.
+    within: BTreeSet<ClusterNodeName>,
+}
+
+impl JoinJudge {
+    fn new(
+        standing: JoinStanding,
+        through: ClusterNodeName,
+        clock_skew_tolerance: Duration,
+    ) -> Self {
+        Self {
+            standing,
+            through,
+            clock_skew_tolerance,
+            within: BTreeSet::new(),
+        }
+    }
+
+    /// What to do after seeing `view`. A newcomer's join ends once it is admitted, or once a live
+    /// member it cannot run beside refuses it. Otherwise every peer whose clock has not answered
+    /// within the tolerance is probed, the one this node joined through first.
+    fn step(&self, view: JoinView) -> JoinStep {
+        if self.standing == JoinStanding::Newcomer {
+            if view.admitted {
+                return JoinStep::Ended(JoinOutcome::Admitted);
+            }
+            if let Some(refusal) = view.incompatible_member {
+                return JoinStep::Ended(JoinOutcome::Refused(JoinRefusedError::Prerequisite(
+                    refusal,
+                )));
+            }
+        }
+        let mut peers = Vec::new();
+        if !self.within.contains(&self.through) {
+            peers.push(self.through.clone());
+        }
+        for peer in view.connected {
+            if peer != self.through && !self.within.contains(&peer) {
+                peers.push(peer);
+            }
+        }
+        JoinStep::Probe(peers)
+    }
+
+    /// Records the skew one answered probe of `peer` proved, with whether the membership this node
+    /// has applied held it once the answer arrived, and returns how the join ended if it did.
+    fn record(
+        &mut self,
+        peer: ClusterNodeName,
+        skew: ClockSkew,
+        admitted: bool,
+    ) -> Option<JoinOutcome> {
+        if skew.at_least() <= self.clock_skew_tolerance {
+            if peer == self.through {
+                info!(
+                    peer = %peer,
+                    %skew,
+                    "joined the cluster through a peer whose clock is within tolerance"
+                );
+            } else {
+                debug!(peer = %peer, %skew, "a peer's clock is within tolerance");
+            }
+            match self.standing {
+                JoinStanding::RecoveredMember => return Some(JoinOutcome::Admitted),
+                JoinStanding::Newcomer => {
+                    self.within.insert(peer);
+                    return None;
+                }
+            }
+        }
+        let refusal = JoinRefusedError::ClockSkew {
+            peer,
+            skew,
+            tolerance: self.clock_skew_tolerance,
+        };
+        // Refusing is correct only while the node is joining: once admitted, it may already be a
+        // voter the cluster's quorum counts.
+        if self.standing == JoinStanding::Newcomer && admitted {
+            warn!(
+                refusal = %refusal,
+                "a peer's clock proved beyond tolerance only after the membership admitted this \
+                 node, which stays in the cluster"
+            );
+            return Some(JoinOutcome::Admitted);
+        }
+        Some(JoinOutcome::Refused(refusal))
+    }
 }
 
 /// Follows the join of a node that starts with peers to reach: a bootstrap host or the members it
@@ -86,13 +204,16 @@ pub(in crate::application) struct JoinSupervision {
     pub(in crate::application) cluster: Arc<ClusterHandle>,
     pub(in crate::application) observer: Observer,
     pub(in crate::application) local_node: ClusterNodeName,
+    pub(in crate::application) standing: JoinStanding,
     pub(in crate::application) clock_skew_tolerance: Duration,
     /// How long to wait before probing an unanswered peer's clock again.
     pub(in crate::application) probe_retry_interval: Duration,
 }
 
 impl JoinSupervision {
-    /// Follows this run's join until the node is admitted, refused, or stopping.
+    /// Follows this run's join until it ends with the node in the cluster, refused, or stopping.
+    /// A peer that does not answer its clock probe is probed again in the next round, a gossip
+    /// interval later or sooner when the topology or the live nodes change.
     pub(in crate::application) async fn run(self, stopping: CancellationToken) -> JoinOutcome {
         let through = match self.first_outbound_handshake(&stopping).await {
             FirstHandshake::Joined { through } => through,
@@ -101,12 +222,55 @@ impl JoinSupervision {
             }
             FirstHandshake::Stopping => return JoinOutcome::Stopping,
         };
-        match self.judge_clock_skew(&through, &stopping).await {
-            SkewJudgment::Within => {}
-            SkewJudgment::Beyond(refusal) => return JoinOutcome::Refused(refusal),
-            SkewJudgment::Stopping => return JoinOutcome::Stopping,
+        let mut judge = JoinJudge::new(self.standing, through, self.clock_skew_tolerance);
+        let mut topology = self.observer.subscribe_topology();
+        let mut live_nodes = self.cluster.subscribe_live_node_states().await;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let view = self.view().await;
+            let peers = match judge.step(view) {
+                JoinStep::Ended(outcome) => return outcome,
+                JoinStep::Probe(peers) => peers,
+            };
+            for peer in peers {
+                nervix_primitives::task::consume_budget().await;
+                let probe = nervix_primitives::select! {
+                    _ = stopping.cancelled() => return JoinOutcome::Stopping,
+                    probe = self.cluster.probe_clock_skew(&peer) => probe,
+                };
+                let skew = match probe {
+                    Ok(skew) => skew,
+                    Err(error) => {
+                        debug!(
+                            peer = %peer,
+                            error = %format!("{error:#}"),
+                            "a peer did not answer its clock probe; it is probed again later"
+                        );
+                        continue;
+                    }
+                };
+                // The leader may have admitted this node while the probe was in flight, so the
+                // membership is read once the answer is here.
+                let admitted = self.is_member().await;
+                if let Some(outcome) = judge.record(peer, skew, admitted) {
+                    return outcome;
+                }
+            }
+            nervix_primitives::select! {
+                _ = stopping.cancelled() => return JoinOutcome::Stopping,
+                changed = topology.changed() => {
+                    if !changed {
+                        return JoinOutcome::Stopping;
+                    }
+                }
+                changed = live_nodes.changed() => {
+                    if changed.is_err() {
+                        return JoinOutcome::Stopping;
+                    }
+                }
+                () = sleep(self.probe_retry_interval) => {}
+            }
         }
-        self.until_admitted(through, &stopping).await
     }
 
     /// Waits for the first outbound handshake of this run to complete or to be refused.
@@ -132,160 +296,48 @@ impl JoinSupervision {
         }
     }
 
-    /// Probes the clock of the peer this node joined through until it answers, and refuses the
-    /// join when the skew one probe proves exceeds this node's tolerance.
-    async fn judge_clock_skew(
-        &self,
-        through: &ClusterNodeName,
-        stopping: &CancellationToken,
-    ) -> SkewJudgment {
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let probe = nervix_primitives::select! {
-                _ = stopping.cancelled() => return SkewJudgment::Stopping,
-                probe = self.cluster.probe_clock_skew(through) => probe,
-            };
-            match probe {
-                Ok(skew) => match self.skew_judgment(through, skew) {
-                    SkewJudgment::Within => {
-                        info!(
-                            peer = %through,
-                            %skew,
-                            "joined the cluster through a peer whose clock is within tolerance"
-                        );
-                        return SkewJudgment::Within;
-                    }
-                    beyond => return beyond,
-                },
-                Err(error) => debug!(
-                    peer = %through,
-                    error = %format!("{error:#}"),
-                    "the node this node joined through did not answer its clock probe"
-                ),
-            }
-            nervix_primitives::select! {
-                _ = stopping.cancelled() => return SkewJudgment::Stopping,
-                () = sleep(self.probe_retry_interval) => {}
-            }
-        }
+    /// Whether the membership this node has applied holds it.
+    async fn is_member(&self) -> bool {
+        self.observer
+            .membership_nodes()
+            .await
+            .contains_key(&self.local_node)
     }
 
-    /// Whether the skew one probe of `peer` proved is within this node's tolerance.
-    fn skew_judgment(&self, peer: &ClusterNodeName, skew: ClockSkew) -> SkewJudgment {
-        if skew.at_least() > self.clock_skew_tolerance {
-            return SkewJudgment::Beyond(JoinRefusedError::ClockSkew {
-                peer: peer.clone(),
-                skew,
-                tolerance: self.clock_skew_tolerance,
-            });
-        }
-        SkewJudgment::Within
-    }
-
-    /// While this node is outside the membership it has applied, refuses the join as soon as a
-    /// live member publishes a record this node cannot run beside, or a peer it completed a
-    /// handshake with proves a clock beyond its tolerance. Peers are probed once each; one that
-    /// does not answer is probed again a gossip interval later.
-    async fn until_admitted(
-        &self,
-        through: ClusterNodeName,
-        stopping: &CancellationToken,
-    ) -> JoinOutcome {
-        let mut topology = self.observer.subscribe_topology();
-        let mut live_nodes = self.cluster.subscribe_live_node_states().await;
-        let mut probed = BTreeSet::from([through]);
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let membership = self.observer.membership_nodes().await;
-            if membership.contains_key(&self.local_node) {
-                return JoinOutcome::Admitted;
-            }
-            if let Some(refusal) = self.incompatible_live_member(&membership).await {
-                return JoinOutcome::Refused(JoinRefusedError::Prerequisite(refusal));
-            }
-            if let Some(refusal) = self.probe_connected_peers(&mut probed, stopping).await {
-                return refusal;
-            }
-            nervix_primitives::select! {
-                _ = stopping.cancelled() => return JoinOutcome::Stopping,
-                changed = topology.changed() => {
-                    if !changed {
-                        return JoinOutcome::Stopping;
-                    }
-                }
-                changed = live_nodes.changed() => {
-                    if changed.is_err() {
-                        return JoinOutcome::Stopping;
-                    }
-                }
-                () = sleep(self.probe_retry_interval) => {}
-            }
-        }
-    }
-
-    /// The first live member, by the membership this node has applied, whose published record
-    /// this node cannot run beside. A live node outside that membership, such as another joining
-    /// node or one that was itself refused and has not left gossip yet, never refuses this one.
-    async fn incompatible_live_member(
-        &self,
-        membership: &BTreeMap<ClusterNodeName, String>,
-    ) -> Option<JoinRefusal> {
+    /// What this node sees now: whether it is admitted, the first live member whose record it
+    /// cannot run beside, and the live peers it has completed a handshake with. A live node outside
+    /// the membership this node has applied, such as another joining node or one that was itself
+    /// refused and has not left gossip yet, never refuses it.
+    async fn view(&self) -> JoinView {
+        let membership = self.observer.membership_nodes().await;
         let local = self.transport.local_prerequisites();
         let gossip = self.cluster.gossip_state().await;
+        let mut view = JoinView {
+            admitted: membership.contains_key(&self.local_node),
+            ..JoinView::default()
+        };
         for node in gossip.live_nodes {
-            if node.node_id == self.local_node || !membership.contains_key(&node.node_id) {
+            if node.node_id == self.local_node {
                 continue;
             }
-            let Some(record) = node.prerequisites else {
-                continue;
-            };
-            if let Err(mismatch) = local.verify_peer(&record) {
-                return Some(JoinRefusal {
-                    peer: node.node_id,
+            if view.incompatible_member.is_none()
+                && membership.contains_key(&node.node_id)
+                && let Some(record) = &node.prerequisites
+                && let Err(mismatch) = local.verify_peer(record)
+            {
+                view.incompatible_member = Some(JoinRefusal {
+                    peer: node.node_id.clone(),
                     mismatch,
                 });
             }
-        }
-        None
-    }
-
-    /// Probes the clock of every live peer this node has completed a handshake with and has not
-    /// probed yet, and refuses the join at the first one beyond its tolerance.
-    async fn probe_connected_peers(
-        &self,
-        probed: &mut BTreeSet<ClusterNodeName>,
-        stopping: &CancellationToken,
-    ) -> Option<JoinOutcome> {
-        let gossip = self.cluster.gossip_state().await;
-        for node in gossip.live_nodes {
-            nervix_primitives::task::consume_budget().await;
-            let peer = node.node_id;
-            if peer == self.local_node
-                || probed.contains(&peer)
-                || !self.transport.is_connected_to(&peer)
-            {
-                continue;
-            }
-            let probe = nervix_primitives::select! {
-                _ = stopping.cancelled() => return Some(JoinOutcome::Stopping),
-                probe = self.cluster.probe_clock_skew(&peer) => probe,
-            };
-            match probe {
-                Ok(skew) => match self.skew_judgment(&peer, skew) {
-                    SkewJudgment::Within => {
-                        debug!(peer = %peer, %skew, "a peer's clock is within tolerance");
-                        probed.insert(peer);
-                    }
-                    SkewJudgment::Beyond(refusal) => return Some(JoinOutcome::Refused(refusal)),
-                    SkewJudgment::Stopping => return Some(JoinOutcome::Stopping),
-                },
-                Err(error) => debug!(
-                    peer = %peer,
-                    error = %format!("{error:#}"),
-                    "a peer did not answer its clock probe; it is probed again later"
-                ),
+            if self.transport.is_connected_to(&node.node_id) {
+                view.connected.insert(node.node_id);
             }
         }
-        None
+        view
     }
 }
+
+#[cfg(test)]
+#[path = "join_supervision_tests.rs"]
+mod tests;

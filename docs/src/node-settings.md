@@ -157,13 +157,16 @@ the node's record is compatible with the record of every live voter, and leaves 
 published no record it can read outside the membership.
 
 Once its first connection completes, a joining node asks the peer it joined through for its
-physical clock, again every gossip interval until the peer answers. Until it is admitted, it then
-asks every other live peer it has completed a handshake with, once each, and again a gossip
-interval later for one that did not answer. The peer read its clock between the probe's departure
-and its answer's arrival, so one probe proves skew only when the reading falls outside that
-window, and the skew it proves is the distance to the nearer end. A peer whose clock reads before
-the Unix epoch answers so, and is behind by more than all the time since it. A node whose proven
-skew to any of those peers exceeds its `--clock-skew-tolerance` stops.
+physical clock, then every other live peer it has completed a handshake with. It asks each peer
+once, and asks a peer that did not answer again a gossip interval later. The peer read its clock
+between the probe's departure and its answer's arrival, so one probe proves skew only when the
+reading falls outside that window, and the skew it proves is the distance to the nearer end. A peer
+whose clock reads before the Unix epoch answers so, and is behind by more than all the time since
+it. A node whose proven skew to one of those peers exceeds its `--clock-skew-tolerance` stops, but
+only while it is still joining. A member its stored membership names returns without changing the
+voters or the quorum, so its join ends at the first answer. Any other node's join ends once the
+membership it has applied admits it, because from then on the cluster may count it among its
+voters: a skew that an answer proves after that is logged at `warn`, and the node stays.
 
 A refused node logs `this node was refused at join and stops` at `error`, requests its own stop,
 runs the ordinary shutdown phases, and exits with status `1`. Its report, beneath
