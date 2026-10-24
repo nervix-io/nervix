@@ -2665,9 +2665,10 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "one scenario-owned relay fanout pause is claimed once",
+            reason = "a scenario-owned relay fanout delay is read for every batch, and one \
+                      scenario-owned relay fanout pause is claimed once",
             key = "one test domain",
-            bound = "one keyed read; its guard ends before the test-controlled wait"
+            bound = "two keyed reads; each guard ends before its test-controlled wait"
         )
     )]
     pub(crate) async fn pause_owner_relay_fanout_if_armed(&self, domain: &DomainName) {
