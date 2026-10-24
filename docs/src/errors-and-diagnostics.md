@@ -1176,10 +1176,12 @@ owns these harness bounds and the distinction from product shutdown deadlines.
 
 The WebSocket declaration fixture treats `Protocol(HandshakeIncomplete)` during an opening
 upgrade as a cancelled attempt. It records that outcome and keeps its payload gate for the next
-completed upgrade. Other handshake errors and established-stream failures preserve their typed
-tungstenite cause beneath the I/O error; a fixture task ending with one still fails the scenario's
-After hook. [Fixture cleanup](./integration-test-lifecycle.md#what-cleanup-releases) owns the
-listener's lifetime.
+completed upgrade. A received Close frame supplies the graceful-close observation. When flushing
+its reply, `ConnectionClosed`, a TCP reset or a broken pipe means the initiator already ended its
+transport, so that observed close completes normally. Other handshake errors, established-stream
+reads and unexpected reply failures preserve their typed tungstenite cause beneath the I/O error;
+a fixture task ending with one still fails the scenario's After hook.
+[Fixture cleanup](./integration-test-lifecycle.md#what-cleanup-releases) owns the listener's lifetime.
 
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;

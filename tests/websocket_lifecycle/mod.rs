@@ -24,6 +24,7 @@ use tokio_tungstenite::tungstenite::{
 };
 
 use super::{ScenarioWorld, draw_scenario_port, initialize_scenario_identity};
+use crate::common::websocket_close::reply_to_close;
 
 const PEER_WAIT: Duration = Duration::from_secs(60);
 
@@ -89,7 +90,7 @@ impl WebsocketPeer {
                     nervix_primitives::task::consume_budget().await;
                     match message.map_err(io::Error::other)? {
                         Message::Close(_) => {
-                            socket.flush().await.map_err(io::Error::other)?;
+                            reply_to_close(&mut socket).await?;
                             if events_tx.send(PeerEvent::ReceivedClose).await.is_err() {
                                 return Ok(());
                             }
@@ -159,11 +160,7 @@ impl WebsocketPeer {
                     nervix_primitives::task::consume_budget().await;
                     let event = match socket.next().await {
                         Some(Ok(Message::Close(_))) => {
-                            match socket.flush().await {
-                                Ok(())
-                                | Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed) => {}
-                                Err(error) => return Err(io::Error::other(error)),
-                            }
+                            reply_to_close(&mut socket).await?;
                             PeerEvent::ReceivedClose
                         }
                         Some(Ok(_)) => continue,

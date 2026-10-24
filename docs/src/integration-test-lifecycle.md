@@ -1520,8 +1520,12 @@ until that node has ended.
   The declaration peer also records an opening client ending an incomplete upgrade, then accepts
   another connection with its pending payload gate intact. The BUFFER/codec-change outlines end a
   partial upgrade and await that cancellation event before starting their one- or three-node
-  cluster. Other handshake errors and established-connection failures still fail the fixture and
-  its After hook.
+  cluster. A received Close frame supplies the graceful-close observation. Its queued reply can
+  find the connection already closed or TCP reset or broken: the initiator can end TCP after
+  sending Close and before reading that reply. The shared close-reply owner treats those endings
+  as completion, and focused harness tests parse a real Close frame before injecting each write
+  failure. Other handshake errors, established-stream reads and unexpected reply failures retain
+  their typed causes and fail the fixture and its After hook.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes, and the
   endpoints it stood in front of a shared dependency, are released once those nodes have ended.
 - The ZeroMQ and syslog ports drawn for the scenario return to the pool after their nodes and
