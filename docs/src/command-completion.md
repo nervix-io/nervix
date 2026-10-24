@@ -212,6 +212,12 @@ models, schedules, clocks, resource bindings, and stopped or running lifecycle s
 listeners start. Each node then reports `ready`, and success waits for the readiness barrier. This
 prevents a source from publishing into a peer that still has the preceding graph.
 
+These barriers belong to commands. The ownership move a stopping node asks for during graceful
+shutdown is not a command, and the stopping node's drain budget bounds it. Each unit it moves
+activates once the live participants of the unit's hold have prepared the revision, and the other
+nodes complete the revision through their own installation; see
+[Draining Admitted Work](./shutdown.md#draining-admitted-work).
+
 Revision progress is cumulative. If a newer runtime revision arrives while a node is waiting at
 either barrier, that node applies the newer coherent state instead of waiting to finish the older
 revision first. Preparing or becoming ready at the newer revision also completes every earlier

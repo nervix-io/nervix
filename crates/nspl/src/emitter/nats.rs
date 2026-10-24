@@ -36,8 +36,12 @@ pub(super) fn mode<'src>()
 
 pub(super) fn subject_body<'src>(
     context: EmitterContext,
-) -> impl Parser<'src, &'src [Token], ParsedDestination<NatsSubjectSink>, extra::Err<ParseError<'src>>>
-+ Clone {
+) -> impl Parser<
+    'src,
+    &'src [Token],
+    ParsedDestination<NatsSubjectEmitter>,
+    extra::Err<ParseError<'src>>,
+> + Clone {
     encoded_destination(
         context,
         client_ref()
@@ -45,7 +49,7 @@ pub(super) fn subject_body<'src>(
             .then(external_name::<NatsPublishSubjectName>())
             .then_ignore(kw(Identifier::Mode))
             .then(mode())
-            .map(|((client, subject), mode)| NatsSubjectSink {
+            .map(|((client, subject), mode)| NatsSubjectEmitter {
                 client,
                 subject,
                 mode,

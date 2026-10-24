@@ -26,7 +26,8 @@ use crate::{
         TransactionBounds, TransactionLimits,
         cli_values::{HumanBytes, HumanDuration},
     },
-    cluster::MembershipSettings,
+    capacity::CapacitySettings,
+    cluster::{MembershipSettings, MembershipValues},
     memory_pressure::MemoryPressureSettings,
     resource::ResourceSettings,
     runtime::RuntimeSettings,
@@ -38,7 +39,7 @@ const CASE_BYTES: usize = 512;
 /// well inside what duration text can name.
 const LONGEST_SECONDS: u64 = 1_000_000_000_000;
 
-/// The most whole milliseconds a generated Raft timing spans before the gaps that order them.
+/// The most whole milliseconds a generated timing prerequisite spans above its floor.
 const LONGEST_TIMING_MILLIS: u64 = 1_000_000_000;
 
 /// Builds current node settings, each group valid on its own and every relationship held.
@@ -110,11 +111,19 @@ impl<'bytes> GeneratedSettings<'bytes> {
     }
 
     fn raft(&mut self) -> RaftTimings {
-        let heartbeat = self.timing_from(0);
-        let minimum = self.timing_from(one_millisecond_above(heartbeat));
-        let maximum = self.timing_from(one_millisecond_above(minimum));
-        RaftTimings::resolve(Some(heartbeat), Some(minimum), Some(maximum))
-            .assured("each timing starts a whole millisecond above the one before it")
+        let heartbeat = self.timing_from(1);
+        RaftTimings::resolve(Some(heartbeat)).assured(
+            "the heartbeat is at least a millisecond and twelve of it fit u64 milliseconds",
+        )
+    }
+
+    fn membership(&mut self) -> MembershipSettings {
+        MembershipSettings::resolve(MembershipValues {
+            node_unavailability_timeout: Some(self.duration()),
+            gossip_interval: Some(self.timing_from(1)),
+            clock_skew_tolerance: Some(self.timing_from(1)),
+        })
+        .assured("each membership timing is at least a millisecond and bounded")
     }
 
     fn raft_retention(&mut self) -> RaftRetentionSettings {
@@ -126,6 +135,16 @@ impl<'bytes> GeneratedSettings<'bytes> {
             retained_log_cap: Some(self.bytes()),
         })
         .assured("the Raft retention bounds declare no validation")
+    }
+
+    fn capacity(&mut self) -> CapacitySettings {
+        let memory_limit = if self.entropy.flag() {
+            Some(ByteUnit::Byte(self.entropy.between(1..=u64::MAX)))
+        } else {
+            None
+        };
+        CapacitySettings::resolve(memory_limit)
+            .assured("a memory limit, when given, is at least one byte")
     }
 
     fn memory_pressure(&mut self) -> MemoryPressureSettings {
@@ -163,11 +182,15 @@ impl<'bytes> GeneratedSettings<'bytes> {
     fn node_settings(&mut self) -> NodeSettings {
         let raft = self.raft();
         let raft_retention = self.raft_retention();
-        let membership = MembershipSettings::resolve(Some(self.duration()))
-            .assured("the membership settings declare no validation");
+        let membership = self.membership();
         let scheduling = SchedulingSettings::resolve(Some(self.size()))
             .assured("the scheduling settings declare no validation");
-        let runtime = RuntimeSettings::resolve(Some(self.duration()), Some(self.bytes()))
+        let restore_staging_max_bytes = if self.entropy.flag() {
+            Some(self.bytes())
+        } else {
+            None
+        };
+        let runtime = RuntimeSettings::resolve(Some(self.duration()), restore_staging_max_bytes)
             .assured("the runtime settings declare no validation");
         let transactions = TransactionLimits::resolve(TransactionBounds {
             idle_timeout: Some(self.duration()),
@@ -184,6 +207,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
         let resources =
             ResourceSettings::resolve(Some(self.bytes()), Some(self.bytes()), Some(self.count()))
                 .assured("the resource settings declare no validation");
+        let capacity = self.capacity();
         NodeSettings {
             raft,
             raft_retention,
@@ -195,17 +219,9 @@ impl<'bytes> GeneratedSettings<'bytes> {
             memory_pressure,
             shutdown,
             resources,
+            capacity,
         }
     }
-}
-
-/// The first whole millisecond above `timing`'s.
-fn one_millisecond_above(timing: Duration) -> u64 {
-    let millis =
-        u64::try_from(timing.as_millis()).assured("generated timings stay far below u64::MAX ms");
-    millis
-        .checked_add(1)
-        .assured("generated timings stay far below u64::MAX ms")
 }
 
 #[test]

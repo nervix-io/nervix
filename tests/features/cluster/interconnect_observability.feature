@@ -65,7 +65,7 @@ Feature: Interconnection observability
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event UNBRANCHED;
-      CREATE ZEROMQ CLIENT sink CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -77,7 +77,7 @@ Feature: Interconnection observability
         TO input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE ZEROMQ PUSH EMITTER sink_output FROM input
-        TO sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;

@@ -23,7 +23,7 @@ pub(super) fn collector_body<'src>(
 ) -> impl Parser<
     'src,
     &'src [Token],
-    ParsedDestination<SyslogCollectorSink>,
+    ParsedDestination<SyslogCollectorEmitter>,
     extra::Err<ParseError<'src>>,
 > + Clone {
     encoded_destination(
@@ -31,6 +31,6 @@ pub(super) fn collector_body<'src>(
         client_ref()
             .then_ignore(kw(Identifier::Mode))
             .then(mode())
-            .map(|(client, mode)| SyslogCollectorSink { client, mode }),
+            .map(|(client, mode)| SyslogCollectorEmitter { client, mode }),
     )
 }

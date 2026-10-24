@@ -249,9 +249,10 @@ mod tests {
             ("NEUTRAL", PlacementPolicy::Neutral),
             ("SUGGEST SEPARATION", PlacementPolicy::SuggestSeparation),
         ] {
-            let statement =
-                parse_statement(&format!("CREATE PLACEMENT p FROM source TO sink {source};"))
-                    .expect("placement policy must parse");
+            let statement = parse_statement(&format!(
+                "CREATE PLACEMENT p FROM source TO emitter {source};"
+            ))
+            .expect("placement policy must parse");
             let Statement::Create(create) = statement else {
                 panic!("expected CREATE model");
             };
@@ -265,7 +266,7 @@ mod tests {
     #[test]
     fn rejects_rank_zero_with_public_diagnostic() {
         let error =
-            parse_create_placement("CREATE PLACEMENT p FROM source TO sink NEUTRAL RANK 0;")
+            parse_create_placement("CREATE PLACEMENT p FROM source TO emitter NEUTRAL RANK 0;")
                 .expect_err("rank zero must fail");
         let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error");
@@ -280,12 +281,12 @@ mod tests {
     #[test]
     fn rejects_hard_separation_and_empty_sides() {
         assert!(
-            parse_create_placement("CREATE PLACEMENT p FROM source TO sink REQUIRE SEPARATION;")
+            parse_create_placement("CREATE PLACEMENT p FROM source TO emitter REQUIRE SEPARATION;")
                 .is_err(),
             "hard separation is not a policy"
         );
         assert!(
-            parse_create_placement("CREATE PLACEMENT p FROM TO sink NEUTRAL;").is_err(),
+            parse_create_placement("CREATE PLACEMENT p FROM TO emitter NEUTRAL;").is_err(),
             "FROM must not be empty"
         );
         assert!(
@@ -343,7 +344,7 @@ mod tests {
 
     #[test]
     fn completes_policy_phrases_without_branch_leakage() {
-        let input = "CREATE PLACEMENT critical FROM source TO sink ";
+        let input = "CREATE PLACEMENT critical FROM source TO emitter ";
         let suggestions = suggest_create_placement(input, input.len());
         for expected in [
             "REQUIRE COLOCATION",

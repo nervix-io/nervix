@@ -1179,11 +1179,11 @@ mod tests {
 
         acks.split_into(2, &mut shares);
         shares[0].ack_success();
-        shares[1].no_ack("sink rejected the message");
+        shares[1].no_ack("emitter rejected the message");
 
         assert_eq!(
             completion.wait().await,
-            AckOutcome::NoAck("sink rejected the message".to_string())
+            AckOutcome::NoAck("emitter rejected the message".to_string())
         );
     }
 
@@ -1872,7 +1872,7 @@ mod shuttle_tests {
                 let (failing_payload, mut failing) = trackers.second_ingestor_root();
                 let (fanned_payload, mut fanned) = trackers.first_ingestor_root();
 
-                let rejected_by_sink = failing_payload.attached();
+                let rejected_by_emitter = failing_payload.attached();
                 let rejected_by_route = failing_payload.attached();
                 let batch = AckSet::merged([batched_payload, failing_payload]);
                 let fan_out_source = fanned_payload.attached();
@@ -1902,8 +1902,9 @@ mod shuttle_tests {
                 trackers.assert_counts(&[&batched, &fanned], &[&failing]);
 
                 let output_consumer = thread::spawn(move || output.ack_success());
-                let sink =
-                    thread::spawn(move || rejected_by_sink.no_ack("sink rejected the message"));
+                let connector = thread::spawn(move || {
+                    rejected_by_emitter.no_ack("emitter rejected the message")
+                });
                 let route = thread::spawn(move || {
                     rejected_by_route.no_ack("error route rejected the message");
                 });
@@ -1915,7 +1916,7 @@ mod shuttle_tests {
                 let second_consumer = thread::spawn(move || second_consumer_share.ack_success());
 
                 output_consumer.join().assured(JOINED);
-                sink.join().assured(JOINED);
+                connector.join().assured(JOINED);
                 route.join().assured(JOINED);
                 release.join().assured(JOINED);
                 first_consumer.join().assured(JOINED);
@@ -1928,7 +1929,7 @@ mod shuttle_tests {
                 assert_eq!(fanned.outcome(), Some(&AckOutcome::Ack));
                 match failing.outcome() {
                     Some(AckOutcome::NoAck(reason)) => assert!(
-                        reason == "sink rejected the message"
+                        reason == "emitter rejected the message"
                             || reason == "error route rejected the message",
                         "the failing root must resolve with one of its two rejections, not \
                          {reason:?}"

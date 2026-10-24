@@ -1435,7 +1435,7 @@ pub fn set_or_where_route_construction<'src>()
     )
 }
 
-/// A construction limited to `WHERE`, for direct emitter sinks whose output is already fully
+/// A construction limited to `WHERE`, for direct emitter emitters whose output is already fully
 /// described by their `VALUES` mapping.
 pub fn where_only_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {

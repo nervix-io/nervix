@@ -14,7 +14,7 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaTopicName, KafkaTopicSource,
+    KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaTopicIngestor, KafkaTopicName,
 };
 
 use super::delivery::{
@@ -29,7 +29,7 @@ use crate::{
 /// `FROM <client> TOPIC '<topic>' OFFSET BY DOMAIN|CONSUMER GROUP '<group>' [INSTANCES <n>] MODE …
 /// ON QUIESCE SUSPEND`.
 pub(super) fn topic_body<'src>()
--> impl Parser<'src, &'src [Token], KafkaTopicSource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], KafkaTopicIngestor, extra::Err<ParseError<'src>>> + Clone {
     let offset_mode = kw(Identifier::Offset)
         .ignore_then(kw(Identifier::By))
         .ignore_then(choice((
@@ -47,7 +47,7 @@ pub(super) fn topic_body<'src>()
         .then(mode())
         .then(suspend_only_quiesce_clause())
         .map(
-            |(((((client, topic), offset_mode), instances), mode), quiesce)| KafkaTopicSource {
+            |(((((client, topic), offset_mode), instances), mode), quiesce)| KafkaTopicIngestor {
                 client,
                 topic,
                 offset_mode,

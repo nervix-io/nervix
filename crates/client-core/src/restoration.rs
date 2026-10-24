@@ -58,7 +58,7 @@ use crate::{
         DomainClockAttachments,
     },
     error::{ClientError, RequestKind},
-    exchange::{EventSinks, Exchange, ExchangeRequests, PendingRequest, SESSION_LIMITS},
+    exchange::{EventTargets, Exchange, ExchangeRequests, PendingRequest, SESSION_LIMITS},
     producer::{Answered, ProducerInner},
     subscriptions::{DesiredSubscriptions, RestoreAttempt},
 };
@@ -171,7 +171,7 @@ impl RestorationChannel {
 pub(crate) struct Restoration {
     channel: RestorationChannel,
     generation: Arc<()>,
-    sinks: EventSinks,
+    emitters: EventTargets,
     /// The domains whose clocks this exchange restores: an attach was sent, or one waits for a
     /// detach of the clock to end.
     attached: HashSet<DomainName>,
@@ -223,7 +223,7 @@ impl Restoration {
                 request_timeout,
             },
             generation: exchange.generation.clone(),
-            sinks: exchange.sinks.clone(),
+            emitters: exchange.emitters.clone(),
             attached: HashSet::default(),
             clocks: Vec::new(),
             unpublished: Vec::new(),
@@ -236,10 +236,10 @@ impl Restoration {
     /// Attaches every clock the client follows, before the exchange is published. A clock whose
     /// detach is in flight waits for it instead.
     pub(crate) async fn attach_followed_clocks(&mut self) {
-        for domain in self.sinks.clocks.followed_domains() {
+        for domain in self.emitters.clocks.followed_domains() {
             nervix_primitives::task::consume_budget().await;
             let step = self
-                .sinks
+                .emitters
                 .clocks
                 .restoration_step(&domain, ClockRestorationScope::Followed);
             match step {
@@ -262,13 +262,13 @@ impl Restoration {
     /// Attaches the clocks the end of the previous exchange interrupted that this exchange does
     /// not restore yet: a clock the client began to follow there while this exchange was opening.
     pub(crate) async fn attach_interrupted_clocks(&mut self) {
-        for domain in self.sinks.clocks.interrupted_domains() {
+        for domain in self.emitters.clocks.interrupted_domains() {
             nervix_primitives::task::consume_budget().await;
             if self.attached.contains(&domain) {
                 continue;
             }
             let step = self
-                .sinks
+                .emitters
                 .clocks
                 .restoration_step(&domain, ClockRestorationScope::Interrupted);
             match step {
@@ -307,7 +307,7 @@ impl Restoration {
     /// Opens every acknowledged subscription the end of the previous exchange interrupted, each
     /// as a new generation.
     pub(crate) async fn open_subscriptions(&mut self) {
-        for attempt in self.sinks.desired.restore(self.generation.clone()) {
+        for attempt in self.emitters.desired.restore(self.generation.clone()) {
             nervix_primitives::task::consume_budget().await;
             let request = ClientRequest::Subscribe(attempt.contract.request());
             let sent = self.channel.send(request).await;
@@ -320,7 +320,7 @@ impl Restoration {
     /// fenced by its exchange and checked against the original endpoint contract before the
     /// application may send through it.
     pub(crate) async fn open_producers(&mut self) {
-        for handle in self.sinks.producers.restorable() {
+        for handle in self.emitters.producers.restorable() {
             nervix_primitives::task::consume_budget().await;
             let Some(request) = handle.begin_restore(&self.generation) else {
                 continue;
@@ -335,7 +335,7 @@ impl Restoration {
 
     /// Restores native emitter consumers with fresh request identities on this exchange.
     pub(crate) async fn open_consumers(&mut self) {
-        for handle in self.sinks.consumers.restorable() {
+        for handle in self.emitters.consumers.restorable() {
             nervix_primitives::task::consume_budget().await;
             let Some(request) = handle.begin_restore(&self.generation) else {
                 continue;
@@ -351,7 +351,7 @@ impl Restoration {
         for clock in self.clocks {
             let follower = ClockFollower {
                 channel: self.channel.clone(),
-                clocks: self.sinks.clocks.clone(),
+                clocks: self.emitters.clocks.clone(),
                 domain: clock.domain,
             };
             nervix_primitives::task::spawn(follower.run(clock.start));
@@ -359,7 +359,7 @@ impl Restoration {
         for subscription in self.subscriptions {
             let follower = SubscriptionFollower {
                 channel: self.channel.clone(),
-                desired: self.sinks.desired.clone(),
+                desired: self.emitters.desired.clone(),
                 generation: self.generation.clone(),
             };
             nervix_primitives::task::spawn(follower.run(subscription.attempt, subscription.sent));

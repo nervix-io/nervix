@@ -11,10 +11,10 @@ use futures_util::{StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::{DnsConfiguration, DnsResolver, NameServers};
 use nervix_interconnect::{
-    DuplexResponses, PeerResolver, TlsConfigBundle, Transport, TransportClock, TransportIdentity,
-    TransportOptions,
+    DuplexResponses, JoinTerms, PeerResolver, TlsConfigBundle, Transport, TransportClock,
+    TransportIdentity, TransportOptions,
 };
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeName, PrerequisiteTimings};
 use nervix_primitives::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -95,6 +95,7 @@ async fn probe_peer(probe_response: wire::AppendEntriesResponseRecord) -> ProbeP
                     cluster_id: cluster.to_string(),
                     node_id: node,
                     advertised_host: "localhost".to_string(),
+                    join_terms: test_join_terms(),
                 },
                 tls,
                 TransportOptions::default(),
@@ -464,4 +465,16 @@ async fn a_failed_following_probe_ends_before_data_stream_admission() {
     peer.client.interconnect.shutdown().await;
     assert_eq!(peer.management_calls.load(Ordering::Relaxed), 1);
     assert_eq!(peer.append_streams.load(Ordering::Relaxed), 0);
+}
+
+/// The join terms every test transport brings, so their handshakes accept each other.
+fn test_join_terms() -> JoinTerms {
+    JoinTerms {
+        durability: crate::RAFT_LOG_DURABILITY,
+        timings: PrerequisiteTimings {
+            raft_heartbeat_interval: crate::RaftTimings::default().heartbeat_interval(),
+            gossip_interval: Duration::from_millis(500),
+            clock_skew_tolerance: Duration::from_millis(500),
+        },
+    }
 }

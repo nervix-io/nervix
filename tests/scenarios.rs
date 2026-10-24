@@ -105,9 +105,10 @@ use crate::common::{
         SUBSCRIBED_LINE, corpus_report,
     },
     cluster::{
-        BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
-        HttpsPublishLoopOutcome, InterconnectCredentialFault, TEST_AUTH_PASSWORD,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
+        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster,
+        DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
+        InterconnectCredentialFault, JoinAttempt, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME,
+        TestClusterConfig, TestSession, WebsocketExchangeAction,
         assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
         command_connect_options, observe_kafka_through, publish_kafka_record_through,
     },
@@ -147,7 +148,8 @@ use crate::common::{
         begin_suite_measurement, suite_summary,
     },
     scenario_schedule::{
-        FeatureLimit, ScenarioAdmission, ScenarioLength, ScenarioRunSlots, prioritize_features,
+        FeatureLimit, SCENARIO_RETRIES, ScenarioAdmission, ScenarioLength, ScenarioRunSlots,
+        prioritize_features,
     },
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
@@ -724,6 +726,56 @@ impl fmt::Debug for ScenarioWorld {
 }
 
 impl ScenarioWorld {
+    /// Asserts that the node the preceding step started or joined stopped, for `reason`.
+    fn assert_node_attempt_refused(&self, node_id: &str, reason: &str) {
+        let attempt = self
+            .node_start_attempt
+            .as_ref()
+            .verified("the preceding step attempted to start or join a node");
+        assert_eq!(
+            attempt.node, node_id,
+            "the attempted start belongs to another node"
+        );
+        let Some(failure) = &attempt.failure else {
+            panic!("node '{node_id}' started although it was expected to refuse: {reason}");
+        };
+        assert!(
+            failure.contains(reason),
+            "node '{node_id}' refused for another reason than '{reason}': {failure}"
+        );
+    }
+
+    /// Describes the cluster on `node_id` until `described` holds for its output, within the
+    /// status wait budget.
+    async fn wait_for_cluster_description(
+        &mut self,
+        node_id: &str,
+        described: impl Fn(&str) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match run_nspl_commands_on_node(self, node_id, "DESCRIBE CLUSTER;").await {
+                Ok(output) => {
+                    let holds = described(&output);
+                    self.last_command_output = Some(output);
+                    if holds {
+                        return;
+                    }
+                }
+                Err(error) => self.last_command_error = Some(error),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "node '{node_id}' did not describe the cluster as expected. last output: {:?}, \
+                 last error: {:?}",
+                self.last_command_output,
+                self.last_command_error,
+            );
+            nervix_primitives::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     fn ingestor_dispatch_ref(&self, ingestor: &str) -> nervix_models::DomainNodeRef {
         let ingestor = expand_placeholders(self, ingestor);
         let domain = nervix_models::DomainName::try_from(self.domain.as_str())
@@ -759,6 +811,21 @@ impl ScenarioWorld {
             published.age()
         );
         append_cucumber_log_line(marker.trim_end());
+    }
+
+    /// Publishes that the scenario's admission holds `run_slots` run slots and its steps start.
+    fn start_running(&self, run_slots: usize) {
+        let Some(registration) = &self.active_scenario else {
+            return;
+        };
+        let published = registration.start_running(run_slots);
+        append_cucumber_log_line(&format!(
+            "scenario {}: {} suite_age={:?} age={:?} run_slots={run_slots}",
+            published.phase,
+            published.identity,
+            ActiveScenario::suite_age(),
+            published.age()
+        ));
     }
 
     fn wait_for_admission(&self, reason: common::scenario_schedule::AdmissionWait) {
@@ -7350,26 +7417,14 @@ async fn given_runtime_replication_is_configured(
         .expect("snapshot interval must be a valid duration");
 }
 
-#[given(expr = "raft election timeout is configured from {string} to {string}")]
-fn given_raft_election_timeout_is_configured(
-    world: &mut ScenarioWorld,
-    minimum: String,
-    maximum: String,
-) {
+#[given(expr = "raft heartbeat interval is configured as {string}")]
+fn given_raft_heartbeat_interval_is_configured(world: &mut ScenarioWorld, heartbeat: String) {
     assert!(
         world.cluster.is_none(),
-        "raft election timeout must be configured before cluster startup"
+        "the raft heartbeat interval must be configured before cluster startup"
     );
-    let minimum = parse_duration_text(&minimum)
-        .assured("the Cucumber scenario supplies a valid minimum election timeout");
-    let maximum = parse_duration_text(&maximum)
-        .assured("the Cucumber scenario supplies a valid maximum election timeout");
-    assert!(
-        minimum <= maximum,
-        "minimum raft election timeout must not exceed its maximum"
-    );
-    world.cluster_config.raft_election_timeout_min = minimum;
-    world.cluster_config.raft_election_timeout_max = maximum;
+    world.cluster_config.raft_heartbeat_interval = parse_duration_text(&heartbeat)
+        .assured("the Cucumber scenario supplies a valid raft heartbeat interval");
 }
 
 #[given("runtime state replica polling is paused")]
@@ -8147,6 +8202,50 @@ async fn given_transaction_tombstone_retention_is_configured(
     );
     world.cluster_config.transaction_tombstone_retention =
         parse_duration_text(&retention).expect("transaction tombstone retention must be valid");
+}
+
+#[given(expr = "transaction tombstone cleanup for domain {string} pauses on every node")]
+async fn given_transaction_cleanup_pauses(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    for node in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .pause_transaction_cleanup(crate::common::cluster::node_name(&node), domain.clone());
+    }
+}
+
+#[then(expr = "transaction tombstone cleanup for domain {string} is paused on node {string}")]
+async fn then_transaction_cleanup_is_paused(
+    world: &mut ScenarioWorld,
+    domain: String,
+    node: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    let node = expand_placeholders(world, &node);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_transaction_cleanup_pause(&crate::common::cluster::node_name(&node), &domain),
+    )
+    .await
+    .expect("the node did not reach the transaction cleanup pause");
+}
+
+#[when(expr = "transaction tombstone cleanup for domain {string} is released on every node")]
+async fn when_transaction_cleanup_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    for node in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .release_transaction_cleanup_pause(&crate::common::cluster::node_name(&node), &domain);
+    }
 }
 
 #[given(expr = "command retry identities are valid for {string}")]
@@ -11671,21 +11770,151 @@ async fn when_node_attempts_to_start(world: &mut ScenarioWorld, node_id: String)
 #[then(expr = "node {string} refused to start because {string}")]
 fn then_node_refused_to_start(world: &mut ScenarioWorld, node_id: String, reason: String) {
     let node_id = expand_placeholders(world, &node_id);
+    world.assert_node_attempt_refused(&node_id, &reason);
+}
+
+/// Starts a node that joins the running cluster, registering it first when the cluster has no
+/// node by that name, and records whether the cluster admitted it as a voter or how it stopped,
+/// for a later step to assert.
+#[when(expr = "node {string} attempts to join")]
+async fn when_node_attempts_to_join(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let attempt = world
+        .cluster_mut()
+        .attempt_join(&node_id)
+        .await
+        .expect("the joining node was neither admitted nor stopped");
+    let failure = match attempt {
+        JoinAttempt::Admitted => None,
+        JoinAttempt::Stopped(failure) => Some(failure),
+    };
+    world.node_start_attempt = Some(NodeStartAttempt {
+        node: node_id,
+        failure,
+    });
+}
+
+#[then(expr = "node {string} refused to join because {string}")]
+fn then_node_refused_to_join(world: &mut ScenarioWorld, node_id: String, reason: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let reason = expand_placeholders(world, &reason);
+    world.assert_node_attempt_refused(&node_id, &reason);
+}
+
+/// The refusal names the trust roots of both nodes as each reads its own trust bundle.
+#[then(
+    expr = "node {string} refused to join because its trust root differs from the trust root of \
+            node {string}"
+)]
+fn then_node_refused_to_join_for_its_trust_root(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    member_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let member_id = expand_placeholders(world, &member_id);
+    let local = world
+        .cluster()
+        .trust_root_of(&node_id)
+        .expect("the joining node's trust bundle loads");
+    let peer = world
+        .cluster()
+        .trust_root_of(&member_id)
+        .expect("the member's trust bundle loads");
+    assert_ne!(
+        local, peer,
+        "the two nodes were meant to trust different roots"
+    );
+    let reason = format!("trust root differs: this node trusts {local}, the peer {peer}");
+    world.assert_node_attempt_refused(&node_id, &reason);
+}
+
+#[then(expr = "node {string} joined the cluster")]
+fn then_node_joined_the_cluster(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
     let attempt = world
         .node_start_attempt
         .as_ref()
-        .verified("the preceding step attempted to start a node");
+        .verified("the preceding step attempted to join a node");
     assert_eq!(
         attempt.node, node_id,
-        "the attempted start belongs to another node"
+        "the attempted join belongs to another node"
     );
-    let Some(failure) = &attempt.failure else {
-        panic!("node '{node_id}' started although it was expected to refuse: {reason}");
-    };
-    assert!(
-        failure.contains(&reason),
-        "node '{node_id}' refused to start for another reason: {failure}"
-    );
+    if let Some(failure) = &attempt.failure {
+        panic!("node '{node_id}' stopped instead of joining: {failure}");
+    }
+}
+
+#[given(expr = "node {string} claims cluster {string}")]
+fn given_node_claims_cluster(world: &mut ScenarioWorld, node_id: String, cluster_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .claim_cluster_for_new_node(&node_id, &cluster_id);
+}
+
+#[given(expr = "node {string} also trusts another certificate authority")]
+fn given_node_also_trusts_another_authority(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .trust_additional_authority_for_new_node(&node_id);
+}
+
+/// Describes the cluster on one node until the block it prints for another node holds a line.
+#[then(expr = "node {string} eventually describes node {string} with {string}")]
+async fn then_node_eventually_describes_node_with(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    described_id: String,
+    expected: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let described_id = expand_placeholders(world, &described_id);
+    let expected = expand_placeholders(world, &expected);
+    world
+        .wait_for_cluster_description(&node_id, |description| {
+            cluster_description_block(description, &described_id)
+                .iter()
+                .any(|line| line.trim() == expected)
+        })
+        .await;
+}
+
+/// Describes the cluster on one node until it reports which nodes' timings drift from the
+/// leader's.
+#[then(expr = "node {string} eventually reports cluster timing drift {string}")]
+async fn then_node_eventually_reports_cluster_timing_drift(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    expected: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let expected = format!("timing drift: {}", expand_placeholders(world, &expected));
+    world
+        .wait_for_cluster_description(&node_id, |description| {
+            description.lines().any(|line| line == expected)
+        })
+        .await;
+}
+
+/// The lines `DESCRIBE CLUSTER` prints for one node: its `node:` line and the indented lines
+/// after it.
+fn cluster_description_block<'a>(description: &'a str, node_id: &str) -> Vec<&'a str> {
+    let header = format!("node: {node_id}");
+    let mut block = Vec::new();
+    let mut inside = false;
+    for line in description.lines() {
+        if line.starts_with("node: ") {
+            inside = line == header || line.starts_with(&format!("{header} "));
+        } else if !line.starts_with("  ") {
+            inside = false;
+        }
+        if inside {
+            block.push(line);
+        }
+    }
+    block
 }
 
 #[when(expr = "node {string} is started while consensus connectivity is blocked")]
@@ -12506,10 +12735,79 @@ async fn when_node_releases_filled_relay_memory(world: &mut ScenarioWorld, node_
         .release_relay_memory_fill_on(&crate::common::cluster::node_name(&node_id));
 }
 
+/// Takes all of a node's free relay memory now, except the little the node needs to read and
+/// answer the relay grant requests it receives, so every grant another node asks it for finds no
+/// room for its delivery.
+#[when(expr = "node {string} fills its relay memory, leaving room for no relay grant")]
+async fn when_node_fills_relay_memory_leaving_room_for_no_grant(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .fill_relay_memory_leaving_room_for_no_grant_on(&crate::common::cluster::node_name(
+            &node_id,
+        ));
+}
+
+/// Arms a node to take all of its free relay memory just before it stores the acknowledgement
+/// records of the next delivery it sends another node, so that delivery finds its own relay
+/// budget full exactly when it needs room for them.
+#[when(
+    expr = "node {string} fills its relay memory before it stores the records of its next delivery"
+)]
+async fn when_node_fills_relay_memory_before_record_storage(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .fill_relay_memory_before_next_record_storage_on(crate::common::cluster::node_name(
+            &node_id,
+        ));
+}
+
+/// Keeps the relay memory a node's fill took for `duration` longer and then returns it.
+///
+/// The duration is the length of the shortage the scenario imposes, not a wait for anything to
+/// happen: a shortage that outlasts the sender's five-second dispatch bound is what tells a
+/// delivery held back apart from one its sender gave up on.
+#[when(expr = "node {string} keeps its relay memory filled for {string} before releasing it")]
+async fn when_node_keeps_relay_memory_filled_before_releasing(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    duration: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node = crate::common::cluster::node_name(&node_id);
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    assert!(
+        world.fault_injection.relay_memory_fill_holds_on(&node),
+        "node '{node_id}' holds no filled relay memory to keep"
+    );
+    nervix_primitives::time::sleep(duration).await;
+    world.fault_injection.release_relay_memory_fill_on(&node);
+}
+
 #[given(expr = "relay owner fan-out for domain {string} is paused before dispatch")]
 async fn given_owner_relay_fanout_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
     world.fault_injection.pause_owner_relay_fanout(domain);
+}
+
+#[given(expr = "relay owner fan-out for domain {string} waits {string} before each batch")]
+async fn given_owner_relay_fanout_waits_before_each_batch(
+    world: &mut ScenarioWorld,
+    domain: String,
+    delay: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let delay = parse_duration_text(&delay).assured("the scenario duration is valid");
+    world
+        .fault_injection
+        .delay_owner_relay_fanout(domain, delay);
 }
 
 #[given(
@@ -13268,34 +13566,34 @@ async fn when_emitter_leaves_fault_mode(world: &mut ScenarioWorld, emitter: Stri
     world.cluster().clear_emitter_fault_on_all_nodes(&emitter);
 }
 
-#[when(expr = "sink client for emitter {string} enters unavailable fault mode")]
-async fn when_sink_client_enters_unavailable_fault_mode(
+#[when(expr = "emitter client for emitter {string} enters unavailable fault mode")]
+async fn when_emitter_client_enters_unavailable_fault_mode(
     world: &mut ScenarioWorld,
     emitter: String,
 ) {
     let emitter = expand_placeholders(world, &emitter);
     world
         .cluster()
-        .fail_sink_client_unavailable_on_all_nodes(&emitter);
+        .fail_emitter_client_unavailable_on_all_nodes(&emitter);
 }
 
-#[when(expr = "sink client for emitter {string} leaves fault mode")]
-#[then(expr = "sink client for emitter {string} leaves fault mode")]
-async fn when_sink_client_leaves_fault_mode(world: &mut ScenarioWorld, emitter: String) {
+#[when(expr = "emitter client for emitter {string} leaves fault mode")]
+#[then(expr = "emitter client for emitter {string} leaves fault mode")]
+async fn when_emitter_client_leaves_fault_mode(world: &mut ScenarioWorld, emitter: String) {
     let emitter = expand_placeholders(world, &emitter);
     world
         .cluster()
-        .clear_sink_client_fault_on_all_nodes(&emitter);
+        .clear_emitter_client_fault_on_all_nodes(&emitter);
 }
 
-/// The sink still writes every record of the emitter's next write, but the emitter receives the
+/// The emitter still writes every record of the emitter's next write, but the emitter receives the
 /// answers for only the first `resolved` of them, as from a broker that stops answering after it
 /// accepted the rest, and retries the write as one whose outcome it never learned.
 #[when(
-    expr = "the sink of emitter {string} stalls after resolving {int} record(s) of its next \
+    expr = "the emitter of emitter {string} stalls after resolving {int} record(s) of its next \
             publish"
 )]
-async fn when_emitter_sink_stalls_after_resolving(
+async fn when_emitter_connector_stalls_after_resolving(
     world: &mut ScenarioWorld,
     emitter: String,
     resolved: usize,
@@ -13303,7 +13601,7 @@ async fn when_emitter_sink_stalls_after_resolving(
     let emitter = expand_placeholders(world, &emitter);
     world
         .cluster()
-        .stall_emitter_sink_after_resolving_on_all_nodes(&emitter, resolved);
+        .stall_emitter_connector_after_resolving_on_all_nodes(&emitter, resolved);
 }
 
 #[when(expr = "ingestor {string} enters fault mode")]
@@ -13404,6 +13702,61 @@ async fn then_kafka_consumer_group_eventually_has_consumers(
         .wait_for_kafka_consumer_group_members(&group, expected)
         .await
         .expect("kafka consumer group did not reach expected member count");
+}
+
+#[then(expr = "Kafka topic {string} does not exist")]
+async fn then_kafka_topic_does_not_exist(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    let exists = world
+        .cluster()
+        .kafka_topic_exists(&topic)
+        .expect("failed to read Kafka topic metadata");
+    assert!(
+        !exists,
+        "Kafka topic '{topic}' exists, but nothing in the scenario created it"
+    );
+}
+
+/// The consumer group names a step's docstring lists, one per line.
+fn kafka_consumer_group_names(world: &ScenarioWorld, step: &Step) -> BTreeSet<String> {
+    let mut groups = BTreeSet::new();
+    for line in docstring(step).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        groups.insert(expand_placeholders(world, line));
+    }
+    groups
+}
+
+#[then(expr = "within {string} Kafka lists these consumer groups")]
+async fn then_within_kafka_lists_these_consumer_groups(
+    world: &mut ScenarioWorld,
+    within: String,
+    #[step] step: &Step,
+) {
+    let within = parse_duration_text(&within).expect("within must be a valid duration");
+    let groups = kafka_consumer_group_names(world, step);
+    world
+        .cluster()
+        .wait_for_kafka_consumer_groups_listed(&groups, true, within)
+        .await
+        .expect("Kafka did not list the consumer groups");
+}
+
+/// A consumer group that must never exist: one check, since waiting would not strengthen it.
+#[then(expr = "Kafka lists none of these consumer groups")]
+async fn then_kafka_lists_none_of_these_consumer_groups(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let groups = kafka_consumer_group_names(world, step);
+    world
+        .cluster()
+        .wait_for_kafka_consumer_groups_listed(&groups, false, Duration::ZERO)
+        .await
+        .expect("Kafka lists consumer groups");
 }
 
 /// Joins a member that Nervix does not run to the group. It takes the topic's first partitions from
@@ -13971,7 +14324,7 @@ fn record_mqtt_ingestors(world: &mut ScenarioWorld, commands: &str) {
         let nervix_models::Model::Ingestor(ingestor) = *create.body else {
             continue;
         };
-        let Some(nervix_models::IngestSource::Mqtt(_)) = ingestor.input.transport_source() else {
+        let Some(nervix_models::IngestorEntity::Mqtt(_)) = ingestor.input.transport_entity() else {
             continue;
         };
         world
@@ -14918,6 +15271,7 @@ fn commands_are_retry_safe_session_ops(commands: &str) -> bool {
     nspl_statements(commands).into_iter().all(|command| {
         let normalized = command.trim().to_ascii_uppercase();
         normalized == "DESCRIBE DOMAIN;"
+            || normalized == "DESCRIBE CLUSTER;"
             || normalized.starts_with("DESCRIBE RELOCATION ")
             || normalized.starts_with("DESCRIBE ENDPOINT ")
             || normalized.starts_with("DESCRIBE RESOURCE ")
@@ -23634,6 +23988,7 @@ async fn given_rabbitmq_queue_exists(world: &mut ScenarioWorld, queue: String) {
 }
 
 #[given(expr = "Kafka topic {string} exists with {int} partitions")]
+#[when(expr = "the operator provisions Kafka topic {string} with {int} partitions")]
 async fn given_kafka_topic_exists_with_partitions(
     world: &mut ScenarioWorld,
     topic: String,
@@ -24855,20 +25210,20 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
     world: &mut ScenarioWorld,
     count: u64,
     user_id: u32,
-    source_kind: String,
+    entity_kind: String,
     input: String,
 ) {
     let input = expand_placeholders(world, &input);
-    let source_kind = source_kind.to_ascii_uppercase();
+    let entity_kind = entity_kind.to_ascii_uppercase();
     let payload = format!(r#"{{"user_id":{user_id}}}"#);
 
     let count = count
         .try_into()
         .expect("rapid publish count must fit into usize");
-    if source_kind == "MQTT" || source_kind == "MQTT_QOS1" {
+    if entity_kind == "MQTT" || entity_kind == "MQTT_QOS1" {
         wait_for_mqtt_ingestors_ready(world).await;
     }
-    match source_kind.as_str() {
+    match entity_kind.as_str() {
         "KAFKA" => world
             .cluster()
             .publish_kafka_payloads(&input, &vec![payload.as_bytes().to_vec(); count])
@@ -26290,6 +26645,57 @@ async fn when_sequential_metric_http_payloads_are_posted(
             .await
             .unwrap_or_else(|error| panic!("failed to post http payload {value}: {error}"));
     }
+}
+
+/// How long one acknowledged metric may take to be acknowledged, its retries included. The endpoint
+/// answers each attempt within its ACK timeout, so this only bounds an endpoint that keeps refusing
+/// the metric.
+const METRIC_ACKNOWLEDGEMENT_WAIT: Duration = Duration::from_secs(300);
+
+/// Posts `{"value":1}` through `{"value":<count>}`, starting each in order once fewer than
+/// `window` posts are waiting for their graph acknowledgement, and returns once every post is
+/// answered. An acknowledged endpoint answers a post only after the relay owner handed the row to
+/// its consumers and to the nodes that subscribe to it, so the relay then holds none of the rows.
+/// An unacknowledged endpoint answers as soon as the row is queued on the node that took it.
+#[when(
+    expr = "{int} metric http payloads are posted with acknowledgement, {int} at a time, to host \
+            {string} path {string}"
+)]
+async fn when_metric_http_payloads_are_posted_with_acknowledgement(
+    world: &mut ScenarioWorld,
+    count: u64,
+    window: usize,
+    host: String,
+    path: String,
+) {
+    assert!(
+        window > 0,
+        "an acknowledged posting window holds at least one post"
+    );
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    append_cucumber_log_line(&format!(
+        "http publish acknowledged metrics: node=node-1 host={host} path={path} count={count} \
+         window={window}"
+    ));
+    let publisher = world.cluster().acknowledged_http_publisher(
+        "node-1",
+        &host,
+        &path,
+        METRIC_ACKNOWLEDGEMENT_WAIT,
+    );
+    futures_util::stream::iter(1..=count)
+        .for_each_concurrent(window, |value| post_acknowledged_metric(&publisher, value))
+        .await;
+}
+
+/// Posts `{"value":<value>}` through `publisher` and fails the step unless it is acknowledged.
+async fn post_acknowledged_metric(publisher: &AcknowledgedHttpPublisher, value: u64) {
+    let payload = format!(r#"{{"value":{value}}}"#);
+    publisher
+        .publish(&payload)
+        .await
+        .unwrap_or_else(|error| panic!("metric {value} was not acknowledged: {error}"));
 }
 
 #[when(expr = "http payload encoded as {string} is posted to host {string} path {string}")]
@@ -32029,7 +32435,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     let run = ScenarioWorld::cucumber::<&str>()
         .with_parser(PrioritizedScenarioParser)
         .max_concurrent_scenarios(usize::MAX)
-        .retries(2)
+        .retries(SCENARIO_RETRIES)
         .before(move |feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
@@ -32050,16 +32456,17 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     scenario_line,
                     length,
                 );
-                let attempt = registration.attempt();
+                let run = registration.run();
                 world.active_scenario = Some(registration);
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, length, &feature_name, attempt, |reason| {
+                    .admit_with(limit, length, &feature_name, run, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;
+                let held_slots = admission.slots();
                 world.scenario_admission = Some(admission);
-                world.enter_phase(ScenarioPhase::Body, "");
+                world.start_running(held_slots);
             })
         })
         .after(|_feature, _rule, _scenario, finished, world| {

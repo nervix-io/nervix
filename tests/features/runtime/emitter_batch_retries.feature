@@ -62,7 +62,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
     # The broker confirms the first payload and stops answering: the emitter never learns whether
     # the next two landed. The retry waits three seconds, longer than the source's one-second ACK
     # TIMEOUT, so the source keeps its message only while the emitter keeps its members alive.
-    When the sink of emitter "retried" stalls after resolving 1 record of its next publish
+    When the emitter of emitter "retried" stalls after resolving 1 record of its next publish
     And Kafka message is published to topic "retried_in_{{test_id}}"
       """
       [{"seq":1,"note":"a"},{"seq":2,"note":"b"},{"seq":3,"note":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},{"seq":4,"note":"d"},{"seq":5,"note":"e"},{"seq":6,"note":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},{"seq":7,"note":"g"},{"seq":8,"note":"h"}]
@@ -138,7 +138,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
       START;
       """
     Then Kafka consumer group "detached_retried_group_{{test_id}}" eventually has 1 consumers
-    When the sink of emitter "detached_retried" stalls after resolving 0 records of its next publish
+    When the emitter of emitter "detached_retried" stalls after resolving 0 records of its next publish
     And Kafka message is published to topic "detached_retried_in_{{test_id}}"
       """
       [{"seq":1,"note":"a"},{"seq":2,"note":"b"}]
@@ -291,7 +291,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
     # MongoDB answers for every document of the bulk write, but the emitter learns only the answers
     # for the first two: the delivered first document and the poison document it rejected. The two
     # documents whose answers were lost are the only ones written again.
-    When the sink of emitter "to_mongodb" stalls after resolving 2 records of its next publish
+    When the emitter of emitter "to_mongodb" stalls after resolving 2 records of its next publish
     And http payload is posted to host "mongodb-retried-{{test_id}}.example.com" path "/notifications"
       """
       [{"user_id":1,"action":"HEALTHY_A"},{"user_id":2,"action":"POISON"},{"user_id":3,"action":"HEALTHY_B"},{"user_id":4,"action":"HEALTHY_C"}]

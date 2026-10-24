@@ -293,7 +293,7 @@ Inside a route expression, completion also offers ordinary VM builtins. For a ju
 through the output relay's declared schema. Qualified `udf::<name>` calls use the domain's UDF
 models, including the session's queued changes. In an ingestor construction expression,
 `read_header` and `read_headers` are offered only when the selected source supports header reads.
-In an emitter `INVOKE` expression, `write_header` is offered only when the selected sink supports
+In an emitter `INVOKE` expression, `write_header` is offered only when the selected emitter supports
 header writes.
 
 Each suggestion carries a display value, a kind, and a text edit with UTF-8 byte start and end

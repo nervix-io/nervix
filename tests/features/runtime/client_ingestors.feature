@@ -1,17 +1,17 @@
 Feature: Client ingestors
   An application publishes typed Arrow batches to a client ingestor through producers it opens on
   a native gRPC session or a console WebSocket session. One submitted batch is one acknowledgement
-  unit: it completes once every route and acknowledging sink its rows reached confirmed them. See
+  unit: it completes once every route and acknowledging emitter its rows reached confirmed them. See
   docs/src/ingestors.md#client-ingestors and docs/src/client-library.md#producers.
 
   @client_ingestor
-  Scenario Outline: Producers publish typed batches through transforming and branched routes to an acknowledging sink
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers with
+  Scenario Outline: Producers publish typed batches through transforming and branched routes to an acknowledging emitter
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers with
       """
       respond 200; after 2s
       """
-    And HTTP receiver "sink" answers unscripted requests with "respond 200"
+    And HTTP receiver "emitter" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -54,7 +54,7 @@ Feature: Client ingestors
       );
       CREATE CODEC order_body_codec FROM WIRE JSON SCHEMA order_body_wire TO SCHEMA order_body;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders_deduped
         TO sink_api
@@ -93,34 +93,34 @@ Feature: Client ingestors
       | us     | o-1      | 7      | 4111-2 |
       | eu     | o-2      | 5      | 4111-3 |
     # The receiver delays its first answer, so the batch completes only after its slowest row
-    # reached the sink's success boundary.
-    Then batch "first" completed at least "2s" after HTTP receiver "sink" request 1 arrived
+    # reached the emitter's success boundary.
+    Then batch "first" completed at least "2s" after HTTP receiver "emitter" request 1 arrived
     When producer "orders" submits batch "second" with rows
       | region | order_id | amount | card   |
       | eu     | o-1      | 12     | 4111-9 |
       | us     | o-3      | 9      | 4111-4 |
     Then batch "second" completes
     # The repeated order o-1 is a duplicate only inside the eu branch.
-    And HTTP receiver "sink" has captured exactly 4 requests
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" has captured exactly 4 requests
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/eu/o-1
 
       {"order_id":"o-1","amount_cents":1200,"card":"4111-1"}
       """
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/us/o-1
 
       {"order_id":"o-1","amount_cents":700,"card":"4111-2"}
       """
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/eu/o-2
 
       {"order_id":"o-2","amount_cents":500,"card":"4111-3"}
       """
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/us/o-3
 
@@ -151,8 +151,8 @@ Feature: Client ingestors
 
   @client_ingestor
   Scenario Outline: A batch that is not the ingestor's canonical Arrow stream is refused whole, and an admitted row error follows its route policy
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "respond 200"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -203,7 +203,7 @@ Feature: Client ingestors
           ON MESSAGE ERROR IGNORE
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders
         TO sink_api
@@ -239,12 +239,12 @@ Feature: Client ingestors
       | eu     | o-1      | 3                   | 4111-1 |
       | eu     | o-2      | 9223372036854775807 | 4111-2 |
     Then batch "overflowing" fails processing because "rejected"
-    And HTTP receiver "sink" eventually receives at least 1 request
-    And HTTP receiver "sink" request 1 is
+    And HTTP receiver "emitter" eventually receives at least 1 request
+    And HTTP receiver "emitter" request 1 is
       """
       POST /orders/eu/o-1
       """
-    # IGNORE acknowledges the failed row instead, so the same batch completes once the sink
+    # IGNORE acknowledges the failed row instead, so the same batch completes once the emitter
     # acknowledges its other row.
     When <session> opens producer "lenient" on ingestor "lenient_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
     And producer "lenient" submits batch "forgiven" with rows
@@ -252,8 +252,8 @@ Feature: Client ingestors
       | eu     | o-3      | 4                   | 4111-3 |
       | eu     | o-4      | 9223372036854775807 | 4111-4 |
     Then batch "forgiven" completes
-    And HTTP receiver "sink" has captured exactly 2 requests
-    And HTTP receiver "sink" request 2 is
+    And HTTP receiver "emitter" has captured exactly 2 requests
+    And HTTP receiver "emitter" request 2 is
       """
       POST /orders/eu/o-3
       """
@@ -265,12 +265,12 @@ Feature: Client ingestors
       | eu     | o-5      | 5                   | 4111-5 |
       | eu     | o-6      | 9223372036854775807 | 4111-6 |
     Then batch "diverted" completes
-    And HTTP receiver "sink" eventually receives at least 4 requests
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" eventually receives at least 4 requests
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/eu/o-5
       """
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /errors/o-6/evaluation
       """
@@ -282,8 +282,8 @@ Feature: Client ingestors
 
   @client_ingestor
   Scenario Outline: A producer is refused what it cannot attach to and ends with its ingestor's lifecycle
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "respond 200"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -312,7 +312,7 @@ Feature: Client ingestors
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders
         TO sink_api
@@ -359,8 +359,8 @@ Feature: Client ingestors
 
   @client_ingestor
   Scenario Outline: Producers of one ingestor share its one acknowledgement window
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "hold response until released"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "hold response until released"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -378,7 +378,7 @@ Feature: Client ingestors
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders
         TO sink_api
@@ -405,7 +405,7 @@ Feature: Client ingestors
     And producer "three" submits batch "b3" with rows
       | region | order_id | amount | card   |
       | eu     | o-3      | 3      | 4111-3 |
-    Then HTTP receiver "sink" eventually receives at least 1 request
+    Then HTTP receiver "emitter" eventually receives at least 1 request
     # Three producers hold three batches, and only the declared window of two is ever admitted.
     And within "30s" the leader node describes ingestor "orders_in" with
       """
@@ -413,11 +413,11 @@ Feature: Client ingestors
       outstanding batches: 3
       admitted batches: 2
       """
-    When HTTP receiver "sink" releases its held responses with "respond 200"
+    When HTTP receiver "emitter" releases its held responses with "respond 200"
     Then batch "b1" completes
     And batch "b2" completes
     And batch "b3" completes
-    And HTTP receiver "sink" has captured exactly 3 requests
+    And HTTP receiver "emitter" has captured exactly 3 requests
 
     Examples:
       | cluster_size |
@@ -426,8 +426,8 @@ Feature: Client ingestors
 
   @client_ingestor
   Scenario Outline: A saturated producer keeps its session's commands and clock moving, and a cancelled wait loses nothing
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "hold response until released"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "hold response until released"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -445,7 +445,7 @@ Feature: Client ingestors
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders
         TO sink_api
@@ -472,7 +472,7 @@ Feature: Client ingestors
     And producer "orders" submits batch "b3" with rows
       | region | order_id | amount | card   |
       | eu     | o-3      | 3      | 4111-3 |
-    Then HTTP receiver "sink" eventually receives at least 1 request
+    Then HTTP receiver "emitter" eventually receives at least 1 request
     And producer "orders" holds batches "b1, b2"
     And within "30s" the leader node describes ingestor "orders_in" with
       """
@@ -495,12 +495,12 @@ Feature: Client ingestors
     When the wait for batch "b3" is cancelled
     And the wait for batch "b1" is cancelled
     Then producer "orders" holds batches "b1, b2"
-    When HTTP receiver "sink" releases its held responses with "respond 200"
+    When HTTP receiver "emitter" releases its held responses with "respond 200"
     Then batch "b2" completes
     When producer "orders" rejoins batch "b1"
     Then batch "b1" completes
     And producer "orders" holds no batches
-    And HTTP receiver "sink" has captured exactly 2 requests
+    And HTTP receiver "emitter" has captured exactly 2 requests
     When client "app" executes these NSPL commands
       """
       BEGIN;
@@ -514,12 +514,12 @@ Feature: Client ingestors
 
   @client_ingestor @client_ingestor_alter_drain @deloxide_stress
   Scenario Outline: An alteration drains buffered branches on a shared relay before replacing its client contract
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers with
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers with
       """
       hold response until released
       """
-    And HTTP receiver "sink" answers unscripted requests with "respond 200"
+    And HTTP receiver "emitter" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -548,7 +548,7 @@ Feature: Client ingestors
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders
         TO sink_api
@@ -574,7 +574,7 @@ Feature: Client ingestors
       admitted batches: 1
       """
     # Both branches have partial batches at a cadence much longer than the test. The hold must
-    # force them through the shared relay while it remains open, then wait for the sink's ACK.
+    # force them through the shared relay while it remains open, then wait for the emitter's ACK.
     Given client "alter owner" is connected to the leader node
     When client "alter owner" executes these NSPL commands
       """
@@ -594,7 +594,7 @@ Feature: Client ingestors
       admission: open
       producers: 1
       """
-    And HTTP receiver "sink" eventually receives at least 1 request
+    And HTTP receiver "emitter" eventually receives at least 1 request
     When these NSPL commands are executed on the leader node
       """
       SHOW CREATE INGESTOR orders_in;
@@ -603,7 +603,7 @@ Feature: Client ingestors
       """
       FLUSH EACH 1h
       """
-    When HTTP receiver "sink" releases its held responses with "respond 200"
+    When HTTP receiver "emitter" releases its held responses with "respond 200"
     Then the background NSPL execution succeeds
     And transaction "{{alter_transaction}}" eventually has state "COMMITTED"
     And transaction "{{alter_transaction}}" report step 1 eventually records planned quiesce "ENTITY_PAUSE", actual quiesce "ENTITY_PAUSE", execution "APPLIED", and outcomes "REQUESTED,CONFIRMED,RELEASED|REQUESTED,CONFIRMED,RELEASED"
@@ -628,16 +628,16 @@ Feature: Client ingestors
       | eu     | o-6      | 6      | 4111-6 |
       | us     | o-7      | 7      | 4111-7 |
     Then batch "after contract change" completes
-    And HTTP receiver "sink" has captured exactly 7 requests
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" has captured exactly 7 requests
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/eu/o-1
       """
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/us/o-2
       """
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/eu/o-3
       """
@@ -651,12 +651,12 @@ Feature: Client ingestors
 
   @client_ingestor @client_ingestor_alter_drain @deloxide_stress
   Scenario Outline: A rejected <failure> releases buffered client admission and retains its committed contract
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers with
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers with
       """
       hold response until released
       """
-    And HTTP receiver "sink" answers unscripted requests with "respond 200"
+    And HTTP receiver "emitter" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -685,7 +685,7 @@ Feature: Client ingestors
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders
         TO sink_api
@@ -729,9 +729,9 @@ Feature: Client ingestors
       admission: open
       producers: 1
       """
-    And HTTP receiver "sink" eventually receives at least 1 request
+    And HTTP receiver "emitter" eventually receives at least 1 request
     Given the next <failure> in domain "{{domain}}" <disposition>
-    When HTTP receiver "sink" releases its held responses with "respond 200"
+    When HTTP receiver "emitter" releases its held responses with "respond 200"
     Then the background NSPL execution fails with "<error>"
     And transaction "{{alter_transaction}}" eventually has state "FAILED"
     And transaction "{{alter_transaction}}" report step 1 eventually records planned quiesce "ENTITY_PAUSE", actual quiesce "ENTITY_PAUSE", execution "FAILED", and outcomes "<outcomes>"
@@ -760,16 +760,16 @@ Feature: Client ingestors
       """
     Then batch "held" completes
     And batch "after rollback" completes
-    And HTTP receiver "sink" has captured exactly 5 requests
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" has captured exactly 5 requests
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/eu/o-1
       """
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/us/o-2
       """
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/eu/o-3
       """
@@ -787,8 +787,8 @@ Feature: Client ingestors
 
   @client_ingestor @client_ingestor_placement
   Scenario Outline: A producer entering through another node is forwarded to the owner, and a planned relocation ends it
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "respond 200"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
@@ -807,7 +807,7 @@ Feature: Client ingestors
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders
         TO sink_api
@@ -864,8 +864,8 @@ Feature: Client ingestors
 
   @client_ingestor @client_ingestor_placement
   Scenario: A forwarded producer keeps working across a leadership change
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "respond 200"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -883,7 +883,7 @@ Feature: Client ingestors
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders
         TO sink_api
@@ -914,12 +914,12 @@ Feature: Client ingestors
       | region | order_id | amount | card   |
       | us     | o-2      | 2      | 4111-2 |
     Then batch "after" completes
-    And HTTP receiver "sink" has captured exactly 2 requests
+    And HTTP receiver "emitter" has captured exactly 2 requests
 
   @client_ingestor @client_ingestor_placement
   Scenario: Stopping the node that executes an ingestor ends its forwarded producers and leaves their unresolved batches unknown
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "hold response until released"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "hold response until released"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
@@ -938,7 +938,7 @@ Feature: Client ingestors
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders
         TO sink_api
@@ -963,11 +963,11 @@ Feature: Client ingestors
     And producer "orders" submits batch "in flight" with rows
       | region | order_id | amount | card   |
       | eu     | o-1      | 1      | 4111-1 |
-    Then HTTP receiver "sink" eventually receives at least 1 request
+    Then HTTP receiver "emitter" eventually receives at least 1 request
     When node "{{owner}}" is stopped
     Then producer "orders" is interrupted because "shutting down"
     And batch "in flight" has an unknown outcome because "interrupted"
-    When HTTP receiver "sink" releases its held responses with "respond 200"
+    When HTTP receiver "emitter" releases its held responses with "respond 200"
     And within "60s" client "app" opens producer "failed over" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
     And producer "failed over" submits batch "after failover" with rows
       | region | order_id | amount | card   |
@@ -976,8 +976,8 @@ Feature: Client ingestors
 
   @client_ingestor @client_ingestor_placement @client_io_03_producer @client_io_03_forwarder
   Scenario: Losing the node that forwards a producer leaves its batches unknown to the client and lets admitted work finish
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "hold response until released"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "hold response until released"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
@@ -996,7 +996,7 @@ Feature: Client ingestors
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders
         TO sink_api
@@ -1023,7 +1023,7 @@ Feature: Client ingestors
     And producer "orders" submits batch "in flight" with rows
       | region | order_id | amount | card   |
       | eu     | o-1      | 1      | 4111-1 |
-    Then HTTP receiver "sink" eventually receives at least 1 request
+    Then HTTP receiver "emitter" eventually receives at least 1 request
     And within "30s" the leader node describes ingestor "orders_in" with
       """
       forwarded producers: 1
@@ -1037,14 +1037,14 @@ Feature: Client ingestors
       producers: 0
       admitted batches: 1
       """
-    # The detached batch was admitted, so it still reaches its sink and leaves the window.
-    When HTTP receiver "sink" releases its held responses with "respond 200"
+    # The detached batch was admitted, so it still reaches its emitter and leaves the window.
+    When HTTP receiver "emitter" releases its held responses with "respond 200"
     Then within "30s" the leader node describes ingestor "orders_in" with
       """
       producers: 0
       admitted batches: 0
       """
-    And HTTP receiver "sink" has captured exactly 1 request
+    And HTTP receiver "emitter" has captured exactly 1 request
 
     When producer "orders" submits batch "after entry loss" with rows
       | region | order_id | amount | card   |
@@ -1053,8 +1053,8 @@ Feature: Client ingestors
 
   @client_ingestor @client_io_03_producer @client_io_03_restore
   Scenario Outline: A producer restores its attachment across a full restart and publishes again
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "respond 200"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -1072,7 +1072,7 @@ Feature: Client ingestors
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders
         TO sink_api
@@ -1095,7 +1095,7 @@ Feature: Client ingestors
       | region | order_id | amount | card   |
       | us     | o-2      | 2      | 4111-2 |
     Then batch "after restart" completes
-    And HTTP receiver "sink" has captured exactly 2 requests
+    And HTTP receiver "emitter" has captured exactly 2 requests
 
     Examples:
       | cluster_size |
@@ -1106,8 +1106,8 @@ Feature: Client ingestors
   # again, which only a producer entering through another node can observe.
   @client_ingestor @client_io_03_producer @client_io_03_restore
   Scenario: A producer restored across a full restart waits for the node that executes its ingestor to install it again
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "respond 200"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "respond 200"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
@@ -1126,7 +1126,7 @@ Feature: Client ingestors
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders
         TO sink_api
@@ -1159,7 +1159,7 @@ Feature: Client ingestors
       | us     | o-2      | 2      | 4111-2 |
     And runtime installation on node "{{owner}}" is released
     Then batch "after restart" completes
-    And HTTP receiver "sink" has captured exactly 2 requests
+    And HTTP receiver "emitter" has captured exactly 2 requests
 
   @client_ingestor @client_io_03_producer @client_io_03_socket_loss
   Scenario Outline: A producer restores its attachment after its session socket is lost
@@ -1235,8 +1235,8 @@ Feature: Client ingestors
 
   @client_ingestor
   Scenario Outline: A batch beyond a producer's credit is refused without graph effect and ends the producer
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "hold response until released"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "hold response until released"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -1254,7 +1254,7 @@ Feature: Client ingestors
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
       CREATE HTTP REQUEST EMITTER published FROM orders
         TO sink_api
@@ -1275,11 +1275,11 @@ Feature: Client ingestors
       | region | order_id | amount | card   |
       | us     | o-2      | 2      | 4111-2 |
     Then batch "beyond" is not admitted because "credit exceeded"
-    When HTTP receiver "sink" releases its held responses with "respond 200"
+    When HTTP receiver "emitter" releases its held responses with "respond 200"
     Then batch "within" completes
     And producer "orders" eventually ends because "protocol violated"
-    And HTTP receiver "sink" has captured exactly 1 request
-    And HTTP receiver "sink" request 1 is
+    And HTTP receiver "emitter" has captured exactly 1 request
+    And HTTP receiver "emitter" request 1 is
       """
       POST /orders/eu/o-1
       """

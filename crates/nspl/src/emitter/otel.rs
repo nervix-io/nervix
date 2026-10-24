@@ -136,14 +136,14 @@ pub(super) fn logs_mode<'src>()
     request_mode!(OtelLogsPublishingMode)
 }
 pub(super) fn logs_body<'src>()
--> impl Parser<'src, &'src [Token], ParsedDestination<OtelLogsSink>, extra::Err<ParseError<'src>>>
+-> impl Parser<'src, &'src [Token], ParsedDestination<OtelLogsEmitter>, extra::Err<ParseError<'src>>>
 + Clone {
     values_destination(
         client_ref()
             .then_ignore(kw(Identifier::Mode))
             .then(logs_mode())
             .then(mappings())
-            .map(|((client, mode), mappings)| OtelLogsSink {
+            .map(|((client, mode), mappings)| OtelLogsEmitter {
                 client,
                 mode,
                 mappings,
@@ -156,14 +156,14 @@ pub(super) fn traces_mode<'src>()
     request_mode!(OtelTracesPublishingMode)
 }
 pub(super) fn traces_body<'src>()
--> impl Parser<'src, &'src [Token], ParsedDestination<OtelTracesSink>, extra::Err<ParseError<'src>>>
+-> impl Parser<'src, &'src [Token], ParsedDestination<OtelTracesEmitter>, extra::Err<ParseError<'src>>>
 + Clone {
     values_destination(
         client_ref()
             .then_ignore(kw(Identifier::Mode))
             .then(traces_mode())
             .then(mappings())
-            .map(|((client, mode), mappings)| OtelTracesSink {
+            .map(|((client, mode), mappings)| OtelTracesEmitter {
                 client,
                 mode,
                 mappings,
@@ -176,7 +176,7 @@ pub(super) fn metrics_mode<'src>()
     request_mode!(OtelMetricsPublishingMode)
 }
 pub(super) fn metrics_body<'src>()
--> impl Parser<'src, &'src [Token], ParsedDestination<OtelMetricsSink>, extra::Err<ParseError<'src>>>
+-> impl Parser<'src, &'src [Token], ParsedDestination<OtelMetricsEmitter>, extra::Err<ParseError<'src>>>
 + Clone {
     values_destination(
         client_ref()
@@ -184,7 +184,7 @@ pub(super) fn metrics_body<'src>()
             .then_ignore(kw(Identifier::Mode))
             .then(metrics_mode())
             .then(mappings())
-            .map(|(((client, metric), mode), mappings)| OtelMetricsSink {
+            .map(|(((client, metric), mode), mappings)| OtelMetricsEmitter {
                 client,
                 metric,
                 mode,

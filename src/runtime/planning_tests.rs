@@ -19,11 +19,12 @@ use std::num::NonZeroU32;
 use nervix_models::{
     BranchSelection, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     CreateDeduplicator, CreateInferencer, CreateJunction, CreateSchema, CreateWasmProcessor,
-    CreateWindowProcessor, DurationTextError, EmitSink, InferencerTensorDeclaration,
+    CreateWindowProcessor, DurationTextError, EmitterEntity, InferencerTensorDeclaration,
     InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
     InferencerTensorRepresentation, InferencerTensorSchema, ParseAsType, ProcessorOutput,
     ProcessorOutputs, RelayBranching, SchemaField, WasmProcessorLimits, WasmRejectedStatePolicy,
-    WindowBound, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqPushSink, ZeroMqSink, ZeroMqSource,
+    WindowBound, ZeroMqEmitter, ZeroMqIngestMode, ZeroMqIngestor, ZeroMqPullIngestor,
+    ZeroMqPushEmitter,
 };
 use nervix_primitives::sync::Arc;
 use nonzero_ext::nonzero;
@@ -1183,11 +1184,13 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                         .with_branch(branched_by("orders", &["tenant"])),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
-                                client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAck,
-                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                            })),
+                            source: IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(
+                                ZeroMqPullIngestor {
+                                    client: named("zmq_client"),
+                                    mode: ZeroMqIngestMode::NoAck,
+                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                                },
+                            )),
                             codec: named("orders_codec"),
                         },
                     ),
@@ -1244,15 +1247,17 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                     body: nervix_models::EmitterBody::Codec {
                         codec: named("orders_codec"),
                     },
-                    sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-                        mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
-                            retry_policy: RetryPolicy {
-                                backoff: "250ms".to_string(),
-                                max_backoff: "30s".to_string(),
+                    connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+                        ZeroMqPushEmitter {
+                            mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                                retry_policy: RetryPolicy {
+                                    backoff: "250ms".to_string(),
+                                    max_backoff: "30s".to_string(),
+                                },
                             },
+                            client: named("zmq_client"),
                         },
-                        client: named("zmq_client"),
-                    }))),
+                    ))),
                     batch: None,
                     flush_policy: FlushPolicy::Each {
                         interval: "100ms".to_string(),
@@ -1323,11 +1328,13 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
                         .with_branch(branched_by("metrics", &["host"])),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
-                                client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAck,
-                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                            })),
+                            source: IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(
+                                ZeroMqPullIngestor {
+                                    client: named("zmq_client"),
+                                    mode: ZeroMqIngestMode::NoAck,
+                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                                },
+                            )),
                             codec: named("metrics_codec"),
                         },
                     ),
@@ -1435,11 +1442,13 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                         .with_branch(branched_by("features", &["tenant"])),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
-                                client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAck,
-                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                            })),
+                            source: IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(
+                                ZeroMqPullIngestor {
+                                    client: named("zmq_client"),
+                                    mode: ZeroMqIngestMode::NoAck,
+                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                                },
+                            )),
                             codec: named("features_codec"),
                         },
                     ),
@@ -1619,11 +1628,13 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                         .with_branch(branched_by("orders", &["tenant"])),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
-                                client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAck,
-                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                            })),
+                            source: IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(
+                                ZeroMqPullIngestor {
+                                    client: named("zmq_client"),
+                                    mode: ZeroMqIngestMode::NoAck,
+                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                                },
+                            )),
                             codec: named("orders_codec"),
                         },
                     ),
@@ -1766,11 +1777,13 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                         .with_branch(branched_by("left_stream", &["tenant"])),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
-                                client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAck,
-                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                            })),
+                            source: IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(
+                                ZeroMqPullIngestor {
+                                    client: named("zmq_client"),
+                                    mode: ZeroMqIngestMode::NoAck,
+                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                                },
+                            )),
                             codec: named("notification_codec"),
                         },
                     ),
@@ -1793,11 +1806,13 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
                         .with_branch(branched_by("right_stream", &["tenant"])),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
-                                client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAck,
-                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                            })),
+                            source: IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(
+                                ZeroMqPullIngestor {
+                                    client: named("zmq_client"),
+                                    mode: ZeroMqIngestMode::NoAck,
+                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                                },
+                            )),
                             codec: named("notification_codec"),
                         },
                     ),
@@ -1903,11 +1918,13 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
                         .with_branch(branched_by("orders", &["tenant"])),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
-                                client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAck,
-                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                            })),
+                            source: IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(
+                                ZeroMqPullIngestor {
+                                    client: named("zmq_client"),
+                                    mode: ZeroMqIngestMode::NoAck,
+                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                                },
+                            )),
                             codec: named("orders_codec"),
                         },
                     ),
@@ -2014,11 +2031,13 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
                         .with_branch(OutputBranch::Unbranched),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
-                                client: named("zmq_client"),
-                                mode: ZeroMqIngestMode::NoAck,
-                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                            })),
+                            source: IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(
+                                ZeroMqPullIngestor {
+                                    client: named("zmq_client"),
+                                    mode: ZeroMqIngestMode::NoAck,
+                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                                },
+                            )),
                             codec: named("orders_codec"),
                         },
                     ),

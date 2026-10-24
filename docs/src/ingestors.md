@@ -268,7 +268,7 @@ including endpoint ingestors, which serve on every node, and ingestors whose sch
 move. It also ignores `ON QUIESCE`. Already admitted payloads continue through their routes, route
 buffers are force-flushed whatever their `FLUSH EACH` cadence, and Nervix waits for their ACK roots
 to resolve before the source session stops, so offsets, acknowledgements, and deletes complete for
-work that reached its sinks. A root still unresolved when the drain timeout passes is negatively
+work that reached its emitters. A root still unresolved when the drain timeout passes is negatively
 acknowledged, and the source's redelivery contract applies. A raw quiesce buffer is outside runtime
 graph work, so a shutdown discards what it retained instead of replaying it. See
 [Planned Ownership Handoffs And Failover](control-plane.md#planned-ownership-handoffs-and-failover)
@@ -363,7 +363,7 @@ is full, what happens to a payload depends on whether its sender can present it 
   `Retry-After` and closes an established WebSocket with 1013, so the sender sends it again.
 - A payload that `BUFFER` retained waits for a place when its buffer drains; see
   [Quiesce Modes](#quiesce-modes).
-- A paced source has already moved past its poll, so the poll waits for a place. Waiting delays the
+- A paced ingestor has already moved past its poll, so the poll waits for a place. Waiting delays the
   next poll, and the domain cadence coalesces the occurrences it missed into one poll at the newest
   due instant.
 - A source read in `MODE NO ACK` cannot present a payload again either. The payload waits for a
@@ -569,7 +569,7 @@ CREATE [IF NOT EXISTS] <kind> CLIENT <name>
 
 Transport-specific schemes and keys:
 
-- `KAFKA`: pass-through to librdkafka. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
+- `KAFKA`: pass-through to librdkafka, except `allow.auto.create.topics`, which `CREATE KAFKA CLIENT` refuses. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
 - `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file` and `tls_key_file`, and the client requires `timeout_ms`; see [Prometheus](#prometheus) for every key it declares.
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
@@ -773,13 +773,13 @@ One batch is one source acknowledgement unit. It has exactly one terminal outcom
 | Outcome | Meaning | Cause |
 | --- | --- | --- |
 | not admitted | No row entered the graph. | `invalid batch: <defect>`, `suspended`, `busy`, `draining`, `producer ended`, `credit exceeded` |
-| completed | Every route and acknowledging sink its rows reached confirmed them under the graph's rules. | — |
+| completed | Every route and acknowledging emitter its rows reached confirmed them under the graph's rules. | — |
 | processing failed | The batch was admitted and its acknowledgement failed. Some of its effects may have happened. | `ack_timeout`, `rejected` |
 | unknown outcome | The batch may have been admitted and processed, but no terminal result can be established. | `interrupted`, `owner_lost`; a client whose session ended adds `session_lost` |
 
 Transport receipt is never an outcome. A batch completes under the normal acknowledgement rules: a
 row a filter drops is resolved; a detached boundary resolves where it detaches; and an
-acknowledging sink resolves its rows at its own success boundary, such as the complete response
+acknowledging emitter resolves its rows at its own success boundary, such as the complete response
 headers of an HTTP emitter. The defects of an invalid batch are `malformed`, `unexpected message`,
 `compressed`, `schema mismatch`, `not one batch`, `too many rows`, `too large`, and `invalid data`.
 
@@ -1002,6 +1002,12 @@ Offset modes:
 Kafka client configuration is passed through to librdkafka. Nervix does not override
 `auto.offset.reset`; set it explicitly, for example to `earliest`, when a new consumer group must
 read records that may already exist.
+
+A Kafka ingestor never creates the topic it reads. Every consumer Nervix runs for it sets
+`allow.auto.create.topics` to `false`, whatever the broker allows, and `CREATE KAFKA CLIENT` refuses a
+Kafka client whose `CONFIG` sets that key. Provision the topic before the ingestor starts. Until it
+exists, `DESCRIBE INGESTOR` reports `transient error: Kafka topic '<topic>' does not exist`, and the
+ingestor starts reading once the topic is created.
 
 In an ACK mode, Nervix commits a Kafka position only after its downstream acknowledgement
 completes. If downstream work rejects a record, the ingestor seeks back to it. A consumer-group

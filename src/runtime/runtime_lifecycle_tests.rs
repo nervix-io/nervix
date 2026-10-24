@@ -137,7 +137,7 @@ async fn a_stopping_execution_gives_each_emitter_its_finish_deadline_before_its_
             .await
             .expect("the emitter task reports what it read"),
         Some(finish_by),
-        "an emitter that the stop ends must already hold the deadline it finishes its sink by"
+        "an emitter that the stop ends must already hold the deadline it finishes its emitter by"
     );
 }
 

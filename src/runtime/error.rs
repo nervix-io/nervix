@@ -19,7 +19,7 @@ use super::*;
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error("failed to retire the source of ingestor '{ingestor}' in domain '{domain}'")]
-    RetireIngestorSource {
+    RetireIngestorEntity {
         domain: DomainName,
         ingestor: IngestorName,
     },

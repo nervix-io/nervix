@@ -7,7 +7,7 @@
 //!   the limit.
 //! - **Depends on.** The generated schemaful codecs and batches with their formats' container
 //!   framing, and the codec's row encoder, batch members and batch containers.
-//! - **Must not know.** Emitters, how a candidate that did not fit is divided, or sinks.
+//! - **Must not know.** Emitters, how a candidate that did not fit is divided, or emitters.
 
 #![cfg_attr(
     nervix_lint,
