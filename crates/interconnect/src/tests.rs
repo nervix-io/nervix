@@ -2293,10 +2293,25 @@ async fn bootstrap_rejects_a_certificate_from_another_cluster() {
         .bootstrap_target(PeerTarget::new(transport_b.local_addr(), "localhost"))
         .await
         .expect_err("a peer certificate from another cluster must be rejected");
-    assert!(matches!(
-        error.current_context(),
-        TransportError::InvalidHandshake(_)
-    ));
+    let TransportError::IncompatiblePeer { peer, mismatch } = error.current_context() else {
+        panic!("another cluster is a cluster-identity mismatch: {error:?}");
+    };
+    assert_eq!(peer, &node_b);
+    assert_eq!(
+        mismatch,
+        &PrerequisiteMismatch::ClusterIdentity {
+            local: "cluster-a".to_string(),
+            peer: "cluster-b".to_string(),
+        }
+    );
+    assert_eq!(
+        *transport_a.join_progress().borrow(),
+        JoinProgress::Refused(JoinRefusal {
+            peer: node_b.clone(),
+            mismatch: mismatch.clone(),
+        }),
+        "a bootstrap exchange that ends in a refusal ends the join"
+    );
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;

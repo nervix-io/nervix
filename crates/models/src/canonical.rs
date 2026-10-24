@@ -942,6 +942,7 @@ impl Statement {
                 show.relay.as_str()
             )),
             Self::ShowClusterStatus(_) => Ok("SHOW CLUSTER STATUS;".to_string()),
+            Self::DescribeCluster(_) => Ok("DESCRIBE CLUSTER;".to_string()),
             Self::ShowTransactions(_) => Ok("SHOW TRANSACTIONS;".to_string()),
             Self::DescribeTransaction(describe) => Ok(describe.to_canonical_nspl()),
         }

@@ -73,8 +73,13 @@ spec:
   initialDefaultUserPasswordSecretRef:
     name: nervix-initial-password
     key: password
-  storage: 5Gi
+  storage: 20Gi
 ```
+
+Each node checks its volume and its memory before it starts, and refuses to start when they cannot
+hold its configuration: its volume must be at least as large as each resource quota, 16 GiB for
+extracted resources by default, and its memory limit must hold its execution budgets, 2.27 GiB.
+[Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) gives the rules.
 
 Apply it and watch the cluster become ready:
 

@@ -681,12 +681,13 @@ removed, and a cancelled or interrupted sweep resumes from the keys that remain.
 gate or changes a selected publication, and never removes a domain's initial namespace, which only a
 publication's cleanup removes.
 
-The restore staging quota, `--restore-staging-max-bytes`, 128 GiB per node by default, bounds the
-key and value bytes of every unpublished restored namespace on the node, across all domains,
-including partial chunks, headers, indices and receipts; published data is outside it. A node
-measures that usage by reading every unpublished entry once, one chunk at a time, and keeps the
-measurement while it stays exact. Admission forgets it before the first chunk is written, and a
-checkpoint that then stages completely restores it with exactly the footprint it admitted; a
+The restore staging quota, `--restore-staging-max-bytes`, by default the smaller of 128 GiB and the
+size of the volume that holds the node database, bounds the key and value bytes of every
+unpublished restored namespace on the node, across all domains, including partial chunks, headers,
+indices and receipts; published data is outside it. A node measures that usage by reading every
+unpublished entry once, one chunk at a time, and keeps the measurement while it stays exact.
+Admission forgets it before the first chunk is written, and a checkpoint that then stages
+completely restores it with exactly the footprint it admitted; a
 staging attempt that fails after admission, one that replaces an earlier attempt, and a
 publication leave it forgotten, so the next admission or sweep measures again, as the first one
 after a start does. A sweep that deletes anything forgets it before deleting and measures again once

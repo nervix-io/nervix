@@ -826,6 +826,7 @@ SHOW CREATE BRANCH by_tenant;
 SHOW PLACEMENTS;
 SHOW RELAY <name> MATERIALIZED STATE;
 SHOW CLUSTER STATUS;
+DESCRIBE CLUSTER;
 DROP NODE <node_id>;
 CORDON NODE <node_id>;
 UNCORDON NODE <node_id>;
@@ -840,6 +841,54 @@ A relocation `<selection>` is a kind-qualified list, `<kind> <name>[, ...]`, or 
 
 For a wire schema, `<kind>` is the exact multi-word kind: `WIRE JSON SCHEMA`, `WIRE CBOR SCHEMA`,
 or `WIRE AVRO SCHEMA`. The same exact kind is required by `DROP`.
+
+`DESCRIBE CLUSTER` shows the prerequisites every live node brings to the cluster, as the node the
+session is on sees them. It takes no name and needs neither a selected domain nor the leader: any
+node answers it.
+
+```nspl
+DESCRIBE CLUSTER;
+```
+
+The answer names the leader, or `none`, and the nodes whose Raft heartbeat, gossip interval or
+clock-skew tolerance differs from the leader's: `none` when every node agrees, and
+`unknown, no leader record is published` while the node knows no leader or no record the leader
+published. Each live node's newest run follows in node name order, with its incarnation and every
+prerequisite in the order nodes compare them. A timing that differs from the leader's carries the
+leader's value beside it, and a node that has not published a record this node can read shows
+`prerequisites: not published`:
+
+```text
+leader: node-1
+timing drift: node-2
+node: node-1 (leader)
+  incarnation: 3
+  cluster identity: production
+  trust root: <64 hexadecimal digits>
+  wire contract: <64 hexadecimal digits>
+  largest command: 1MiB
+  largest management event: 64KiB
+  durability promise: fsync every append
+  raft-heartbeat-interval: 250ms
+  gossip-interval: 500ms
+  clock-skew-tolerance: 500ms
+node: node-2
+  incarnation: 7
+  cluster identity: production
+  trust root: <64 hexadecimal digits>
+  wire contract: <64 hexadecimal digits>
+  largest command: 1MiB
+  largest management event: 64KiB
+  durability promise: fsync every append
+  raft-heartbeat-interval: 400ms, the leader's 250ms
+  gossip-interval: 500ms
+  clock-skew-tolerance: 500ms
+```
+
+Two nodes run together only while every value but the timings is equal and each timing stays
+within a factor of two of the other's. [Node Settings](node-settings.md#prerequisites-at-join)
+describes what a node outside that bound does, and the `nervix_cluster_timing_drift_nodes` metric
+counts the drifting nodes.
 
 General notes:
 

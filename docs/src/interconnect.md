@@ -220,7 +220,8 @@ identifier, endpoint name, validity period, and key all agree. A remote connecti
 when all of the following are true:
 
 - its certificate chains to the configured cluster CA
-- its identity URI names the same cluster
+- its identity URI names the same cluster; a certificate that names another one is refused as a
+  cluster-identity mismatch, as [The Join Contract](#the-join-contract) describes
 - its node identifier is the expected peer identifier, once that identifier is known
 - its endpoint subject alternative name matches the advertised endpoint being contacted
 - its certificate is currently valid
@@ -231,9 +232,11 @@ the process wall clock. Rustls verification on both sides of the handshake and t
 validity and expiry checks read that one clock, so they cannot disagree about a certificate.
 
 The first HTTP/2 exchange binds the connection to its authenticated node, traffic class, advertised
-endpoint, current process epoch, and wire-contract fingerprint. The receiver cross-checks those
-claims against the TLS identity and the connection slot it is accepting. This prevents a valid peer
-from relabeling a connection as a different node or traffic class.
+endpoint, current process epoch, and the dialing node's prerequisite record, which carries the
+wire-contract fingerprint. The receiver cross-checks those claims against the TLS identity and the
+connection slot it is accepting, and judges the record as [The Join Contract](#the-join-contract)
+describes. This prevents a valid peer from relabeling a connection as a different node or traffic
+class.
 
 Three identities serve different purposes:
 
@@ -387,12 +390,61 @@ drain. For a release it is the bound
 [Releasing The Drain Cordon](./shutdown.md#releasing-the-drain-cordon) states.
 [Topology Cases](./shutdown.md#topology-cases) owns when a node sends it.
 
+## The Join Contract
+
+Every hello a node dials with carries its prerequisite record: its cluster identity, the
+fingerprint of the trust anchors it currently holds, the wire contract it speaks, the largest
+command and management event its executor admits, its durability promise, and its Raft heartbeat,
+gossip interval and clock-skew tolerance.
+[Node Settings](node-settings.md#the-prerequisite-list-is-closed) owns the record and the rule that
+judges two of them: every value equal, except the timings, which must stay within a factor of two
+of each other.
+
+The accepting node judges the hello's record against its own after it has checked the hello's
+identity and before it registers the connection in a pool. It answers either with its own record,
+which binds the connection, or with a refusal that names the first prerequisite the two records
+disagree on and both values, seen from the accepting node. A refusal reaches the dialing node
+before the connection closes: the accepting node starts the connection's graceful shutdown and
+keeps it polled for at most the progress timeout while the answer leaves. The dialing node judges
+an accepted answer's record the same way, so a connection binds only when both nodes accept the
+other's record. The judgment is symmetric: reversing two records reverses the mismatch and never
+removes it, so both nodes name the same prerequisite. A certificate whose identity URI names another
+cluster is the same mismatch, of cluster identity, judged on whichever side reads it, before any
+hello is exchanged.
+
+A refusal is `TransportError::RefusedByPeer` on the dialing node and
+`TransportError::IncompatiblePeer` on the node that judged it, each naming the peer and the
+mismatch from its own side. The accepting node logs
+`refused an interconnect peer that cannot run beside this node` at `warn` with the peer, its
+address, the prerequisite and the refusal, and the dialing node logs
+`an outbound interconnect connection ended in a prerequisite refusal` at `warn`. A refused outbound
+pool connection is counted with reason `prerequisite` and reconnects with its slot's backoff like
+any other failed attempt; the refusal decides nothing else inside the transport.
+
+The transport also reports how far its node has come in joining the cluster. That progress starts
+as joining and leaves it exactly once, whichever comes first: at the first outbound pool connection
+the process completes, naming the peer it joined through, or at the first outbound attempt, a
+bootstrap exchange included, that ends in a refusal. A connection a peer dials never moves it, so a
+node that has joined never leaves because a newcomer cannot run beside it. The server stops a
+joining node whose progress ends in a refusal, as
+[Prerequisites At Join](node-settings.md#prerequisites-at-join) describes.
+
+A joining node bounds its clock skew to each peer it completes a handshake with, the one it joined
+through first, with the typed `peer_clock` request. The request uses the management pool's
+discovery subquota under a one-second deadline, and it may target a node the requester does not
+yet list as live, because a joining node can reach a peer before its gossip has. The answering node
+returns its physical clock as time since the Unix epoch, or that its clock reads before the epoch,
+and the requester bounds the skew between its own readings before the request left and after the
+answer arrived.
+
 ## Wire Contract And Payloads
 
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
-supported operations and their encoded shapes. A fingerprint mismatch rejects connection setup;
-there is no version negotiation or alternate decoding path. A wire-contract change therefore
-requires a coordinated cluster stop and start with all nodes on the same version.
+supported operations and their encoded shapes. It is one of the prerequisites every hello carries,
+so a node whose fingerprint differs is refused at join as a wire-contract mismatch, and a hello of
+another shape fails as a malformed handshake before its record can be judged. There is no version
+negotiation or alternate decoding path. A wire-contract change therefore requires a coordinated
+cluster stop and start with all nodes on the same version.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
 
@@ -1008,6 +1060,10 @@ membership, after which application health and Raft reconciliation use the curre
 Admission to consensus membership requires an available interconnect endpoint. A discovered node
 without one is not an admission candidate, so it is neither added as a learner nor promoted to
 voter, and it becomes eligible on the round that publishes an endpoint this node accepts. The
+leader also admits a candidate only when its published prerequisite record is one the leader can
+read and is compatible with the record of every live voter; it logs a candidate it leaves out for
+that reason once while the reason holds, at `warn` for a record that cannot run beside a voter and
+at `debug` for a record not yet published. The
 client and web-console advertisements are independent of admission: a node joins, votes, and leads
 with either of them unavailable. Membership replaces the recorded address of an existing member
 when its advertised endpoint changes. A returning voter remains a voter, while a learner still
@@ -1733,7 +1789,12 @@ PEM parsing failures as typed categories. Error reports and watcher logs omit cr
 and malformed PEM input bytes.
 
 After a valid replacement, new outbound pools use the new credentials and existing inbound HTTP/2
-connections begin graceful shutdown. Certificate expiration is also mapped to a process-monotonic
+connections begin graceful shutdown. A replacement whose trust anchors differ changes the node's
+trust-root fingerprint: the node republishes its prerequisite record, logs
+`published the trust root of the reloaded interconnect credentials` at `info`, and every later
+hello carries the new fingerprint. Until a peer holds the same anchors, the connections the
+replacement retired are refused when they dial again, as [The Join Contract](#the-join-contract)
+describes. Certificate expiration is also mapped to a process-monotonic
 deadline when a connection is authenticated, so a connection cannot remain open beyond the validity
 of either peer certificate even if the wall clock later moves.
 
@@ -1781,8 +1842,9 @@ statuses, and what each ending preserves.
 
 ## Failure Ownership And Persistence
 
-Transport failures identify name-resolution, setup, authentication, admission, encoding, decoding,
-flow-control, timeout, remote-response, and target-departure failures separately. Typed remote
+Transport failures identify name-resolution, setup, authentication, prerequisite-refusal,
+admission, encoding, decoding, flow-control, timeout, remote-response, and target-departure
+failures separately. Typed remote
 errors remain available to the operation owner, which decides whether a request is safe to retry.
 The interconnect does not infer idempotency for arbitrary control-plane or runtime operations.
 Local transport operations return `error_stack` reports. TLS and wire failures retain their typed
@@ -1822,8 +1884,10 @@ cover connection and stream occupancy, pending operations, setup failures and re
 exhaustion, request latency, relay channels and grants, admission wait, unresolved delivery age, and
 bulk-transfer bytes. Interconnect memory, worker queues, reactor delay, and consensus retention show
 whether pressure originates in transport, execution, or the protocol using it. A connection attempt
-that could not resolve its peer's advertised host is counted with reason `resolution`, apart from
-setup, handshake, capacity, and closed failures, so a DNS outage is visible as itself.
+that could not resolve its peer's advertised host is counted with reason `resolution`, and one that
+ended in a prerequisite refusal with reason `prerequisite`, apart from setup, handshake, capacity,
+and closed failures, so a DNS outage and a node that cannot run beside its peer are each visible as
+themselves.
 
 Typed-request observations are labeled by the subquota a request uses: operation `liveness` counts
 application health together with the other requests of that subquota, the drain-status polls of

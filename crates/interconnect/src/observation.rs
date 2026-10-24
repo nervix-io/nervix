@@ -37,7 +37,7 @@ use crate::{PoolClass, RequestSubquota, TransportError};
 pub enum ConnectionFailureReason {
     /// The TCP connect, the TLS handshake, or the HTTP/2 preface did not complete in time.
     Setup,
-    /// The peer's identity, the wire contract fingerprint, or a certificate was rejected.
+    /// The peer's identity or a certificate was rejected.
     Handshake,
     /// This node or its peer had no capacity for another connection of this class.
     Capacity,
@@ -45,6 +45,9 @@ pub enum ConnectionFailureReason {
     Closed,
     /// Resolving the peer's advertised host failed, whichever lookup failure ended it.
     Resolution,
+    /// One of the two nodes cannot run beside the other: a prerequisite they must share differs,
+    /// or a timing is outside the bound two nodes may hold apart.
+    Prerequisite,
 }
 
 /// Why one HTTP/2 stream ended without delivering its result.
@@ -127,6 +130,7 @@ impl ConnectionFailureReason {
             Self::Capacity => 2,
             Self::Closed => 3,
             Self::Resolution => 4,
+            Self::Prerequisite => 5,
         }
     }
 
@@ -156,6 +160,9 @@ impl ConnectionFailureReason {
             | TransportError::RelayRejected(_) => Self::Handshake,
             TransportError::PoolExhausted | TransportError::IncomingQueueFull => Self::Capacity,
             TransportError::ShuttingDown => Self::Closed,
+            TransportError::RefusedByPeer { .. } | TransportError::IncompatiblePeer { .. } => {
+                Self::Prerequisite
+            }
         }
     }
 }
@@ -196,7 +203,9 @@ impl StreamResetReason {
             | TransportError::RemoteRejected { .. }
             | TransportError::RelayCancelled
             | TransportError::RelayIndeterminate
-            | TransportError::RelayRejected(_) => Self::Peer,
+            | TransportError::RelayRejected(_)
+            | TransportError::RefusedByPeer { .. }
+            | TransportError::IncompatiblePeer { .. } => Self::Peer,
         }
     }
 }

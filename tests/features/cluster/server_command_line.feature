@@ -27,7 +27,9 @@ Feature: Server command-line values
     And the server process log does not contain "panicked"
 
     Examples:
-      | option                      | value | refusal                                                                       |
-      | --drain-timeout             | 1m    | drain-timeout (60s) must not exceed shutdown-timeout (50s)                    |
-      | --raft-election-timeout-min | 250ms | raft-election-timeout-min (250ms) must exceed raft-heartbeat-interval (250ms) |
-      | --raft-election-timeout-max | 1s    | raft-election-timeout-max (1s) must exceed raft-election-timeout-min (1.5s)   |
+      | option                    | value | refusal                                                                                      |
+      | --drain-timeout           | 1m    | drain-timeout (60s) must not exceed shutdown-timeout (50s)                                   |
+      | --raft-heartbeat-interval | 0s    | raft-heartbeat-interval (0ns) must be at least 1ms, the resolution consensus runs timings at |
+      | --gossip-interval         | 0s    | gossip-interval (0ns) must be at least 1ms                                                   |
+      | --clock-skew-tolerance    | 0s    | clock-skew-tolerance (0ns) must be at least 1ms                                              |
+      | --memory-limit            | 0B    | memory-limit must be greater than zero                                                       |

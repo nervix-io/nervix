@@ -342,6 +342,7 @@ pub(crate) async fn test_interconnect(cluster_id: &str, node_id: &ClusterNodeNam
             cluster_id: cluster_id.to_string(),
             node_id: node_id.clone(),
             advertised_host: "127.0.0.1".to_string(),
+            join_terms: super::NodeSettings::default().join_terms(),
         },
         tls,
         Default::default(),
@@ -630,12 +631,8 @@ pub(in crate::application) async fn build_test_service_inner(
         interconnect_advertise_addr: interconnect.local_addr().into(),
         interconnect: interconnect.clone(),
         executor: executor.clone(),
-        raft_timings: RaftTimings::resolve(
-            Some(Duration::from_millis(50)),
-            Some(Duration::from_millis(150)),
-            Some(Duration::from_millis(300)),
-        )
-        .expect("the fixture's Raft timings are valid"),
+        raft_timings: RaftTimings::resolve(Some(Duration::from_millis(25)))
+            .expect("the fixture's Raft heartbeat is valid"),
         raft_retention: RaftRetentionSettings::default(),
     };
     #[cfg(feature = "testing")]
@@ -674,7 +671,8 @@ pub(in crate::application) async fn build_test_service_inner(
             bootstrap_host: None,
             recovery_endpoints: Default::default(),
             interconnect: interconnect.clone(),
-            node_unavailability_timeout: Duration::from_secs(10),
+            membership: crate::cluster::MembershipSettings::default(),
+            prerequisites: interconnect.local_prerequisites(),
             fault_injection: Default::default(),
         })
         .await

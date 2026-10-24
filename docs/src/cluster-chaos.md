@@ -288,7 +288,7 @@ inspection where a verdict depends on them:
 
 | Setting | Default deployment | Changed for |
 | --- | --- | --- |
-| Raft heartbeat and election window | 250 ms; 1.5 to 3 seconds | 250 ms; 10 to 12 seconds for `pause-resume`, `--fault owner-pause` and `--fault voter-pause` |
+| Raft heartbeat, and the election window derived from it | 250 ms, so 1.5 to 3 seconds | 1.5 seconds, so 9 to 18 seconds, for `pause-resume`, `--fault owner-pause` and `--fault voter-pause` |
 | Node unavailability timeout | 10 seconds | 15 seconds for the same pause deployments |
 | Raft snapshot entry threshold, covered log entries retained | 10,000; 1,000 | 64; 16 for `stale-follower` |
 | State snapshot interval, replica count | 30 seconds; 0 | 1 second, and on three nodes one replica, for `stateful`; one replica for `restore-fault` and `restore-volume` |
@@ -1319,9 +1319,9 @@ replay duplicates.
 just chaos run pause-resume --image nervix:debian
 ```
 
-The three-node pause deployment uses a 250 ms heartbeat, a 10 to 12 second election window and a
-15-second unavailability timeout. The run verifies these in each target's Docker inspection. It then
-runs four cases:
+The three-node pause deployment uses a 1.5-second heartbeat, from which consensus derives a 9 to 18
+second election window, and a 15-second unavailability timeout. The run verifies these in each
+target's Docker inspection. It then runs four cases:
 
 1. a one-second pause of the leader
 2. a one-second pause of an execution owner
@@ -1375,7 +1375,7 @@ just chaos run partition-recovery --image nervix:debian --case quorum-loss --par
 - `quorum-loss` leaves no two nodes able to exchange a packet
 
 `--partition-seconds` sets the minimum verified isolation window. The deployment keeps the standard
-election and unavailability settings and records them.
+heartbeat and unavailability settings and records them.
 
 **During each fault.**
 
@@ -1644,7 +1644,7 @@ and output topic:
 
 The deployment uses a one-second state snapshot interval and, on three nodes, one state replica, so
 the loss of an owner promotes a replica of each processor's state instead of resetting it. A pause
-fault also deploys the pause scenario's election and unavailability settings. On three nodes, one
+fault also deploys the pause scenario's heartbeat and unavailability settings. On three nodes, one
 acknowledged `RELOCATE` moves the stateful entities onto the observed follower that the faults
 target, and both stateful ingestors onto another node. A fault on the state owner therefore leaves
 the Kafka consumers in place.
@@ -1987,8 +1987,8 @@ for the samples it took.
   unless `--records` asks for more.
 - The run is bounded by its duration plus the larger of that duration and 20 minutes, at most six
   hours, unless `--timeout` sets a bound from the duration plus 10 minutes through six hours.
-- The deployment uses the standard heartbeat, election and unavailability settings, and the
-  manifest records them as Compose renders them.
+- The deployment uses the standard heartbeat and unavailability settings, and the manifest records
+  them as Compose renders them.
 
 ### Replay
 

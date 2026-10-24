@@ -117,6 +117,36 @@ Two multipliers usually dominate:
 The second multiplier applies separately to every stateful node. A long deduplication horizon does
 not pay for a window's state, and a window width does not bound a correlator.
 
+## What A Node Needs To Start
+
+A node checks its memory and its database volume against its configuration before it starts, in
+its [startup preflight](node-settings.md#the-startup-preflight), and refuses to start when they
+cannot hold it:
+
+- **Memory.** The node's memory limit is `--memory-limit` (`NERVIX_MEMORY_LIMIT`) when given, and
+  otherwise the smallest memory limit of its control group and the groups above it, or its
+  physical memory when no group limit is smaller. It must hold every execution budget at once: the
+  275 MiB of transient budgets above and the 2 GiB grant for restore metadata, 2,323 MiB in all,
+  and a `--memory-high-watermark` when one is set. A container limited to 2 GiB therefore cannot
+  start a node. Size the limit above the budgets by the process memory a running graph holds, which
+  the memory-pressure watermarks govern.
+- **Volume.** The volume that holds the node's database directory must be at least as large as
+  each of its quotas. The restore-staging quota, `--restore-staging-max-bytes`, follows the volume
+  when it is not given: the node takes the smaller of 128 GiB and the volume's total size, and a
+  given value larger than the volume refuses the start. The resource quotas,
+  `--resource-max-archive-bytes` and `--resource-max-extracted-bytes`, keep their 4 GiB and 16 GiB
+  defaults whatever the volume, so a node on a smaller volume needs them set below its size: a
+  5 GiB volume might take `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES=1GiB` and
+  `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES=2GiB`. They are cluster parameters, so give every node the
+  same values. Each quota is compared with the volume's total size on its own, and what the volume
+  already holds is not subtracted, so size the volume for the log, snapshots and state the node
+  keeps beside them.
+
+A refusal names the setting, the value and the capacity it was compared with, such as
+`resource-max-extracted-bytes (16GiB) exceeds the 5GiB capacity of the volume holding the database
+directory /var/lib/nervix/db`, and a node that passes logs `the startup preflight passed` with its
+memory limit, its budgets, the size of its volumes and the restore-staging quota it resolved.
+
 ## Sizing Knobs
 
 - Branch `TTL` trades branch reuse against how long idle branch-local tasks, buffers, and state

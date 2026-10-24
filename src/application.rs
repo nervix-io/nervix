@@ -50,9 +50,9 @@ use clap_complete::Shell;
 #[cfg(feature = "deloxide")]
 pub use cli::DiagnosticArgs;
 pub use cli::{
-    Args, Command, ConsensusArgs, MembershipArgs, MemoryPressureArgs, NodeArgs, ResourceArgs,
-    RuntimeArgs, SchedulingArgs, SettingOverride, SettingsArgs, ShutdownArgs, TracingArgs,
-    TransactionArgs,
+    Args, CapacityArgs, Command, ConsensusArgs, MembershipArgs, MemoryPressureArgs, NodeArgs,
+    ResourceArgs, RuntimeArgs, SchedulingArgs, SettingOverride, SettingsArgs, ShutdownArgs,
+    TracingArgs, TransactionArgs,
 };
 use cli_completions::print_completions;
 pub use cli_values::{HumanBytes, HumanDuration, InternalTransportMode, RefusedCliValue};
@@ -74,8 +74,6 @@ use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusSettings, TransactionState};
-use nervix_dns::DnsResolver;
-use nervix_execution::Executor;
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
     ApplicationHealthProbe,
@@ -114,7 +112,7 @@ use nervix_models::{
 use nervix_primitives::{
     collections::DashMap,
     net::TcpListener,
-    sync::{StdArc, broadcast},
+    sync::{StdArc, broadcast, watch},
     time::sleep,
 };
 use observability_http::serve_observability_http;
@@ -157,6 +155,7 @@ mod cli_completions;
 mod cli_values;
 mod client_consumers;
 mod client_producers;
+mod cluster_description;
 mod cluster_status;
 mod command_execution;
 mod command_result;
@@ -169,6 +168,7 @@ mod entity_gate;
 mod error;
 mod http_endpoint;
 mod interconnect_relay;
+mod join_supervision;
 mod leader_redirect;
 mod model_mutation;
 mod model_validation;
@@ -177,6 +177,7 @@ mod node_settings;
 mod observability_http;
 mod observation;
 mod ownership_handoff;
+mod preflight;
 mod relocation;
 mod resource;
 mod restore;
@@ -205,9 +206,11 @@ mod web_console;
 pub use command_execution::{
     CommandExecutionCapacity, CommandExecutionPolicy, CommandRetryValidity,
 };
+use join_supervision::{JoinOutcome, JoinSupervision};
 use nervix_primitives::sync::Arc;
 pub use node_identity::NodeIdentity;
 pub use node_settings::NodeSettings;
+use preflight::{Preflight, PreflightOutcome};
 pub use scheduling::{ReplicaCount, SchedulingSettings};
 use service_tasks::ServiceTasks;
 use shutdown::BeforeDeadline;
@@ -417,6 +420,31 @@ impl Application {
                 None
             }
         };
+        let dns_configuration = self.identity.dns.clone();
+        let preflight = Preflight {
+            settings: &settings,
+            db_path: &db_path,
+            temp_dir: &temp_dir,
+            dns: &dns_configuration,
+        }
+        .run()
+        .instrument(tracing::info_span!("startup_preflight", node_id = %node_id))
+        .await;
+        let PreflightOutcome {
+            executor,
+            dns,
+            memory,
+            restore_staging_max_bytes,
+        } = match preflight {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                error!(
+                    error = format!("{error:#}"),
+                    "the startup preflight refused this node"
+                );
+                return Err(error.change_context(AppError::Preflight));
+            }
+        };
         let grpc_listener = TcpListener::bind(grpc_listen_addr)
             .await
             .change_context(AppError::BindGrpcListenAddress)?;
@@ -451,11 +479,6 @@ impl Application {
         let interconnect_tls = interconnect_tls_material
             .tls_bundle()
             .change_context(AppError::LoadInterconnectTls)?;
-        let dns_configuration = self.identity.dns.clone();
-        let dns = DnsResolver::load(dns_configuration.clone())
-            .instrument(tracing::info_span!("load_dns_configuration", node_id = %node_id))
-            .await
-            .change_context(AppError::LoadDnsConfiguration)?;
         if let Some(tracing) = tracing {
             tracing.install_dns(&dns);
         }
@@ -481,6 +504,9 @@ impl Application {
             raft_heartbeat_interval = ?raft_timings.heartbeat_interval(),
             raft_election_timeout_min = ?raft_timings.election_timeout_min(),
             raft_election_timeout_max = ?raft_timings.election_timeout_max(),
+            gossip_interval = ?settings.membership.gossip_interval(),
+            clock_skew_tolerance = ?settings.membership.clock_skew_tolerance(),
+            memory = %memory,
             replica_count,
             state_snapshot_interval = ?state_snapshot_interval,
             cluster_id,
@@ -494,7 +520,6 @@ impl Application {
             "starting nervix server"
         );
 
-        let executor = Executor::default();
         let db = ApplicationStartup::open_node_database(db_path.clone(), &executor).await?;
         let registry = Arc::new(
             match Registry::from_database(db.clone(), Some(db_path.as_path())) {
@@ -511,6 +536,7 @@ impl Application {
                     executor,
                     dns: Some(dns.clone()),
                     db: Some(db.clone()),
+                    restore_staging_max_bytes,
                     fault_injection: fault_injection.clone(),
                     temp_dir: temp_dir.clone(),
                 },
@@ -582,6 +608,7 @@ impl Application {
                 cluster_id: cluster_id.clone(),
                 node_id: node_id.clone(),
                 advertised_host: interconnect_advertise_addr.host().to_string(),
+                join_terms: settings.join_terms(),
             },
             interconnect_tls,
             Default::default(),
@@ -649,7 +676,8 @@ impl Application {
             bootstrap_host: cluster_bootstrap_host.clone(),
             recovery_endpoints,
             interconnect: interconnect.clone(),
-            node_unavailability_timeout,
+            membership: settings.membership,
+            prerequisites: interconnect.local_prerequisites(),
             fault_injection: fault_injection.clone(),
         })
         .await
@@ -707,6 +735,10 @@ impl Application {
         let startup = startup
             .require_handler_registration(&cluster, completion_peers_handler)
             .await?;
+        let clock_probe_handler = cluster::register_clock_probe_handler(&interconnect);
+        let startup = startup
+            .require_handler_registration(&cluster, clock_probe_handler)
+            .await?;
         let ApplicationStartup {
             db,
             consensus_path: _,
@@ -727,6 +759,7 @@ impl Application {
             runtime.executor().clone(),
             interconnect.clone(),
             consensus.observer(),
+            cluster.prerequisites_view(),
         );
         runtime
             .metrics()
@@ -757,15 +790,44 @@ impl Application {
         let membership_reconcile_shutdown = shutdown.clone();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
+        let interconnect_tls_cluster = cluster.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
             reload_interconnect_tls(
                 interconnect_tls_transport,
+                interconnect_tls_cluster,
                 interconnect_tls_paths,
                 interconnect_tls_fingerprint,
                 interconnect_tls_shutdown,
             )
             .await;
         }));
+        let (join_refusal_sender, join_refusal) = watch::channel(None);
+        if has_bootstrap_candidates {
+            let supervision = JoinSupervision {
+                transport: interconnect.clone(),
+                cluster: cluster.clone(),
+                observer: consensus.observer(),
+                local_node: node_id.clone(),
+                clock_skew_tolerance: settings.membership.clock_skew_tolerance(),
+                probe_retry_interval: settings.membership.gossip_interval(),
+            };
+            let join_shutdown = shutdown.clone();
+            let join_coordinator = shutdown_coordinator.clone();
+            background_tasks.push(nervix_primitives::task::spawn(async move {
+                let outcome = supervision.run(join_shutdown).await;
+                let JoinOutcome::Refused(refusal) = outcome else {
+                    return;
+                };
+                error!(refusal = %refusal, "this node was refused at join and stops");
+                join_refusal_sender.send_replace(Some(refusal));
+                match join_coordinator.request_stop() {
+                    ShutdownRequestOutcome::Accepted(_) => {}
+                    ShutdownRequestOutcome::AlreadyRequested(_) => {
+                        debug!("the node was already stopping when its join was refused");
+                    }
+                }
+            }));
+        }
         if let Some(controller) = memory_pressure_controller {
             let memory_runtime = runtime.clone();
             let memory_shutdown = shutdown.clone();
@@ -2604,6 +2666,10 @@ impl Application {
         }
         shutdown_coordinator.finish(terminal_teardown_outcome.unless_deadline_passed(deadline));
 
+        let refused_join = join_refusal.borrow().clone();
+        if let Some(refusal) = refused_join {
+            return Err(Report::new(refusal).change_context(AppError::JoinRefused));
+        }
         listeners.result?;
         cluster_shutdown_result?;
         database_owner_outcome?;

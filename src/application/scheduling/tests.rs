@@ -42,6 +42,7 @@ fn voter_gossip(live: &[&str], dead: &[&str]) -> GossipState {
                 client_url: None,
                 console_url: None,
                 interconnect_endpoint: None,
+                prerequisites: None,
             })
             .collect(),
         dead_node_ids: dead.iter().map(|name| named(name)).collect(),

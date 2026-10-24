@@ -105,7 +105,7 @@ use crate::common::{
     },
     cluster::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
-        HttpsPublishLoopOutcome, InterconnectCredentialFault, TEST_AUTH_PASSWORD,
+        HttpsPublishLoopOutcome, InterconnectCredentialFault, JoinAttempt, TEST_AUTH_PASSWORD,
         TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
         assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
         command_connect_options, observe_kafka_through, publish_kafka_record_through,
@@ -720,6 +720,56 @@ impl fmt::Debug for ScenarioWorld {
 }
 
 impl ScenarioWorld {
+    /// Asserts that the node the preceding step started or joined stopped, for `reason`.
+    fn assert_node_attempt_refused(&self, node_id: &str, reason: &str) {
+        let attempt = self
+            .node_start_attempt
+            .as_ref()
+            .verified("the preceding step attempted to start or join a node");
+        assert_eq!(
+            attempt.node, node_id,
+            "the attempted start belongs to another node"
+        );
+        let Some(failure) = &attempt.failure else {
+            panic!("node '{node_id}' started although it was expected to refuse: {reason}");
+        };
+        assert!(
+            failure.contains(reason),
+            "node '{node_id}' refused for another reason than '{reason}': {failure}"
+        );
+    }
+
+    /// Describes the cluster on `node_id` until `described` holds for its output, within the
+    /// status wait budget.
+    async fn wait_for_cluster_description(
+        &mut self,
+        node_id: &str,
+        described: impl Fn(&str) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match run_nspl_commands_on_node(self, node_id, "DESCRIBE CLUSTER;").await {
+                Ok(output) => {
+                    let holds = described(&output);
+                    self.last_command_output = Some(output);
+                    if holds {
+                        return;
+                    }
+                }
+                Err(error) => self.last_command_error = Some(error),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "node '{node_id}' did not describe the cluster as expected. last output: {:?}, \
+                 last error: {:?}",
+                self.last_command_output,
+                self.last_command_error,
+            );
+            nervix_primitives::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     fn ingestor_dispatch_ref(&self, ingestor: &str) -> nervix_models::DomainNodeRef {
         let ingestor = expand_placeholders(self, ingestor);
         let domain = nervix_models::DomainName::try_from(self.domain.as_str())
@@ -7346,26 +7396,14 @@ async fn given_runtime_replication_is_configured(
         .expect("snapshot interval must be a valid duration");
 }
 
-#[given(expr = "raft election timeout is configured from {string} to {string}")]
-fn given_raft_election_timeout_is_configured(
-    world: &mut ScenarioWorld,
-    minimum: String,
-    maximum: String,
-) {
+#[given(expr = "raft heartbeat interval is configured as {string}")]
+fn given_raft_heartbeat_interval_is_configured(world: &mut ScenarioWorld, heartbeat: String) {
     assert!(
         world.cluster.is_none(),
-        "raft election timeout must be configured before cluster startup"
+        "the raft heartbeat interval must be configured before cluster startup"
     );
-    let minimum = parse_duration_text(&minimum)
-        .assured("the Cucumber scenario supplies a valid minimum election timeout");
-    let maximum = parse_duration_text(&maximum)
-        .assured("the Cucumber scenario supplies a valid maximum election timeout");
-    assert!(
-        minimum <= maximum,
-        "minimum raft election timeout must not exceed its maximum"
-    );
-    world.cluster_config.raft_election_timeout_min = minimum;
-    world.cluster_config.raft_election_timeout_max = maximum;
+    world.cluster_config.raft_heartbeat_interval = parse_duration_text(&heartbeat)
+        .assured("the Cucumber scenario supplies a valid raft heartbeat interval");
 }
 
 #[given("runtime state replica polling is paused")]
@@ -11627,21 +11665,151 @@ async fn when_node_attempts_to_start(world: &mut ScenarioWorld, node_id: String)
 #[then(expr = "node {string} refused to start because {string}")]
 fn then_node_refused_to_start(world: &mut ScenarioWorld, node_id: String, reason: String) {
     let node_id = expand_placeholders(world, &node_id);
+    world.assert_node_attempt_refused(&node_id, &reason);
+}
+
+/// Starts a node that joins the running cluster, registering it first when the cluster has no
+/// node by that name, and records whether the cluster admitted it as a voter or how it stopped,
+/// for a later step to assert.
+#[when(expr = "node {string} attempts to join")]
+async fn when_node_attempts_to_join(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let attempt = world
+        .cluster_mut()
+        .attempt_join(&node_id)
+        .await
+        .expect("the joining node was neither admitted nor stopped");
+    let failure = match attempt {
+        JoinAttempt::Admitted => None,
+        JoinAttempt::Stopped(failure) => Some(failure),
+    };
+    world.node_start_attempt = Some(NodeStartAttempt {
+        node: node_id,
+        failure,
+    });
+}
+
+#[then(expr = "node {string} refused to join because {string}")]
+fn then_node_refused_to_join(world: &mut ScenarioWorld, node_id: String, reason: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let reason = expand_placeholders(world, &reason);
+    world.assert_node_attempt_refused(&node_id, &reason);
+}
+
+/// The refusal names the trust roots of both nodes as each reads its own trust bundle.
+#[then(
+    expr = "node {string} refused to join because its trust root differs from the trust root of \
+            node {string}"
+)]
+fn then_node_refused_to_join_for_its_trust_root(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    member_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let member_id = expand_placeholders(world, &member_id);
+    let local = world
+        .cluster()
+        .trust_root_of(&node_id)
+        .expect("the joining node's trust bundle loads");
+    let peer = world
+        .cluster()
+        .trust_root_of(&member_id)
+        .expect("the member's trust bundle loads");
+    assert_ne!(
+        local, peer,
+        "the two nodes were meant to trust different roots"
+    );
+    let reason = format!("trust root differs: this node trusts {local}, the peer {peer}");
+    world.assert_node_attempt_refused(&node_id, &reason);
+}
+
+#[then(expr = "node {string} joined the cluster")]
+fn then_node_joined_the_cluster(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
     let attempt = world
         .node_start_attempt
         .as_ref()
-        .verified("the preceding step attempted to start a node");
+        .verified("the preceding step attempted to join a node");
     assert_eq!(
         attempt.node, node_id,
-        "the attempted start belongs to another node"
+        "the attempted join belongs to another node"
     );
-    let Some(failure) = &attempt.failure else {
-        panic!("node '{node_id}' started although it was expected to refuse: {reason}");
-    };
-    assert!(
-        failure.contains(&reason),
-        "node '{node_id}' refused to start for another reason: {failure}"
-    );
+    if let Some(failure) = &attempt.failure {
+        panic!("node '{node_id}' stopped instead of joining: {failure}");
+    }
+}
+
+#[given(expr = "node {string} claims cluster {string}")]
+fn given_node_claims_cluster(world: &mut ScenarioWorld, node_id: String, cluster_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .claim_cluster_for_new_node(&node_id, &cluster_id);
+}
+
+#[given(expr = "node {string} also trusts another certificate authority")]
+fn given_node_also_trusts_another_authority(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .trust_additional_authority_for_new_node(&node_id);
+}
+
+/// Describes the cluster on one node until the block it prints for another node holds a line.
+#[then(expr = "node {string} eventually describes node {string} with {string}")]
+async fn then_node_eventually_describes_node_with(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    described_id: String,
+    expected: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let described_id = expand_placeholders(world, &described_id);
+    let expected = expand_placeholders(world, &expected);
+    world
+        .wait_for_cluster_description(&node_id, |description| {
+            cluster_description_block(description, &described_id)
+                .iter()
+                .any(|line| line.trim() == expected)
+        })
+        .await;
+}
+
+/// Describes the cluster on one node until it reports which nodes' timings drift from the
+/// leader's.
+#[then(expr = "node {string} eventually reports cluster timing drift {string}")]
+async fn then_node_eventually_reports_cluster_timing_drift(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    expected: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let expected = format!("timing drift: {}", expand_placeholders(world, &expected));
+    world
+        .wait_for_cluster_description(&node_id, |description| {
+            description.lines().any(|line| line == expected)
+        })
+        .await;
+}
+
+/// The lines `DESCRIBE CLUSTER` prints for one node: its `node:` line and the indented lines
+/// after it.
+fn cluster_description_block<'a>(description: &'a str, node_id: &str) -> Vec<&'a str> {
+    let header = format!("node: {node_id}");
+    let mut block = Vec::new();
+    let mut inside = false;
+    for line in description.lines() {
+        if line.starts_with("node: ") {
+            inside = line == header || line.starts_with(&format!("{header} "));
+        } else if !line.starts_with("  ") {
+            inside = false;
+        }
+        if inside {
+            block.push(line);
+        }
+    }
+    block
 }
 
 #[when(expr = "node {string} is started while consensus connectivity is blocked")]
@@ -14873,6 +15041,7 @@ fn commands_are_retry_safe_session_ops(commands: &str) -> bool {
     nspl_statements(commands).into_iter().all(|command| {
         let normalized = command.trim().to_ascii_uppercase();
         normalized == "DESCRIBE DOMAIN;"
+            || normalized == "DESCRIBE CLUSTER;"
             || normalized.starts_with("DESCRIBE RELOCATION ")
             || normalized.starts_with("DESCRIBE ENDPOINT ")
             || normalized.starts_with("DESCRIBE RESOURCE ")

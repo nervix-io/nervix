@@ -116,6 +116,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/cluster/__fuzz__/cluster__prerequisites__tests__bolero_peer_clock_probes_and_answers_round_trip_through_the_archive/corpus"
+domain_version = 1
+features = []
+id = "cluster-peer-clock-probes"
+invariant = "A peer clock probe and every answer, a reading since the Unix epoch to the nanosecond at either end of the seconds range or a clock that reads before the epoch, round trip through the archive unchanged."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-server"
+random_iterations = 256
+source = "src/cluster/prerequisites.rs"
+test = "cluster::prerequisites::tests::bolero_peer_clock_probes_and_answers_round_trip_through_the_archive"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/state_replication/__fuzz__/runtime__state_replication__replica_branch_checkpoints__tests__bolero_a_replica_catches_up_every_named_branch_with_its_owner/corpus"
 domain_version = 1
 features = []
@@ -712,6 +727,21 @@ package = "nervix-models"
 random_iterations = 256
 source = "crates/models/tests/representations/identities.rs"
 test = "identities::bolero_identity_input_is_validated_or_rejected"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/prerequisites__bolero_prerequisite_records_round_trip_through_every_representation/corpus"
+domain_version = 1
+features = []
+id = "models-prerequisite-records"
+invariant = "A node's prerequisite record keeps every value through its gossip text and the archive and judges a peer as the written record does, fingerprints keep their digests through text, and a prerequisite mismatch keeps its kind and both values through the archive."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/prerequisites.rs"
+test = "prerequisites::bolero_prerequisite_records_round_trip_through_every_representation"
 test_target = "test:representations"
 
 [[target]]
@@ -2396,10 +2426,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_relay_messages_reach_the_receiver_whole/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "relay-wire-messages"
-invariant = "Every relay grant request with its delivery position, body length, branch key fields to the bit, row watermarks, registrations and admission, the payload the receiver rebuilds from it, and every grant reply, admission exchange, acknowledgement resolution and connection binding round trip through the bounded codec, and nothing stays charged."
+invariant = "Every relay grant request with its delivery position, body length, branch key fields to the bit, row watermarks, registrations and admission, the payload the receiver rebuilds from it, and every grant reply, admission exchange, acknowledgement resolution, connection hello with its prerequisite record and accepted or refused connection answer round trip through the bounded codec, and nothing stays charged."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-interconnect"
@@ -2411,7 +2441,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "relay-wire-messages-malformed"
 invariant = "Truncated, bit-flipped or overwritten encodings of every relay message, and arbitrary bytes, fail with the codec's typed decode failure within the depth bound, or decode to a message that encodes and decodes back to itself, and either way leave no charge and no allocation of the decoder behind."
@@ -3176,7 +3206,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/application/cli/__fuzz__/application__cli__properties__bolero_node_settings_survive_their_command_line/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "node-settings-command-line"
 invariant = "Current valid node settings of every group, with the Raft timings ordered in whole milliseconds, the drain shorter than the shutdown and the memory watermarks paired and ordered, render as the server's options and read back through the same options and validation unchanged; every duration and byte quantity help prints reads back as the same value."

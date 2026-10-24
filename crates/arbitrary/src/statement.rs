@@ -12,24 +12,24 @@ use nervix_models::{
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
     AlterWireSchema, AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope,
     ClientSourceEntity, CordonNode, CreateDomain, CreateResource, CreateStatement, CreateUser,
-    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
-    DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
-    DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
-    DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace, DomainTimeRate,
-    DrainNode, DropModel, DropNode, EmitSinkKind, EmitterBatchLegality, EmitterBodyForm,
-    ExistingUserPolicy, FieldName, HttpSourceEntity, IngestSourceKind, IngestorAlteration,
-    InspectionFormat, KafkaSourceEntity, LookupQuery, ModelKind, ModelName, MqttSourceEntity,
-    NatsSourceEntity, NodeRef, PlacementPolicy, PrometheusSourceEntity, PulsarSourceEntity,
-    RabbitMqSourceEntity, RebindResource, RebindResourceMembers, RebindResourceSelection,
-    RedisSourceEntity, RelayBranching, RelayName, Relocation, RelocationMember,
-    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
-    ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore, RestoreLifecycle,
-    RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate, ShowIngestors,
-    ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SinkReferenceKind,
-    SqsSourceEntity, StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionLiteral,
-    SyslogSourceEntity, TransactionInspectionRequest, TransactionInspectionTarget,
-    TransactionOperationNumber, UncordonNode, UploadResource, WebsocketsSourceEntity,
-    ZeroMqSourceEntity,
+    DescribeCluster, DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter,
+    DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement,
+    DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction,
+    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace,
+    DomainTimeRate, DrainNode, DropModel, DropNode, EmitSinkKind, EmitterBatchLegality,
+    EmitterBodyForm, ExistingUserPolicy, FieldName, HttpSourceEntity, IngestSourceKind,
+    IngestorAlteration, InspectionFormat, KafkaSourceEntity, LookupQuery, ModelKind, ModelName,
+    MqttSourceEntity, NatsSourceEntity, NodeRef, PlacementPolicy, PrometheusSourceEntity,
+    PulsarSourceEntity, RabbitMqSourceEntity, RebindResource, RebindResourceMembers,
+    RebindResourceSelection, RedisSourceEntity, RelayBranching, RelayName, Relocation,
+    RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+    RelocationSelection, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore,
+    RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate,
+    ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
+    SinkReferenceKind, SqsSourceEntity, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionLiteral, SyslogSourceEntity, TransactionInspectionRequest,
+    TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
+    WebsocketsSourceEntity, ZeroMqSourceEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -154,6 +154,7 @@ pub enum StatementVariant {
     ShowClusterStatus,
     ShowTransactions,
     DescribeTransaction,
+    DescribeCluster,
 }
 
 impl StatementVariant {
@@ -218,6 +219,7 @@ impl StatementVariant {
             Statement::ShowClusterStatus(_) => Self::ShowClusterStatus,
             Statement::ShowTransactions(_) => Self::ShowTransactions,
             Statement::DescribeTransaction(_) => Self::DescribeTransaction,
+            Statement::DescribeCluster(_) => Self::DescribeCluster,
         }
     }
 }
@@ -659,6 +661,7 @@ impl Arbitrary<'_> {
                     format: self.inspection_format(),
                 })
             }
+            StatementVariant::DescribeCluster => Statement::DescribeCluster(DescribeCluster),
         }
     }
 

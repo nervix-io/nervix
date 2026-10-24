@@ -489,7 +489,8 @@ Choose checks relevant to the configured graph:
   retain their disk data.
   Size the server's `--restore-staging-max-bytes` or
   `NERVIX_RESTORE_STAGING_MAX_BYTES` allowance for all concurrent unpublished checkpoints on that
-  node; it defaults to `128GiB` and counts keys and values, including incomplete chunks. It is
+  node; it defaults to the smaller of `128GiB` and the node database's volume, a larger value
+  refuses the node's start, and it counts keys and values, including incomplete chunks. It is
   separate from archive-file staging and does not bound snapshot retention or filesystem
   overhead. Observe `nervix_restore_staging_bytes`, `nervix_restore_staging_limit_bytes` and
   `nervix_restore_staging_reclaimed_bytes_total` at `/metrics`; the backup chapter distinguishes
@@ -532,6 +533,11 @@ Choose checks relevant to the configured graph:
   `nx_session_next_clock_event`. The clock's projections give the logical time, the wait until a
   logical target, and the `TIMESTAMP AT` values the ingestor admits.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
+- `DESCRIBE CLUSTER;` lists the prerequisites every live node brings and the nodes whose Raft
+  heartbeat, gossip interval or clock-skew tolerance differs from the leader's. A node refused as it
+  joins, or by its startup checks, names the setting and both values; read
+  [Node Settings](https://docs.nervix.io/node-settings.html) directly for the rules, which is
+  outside the curated Plexus index.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.
 

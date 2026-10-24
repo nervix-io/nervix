@@ -21,7 +21,9 @@ use error_stack::Report;
 use nervix_execution::{
     BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
 };
-use nervix_models::ClusterNodeName;
+use nervix_models::{
+    ClusterNodeName, NodePrerequisites, PrerequisiteMismatch, WireContractFingerprint,
+};
 use rkyv::{
     Archive, Deserialize, Serialize,
     api::{access_with_context, deserialize_using, high::HighSerializer},
@@ -39,25 +41,45 @@ use super::{
 const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
 
 /// Changes whenever the one supported interconnect contract changes.
-pub(crate) const WIRE_CONTRACT_FINGERPRINT: [u8; 32] = [
-    0x93, 0x61, 0xfb, 0x1b, 0x76, 0xb1, 0x0a, 0x0c, 0x73, 0x88, 0x67, 0xcd, 0xcd, 0xf6, 0xbd, 0x3d,
-    0xcc, 0xf8, 0x4c, 0xb2, 0x0c, 0xa7, 0x21, 0xda, 0xbb, 0xbd, 0x5e, 0xf0, 0xe3, 0xed, 0x70, 0x08,
-];
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the fingerprint names the one wire contract this build speaks; peers compare it \
+                  for equality in every connection handshake"
+    )
+)]
+pub const WIRE_CONTRACT: WireContractFingerprint = WireContractFingerprint::from_digest([
+    0x07, 0xea, 0x90, 0x40, 0x5a, 0x50, 0xef, 0x12, 0x67, 0x88, 0x23, 0x40, 0x08, 0x45, 0x99, 0x37,
+    0x09, 0x98, 0x7f, 0xdd, 0xc5, 0xe1, 0x63, 0x2d, 0xd4, 0xfc, 0xc3, 0xb3, 0x70, 0x66, 0x86, 0x86,
+]);
 
+/// The first message of every connection: who dials, for which pool, and everything the dialing
+/// node brings to the cluster.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ConnectionHello {
-    pub(crate) fingerprint: [u8; 32],
     pub(crate) class: PoolClass,
     pub(crate) process_epoch: u64,
     pub(crate) node_id: ClusterNodeName,
     pub(crate) advertised_host: String,
+    pub(crate) prerequisites: NodePrerequisites,
+}
+
+/// The accepting node's answer to a hello.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum ConnectionAnswer {
+    /// The connection is bound, and the accepting node brings these prerequisites.
+    Accepted(ConnectionAccepted),
+    /// The accepting node cannot run beside the dialing one. The mismatch is seen from the accepting
+    /// node: its own value is the local one.
+    Refused { mismatch: PrerequisiteMismatch },
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ConnectionAccepted {
-    pub(crate) fingerprint: [u8; 32],
     pub(crate) process_epoch: u64,
     pub(crate) node_id: ClusterNodeName,
+    pub(crate) prerequisites: NodePrerequisites,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]

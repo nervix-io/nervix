@@ -105,6 +105,7 @@ pub enum Statement {
     ShowClusterStatus(ShowClusterStatus),
     ShowTransactions(ShowTransactions),
     DescribeTransaction(DescribeTransaction),
+    DescribeCluster(DescribeCluster),
 }
 
 impl Statement {
@@ -180,6 +181,7 @@ impl Statement {
             | Self::ShowClusterStatus(_)
             | Self::ShowTransactions(_)
             | Self::DescribeTransaction(_)
+            | Self::DescribeCluster(_)
             | Self::ResetWasmState(_) => false,
         }
     }
@@ -369,6 +371,22 @@ pub struct ShowCreate {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct ShowClusterStatus;
+
+/// Describes every live node of the cluster: the prerequisites it brings, and how its timings
+/// differ from the leader's.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct DescribeCluster;
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
