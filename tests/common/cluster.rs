@@ -1612,46 +1612,37 @@ impl Cluster {
     /// and returns once each of them is ready, each inside its own startup budget nested in the
     /// restart's. Starting each node only once the one before it is ready would hold the last voter
     /// back by every earlier node's startup, which on a loaded host can outlast the grace a newly
-    /// started leader gives voters it has not yet observed before it fails their work over.
+    /// started leader gives voters it has not yet observed before it fails their work over. The
+    /// node `ready_after_startup_observation` names counts as ready only once a leader of the
+    /// restarted cluster has ended that observation, so a restart that waited for it before
+    /// starting the next node would start that node only after the grace.
     async fn start_restarted_nodes_together(
         &mut self,
         construction: PhaseDeadline,
+        ready_after_startup_observation: Option<&str>,
     ) -> io::Result<()> {
         let mut startups = Vec::with_capacity(self.nodes.len());
         for handle in self.nodes.values_mut() {
+            let ready_after_observation_end =
+                ready_after_startup_observation == Some(handle.spec.node_id.as_str());
             startups.push(async move {
                 let node = node_name(&handle.spec.node_id);
                 let budget = construction.nested(NODE_STARTUP_BUDGET);
                 NodeStartup::start(&node, handle, budget, StartupRetryPolicy::Transient)
                     .await
-                    .map_err(io::Error::other)
+                    .map_err(io::Error::other)?;
+                if ready_after_observation_end {
+                    handle
+                        .wait_for_startup_voter_observation_end(construction)
+                        .await?;
+                }
+                Ok::<(), io::Error>(())
             });
         }
         for startup in join_all(startups).await {
             startup?;
         }
         Ok(())
-    }
-
-    /// Waits, inside the restart's budget, until a leader of the restarted cluster has ended its
-    /// startup voter observation.
-    async fn wait_for_startup_voter_observation_end(
-        &self,
-        construction: PhaseDeadline,
-    ) -> io::Result<()> {
-        let ended = construction
-            .bound(
-                self.fault_injection
-                    .wait_for_startup_voter_observation_end(),
-            )
-            .await;
-        match ended {
-            BeforeDeadline::Finished(()) => Ok(()),
-            BeforeDeadline::Passed => Err(io::Error::other(
-                "no leader of the restarted cluster ended its startup voter observation within \
-                 the restart's budget",
-            )),
-        }
     }
 
     async fn restart_arranged(&mut self, arrangement: RestartArrangement<'_>) -> io::Result<()> {
@@ -1716,11 +1707,11 @@ impl Cluster {
             self.wait_for_any_leader(&bootstrap).await?;
             return self.wait_for_leader(&bootstrap, Some(&bootstrap)).await;
         }
-        self.start_restarted_nodes_together(construction).await?;
-        if arrangement.ready_after_startup_observation().is_some() {
-            self.wait_for_startup_voter_observation_end(construction)
-                .await?;
-        }
+        self.start_restarted_nodes_together(
+            construction,
+            arrangement.ready_after_startup_observation(),
+        )
+        .await?;
         for node_id in &node_ids {
             self.wait_for_node_raft_catch_up(node_id).await?;
         }
@@ -3711,6 +3702,28 @@ impl NodeHandle {
     ) -> Result<ClusterStatus, Report<StatusRequestError>> {
         let status = self.status_endpoint().cluster_status(phase).await?;
         Ok(ClusterStatus::parse(status))
+    }
+
+    /// Waits, inside the restart's budget, until a leader of the restarted cluster has ended its
+    /// startup voter observation, for a node the restart counts as ready only after that.
+    async fn wait_for_startup_voter_observation_end(
+        &self,
+        construction: PhaseDeadline,
+    ) -> io::Result<()> {
+        let ended = construction
+            .bound(
+                self.fault_injection
+                    .wait_for_startup_voter_observation_end(),
+            )
+            .await;
+        match ended {
+            BeforeDeadline::Finished(()) => Ok(()),
+            BeforeDeadline::Passed => Err(io::Error::other(format!(
+                "no leader of the restarted cluster ended its startup voter observation within \
+                 the restart's budget, so node '{}' never counted as ready",
+                self.spec.node_id
+            ))),
+        }
     }
 }
 
