@@ -59,11 +59,20 @@ impl ConfiguredFaultInjection {
         None
     }
 
-    pub(in crate::runtime) fn sink_client_is_unavailable(&self, _emitter: &EmitterName) -> bool {
+    pub(in crate::runtime) fn stopped_branch_state_write_delay(
+        &self,
+        _domain: &DomainName,
+        _kind: ModelKind,
+        _entity: &ModelName,
+    ) -> Option<Duration> {
+        None
+    }
+
+    pub(in crate::runtime) fn emitter_client_is_unavailable(&self, _emitter: &EmitterName) -> bool {
         false
     }
 
-    pub(in crate::runtime) fn take_emitter_sink_stall(
+    pub(in crate::runtime) fn take_emitter_connector_stall(
         &self,
         _emitter: &EmitterName,
     ) -> Option<usize> {
@@ -148,6 +157,20 @@ impl ConfiguredFaultInjection {
     }
 
     pub(in crate::runtime) fn fill_relay_memory_before_acknowledgement_watches_if_armed(
+        &self,
+        _node_id: &ClusterNodeName,
+        _executor: &nervix_execution::Executor,
+    ) {
+    }
+
+    pub(in crate::runtime) fn fill_relay_memory_before_record_storage_if_armed(
+        &self,
+        _node_id: &ClusterNodeName,
+        _executor: &nervix_execution::Executor,
+    ) {
+    }
+
+    pub(in crate::runtime) fn register_relay_memory_owner(
         &self,
         _node_id: &ClusterNodeName,
         _executor: &nervix_execution::Executor,

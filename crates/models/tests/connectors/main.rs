@@ -2,7 +2,7 @@
 //!
 //! Layer: test harness.
 //!
-//! - **Owns.** The checks that the source and sink unions name every pair once, that each pair's
+//! - **Owns.** The checks that the source and emitter unions name every pair once, that each pair's
 //!   keywords, capabilities, quiesce modes, publishing modes and references are the declared
 //!   ones, and that every generated Model states what its pair declares.
 //! - **Depends on.** The vocabulary and the generators of `nervix-arbitrary`.
@@ -17,27 +17,29 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, ModelVariant};
 use nervix_models::{
     AckWindow, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterIngestorError,
-    BatchMessageLimit, BatchUnavailability, ClickHouseSink, ClickHouseSinkEntity,
-    ClickHouseTableSink, ClickHouseValueMapping, ClientConsumerSink, ClientIngestMode, ClientName,
-    ClientSinkEntity, ClientSourceEntity, ConnectorKind, EmitSink, EmitSinkKind,
-    EmitterBatchLegality, EmitterBatchPolicy, EmitterBodyForm, EndpointIngestMode, EndpointType,
-    Expression, HeaderLayout, HeaderModel, HttpEndpointSource, HttpSinkEntity, HttpSource,
-    HttpSourceEntity, IcebergCatalog, IcebergSink, IcebergSinkEntity, IcebergTableSink,
-    IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestSourceKind, KafkaIngestMode, KafkaOffsetMode, KafkaSinkEntity, KafkaSourceEntity,
-    KafkaTopicSink, KafkaTopicSource, Literal, Model, ModelKind, MongoDbCollectionSink,
-    MongoDbConflictAction, MongoDbSink, MongoDbSinkEntity, MqttIngestMode, MqttQos, MqttSession,
-    MqttSinkEntity, MqttSourceEntity, MqttTopicSource, MySqlConflictAction, MySqlSink,
-    MySqlSinkEntity, MySqlTableSink, NatsSinkEntity, NatsSourceEntity, OtelLogsSink, OtelMappings,
-    OtelMetric, OtelMetricKind, OtelMetricsSink, OtelSink, OtelSinkEntity, OtelTracesSink,
-    ParseAsType, PostgresConflictAction, PostgresSink, PostgresSinkEntity, PostgresTableSink,
-    PrometheusSourceEntity, PulsarSinkEntity, PulsarSourceEntity, PulsarTopicSink,
-    RabbitMqSinkEntity, RabbitMqSourceEntity, RedisPubSubIngestMode, RedisPubSubSink,
-    RedisPubSubSource, RedisSink, RedisSinkEntity, RedisSource, RedisSourceEntity, RetryPolicy,
-    SchemaName, SentryEventSink, SentrySink, SentrySinkEntity, SinkClientReference, SinkReference,
-    SinkValueMapping, SourceMetadataScope, SourceReferenceKind, SqsSinkEntity, SqsSourceEntity,
-    SyslogSinkEntity, SyslogSourceEntity, WebsocketsEndpointSource, WebsocketsSourceEntity,
-    ZeroMqSinkEntity, ZeroMqSourceEntity,
+    BatchMessageLimit, BatchUnavailability, ClickHouseEmitter, ClickHouseEmitterEntity,
+    ClickHouseTableEmitter, ClickHouseValueMapping, ClientConsumerEmitter, ClientEmitterEntity,
+    ClientIngestMode, ClientIngestorEntity, ClientName, ConnectorKind, EmitterBatchLegality,
+    EmitterBatchPolicy, EmitterBodyForm, EmitterClientReference, EmitterEntity, EmitterEntityKind,
+    EmitterReference, EmitterValueMapping, EndpointIngestMode, EndpointType, Expression,
+    HeaderLayout, HeaderModel, HttpEmitterEntity, HttpEndpointIngestor, HttpIngestor,
+    HttpIngestorEntity, IcebergCatalog, IcebergEmitter, IcebergEmitterEntity, IcebergTableEmitter,
+    IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity,
+    IngestorEntityKind, IngestorMetadataScope, IngestorReferenceKind, KafkaEmitterEntity,
+    KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicIngestor,
+    Literal, Model, ModelKind, MongoDbCollectionEmitter, MongoDbConflictAction, MongoDbEmitter,
+    MongoDbEmitterEntity, MqttEmitterEntity, MqttIngestMode, MqttIngestorEntity, MqttQos,
+    MqttSession, MqttTopicIngestor, MySqlConflictAction, MySqlEmitter, MySqlEmitterEntity,
+    MySqlTableEmitter, NatsEmitterEntity, NatsIngestorEntity, OtelEmitter, OtelEmitterEntity,
+    OtelLogsEmitter, OtelMappings, OtelMetric, OtelMetricKind, OtelMetricsEmitter,
+    OtelTracesEmitter, ParseAsType, PostgresConflictAction, PostgresEmitter, PostgresEmitterEntity,
+    PostgresTableEmitter, PrometheusIngestorEntity, PulsarEmitterEntity, PulsarIngestorEntity,
+    PulsarTopicEmitter, RabbitMqEmitterEntity, RabbitMqIngestorEntity, RedisEmitter,
+    RedisEmitterEntity, RedisIngestor, RedisIngestorEntity, RedisPubSubEmitter,
+    RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SchemaName, SentryEmitter,
+    SentryEmitterEntity, SentryEventEmitter, SqsEmitterEntity, SqsIngestorEntity,
+    SyslogEmitterEntity, SyslogIngestorEntity, WebsocketsEndpointIngestor,
+    WebsocketsIngestorEntity, ZeroMqEmitterEntity, ZeroMqIngestorEntity,
 };
 use rstest::rstest;
 use strum::IntoEnumIterator as _;
@@ -62,8 +64,8 @@ fn seeded_bytes(seed: u8) -> Vec<u8> {
         .collect()
 }
 
-fn mapping(column: &str) -> SinkValueMapping {
-    SinkValueMapping {
+fn mapping(column: &str) -> EmitterValueMapping {
+    EmitterValueMapping {
         column: column.to_owned(),
         expression: Expression::Literal(Literal::String(column.to_owned())),
     }
@@ -132,8 +134,8 @@ fn every_connector_kind_is_spelled_as_nspl_spells_it() {
 
 #[test]
 fn the_source_kinds_name_every_pair_once_with_its_phrase() {
-    let phrases = IngestSourceKind::all()
-        .map(IngestSourceKind::phrase)
+    let phrases = IngestorEntityKind::all()
+        .map(IngestorEntityKind::phrase)
         .collect::<Vec<_>>();
     assert_eq!(
         phrases,
@@ -159,9 +161,9 @@ fn the_source_kinds_name_every_pair_once_with_its_phrase() {
 }
 
 #[test]
-fn the_sink_kinds_name_every_pair_once_with_its_phrase() {
-    let phrases = EmitSinkKind::all()
-        .map(EmitSinkKind::phrase)
+fn the_emitter_kinds_name_every_pair_once_with_its_phrase() {
+    let phrases = EmitterEntityKind::all()
+        .map(EmitterEntityKind::phrase)
         .collect::<Vec<_>>();
     assert_eq!(
         phrases,
@@ -193,13 +195,13 @@ fn the_sink_kinds_name_every_pair_once_with_its_phrase() {
 
 #[test]
 fn a_phrase_is_the_keyword_of_its_connector_then_of_its_entity() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         assert_eq!(
             kind.phrase(),
             format!("{} {}", kind.connector().keyword(), kind.entity_keyword())
         );
     }
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         assert_eq!(
             kind.phrase(),
             format!("{} {}", kind.connector().keyword(), kind.entity_keyword())
@@ -209,15 +211,15 @@ fn a_phrase_is_the_keyword_of_its_connector_then_of_its_entity() {
 
 #[test]
 fn the_transport_sources_are_every_source_pair_but_the_client_producer() {
-    let transports = IngestSourceKind::modeled().collect::<Vec<_>>();
-    let mut expected = IngestSourceKind::all().collect::<Vec<_>>();
-    expected.retain(|kind| *kind != IngestSourceKind::Client(ClientSourceEntity::Producer));
+    let transports = IngestorEntityKind::modeled().collect::<Vec<_>>();
+    let mut expected = IngestorEntityKind::all().collect::<Vec<_>>();
+    expected.retain(|kind| *kind != IngestorEntityKind::Client(ClientIngestorEntity::Producer));
     assert_eq!(transports, expected);
 }
 
 #[test]
 fn a_source_form_names_its_pair_by_key_and_label() {
-    let forms = IngestSourceKind::all()
+    let forms = IngestorEntityKind::all()
         .map(|kind| (kind.form_key(), kind.form_label()))
         .collect::<Vec<_>>();
     let expected = [
@@ -245,90 +247,97 @@ fn a_source_form_names_its_pair_by_key_and_label() {
 }
 
 /// What one source pair declares, as the table below states it.
-struct SourceDeclaration {
+struct IngestorDeclaration {
     headers: Option<HeaderModel>,
-    metadata: SourceMetadataScope,
+    metadata: IngestorMetadataScope,
     every_node: bool,
-    reference: SourceReferenceKind,
+    reference: IngestorReferenceKind,
 }
 
-fn source_declaration(kind: IngestSourceKind) -> SourceDeclaration {
-    let headers_only = |headers, connector| SourceDeclaration {
+fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
+    let headers_only = |headers, connector| IngestorDeclaration {
         headers,
-        metadata: SourceMetadataScope::Headers,
+        metadata: IngestorMetadataScope::Headers,
         every_node: false,
-        reference: SourceReferenceKind::Client(connector),
+        reference: IngestorReferenceKind::Client(connector),
     };
     match kind {
-        IngestSourceKind::Client(ClientSourceEntity::Producer) => SourceDeclaration {
+        IngestorEntityKind::Client(ClientIngestorEntity::Producer) => IngestorDeclaration {
             headers: None,
-            metadata: SourceMetadataScope::Headers,
+            metadata: IngestorMetadataScope::Headers,
             every_node: false,
-            reference: SourceReferenceKind::Schema,
+            reference: IngestorReferenceKind::Schema,
         },
-        IngestSourceKind::Http(HttpSourceEntity::Request) => headers_only(
+        IngestorEntityKind::Http(HttpIngestorEntity::Request) => headers_only(
             Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
             ConnectorKind::Http,
         ),
-        IngestSourceKind::Kafka(KafkaSourceEntity::Topic) => SourceDeclaration {
+        IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) => IngestorDeclaration {
             headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
-            metadata: SourceMetadataScope::Kafka,
+            metadata: IngestorMetadataScope::Kafka,
             every_node: false,
-            reference: SourceReferenceKind::Client(ConnectorKind::Kafka),
+            reference: IngestorReferenceKind::Client(ConnectorKind::Kafka),
         },
-        IngestSourceKind::Pulsar(PulsarSourceEntity::Topic) => headers_only(
+        IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => headers_only(
             Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
             ConnectorKind::Pulsar,
         ),
-        IngestSourceKind::Mqtt(MqttSourceEntity::Topic) => headers_only(None, ConnectorKind::Mqtt),
-        IngestSourceKind::Nats(NatsSourceEntity::Subject) => headers_only(
+        IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => {
+            headers_only(None, ConnectorKind::Mqtt)
+        }
+        IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => headers_only(
             Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
             ConnectorKind::Nats,
         ),
-        IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) => headers_only(
+        IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => headers_only(
             Some(HeaderModel::exact(HeaderLayout::SortedByName)),
             ConnectorKind::RabbitMq,
         ),
-        IngestSourceKind::Redis(RedisSourceEntity::PubSub) => {
+        IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => {
             headers_only(None, ConnectorKind::Redis)
         }
-        IngestSourceKind::Prometheus(PrometheusSourceEntity::Query) => {
+        IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => {
             headers_only(None, ConnectorKind::Prometheus)
         }
-        IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull) => {
+        IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull) => {
             headers_only(None, ConnectorKind::ZeroMq)
         }
-        IngestSourceKind::Sqs(SqsSourceEntity::Queue) => headers_only(
+        IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => headers_only(
             Some(HeaderModel::exact(HeaderLayout::LastWins)),
             ConnectorKind::Sqs,
         ),
-        IngestSourceKind::Http(HttpSourceEntity::Endpoint) => SourceDeclaration {
+        IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-            metadata: SourceMetadataScope::Headers,
+            metadata: IngestorMetadataScope::Headers,
             every_node: true,
-            reference: SourceReferenceKind::Endpoint(EndpointType::Http),
+            reference: IngestorReferenceKind::Endpoint(EndpointType::Http),
         },
-        IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection) => {
-            headers_only(None, ConnectorKind::Websockets)
+        IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection) => {
+            IngestorDeclaration {
+                headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
+                metadata: IngestorMetadataScope::Websockets,
+                every_node: false,
+                reference: IngestorReferenceKind::Client(ConnectorKind::Websockets),
+            }
         }
-        IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint) => SourceDeclaration {
+        IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-            metadata: SourceMetadataScope::Headers,
+            metadata: IngestorMetadataScope::Headers,
             every_node: true,
-            reference: SourceReferenceKind::Endpoint(EndpointType::Websockets),
+            reference: IngestorReferenceKind::Endpoint(EndpointType::Websockets),
         },
-        IngestSourceKind::Syslog(SyslogSourceEntity::Listener) => SourceDeclaration {
+        IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener) => IngestorDeclaration {
             headers: None,
-            metadata: SourceMetadataScope::Syslog,
+            metadata: IngestorMetadataScope::Syslog,
             every_node: true,
-            reference: SourceReferenceKind::Client(ConnectorKind::Syslog),
+            reference: IngestorReferenceKind::Client(ConnectorKind::Syslog),
         },
     }
 }
 
 #[test]
 fn every_source_pair_declares_its_headers_metadata_execution_and_reference() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         let expected = source_declaration(kind);
         let declared = kind.capabilities();
         assert_eq!(declared.headers, expected.headers, "{kind:?}");
@@ -349,22 +358,25 @@ fn every_source_pair_declares_its_headers_metadata_execution_and_reference() {
 
 #[test]
 fn a_reference_kind_names_the_kind_of_model_a_body_references() {
-    let client = SourceReferenceKind::Client(ConnectorKind::Kafka);
+    let client = IngestorReferenceKind::Client(ConnectorKind::Kafka);
     assert_eq!(client.model_kind(), ModelKind::Client);
     assert_eq!(client.client_connector(), Some(ConnectorKind::Kafka));
     assert_eq!(client.endpoint_type(), None);
-    let endpoint = SourceReferenceKind::Endpoint(EndpointType::Websockets);
+    let endpoint = IngestorReferenceKind::Endpoint(EndpointType::Websockets);
     assert_eq!(endpoint.model_kind(), ModelKind::Endpoint);
     assert_eq!(endpoint.client_connector(), None);
     assert_eq!(endpoint.endpoint_type(), Some(EndpointType::Websockets));
-    assert_eq!(SourceReferenceKind::Schema.model_kind(), ModelKind::Schema);
-    assert_eq!(SourceReferenceKind::Schema.client_connector(), None);
-    assert_eq!(SourceReferenceKind::Schema.endpoint_type(), None);
+    assert_eq!(
+        IngestorReferenceKind::Schema.model_kind(),
+        ModelKind::Schema
+    );
+    assert_eq!(IngestorReferenceKind::Schema.client_connector(), None);
+    assert_eq!(IngestorReferenceKind::Schema.endpoint_type(), None);
 }
 
 #[test]
 fn a_transport_source_states_what_its_pair_declares() {
-    for kind in IngestSourceKind::modeled() {
+    for kind in IngestorEntityKind::modeled() {
         for seed in 0..4 {
             let bytes = seeded_bytes(seed);
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
@@ -384,7 +396,7 @@ fn a_transport_source_states_what_its_pair_declares() {
                 source.executes_on_every_cluster_node(),
                 declared.executes_on_every_cluster_node
             );
-            assert_eq!(source.source_kind(), declared.reference.model_kind());
+            assert_eq!(source.entity_kind(), declared.reference.model_kind());
             assert!(source.supports_quiesce(source.quiesce()), "{source:?}");
         }
     }
@@ -393,21 +405,21 @@ fn a_transport_source_states_what_its_pair_declares() {
 /// The quiesce modes one source pair supports, of the five the vocabulary defines, in the order
 /// suspend, buffer, drop, reject, endpoint buffer.
 #[rstest]
-#[case::http(IngestSourceKind::Http(HttpSourceEntity::Request), [true, true, false, false, false])]
-#[case::kafka(IngestSourceKind::Kafka(KafkaSourceEntity::Topic), [true, false, false, false, false])]
-#[case::pulsar(IngestSourceKind::Pulsar(PulsarSourceEntity::Topic), [true, false, false, false, false])]
-#[case::nats(IngestSourceKind::Nats(NatsSourceEntity::Subject), [false, true, true, false, false])]
-#[case::rabbitmq(IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue), [true, false, false, false, false])]
-#[case::redis(IngestSourceKind::Redis(RedisSourceEntity::PubSub), [false, true, true, false, false])]
-#[case::prometheus(IngestSourceKind::Prometheus(PrometheusSourceEntity::Query), [true, true, false, false, false])]
-#[case::zeromq(IngestSourceKind::ZeroMq(ZeroMqSourceEntity::Pull), [true, true, true, false, false])]
-#[case::sqs(IngestSourceKind::Sqs(SqsSourceEntity::Queue), [true, false, false, false, false])]
-#[case::http_endpoint(IngestSourceKind::Http(HttpSourceEntity::Endpoint), [false, false, false, true, true])]
-#[case::websockets(IngestSourceKind::Websockets(WebsocketsSourceEntity::Connection), [false, true, true, false, false])]
-#[case::websockets_endpoint(IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint), [false, false, false, true, true])]
-#[case::syslog(IngestSourceKind::Syslog(SyslogSourceEntity::Listener), [true, true, true, false, false])]
+#[case::http(IngestorEntityKind::Http(HttpIngestorEntity::Request), [true, true, false, false, false])]
+#[case::kafka(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic), [true, false, false, false, false])]
+#[case::pulsar(IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic), [true, false, false, false, false])]
+#[case::nats(IngestorEntityKind::Nats(NatsIngestorEntity::Subject), [false, true, true, false, false])]
+#[case::rabbitmq(IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue), [true, false, false, false, false])]
+#[case::redis(IngestorEntityKind::Redis(RedisIngestorEntity::PubSub), [false, true, true, false, false])]
+#[case::prometheus(IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query), [true, true, false, false, false])]
+#[case::zeromq(IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull), [true, true, true, false, false])]
+#[case::sqs(IngestorEntityKind::Sqs(SqsIngestorEntity::Queue), [true, false, false, false, false])]
+#[case::http_endpoint(IngestorEntityKind::Http(HttpIngestorEntity::Endpoint), [false, false, false, true, true])]
+#[case::websockets(IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection), [false, true, true, false, false])]
+#[case::websockets_endpoint(IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint), [false, false, false, true, true])]
+#[case::syslog(IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener), [true, true, true, false, false])]
 fn a_source_supports_the_quiesce_modes_its_entity_declares(
-    #[case] kind: IngestSourceKind,
+    #[case] kind: IngestorEntityKind,
     #[case] expected: [bool; 5],
 ) {
     let modes = [
@@ -442,7 +454,7 @@ fn a_source_supports_the_quiesce_modes_its_entity_declares(
 #[test]
 fn an_mqtt_source_suspends_only_a_persistent_session_delivered_at_least_once() {
     let source = |mode| {
-        IngestSource::from(MqttTopicSource {
+        IngestorEntity::from(MqttTopicIngestor {
             client: named("broker"),
             topic: named("orders/#"),
             instances: std::num::NonZeroU64::MIN,
@@ -478,7 +490,7 @@ fn an_mqtt_source_suspends_only_a_persistent_session_delivered_at_least_once() {
 
 #[test]
 fn a_source_references_the_client_or_endpoint_its_body_names() {
-    let kafka = IngestSource::from(KafkaTopicSource {
+    let kafka = IngestorEntity::from(KafkaTopicIngestor {
         client: named("events"),
         topic: named("orders"),
         offset_mode: KafkaOffsetMode::Domain,
@@ -487,13 +499,13 @@ fn a_source_references_the_client_or_endpoint_its_body_names() {
         quiesce: IngestQuiesceMode::Suspend,
     });
     assert_eq!(kafka.source_ref().as_str(), "events");
-    assert_eq!(kafka.source_kind(), ModelKind::Client);
+    assert_eq!(kafka.entity_kind(), ModelKind::Client);
     assert_eq!(
         kafka.acknowledgement(),
         IngestAcknowledgement::Unacknowledged
     );
 
-    let endpoint = IngestSource::from(HttpEndpointSource {
+    let endpoint = IngestorEntity::from(HttpEndpointIngestor {
         endpoint: named("intake"),
         mode: EndpointIngestMode::NoAck,
         quiesce: IngestQuiesceMode::Reject {
@@ -501,9 +513,9 @@ fn a_source_references_the_client_or_endpoint_its_body_names() {
         },
     });
     assert_eq!(endpoint.source_ref().as_str(), "intake");
-    assert_eq!(endpoint.source_kind(), ModelKind::Endpoint);
+    assert_eq!(endpoint.entity_kind(), ModelKind::Endpoint);
 
-    let stream = IngestSource::from(WebsocketsEndpointSource {
+    let stream = IngestorEntity::from(WebsocketsEndpointIngestor {
         endpoint: named("stream"),
         mode: EndpointIngestMode::NoAck,
         quiesce: IngestQuiesceMode::EndpointBuffer {
@@ -511,16 +523,16 @@ fn a_source_references_the_client_or_endpoint_its_body_names() {
         },
     });
     assert_eq!(stream.source_ref().as_str(), "stream");
-    assert_eq!(stream.source_kind(), ModelKind::Endpoint);
+    assert_eq!(stream.entity_kind(), ModelKind::Endpoint);
     assert_eq!(
         stream.kind(),
-        IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint)
+        IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint)
     );
 }
 
 #[test]
 fn the_metadata_scopes_declare_their_fields_in_order() {
-    let described = |scope: SourceMetadataScope| {
+    let described = |scope: IngestorMetadataScope| {
         scope
             .fields()
             .into_iter()
@@ -531,9 +543,9 @@ fn the_metadata_scopes_declare_their_fields_in_order() {
             })
             .collect::<Vec<_>>()
     };
-    assert!(described(SourceMetadataScope::Headers).is_empty());
+    assert!(described(IngestorMetadataScope::Headers).is_empty());
     assert_eq!(
-        described(SourceMetadataScope::Kafka),
+        described(IngestorMetadataScope::Kafka),
         [
             ("topic".to_owned(), ParseAsType::String),
             ("partition".to_owned(), ParseAsType::I32),
@@ -541,13 +553,13 @@ fn the_metadata_scopes_declare_their_fields_in_order() {
         ]
     );
     assert_eq!(
-        described(SourceMetadataScope::Syslog),
+        described(IngestorMetadataScope::Syslog),
         [("peer_addr".to_owned(), ParseAsType::String)]
     );
 }
 
-/// What one sink pair declares, as the table below states it.
-struct SinkDeclaration {
+/// What one emitter pair declares, as the table below states it.
+struct EmitterDeclaration {
     headers: Option<HeaderModel>,
     body: EmitterBodyForm,
     batch: EmitterBatchLegality,
@@ -555,15 +567,15 @@ struct SinkDeclaration {
     modes: &'static [&'static str],
 }
 
-fn sink_declaration(kind: EmitSinkKind) -> SinkDeclaration {
-    let codec = |headers, modes| SinkDeclaration {
+fn emitter_declaration(kind: EmitterEntityKind) -> EmitterDeclaration {
+    let codec = |headers, modes| EmitterDeclaration {
         headers,
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         modes,
     };
-    let request = |batch| SinkDeclaration {
+    let request = |batch| EmitterDeclaration {
         headers: None,
         body: EmitterBodyForm::Values,
         batch,
@@ -573,43 +585,43 @@ fn sink_declaration(kind: EmitSinkKind) -> SinkDeclaration {
     let required = EmitterBatchLegality::Required { maximum: None };
     let optional = EmitterBatchLegality::Optional { maximum: None };
     match kind {
-        EmitSinkKind::Client(ClientSinkEntity::Consumer) => SinkDeclaration {
+        EmitterEntityKind::Client(ClientEmitterEntity::Consumer) => EmitterDeclaration {
             headers: None,
             body: EmitterBodyForm::Native,
             batch: required,
             requires_batch_transformation: false,
             modes: &["ClientAck"],
         },
-        EmitSinkKind::Http(HttpSinkEntity::Request) => SinkDeclaration {
+        EmitterEntityKind::Http(HttpEmitterEntity::Request) => EmitterDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::SortedByName)),
             body: EmitterBodyForm::CodecOrWithoutBody,
             ..request(EmitterBatchLegality::Unavailable {
                 reason: BatchUnavailability::OneRequestPerRecord,
             })
         },
-        EmitSinkKind::Kafka(KafkaSinkEntity::Topic) => codec(
+        EmitterEntityKind::Kafka(KafkaEmitterEntity::Topic) => codec(
             Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
             &["NoAck", "BrokerAck"],
         ),
-        EmitSinkKind::Pulsar(PulsarSinkEntity::Topic) => codec(
+        EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => codec(
             Some(HeaderModel::exact(HeaderLayout::LastWins)),
             &["NoAck", "BrokerAck"],
         ),
-        EmitSinkKind::RabbitMq(RabbitMqSinkEntity::Queue) => codec(
+        EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Queue) => codec(
             Some(HeaderModel::exact(HeaderLayout::SortedByName)),
             &["NoAck", "BrokerAck"],
         ),
-        EmitSinkKind::Redis(RedisSinkEntity::PubSub)
-        | EmitSinkKind::ZeroMq(ZeroMqSinkEntity::Push)
-        | EmitSinkKind::Syslog(SyslogSinkEntity::Collector) => codec(None, &["NoAck"]),
-        EmitSinkKind::Mqtt(MqttSinkEntity::Topic) => {
+        EmitterEntityKind::Redis(RedisEmitterEntity::PubSub)
+        | EmitterEntityKind::ZeroMq(ZeroMqEmitterEntity::Push)
+        | EmitterEntityKind::Syslog(SyslogEmitterEntity::Collector) => codec(None, &["NoAck"]),
+        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
             codec(None, &["MqttQos0", "MqttQos1", "MqttQos2"])
         }
-        EmitSinkKind::Nats(NatsSinkEntity::Subject) => codec(
+        EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => codec(
             Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
             &["NoAck", "NatsJetStream"],
         ),
-        EmitSinkKind::Sqs(SqsSinkEntity::Queue) => SinkDeclaration {
+        EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => EmitterDeclaration {
             batch: EmitterBatchLegality::Optional {
                 maximum: Some(
                     "256KiB"
@@ -622,25 +634,25 @@ fn sink_declaration(kind: EmitSinkKind) -> SinkDeclaration {
                 &["SqsSingle", "SqsBatch"],
             )
         },
-        EmitSinkKind::Sentry(SentrySinkEntity::Event) => SinkDeclaration {
+        EmitterEntityKind::Sentry(SentryEmitterEntity::Event) => EmitterDeclaration {
             requires_batch_transformation: true,
             ..codec(None, &["RequestAck"])
         },
-        EmitSinkKind::Otel(
-            OtelSinkEntity::Logs | OtelSinkEntity::Traces | OtelSinkEntity::Metrics,
+        EmitterEntityKind::Otel(
+            OtelEmitterEntity::Logs | OtelEmitterEntity::Traces | OtelEmitterEntity::Metrics,
         )
-        | EmitSinkKind::Iceberg(IcebergSinkEntity::Table) => request(optional),
-        EmitSinkKind::ClickHouse(ClickHouseSinkEntity::Table)
-        | EmitSinkKind::Postgres(PostgresSinkEntity::Table)
-        | EmitSinkKind::MySql(MySqlSinkEntity::Table)
-        | EmitSinkKind::MongoDb(MongoDbSinkEntity::Collection) => request(required),
+        | EmitterEntityKind::Iceberg(IcebergEmitterEntity::Table) => request(optional),
+        EmitterEntityKind::ClickHouse(ClickHouseEmitterEntity::Table)
+        | EmitterEntityKind::Postgres(PostgresEmitterEntity::Table)
+        | EmitterEntityKind::MySql(MySqlEmitterEntity::Table)
+        | EmitterEntityKind::MongoDb(MongoDbEmitterEntity::Collection) => request(required),
     }
 }
 
 #[test]
-fn every_sink_pair_declares_its_headers_codec_batching_and_publishing_modes() {
-    for kind in EmitSinkKind::all() {
-        let expected = sink_declaration(kind);
+fn every_emitter_pair_declares_its_headers_codec_batching_and_publishing_modes() {
+    for kind in EmitterEntityKind::all() {
+        let expected = emitter_declaration(kind);
         let declared = kind.capabilities();
         assert_eq!(declared.headers, expected.headers, "{kind:?}");
         assert_eq!(
@@ -665,10 +677,12 @@ fn every_sink_pair_declares_its_headers_codec_batching_and_publishing_modes() {
 }
 
 #[test]
-fn the_sqs_sink_admits_at_most_the_message_size_sqs_does() {
+fn the_sqs_emitter_admits_at_most_the_message_size_sqs_does() {
     let EmitterBatchLegality::Optional {
         maximum: Some(maximum),
-    } = EmitSinkKind::Sqs(SqsSinkEntity::Queue).capabilities().batch
+    } = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue)
+        .capabilities()
+        .batch
     else {
         panic!("SQS batches optionally, up to the message size it fixes");
     };
@@ -676,43 +690,46 @@ fn the_sqs_sink_admits_at_most_the_message_size_sqs_does() {
 }
 
 #[test]
-fn a_sink_states_what_its_pair_declares() {
-    for kind in EmitSinkKind::all() {
+fn an_emitter_states_what_its_pair_declares() {
+    for kind in EmitterEntityKind::all() {
         for seed in 0..4 {
             let bytes = seeded_bytes(seed);
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
-            let sink = arbitrary.emit_sink_of(kind);
+            let entity = arbitrary.emitter_entity_of(kind);
             let declared = kind.capabilities();
-            assert_eq!(sink.kind(), kind);
-            assert_eq!(sink.connector(), kind.connector());
-            assert_eq!(sink.transport_label(), kind.phrase());
-            assert_eq!(sink.capabilities(), declared);
-            assert_eq!(sink.requires_codec(), declared.body.requires_codec());
-            assert_eq!(sink.batch_legality(), declared.batch);
+            assert_eq!(entity.kind(), kind);
+            assert_eq!(entity.connector(), kind.connector());
+            assert_eq!(entity.transport_label(), kind.phrase());
+            assert_eq!(entity.capabilities(), declared);
+            assert_eq!(entity.requires_codec(), declared.body.requires_codec());
+            assert_eq!(entity.batch_legality(), declared.batch);
             assert_eq!(
-                sink.requires_batch_transformation(),
+                entity.requires_batch_transformation(),
                 declared.requires_batch_transformation
             );
             assert!(
                 declared
                     .publishing_modes
-                    .contains(&sink.publishing().kind())
+                    .contains(&entity.publishing().kind())
             );
-            match sink.reference() {
-                SinkReference::Client(SinkClientReference { client, connector }) => {
-                    assert_eq!(sink.client(), Some(client));
+            match entity.reference() {
+                EmitterReference::Client(EmitterClientReference { client, connector }) => {
+                    assert_eq!(entity.client(), Some(client));
                     assert!(declared.reference.admits_client(connector));
                 }
-                SinkReference::StorageClient(client) => {
-                    assert_eq!(sink.client(), Some(client));
+                EmitterReference::StorageClient(client) => {
+                    assert_eq!(entity.client(), Some(client));
                     assert!(matches!(
                         declared.reference,
-                        nervix_models::SinkReferenceKind::StorageClient(_)
+                        nervix_models::EmitterReferenceKind::StorageClient(_)
                     ));
                 }
-                SinkReference::Schema(_) => {
-                    assert_eq!(sink.client(), None);
-                    assert_eq!(kind, EmitSinkKind::Client(ClientSinkEntity::Consumer));
+                EmitterReference::Schema(_) => {
+                    assert_eq!(entity.client(), None);
+                    assert_eq!(
+                        kind,
+                        EmitterEntityKind::Client(ClientEmitterEntity::Consumer)
+                    );
                 }
             }
         }
@@ -772,8 +789,8 @@ fn every_client_model_names_the_connector_it_configures_and_no_other_model_does(
     );
 }
 
-fn iceberg_sink() -> IcebergTableSink {
-    IcebergTableSink {
+fn iceberg_emitter() -> IcebergTableEmitter {
+    IcebergTableEmitter {
         mode: nervix_models::IcebergTablePublishingMode::Ack {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
@@ -794,36 +811,36 @@ fn iceberg_sink() -> IcebergTableSink {
 
 #[test]
 fn an_iceberg_destination_retains_its_storage_client_for_resolution() {
-    let sink = EmitSink::from(iceberg_sink());
-    let SinkReference::StorageClient(client) = sink.reference() else {
+    let connector = EmitterEntity::from(iceberg_emitter());
+    let EmitterReference::StorageClient(client) = connector.reference() else {
         panic!("storage reference");
     };
     assert_eq!(client, &named::<ClientName>("lake"));
-    assert_eq!(sink.client(), Some(client));
+    assert_eq!(connector.client(), Some(client));
     let catalog: ClientName = named("catalog");
     assert_eq!(
-        sink.catalog_client(),
-        Some(SinkClientReference {
+        connector.catalog_client(),
+        Some(EmitterClientReference {
             client: &catalog,
             connector: ConnectorKind::IcebergRest,
         })
     );
-    assert_eq!(sink.commit_policy(), Some(("30s", "64MiB")));
-    let EmitSink::Iceberg(IcebergSink::Table(table)) = &sink else {
-        panic!("an Iceberg table sink was built, found {sink:?}");
+    assert_eq!(connector.commit_policy(), Some(("30s", "64MiB")));
+    let EmitterEntity::Iceberg(IcebergEmitter::Table(table)) = &connector else {
+        panic!("an Iceberg table emitter was built, found {connector:?}");
     };
     assert_eq!(table.catalog.connector(), ConnectorKind::IcebergRest);
 }
 
 #[test]
-fn only_an_iceberg_sink_names_a_catalog_client_and_a_commit_policy() {
-    for kind in EmitSinkKind::all() {
+fn only_an_iceberg_emitter_names_a_catalog_client_and_a_commit_policy() {
+    for kind in EmitterEntityKind::all() {
         let bytes = seeded_bytes(7);
         let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
-        let sink = arbitrary.emit_sink_of(kind);
-        let iceberg = kind == EmitSinkKind::Iceberg(IcebergSinkEntity::Table);
-        assert_eq!(sink.catalog_client().is_some(), iceberg, "{kind:?}");
-        assert_eq!(sink.commit_policy().is_some(), iceberg, "{kind:?}");
+        let connector = arbitrary.emitter_entity_of(kind);
+        let iceberg = kind == EmitterEntityKind::Iceberg(IcebergEmitterEntity::Table);
+        assert_eq!(connector.catalog_client().is_some(), iceberg, "{kind:?}");
+        assert_eq!(connector.commit_policy().is_some(), iceberg, "{kind:?}");
     }
 }
 
@@ -837,14 +854,14 @@ fn otel_mappings() -> OtelMappings {
 }
 
 #[test]
-fn an_otel_sink_names_its_signal_by_its_entity() {
+fn an_otel_emitter_names_its_signal_by_its_entity() {
     let metric = OtelMetric {
         name: "queue.depth".to_owned(),
         unit: "1".to_owned(),
         description: None,
         kind: OtelMetricKind::Gauge,
     };
-    let logs = OtelSink::from(OtelLogsSink {
+    let logs = OtelEmitter::from(OtelLogsEmitter {
         mode: nervix_models::OtelLogsPublishingMode::Ack {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
@@ -854,7 +871,7 @@ fn an_otel_sink_names_its_signal_by_its_entity() {
         client: named("collector"),
         mappings: otel_mappings(),
     });
-    let traces = OtelSink::from(OtelTracesSink {
+    let traces = OtelEmitter::from(OtelTracesEmitter {
         mode: nervix_models::OtelTracesPublishingMode::Ack {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
@@ -864,7 +881,7 @@ fn an_otel_sink_names_its_signal_by_its_entity() {
         client: named("collector"),
         mappings: otel_mappings(),
     });
-    let metrics = OtelSink::from(OtelMetricsSink {
+    let metrics = OtelEmitter::from(OtelMetricsEmitter {
         mode: nervix_models::OtelMetricsPublishingMode::Ack {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
@@ -875,32 +892,32 @@ fn an_otel_sink_names_its_signal_by_its_entity() {
         metric: metric.clone(),
         mappings: otel_mappings(),
     });
-    assert_eq!(logs.entity(), OtelSinkEntity::Logs);
-    assert_eq!(traces.entity(), OtelSinkEntity::Traces);
-    assert_eq!(metrics.entity(), OtelSinkEntity::Metrics);
-    let OtelSink::Metrics(OtelMetricsSink {
+    assert_eq!(logs.entity(), OtelEmitterEntity::Logs);
+    assert_eq!(traces.entity(), OtelEmitterEntity::Traces);
+    assert_eq!(metrics.entity(), OtelEmitterEntity::Metrics);
+    let OtelEmitter::Metrics(OtelMetricsEmitter {
         metric: declared, ..
     }) = &metrics
     else {
-        panic!("a metrics sink was built, found {metrics:?}");
+        panic!("a metrics emitter was built, found {metrics:?}");
     };
     assert_eq!(declared, &metric);
-    for sink in [&logs, &traces, &metrics] {
-        assert_eq!(sink.client(), &named::<ClientName>("collector"));
-        assert_eq!(sink.mappings(), &otel_mappings());
+    for connector in [&logs, &traces, &metrics] {
+        assert_eq!(connector.client(), &named::<ClientName>("collector"));
+        assert_eq!(connector.mappings(), &otel_mappings());
     }
 }
 
 #[test]
 fn direct_value_mappings_cover_all_external_value_sections() {
-    let client: ClientName = named("sink");
+    let client: ClientName = named("emitter");
     let mapping = |column: &str| ClickHouseValueMapping {
         column: column.to_owned(),
         expression: Expression::Literal(Literal::String(column.to_owned())),
     };
     let single_value = || vec![mapping("value")];
-    let sinks = [
-        EmitSink::from(OtelLogsSink {
+    let emitters = [
+        EmitterEntity::from(OtelLogsEmitter {
             mode: nervix_models::OtelLogsPublishingMode::Ack {
                 retry_policy: nervix_models::RetryPolicy {
                     backoff: "250ms".to_string(),
@@ -915,7 +932,7 @@ fn direct_value_mappings_cover_all_external_value_sections() {
                 scope: None,
             },
         }),
-        EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
+        EmitterEntity::ClickHouse(ClickHouseEmitter::Table(ClickHouseTableEmitter {
             mode: nervix_models::ClickHouseTablePublishingMode::Ack {
                 retry_policy: nervix_models::RetryPolicy {
                     backoff: "250ms".to_string(),
@@ -926,7 +943,7 @@ fn direct_value_mappings_cover_all_external_value_sections() {
             table: named("events"),
             values: single_value(),
         })),
-        EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
+        EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
             mode: nervix_models::PostgresTablePublishingMode::Ack {
                 retry_policy: nervix_models::RetryPolicy {
                     backoff: "250ms".to_string(),
@@ -938,7 +955,7 @@ fn direct_value_mappings_cover_all_external_value_sections() {
             values: single_value(),
             conflict_action: PostgresConflictAction::None,
         })),
-        EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
+        EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter {
             mode: nervix_models::MySqlTablePublishingMode::Ack {
                 retry_policy: nervix_models::RetryPolicy {
                     backoff: "250ms".to_string(),
@@ -950,7 +967,7 @@ fn direct_value_mappings_cover_all_external_value_sections() {
             values: single_value(),
             conflict_action: MySqlConflictAction::None,
         })),
-        EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
+        EmitterEntity::MongoDb(MongoDbEmitter::Collection(MongoDbCollectionEmitter {
             mode: nervix_models::MongoDbCollectionPublishingMode::Ack {
                 retry_policy: nervix_models::RetryPolicy {
                     backoff: "250ms".to_string(),
@@ -962,7 +979,7 @@ fn direct_value_mappings_cover_all_external_value_sections() {
             values: single_value(),
             conflict_action: MongoDbConflictAction::None,
         })),
-        EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
+        EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
             mode: nervix_models::IcebergTablePublishingMode::Ack {
                 retry_policy: nervix_models::RetryPolicy {
                     backoff: "250ms".to_string(),
@@ -981,8 +998,8 @@ fn direct_value_mappings_cover_all_external_value_sections() {
         })),
     ];
 
-    for (index, sink) in sinks.iter().enumerate() {
-        let columns = sink
+    for (index, connector) in emitters.iter().enumerate() {
+        let columns = connector
             .direct_value_mappings()
             .map(|mapping| mapping.column.as_str())
             .collect::<Vec<_>>();
@@ -991,22 +1008,22 @@ fn direct_value_mappings_cover_all_external_value_sections() {
         } else {
             vec!["value"]
         };
-        assert_eq!(columns, expected, "{sink:?}");
+        assert_eq!(columns, expected, "{connector:?}");
     }
 
-    let sink_without_values = EmitSink::Sentry(SentrySink::Event(SentryEventSink {
+    let emitter_without_values = EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
         client,
         mode: nervix_models::SentryEventPublishingMode::Ack {
             retry_policy: retry_policy(),
         },
     }));
-    assert_eq!(sink_without_values.direct_value_mappings().count(), 0);
+    assert_eq!(emitter_without_values.direct_value_mappings().count(), 0);
 }
 
 #[test]
-fn two_sinks_are_one_definition_when_only_their_client_differs() {
+fn two_emitters_are_one_definition_when_only_their_client_differs() {
     let kafka = |client: &str, topic: &str| {
-        EmitSink::from(KafkaTopicSink {
+        EmitterEntity::from(KafkaTopicEmitter {
             mode: nervix_models::KafkaTopicPublishingMode::NoAck {
                 retry_policy: nervix_models::RetryPolicy {
                     backoff: "250ms".to_string(),
@@ -1021,7 +1038,7 @@ fn two_sinks_are_one_definition_when_only_their_client_differs() {
     assert!(kafka("first", "orders").same_definition(&kafka("second", "orders")));
     assert!(!kafka("first", "orders").same_definition(&kafka("first", "payments")));
 
-    let pulsar = EmitSink::from(PulsarTopicSink {
+    let pulsar = EmitterEntity::from(PulsarTopicEmitter {
         mode: nervix_models::PulsarTopicPublishingMode::NoAck {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
@@ -1034,7 +1051,7 @@ fn two_sinks_are_one_definition_when_only_their_client_differs() {
     assert!(!kafka("first", "orders").same_definition(&pulsar));
 
     let consumer = |schema: &str| {
-        EmitSink::from(ClientConsumerSink {
+        EmitterEntity::from(ClientConsumerEmitter {
             mode: nervix_models::ClientConsumerPublishingMode::Ack {
                 window: nervix_models::AckWindow::Sequential,
                 ack_timeout: "30s".to_string(),
@@ -1052,18 +1069,18 @@ fn two_sinks_are_one_definition_when_only_their_client_differs() {
     assert!(!kafka("first", "orders").same_definition(&consumer("orders")));
 
     let iceberg = |client: &str, catalog: &str| {
-        let mut sink = iceberg_sink();
-        sink.client = named(client);
-        sink.catalog = IcebergCatalog::Rest {
+        let mut connector = iceberg_emitter();
+        connector.client = named(client);
+        connector.catalog = IcebergCatalog::Rest {
             client: named(catalog),
         };
-        EmitSink::from(sink)
+        EmitterEntity::from(connector)
     };
     assert!(iceberg("lake", "catalog").same_definition(&iceberg("other_lake", "catalog")));
     assert!(!iceberg("lake", "catalog").same_definition(&iceberg("lake", "other_catalog")));
 }
 
-/// A batching clause every sink's contract admits: small enough for the tightest destination.
+/// A batching clause every emitter's contract admits: small enough for the tightest destination.
 fn admissible_batch() -> EmitterBatchPolicy {
     EmitterBatchPolicy {
         max_messages: BatchMessageLimit::try_from(8_u32)
@@ -1075,16 +1092,16 @@ fn admissible_batch() -> EmitterBatchPolicy {
 }
 
 #[test]
-fn naming_another_client_keeps_a_sink_of_every_pair_the_same_definition() {
+fn naming_another_client_keeps_a_emitter_of_every_pair_the_same_definition() {
     let other: ClientName = named("rebound");
-    for kind in EmitSinkKind::all() {
+    for kind in EmitterEntityKind::all() {
         for seed in 0..4 {
             let bytes = seeded_bytes(seed);
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
             let mut original = arbitrary.create_emitter_to(kind);
             // An alteration checks the batching contract again, which is not what this check is
-            // about, so the emitter batches exactly as its sink requires.
-            original.batch = match original.sink.batch_legality() {
+            // about, so the emitter batches exactly as its emitter requires.
+            original.batch = match original.connector.batch_legality() {
                 EmitterBatchLegality::Required { .. } => Some(admissible_batch()),
                 EmitterBatchLegality::Optional { .. }
                 | EmitterBatchLegality::Unavailable { .. } => None,
@@ -1099,9 +1116,10 @@ fn naming_another_client_keeps_a_sink_of_every_pair_the_same_definition() {
             let mut rebound = original.clone();
             let outcome = rebound.apply_alter(&alter);
 
-            if original.sink.client().is_none() {
-                let error = outcome
-                    .expect_err("a sink that serves session consumers publishes through no client");
+            if original.connector.client().is_none() {
+                let error = outcome.expect_err(
+                    "an emitter that serves session consumers publishes through no client",
+                );
                 assert_eq!(
                     error.current_context(),
                     &AlterEmitterError::ClientUnsupported,
@@ -1110,11 +1128,17 @@ fn naming_another_client_keeps_a_sink_of_every_pair_the_same_definition() {
                 assert_eq!(rebound, original, "{kind:?}");
                 continue;
             }
-            outcome.expect("a sink that publishes through a client can name another");
-            assert_eq!(rebound.sink.kind(), kind);
-            assert_eq!(rebound.sink.client(), Some(&other), "{kind:?}");
-            assert!(original.sink.same_definition(&rebound.sink), "{kind:?}");
-            assert!(rebound.sink.same_definition(&original.sink), "{kind:?}");
+            outcome.expect("an emitter that publishes through a client can name another");
+            assert_eq!(rebound.connector.kind(), kind);
+            assert_eq!(rebound.connector.client(), Some(&other), "{kind:?}");
+            assert!(
+                original.connector.same_definition(&rebound.connector),
+                "{kind:?}"
+            );
+            assert!(
+                rebound.connector.same_definition(&original.connector),
+                "{kind:?}"
+            );
         }
     }
 }
@@ -1135,7 +1159,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
     };
 
     let kafka = |mode| {
-        IngestSource::from(KafkaTopicSource {
+        IngestorEntity::from(KafkaTopicIngestor {
             client: named("events"),
             topic: named("orders"),
             offset_mode: KafkaOffsetMode::Domain,
@@ -1195,7 +1219,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
     ];
     for (mode, expected) in mqtt_modes.into_iter().zip(expected) {
         let acknowledges = mode.is_ack();
-        let source = IngestSource::from(MqttTopicSource {
+        let source = IngestorEntity::from(MqttTopicIngestor {
             client: named("broker"),
             topic: named("orders/#"),
             instances: std::num::NonZeroU64::MIN,
@@ -1213,28 +1237,28 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
 
 #[test]
 fn an_entity_model_converts_into_every_enum_that_holds_it() {
-    let source = RedisPubSubSource {
+    let source = RedisPubSubIngestor {
         client: named("cache"),
         channel: named("orders"),
         mode: RedisPubSubIngestMode::NoAck,
         quiesce: IngestQuiesceMode::Drop,
     };
-    let nested = RedisSource::from(source.clone());
-    assert_eq!(nested.entity(), RedisSourceEntity::PubSub);
+    let nested = RedisIngestor::from(source.clone());
+    assert_eq!(nested.entity(), RedisIngestorEntity::PubSub);
     assert_eq!(
-        IngestSource::from(source.clone()),
-        IngestSource::from(nested)
+        IngestorEntity::from(source.clone()),
+        IngestorEntity::from(nested)
     );
     assert_eq!(
-        IngestSource::from(source).kind(),
-        IngestSourceKind::from(RedisSourceEntity::PubSub)
+        IngestorEntity::from(source).kind(),
+        IngestorEntityKind::from(RedisIngestorEntity::PubSub)
     );
     assert_eq!(
-        IngestSourceKind::from(ClientSourceEntity::Producer),
-        IngestSourceKind::Client(ClientSourceEntity::Producer)
+        IngestorEntityKind::from(ClientIngestorEntity::Producer),
+        IngestorEntityKind::Client(ClientIngestorEntity::Producer)
     );
 
-    let sink = RedisPubSubSink {
+    let connector = RedisPubSubEmitter {
         mode: nervix_models::RedisPubSubPublishingMode::NoAck {
             retry_policy: nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
@@ -1244,12 +1268,15 @@ fn an_entity_model_converts_into_every_enum_that_holds_it() {
         client: named("cache"),
         channel: named("orders"),
     };
-    let nested = RedisSink::from(sink.clone());
-    assert_eq!(nested.entity(), RedisSinkEntity::PubSub);
-    assert_eq!(EmitSink::from(sink.clone()), EmitSink::from(nested));
+    let nested = RedisEmitter::from(connector.clone());
+    assert_eq!(nested.entity(), RedisEmitterEntity::PubSub);
     assert_eq!(
-        EmitSink::from(sink).kind(),
-        EmitSinkKind::from(RedisSinkEntity::PubSub)
+        EmitterEntity::from(connector.clone()),
+        EmitterEntity::from(nested)
+    );
+    assert_eq!(
+        EmitterEntity::from(connector).kind(),
+        EmitterEntityKind::from(RedisEmitterEntity::PubSub)
     );
 }
 
@@ -1270,7 +1297,7 @@ fn an_ingest_source_refuses_a_quiesce_mode_its_transport_lacks() {
     let buffer = IngestQuiesceMode::EndpointBuffer {
         max_size: "1MiB".to_string(),
     };
-    let mut source = IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+    let mut source = IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
         endpoint: named("ingress"),
         mode: EndpointIngestMode::NoAck,
         quiesce: buffer.clone(),
@@ -1283,7 +1310,7 @@ fn an_ingest_source_refuses_a_quiesce_mode_its_transport_lacks() {
     assert_eq!(
         error.current_context(),
         &AlterIngestorError::UnsupportedQuiesceMode {
-            kind: IngestSourceKind::Http(HttpSourceEntity::Endpoint),
+            kind: IngestorEntityKind::Http(HttpIngestorEntity::Endpoint),
             mode: "SUSPEND",
         }
     );

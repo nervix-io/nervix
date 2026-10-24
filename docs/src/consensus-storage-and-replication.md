@@ -25,7 +25,10 @@ owns the compiler and propagation rules.
 
 Every consensus mutation uses a full synchronization barrier that asks the filesystem to persist
 both data and filesystem metadata. The device and filesystem must honor that request for the
-host-power-loss guarantees in this chapter to hold.
+host-power-loss guarantees in this chapter to hold. This durability promise, `fsync every append`,
+is fixed by the build and is a prerequisite every node publishes: a node that promised anything else
+would give its acknowledgements another meaning, so it is refused at join, as
+[Node Settings](node-settings.md#the-prerequisite-list-is-closed) describes.
 
 The path from a proposal to its reply has four distinct boundaries:
 
@@ -223,7 +226,8 @@ Heartbeats keep the shorter deadline derived from the configured heartbeat inter
 seconds. With the default 250 ms heartbeat, the current soft deadline is 187.5 ms. Replication
 answers also prove leader contact, so sustained writes suppress redundant heartbeats for an
 automatically derived window. The window is no longer than the heartbeat interval or half the gap
-between that interval and the minimum election timeout. This keeps the heartbeat interval plus the
+between that interval and the minimum election timeout, which, with the election timeouts derived
+at six heartbeats, is one heartbeat interval. This keeps the heartbeat interval plus the
 suppression window below the minimum election timeout.
 
 The independent paths matter when a follower has slow storage: its append answer may take much
@@ -264,8 +268,13 @@ stream. If the leader has already purged part of that suffix, the follower recei
 snapshot and then the remaining log. Client proposals and management heartbeats continue while the
 catch-up runs.
 
-A discovered node joins as a learner. Each membership reconciliation gives a blocking learner
-catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
+A discovered node joins as a learner once the leader has read its published prerequisite record and
+found it compatible with the record of every live voter. The leader leaves any other candidate
+outside the membership and logs why once while the reason holds: at `debug` while the candidate has
+published no record the leader can read, and at `warn` with the voter and the mismatch when it
+cannot run beside a voter. [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes
+what the refused node does. Each membership reconciliation gives a blocking learner catch-up
+attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
 learner caught up; the membership change has its own ten-second bound. A timeout leaves the node a
 learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
 tries again while ordinary replication continues.
@@ -468,26 +477,27 @@ purge requests appear at `debug`.
 
 ## Tuning
 
-The server exposes heartbeat, election, snapshot, and retention policy as command-line arguments and
-matching environment variables:
+The server exposes heartbeat, snapshot, and retention policy as command-line arguments and matching
+environment variables:
 
 | Argument | Environment | Default | Effect |
 | --- | --- | --- | --- |
-| `--raft-heartbeat-interval` | `NERVIX_RAFT_HEARTBEAT_INTERVAL` | `250ms` | Period for leader liveness probes and basis for their soft deadline. It does not set the append-stream idle bound. |
-| `--raft-election-timeout-min` | `NERVIX_RAFT_ELECTION_TIMEOUT_MIN` | `1500ms` | Lower end of the randomized follower election timeout. Must exceed the heartbeat interval; the derived suppression window always fits inside that gap. |
-| `--raft-election-timeout-max` | `NERVIX_RAFT_ELECTION_TIMEOUT_MAX` | `3s` | Exclusive upper end of the randomized election timeout. Must exceed the minimum. |
+| `--raft-heartbeat-interval` | `NERVIX_RAFT_HEARTBEAT_INTERVAL` | `250ms` | Period for leader liveness probes and basis for their soft deadline, and for the randomized follower election timeout, which runs from six to twelve heartbeat intervals, `1.5s` to `3s` by default. It does not set the append-stream idle bound. |
 | `--raft-snapshot-entry-threshold` | `NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD` | `10000` | Applied entries since the last completed snapshot that request the next build. |
 | `--raft-snapshot-byte-threshold` | `NERVIX_RAFT_SNAPSHOT_BYTE_THRESHOLD` | `64MiB` | Appended entry bytes since the last completed snapshot that request the next build. |
 | `--raft-covered-log-entries-retained` | `NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED` | `1000` | Newest snapshot-covered entries retained for log catch-up. |
 | `--raft-covered-log-bytes-retained` | `NERVIX_RAFT_COVERED_LOG_BYTES_RETAINED` | `64MiB` | Newest snapshot-covered encoded bytes retained; the entry or byte bound reached first decides. |
 | `--raft-retained-log-cap` | `NERVIX_RAFT_RETAINED_LOG_CAP` | `1GiB` | Current-log byte level above which later mutations wait up to 30 seconds for reclamation. |
 
-A node compares its timings in the whole milliseconds consensus runs with, before it opens a store
-or binds a listener. A minimum election timeout that does not exceed the heartbeat interval, or a
-maximum that does not exceed the minimum, refuses the start with a message naming both settings,
-such as `raft-election-timeout-min (200ms) must exceed raft-heartbeat-interval (250ms)`; consensus
-never opens with timings it would reject. [Node Settings](node-settings.md) gives the class of each
-argument: the timings are prerequisites, the snapshot and retention bounds node capabilities.
+Consensus runs its timings in whole milliseconds. Before a node opens a store or binds a listener,
+it refuses a heartbeat below one millisecond, such as
+`raft-heartbeat-interval (500µs) must be at least 1ms, the resolution consensus runs timings at`,
+and a heartbeat so long that twelve of it do not fit the milliseconds consensus counts an election
+timeout in, so consensus never opens with timings it would reject. The election timeouts are not
+configured on their own, because deriving them by fixed factors keeps every pairing of nodes
+safe: [Node Settings](node-settings.md) gives the class of each argument, and the heartbeat is a
+prerequisite that every two nodes keep within a factor of two of each other, so that one rolling
+change moves it by less than that. The snapshot and retention bounds are node capabilities.
 
 Replication batch and memory limits are fixed by the current server execution policy; the server
 does not expose flags for them:
@@ -504,9 +514,11 @@ does not expose flags for them:
 | Snapshot section / transport chunk | 8 MiB / 64 KiB |
 | Complete snapshot transfer | 30 seconds |
 
-Use the timing settings as one policy. Lowering the election minimum without lowering the heartbeat
-interval can make the configuration invalid at startup. Raising the heartbeat interval does not
-allow slower append storage because append liveness is progress-based and fixed at five seconds.
+The heartbeat sets the whole timing policy: lowering it shortens the election timeouts with it, and
+raising it lengthens them. Change it across a cluster by less than a factor of two per rolling
+restart; a node outside that bound of a live peer is refused as it joins. Raising the heartbeat
+interval does not allow slower append storage because append liveness is progress-based and fixed
+at five seconds.
 
 Snapshot and covered-log settings trade storage and catch-up method. Smaller thresholds build and
 transfer snapshots more often; smaller covered suffixes make a lagging follower switch to a snapshot

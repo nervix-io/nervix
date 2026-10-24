@@ -149,6 +149,13 @@ A quiesced cut and a stopped cut hold the domain's replicated mutation lease, ow
 execution reference, so no transaction, alteration or other command changes the domain while it is
 captured. A live cut and a configuration-only capture take no lease.
 
+A stopped cut reads what the domain's stop left on disk. That stop completes only once every
+deduplicator and window branch it ended has written what it published last, including a branch
+ended at its stop grace whose snapshot task was still writing, as [Draining Admitted
+Work](./shutdown.md#draining-admitted-work) describes. A stopped cut that begins as soon as `STOP`
+returns therefore holds the same keyspaces and windows a quiesced cut taken just before the stop
+held.
+
 ## The Quiesced Cut
 
 A quiesced cut freezes a domain for one drain and one publication round, and the transfer happens
@@ -194,7 +201,7 @@ after the freeze ends. The leader's backup coordinator runs it in this order:
 8. **Release.** It always releases the lease, and checks its tenure a last time.
 
 A drain that does not finish by the deadline fails the backup with the counts each node still held
-and resumes the domain; an unavailable sink keeps its publish and acknowledgement counts outstanding
+and resumes the domain; an unavailable emitter keeps its publish and acknowledgement counts outstanding
 until then. A tenure change at any check refuses the cut, still attempts the resume and the release,
 and leaves the command applying. The next leader holds no alteration guard for the domain, so its
 reconciliation resumes the domain if it is still paused, and it re-executes every applying backup
@@ -681,12 +688,13 @@ removed, and a cancelled or interrupted sweep resumes from the keys that remain.
 gate or changes a selected publication, and never removes a domain's initial namespace, which only a
 publication's cleanup removes.
 
-The restore staging quota, `--restore-staging-max-bytes`, 128 GiB per node by default, bounds the
-key and value bytes of every unpublished restored namespace on the node, across all domains,
-including partial chunks, headers, indices and receipts; published data is outside it. A node
-measures that usage by reading every unpublished entry once, one chunk at a time, and keeps the
-measurement while it stays exact. Admission forgets it before the first chunk is written, and a
-checkpoint that then stages completely restores it with exactly the footprint it admitted; a
+The restore staging quota, `--restore-staging-max-bytes`, by default the smaller of 128 GiB and the
+size of the volume that holds the node database, bounds the key and value bytes of every
+unpublished restored namespace on the node, across all domains, including partial chunks, headers,
+indices and receipts; published data is outside it. A node measures that usage by reading every
+unpublished entry once, one chunk at a time, and keeps the measurement while it stays exact.
+Admission forgets it before the first chunk is written, and a checkpoint that then stages
+completely restores it with exactly the footprint it admitted; a
 staging attempt that fails after admission, one that replaces an earlier attempt, and a
 publication leave it forgotten, so the next admission or sweep measures again, as the first one
 after a start does. A sweep that deletes anything forgets it before deleting and measures again once
@@ -759,7 +767,7 @@ routing could not reach. A section path names a branch by the BLAKE3 fingerprint
 | Boundary | Failure | What remains | Recovery |
 | --- | --- | --- | --- |
 | Backup admission | The statement is batched, queued in a transaction, or sent to a follower | Nothing admitted | Send it alone, to the leader the redirect names. |
-| Cut lease and drain | The lease or the drain does not finish within the cut's budget | A pause is undone and the lease released; a failed drain names what each node still held | Send the backup again, with a longer `TIMEOUT` or after the stalled sink recovers. |
+| Cut lease and drain | The lease or the drain does not finish within the cut's budget | A pause is undone and the lease released; a failed drain names what each node still held | Send the backup again, with a longer `TIMEOUT` or after the stalled emitter recovers. |
 | Cut reach | A node the schedule assigns the domain's work to is not reported live when a quiesced cut starts, a scheduled state owner is not reported live when any cut captures, or the schedule places an entity whose state the archive captures on no node | Nothing paused when a quiesced cut refused before its pause, otherwise the pause is undone; the lease is released and no archive is assembled | Send the backup again once the node is back, or once failover has moved its placements or a node can host the entity again. |
 | Leader change during a cut | The tenure check fails | The domain is resumed, by the coordinator or by the next leader's reconciliation, and the command stays applying | The next leader re-executes the backup under the same reference; the client retries the reference to receive its archive. |
 | Owner capture | An owner cannot apply the revision, convert a checkpoint, or stage a section | No archive is assembled. The coordinator's copies and the failing owner's partial files are dropped; other owners' staged sections expire after 600 seconds | Send the backup again; it takes a new cut. |
@@ -964,6 +972,10 @@ restored schedule remains the restore planner's contract, exercised by the publi
   stays suppressed until its original three-minute deadline and is accepted at that deadline; the
   public scenario observes eventual delivery after that boundary, because a loaded runner may delay
   the first post or the read beyond the deadline.
+- The stopped cut outline on one and three nodes makes the last write of every window branch
+  outlast its stop grace, takes a stopped backup as soon as `STOP` returns, and requires the same
+  deduplicator and window sections a quiesced backup took before the stop. A difference names each
+  section only one archive holds and the first differing byte of a shared one, never the bytes.
 - The stored-branch capture outline exercises a stopped domain and a stopped restore with a keyspace
   and a window above 32 MiB beside 24 small branches, checks exact re-export, and reports sampled
   per-node bulk and metadata reservations separately from harness allocator statistics. Mappings are

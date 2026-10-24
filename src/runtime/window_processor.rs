@@ -342,7 +342,7 @@ pub(super) async fn flush_ready_window_processor(
                 ProcessorOutputDispatchContext {
                     branch,
                     node_kind,
-                    source_kind: ModelKind::WindowProcessor,
+                    entity_kind: ModelKind::WindowProcessor,
                     processor,
                     error_policies,
                     materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(

@@ -135,7 +135,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `client-producer-link-frames-malformed` | `nervix-server` typed decode failure, never an admission or execution refusal, or a frame that encodes and decodes back to itself | damaged encodings of every link frame, frames read as another direction's type and arbitrary bytes, v1 | 256 | 2048 bytes |
 | `client-consumer-stream-frames` | `nervix-server` complete equality of every client consumer stream frame through the bounded duplex codec of its stream, with nothing left charged | the opening message, every serving-node frame and every owning-node answer, with schemas of any field type, policy durations from zero to the longest, every answer, refusal and settlement outcome, delivery headers across their ranges with and without a branch fingerprint, and chunks from empty to the largest one sent, v1 | 256 | 2048 bytes |
 | `client-consumer-stream-frames-malformed` | `nervix-server` typed decode failure, never an admission or execution refusal, or a frame that encodes and decodes back to itself | damaged encodings of every stream frame, frames read as another direction's type and arbitrary bytes, v1 | 256 | 2048 bytes |
-| `client-emitter-deliveries` | `nervix-server` client emitter delivery equality from the sink's Arrow IPC stream to the client library's batch: the Arrow schema of exactly the declared fields, every delivered row in order, values, nulls and float bits; refusal under another row count or other fields | every field type with nulls, nested lists and sliced views, deliveries of adjacent and scattered rows, v1 | 128 | 2048 bytes |
+| `client-emitter-deliveries` | `nervix-server` client emitter delivery equality from the emitter's Arrow IPC stream to the client library's batch: the Arrow schema of exactly the declared fields, every delivered row in order, values, nulls and float bits; refusal under another row count or other fields | every field type with nulls, nested lists and sliced views, deliveries of adjacent and scattered rows, v1 | 128 | 2048 bytes |
 | `wasm-generated-pools` | `nervix-server` generated column pool equality from a WASM guest's Arrow IPC stream to the node's batch: unnamed fields, types, nullability, values, nulls and float bits | every field type with nulls, nested lists and sliced views, streams ended by the marker or closed, v1 | 128 | 2048 bytes |
 | `wasm-generated-pools-malformed` | `nervix-server` a typed generated-IPC or batch-count defect, or one batch of unnamed columns that writes and decodes back to itself | truncated, flipped, overwritten, shifted, trailing and arbitrary pools, v1 | 256 | 2048 bytes |
 | `simd-checked-lanes` | `nervix-simd-kernels` checked integer arithmetic equals scalar overflowing arithmetic at every SIMD level | all integer widths, runs and shared operands, v1 | 256 | 128 bytes |
@@ -293,7 +293,7 @@ and a field, UDF or function name inside an expression or a route construction m
 `~` or `.`, or begin with a digit, which canonical NSPL writes between backticks. Names reach both
 length limits, and counts reach the largest value their field holds.
 The language properties also sweep sixteen deterministic byte sequences through every Model
-family, every emitter sink and every statement form on every ordinary run, so none is left to the
+family, every emitter entity and every statement form on every ordinary run, so none is left to the
 random cases.
 
 The NSPL Postgres generator keeps `DO UPDATE` targets nonempty and leaves at least one `VALUES`
@@ -355,7 +355,7 @@ Registered properties also hold behavioral contracts against independent referen
   still runs and checks its own answer, and the complete state is compared every sixteenth step and
   at the end. Mutation testing runs the property in every mutant through
   `just test-expiry-map-mutants`. `connector-confirmation-window` publishes generated hand-overs,
-  refusals, pauses and scripted broker answers through the brokered sink confirmation window on a
+  refusals, pauses and scripted broker answers through the brokered emitter confirmation window on a
   paused clock, and compares the instant the publish ends, the answers the window holds after each
   hand-over, the records it settles and the failure that ends it with a reference model of the
   documented window rule computed in whole milliseconds.

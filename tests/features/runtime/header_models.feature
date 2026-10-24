@@ -1,12 +1,12 @@
 Feature: Header models
   Every entity whose messages carry transport headers declares a header model for each side: what
   a repeated name keeps, the order names travel in, and how names compare. DESCRIBE shows each
-  side's model. Where a sink keeps one value per header name, an emitter that writes one literal
+  side's model. Where a emitter keeps one value per header name, an emitter that writes one literal
   name twice is refused when its statement is validated, because the later write would replace the
   earlier one on every record. No broker is involved: nothing here starts the domain.
 
   @header_models
-  Scenario Outline: A repeated literal header name is refused where the sink keeps one value per name
+  Scenario Outline: A repeated literal header name is refused where the emitter keeps one value per name
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus statements

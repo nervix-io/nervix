@@ -31,7 +31,7 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{IngestMessageHeaders, RetainedIngestHeaders};
-use nervix_connector_websockets::{SignalingDataSink, WebsocketSignalingSession};
+use nervix_connector_websockets::{SignalingDataEmitter, WebsocketSignalingSession};
 use nervix_models::EndpointType;
 use nervix_primitives::{net::TcpListener, sync::CancellationToken, task::JoinSet};
 use nervix_recovery::NoReceiver;
@@ -161,35 +161,33 @@ pub(in crate::application) fn is_websocket_upgrade_request(
 }
 
 /// Ingests data frames that arrive on a server-side endpoint while its handshake is running.
-struct EndpointSignalingDataSink<'a> {
+struct EndpointSignalingDataEmitter<'a> {
     runtime: &'a Runtime,
     route: &'a ResolvedEndpointRoute,
     headers: &'a RetainedIngestHeaders,
     shutdown: &'a CancellationToken,
 }
 
-impl SignalingDataSink for EndpointSignalingDataSink<'_> {
-    async fn accept(&self, payload: Vec<u8>) {
+impl SignalingDataEmitter for EndpointSignalingDataEmitter<'_> {
+    async fn accept(&self, frame: nervix_connector_websockets::WebsocketDataFrame) {
         self.route
-            .dispatch(
-                self.runtime,
-                payload.as_slice(),
-                self.headers,
-                self.shutdown,
-            )
+            .dispatch(self.runtime, frame.payload(), self.headers, self.shutdown)
             .await;
     }
 
-    async fn accept_and_reply(&self, payload: Vec<u8>) -> Option<Message> {
+    async fn accept_and_reply(
+        &self,
+        frame: nervix_connector_websockets::WebsocketDataFrame,
+    ) -> Option<Message> {
         let outcome = self
             .route
-            .dispatch(self.runtime, &payload, self.headers, self.shutdown)
+            .dispatch(self.runtime, frame.payload(), self.headers, self.shutdown)
             .await;
         self.reply(outcome)
     }
 }
 
-impl EndpointSignalingDataSink<'_> {
+impl EndpointSignalingDataEmitter<'_> {
     fn reply(&self, outcome: EndpointDispatchOutcome) -> Option<Message> {
         let reply = outcome.acknowledgement()?;
         let Some(protocol) = self.route.signaling_protocol() else {
@@ -293,7 +291,7 @@ async fn handle_http_request(
                     let mut websocket =
                         WebSocketStream::from_raw_socket(io, Role::Server, None).await;
 
-                    let sink = EndpointSignalingDataSink {
+                    let connector = EndpointSignalingDataEmitter {
                         runtime: &runtime,
                         route: &route,
                         headers: &headers,
@@ -303,7 +301,7 @@ async fn handle_http_request(
                         let session = WebsocketSignalingSession::new(protocol.clone());
                         let session_result = nervix_primitives::select! {
                             _ = shutdown.cancelled() => return,
-                            result = session.run(&mut websocket, &sink) => result,
+                            result = session.run(&mut websocket, &connector) => result,
                         };
                         if let Err(error) = session_result {
                             warn!(
@@ -331,7 +329,7 @@ async fn handle_http_request(
                                 let outcome = route
                                     .dispatch(&runtime, payload.as_ref(), &headers, &shutdown)
                                     .await;
-                                if let Some(reply) = sink.reply(outcome) {
+                                if let Some(reply) = connector.reply(outcome) {
                                     if websocket.send(reply).await.is_err() {
                                         break;
                                     }

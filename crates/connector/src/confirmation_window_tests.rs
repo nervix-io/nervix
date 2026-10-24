@@ -4,7 +4,7 @@
 //! - **Owns.** A scripted broker that answers each record at a chosen instant of a paused clock,
 //!   the reference publish the documented window rule gives a script, and the Bolero property and
 //!   focused tests that hold the window to it.
-//! - **Depends on.** The confirmation window, the sink contract's outcome types, and a runtime on a
+//! - **Depends on.** The confirmation window, the emitter contract's outcome types, and a runtime on a
 //!   paused clock.
 //! - **Must not know.** Any broker driver or the host's retry.
 
@@ -32,13 +32,13 @@ use nervix_primitives::{
 };
 
 use super::{BrokerAnswer, BrokerVerdict, ConfirmationWindow, ConfirmationWindowError};
-use crate::sink::{
-    AckConfirmation, PerRecordOutcomeParts, RejectedSinkRecord, SinkPublishError,
-    SinkPublishResult, SinkRecordId,
+use crate::emitter::{
+    AckConfirmation, EmitterRecordId, EmitterWriteError, EmitterWriteResult, PerRecordOutcomeParts,
+    RejectedEmitterMember,
 };
 
-/// The sink the scripted publishes report their failures for.
-pub(super) const SINK: &str = "scripted";
+/// The emitter the scripted publishes report their failures for.
+pub(super) const EMITTER: &str = "scripted";
 
 /// What the driver reports for a record it refused for good as it was handed over.
 const REFUSED_AT_HAND_OVER: &str = "the scripted driver refused the record as it was handed over";
@@ -54,7 +54,7 @@ pub(super) enum ScriptedVerdict {
 
 /// Names the record whose scripted answer failed, in the failure that answer reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct FailedAnswerOf(pub(super) SinkRecordId);
+pub(super) struct FailedAnswerOf(pub(super) EmitterRecordId);
 
 /// Marks the failure of a scripted driver that could take no more records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,19 +62,21 @@ pub(super) struct DriverRefusedRecords;
 
 impl ScriptedVerdict {
     /// The answer the scripted broker gives `record`.
-    pub(super) fn answer(self, record: SinkRecordId) -> BrokerAnswer {
+    pub(super) fn answer(self, record: EmitterRecordId) -> BrokerAnswer {
         match self {
             Self::Confirmed => Ok(BrokerVerdict::Confirmed),
             Self::Rejected => Ok(BrokerVerdict::Rejected {
                 message: Self::rejection(record),
             }),
-            Self::Failed => Err(Report::new(SinkPublishError::Publish { sink: SINK })
-                .attach(FailedAnswerOf(record))),
+            Self::Failed => Err(
+                Report::new(EmitterWriteError::Publish { connector: EMITTER })
+                    .attach(FailedAnswerOf(record)),
+            ),
         }
     }
 
     /// The message the scripted broker refuses `record` with.
-    pub(super) fn rejection(record: SinkRecordId) -> String {
+    pub(super) fn rejection(record: EmitterRecordId) -> String {
         format!("the scripted broker refused record {}", record.index())
     }
 }
@@ -82,13 +84,13 @@ impl ScriptedVerdict {
 /// A record a publish rejected, and the message its rejection reports.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct RejectedRecord {
-    record: SinkRecordId,
+    record: EmitterRecordId,
     message: String,
 }
 
 impl RejectedRecord {
     /// `record` as the scripted broker refuses it.
-    fn by_broker(record: SinkRecordId) -> Self {
+    fn by_broker(record: EmitterRecordId) -> Self {
         Self {
             record,
             message: ScriptedVerdict::rejection(record),
@@ -96,7 +98,7 @@ impl RejectedRecord {
     }
 
     /// `record` as the scripted driver refuses it at hand-over.
-    fn at_hand_over(record: SinkRecordId) -> Self {
+    fn at_hand_over(record: EmitterRecordId) -> Self {
         Self {
             record,
             message: REFUSED_AT_HAND_OVER.to_owned(),
@@ -106,14 +108,14 @@ impl RejectedRecord {
 
 /// When the scripted publish says `record` occurred, distinct for every record so a settled
 /// rejection shows it kept its own record's time.
-pub(super) fn occurred_at(record: SinkRecordId) -> Timestamp {
+pub(super) fn occurred_at(record: EmitterRecordId) -> Timestamp {
     let nanos = i64::try_from(record.index()).assured("a scripted publish has few records");
     Timestamp::from_unix_nanos(nanos)
 }
 
 /// The failure of a scripted driver that could take no more records.
-pub(super) fn driver_refused() -> Report<SinkPublishError> {
-    Report::new(SinkPublishError::Publish { sink: SINK }).attach(DriverRefusedRecords)
+pub(super) fn driver_refused() -> Report<EmitterWriteError> {
+    Report::new(EmitterWriteError::Publish { connector: EMITTER }).attach(DriverRefusedRecords)
 }
 
 /// The settings of a window that awaits at most `max_in_flight` answers, each for `timeout`.
@@ -137,7 +139,7 @@ fn paused_runtime() -> nervix_primitives::runtime::Runtime {
 /// The answer for one record, which the scripted broker gives once the clock reaches `given_at`,
 /// or never.
 struct ScriptedAnswer<'a> {
-    record: SinkRecordId,
+    record: EmitterRecordId,
     verdict: ScriptedVerdict,
     given_at: Option<Instant>,
     /// Wakes a publish that waits for this answer when it is given.
@@ -148,7 +150,7 @@ struct ScriptedAnswer<'a> {
 
 impl<'a> ScriptedAnswer<'a> {
     fn new(
-        record: SinkRecordId,
+        record: EmitterRecordId,
         verdict: ScriptedVerdict,
         given_at: Option<Instant>,
         held: &'a Cell<usize>,
@@ -209,7 +211,7 @@ enum Treatment {
 /// One record of a generated publish.
 #[derive(Debug, Clone, Copy, bolero::TypeGenerator)]
 struct ScriptedRecord {
-    /// The sink's own work before it hands this record over: up to nine milliseconds.
+    /// The emitter's own work before it hands this record over: up to nine milliseconds.
     pause: u8,
     /// Selects how the driver and the broker treat the record; see [`ScriptedRecord::treatment`].
     treatment: u8,
@@ -248,7 +250,7 @@ impl ScriptedRecord {
     }
 }
 
-/// A generated publish: the window's settings, the records the sink hands over in order, and the
+/// A generated publish: the window's settings, the records the emitter hands over in order, and the
 /// record the driver fails at, if any.
 #[derive(Debug, bolero::TypeGenerator)]
 struct WindowCase {
@@ -271,7 +273,7 @@ enum ExpectedFailure {
     /// The driver could take no more records.
     DriverRefused,
     /// The answer for the oldest record failed.
-    AnswerFailed(SinkRecordId),
+    AnswerFailed(EmitterRecordId),
     /// The answer for the oldest record did not arrive by its deadline.
     TimedOut,
 }
@@ -280,7 +282,7 @@ enum ExpectedFailure {
 /// the publish began.
 #[derive(Debug, Clone, Copy)]
 struct ReferenceRecord {
-    record: SinkRecordId,
+    record: EmitterRecordId,
     verdict: ScriptedVerdict,
     given_at: Option<u64>,
     deadline: u64,
@@ -303,14 +305,14 @@ struct ReferencePublish {
     /// Every record the driver took, in hand-over order.
     taken: Vec<ReferenceRecord>,
     /// Every record the driver refused as it was handed over.
-    refused: Vec<SinkRecordId>,
+    refused: Vec<EmitterRecordId>,
     failure: Option<ExpectedFailure>,
 }
 
 impl ReferencePublish {
     /// The records the publish delivers: exactly those whose broker confirmed them before it
     /// ended. No other record is delivered, and none of them is left unresolved.
-    fn delivered(&self) -> Vec<SinkRecordId> {
+    fn delivered(&self) -> Vec<EmitterRecordId> {
         let mut delivered = Vec::new();
         for taken in &self.taken {
             if taken.verdict == ScriptedVerdict::Confirmed && taken.given_by(self.end) {
@@ -340,7 +342,7 @@ impl ReferencePublish {
 /// What the window reported for a scripted publish, and how long the publish took.
 struct ScriptedPublish {
     took: Duration,
-    outcome: PerRecordOutcomeParts<SinkRecordId>,
+    outcome: PerRecordOutcomeParts<EmitterRecordId>,
 }
 
 impl WindowCase {
@@ -379,7 +381,7 @@ impl WindowCase {
         let mut refused = Vec::new();
         for (index, record) in self.records.iter().enumerate() {
             now += u64::from(record.pause % 10);
-            let id = SinkRecordId::new(index);
+            let id = EmitterRecordId::new(index);
             if self.driver_fails_at() == Some(index) {
                 return ReferencePublish {
                     end: now,
@@ -476,17 +478,17 @@ impl WindowCase {
         &self,
         window: &mut ConfirmationWindow<ScriptedAnswer<'a>>,
         held: &'a Cell<usize>,
-    ) -> Option<Report<SinkPublishError>> {
+    ) -> Option<Report<EmitterWriteError>> {
         let timeout = self.timeout_millis();
         for (index, record) in self.records.iter().enumerate() {
             nervix_primitives::task::consume_budget().await;
             sleep(record.pause()).await;
-            let id = SinkRecordId::new(index);
+            let id = EmitterRecordId::new(index);
             if self.driver_fails_at() == Some(index) {
                 return Some(driver_refused());
             }
             match record.treatment(timeout) {
-                Treatment::Refused => window.reject(RejectedSinkRecord::external(
+                Treatment::Refused => window.reject(RejectedEmitterMember::external(
                     id,
                     occurred_at(id),
                     REFUSED_AT_HAND_OVER.to_owned(),
@@ -527,7 +529,7 @@ impl WindowCase {
             let began = Instant::now();
             let held = Cell::new(0);
             let mut window = ConfirmationWindow::new(
-                SINK,
+                EMITTER,
                 settings(
                     self.max_in_flight(),
                     Duration::from_millis(self.timeout_millis()),
@@ -549,7 +551,7 @@ impl WindowCase {
 
 /// The records `outcome` rejected, with the message each is rejected with, after checking that
 /// each rejection is the external publish error of its own record.
-fn rejected_records(outcome: &PerRecordOutcomeParts<SinkRecordId>) -> Vec<RejectedRecord> {
+fn rejected_records(outcome: &PerRecordOutcomeParts<EmitterRecordId>) -> Vec<RejectedRecord> {
     let mut rejected = Vec::new();
     for rejection in &outcome.rejected {
         assert_eq!(rejection.error.code, MessageErrorCode::External);
@@ -570,13 +572,13 @@ fn rejected_records(outcome: &PerRecordOutcomeParts<SinkRecordId>) -> Vec<Reject
 
 /// Checks that `failure` is the failure `expected` names.
 fn assert_failure(
-    failure: &Report<SinkPublishError>,
+    failure: &Report<EmitterWriteError>,
     expected: ExpectedFailure,
     timeout: Duration,
 ) {
     assert_eq!(
         failure.current_context(),
-        &SinkPublishError::Publish { sink: SINK }
+        &EmitterWriteError::Publish { connector: EMITTER }
     );
     match expected {
         ExpectedFailure::DriverRefused => assert!(
@@ -598,7 +600,7 @@ fn assert_failure(
 
 /// The first printable attachment of `failure`: the description an emitter shows as its transient
 /// error.
-fn printable_description(failure: &Report<SinkPublishError>) -> Option<String> {
+fn printable_description(failure: &Report<EmitterWriteError>) -> Option<String> {
     for frame in failure.frames() {
         if let FrameKind::Attachment(AttachmentKind::Printable(attachment)) = frame.kind() {
             return Some(attachment.to_string());
@@ -655,10 +657,10 @@ async fn hand_over_all<'a>(
     window: &mut ConfirmationWindow<ScriptedAnswer<'a>>,
     records: &[Taken],
     held: &'a Cell<usize>,
-) -> SinkPublishResult<()> {
+) -> EmitterWriteResult<()> {
     for (index, taken) in records.iter().enumerate() {
         nervix_primitives::task::consume_budget().await;
-        let record = SinkRecordId::new(index);
+        let record = EmitterRecordId::new(index);
         let given_at = taken.answer_after.map(|after| Instant::now() + after);
         let answer = ScriptedAnswer::new(record, taken.verdict, given_at, held);
         window.admit(record, occurred_at(record), answer).await?;
@@ -666,14 +668,14 @@ async fn hand_over_all<'a>(
     Ok(())
 }
 
-fn sorted_delivered(outcome: &PerRecordOutcomeParts<SinkRecordId>) -> Vec<SinkRecordId> {
+fn sorted_delivered(outcome: &PerRecordOutcomeParts<EmitterRecordId>) -> Vec<EmitterRecordId> {
     let mut delivered = outcome.delivered.clone();
     delivered.sort();
     delivered
 }
 
-fn record_ids(indices: &[usize]) -> Vec<SinkRecordId> {
-    indices.iter().copied().map(SinkRecordId::new).collect()
+fn record_ids(indices: &[usize]) -> Vec<EmitterRecordId> {
+    indices.iter().copied().map(EmitterRecordId::new).collect()
 }
 
 /// The defect the window removes: a driver that fails while answers are awaited no longer drops
@@ -681,7 +683,7 @@ fn record_ids(indices: &[usize]) -> Vec<SinkRecordId> {
 #[nervix_primitives::test(start_paused = true)]
 async fn a_driver_failure_settles_every_answer_the_broker_already_gave() {
     let held = Cell::new(0);
-    let mut window = ConfirmationWindow::new(SINK, settings(5, Duration::from_millis(50)), 5);
+    let mut window = ConfirmationWindow::new(EMITTER, settings(5, Duration::from_millis(50)), 5);
     let records = [
         Taken {
             verdict: ScriptedVerdict::Confirmed,
@@ -714,7 +716,7 @@ async fn a_driver_failure_settles_every_answer_the_broker_already_gave() {
     assert_eq!(sorted_delivered(&outcome), record_ids(&[0, 4]));
     assert_eq!(
         rejected_records(&outcome),
-        vec![RejectedRecord::by_broker(SinkRecordId::new(1))]
+        vec![RejectedRecord::by_broker(EmitterRecordId::new(1))]
     );
     let failure = outcome
         .infrastructure_error
@@ -754,13 +756,13 @@ fn channel_answer(receiver: oneshot::Receiver<BrokerVerdict>) -> ChannelAnswer {
 #[nervix_primitives::test]
 async fn a_failure_settles_more_given_answers_than_one_cooperative_budget() {
     let mut window = ConfirmationWindow::new(
-        SINK,
+        EMITTER,
         settings(WINDOW_LARGER_THAN_THE_PUBLISH, Duration::from_secs(30)),
         ANSWERS_BEYOND_ONE_BUDGET,
     );
     for index in 0..ANSWERS_BEYOND_ONE_BUDGET {
         nervix_primitives::task::consume_budget().await;
-        let record = SinkRecordId::new(index);
+        let record = EmitterRecordId::new(index);
         let (give, receiver) = oneshot::channel();
         give.send(BrokerVerdict::Confirmed)
             .assured("the window holds the receiver as the record's answer");
@@ -789,24 +791,24 @@ async fn a_full_window_waits_for_the_oldest_until_its_own_deadline() {
     let held = Cell::new(0);
     let began = Instant::now();
     let timeout = Duration::from_millis(10);
-    let mut window = ConfirmationWindow::new(SINK, settings(2, timeout), 2);
+    let mut window = ConfirmationWindow::new(EMITTER, settings(2, timeout), 2);
     let oldest = ScriptedAnswer::new(
-        SinkRecordId::new(0),
+        EmitterRecordId::new(0),
         ScriptedVerdict::Confirmed,
         None,
         &held,
     );
     window
         .admit(
-            SinkRecordId::new(0),
-            occurred_at(SinkRecordId::new(0)),
+            EmitterRecordId::new(0),
+            occurred_at(EmitterRecordId::new(0)),
             oldest,
         )
         .await
         .verified("a window of two takes its first record without waiting");
     sleep(Duration::from_millis(4)).await;
     let younger = ScriptedAnswer::new(
-        SinkRecordId::new(1),
+        EmitterRecordId::new(1),
         ScriptedVerdict::Confirmed,
         Some(Instant::now() + Duration::from_millis(2)),
         &held,
@@ -814,8 +816,8 @@ async fn a_full_window_waits_for_the_oldest_until_its_own_deadline() {
 
     let admitted = window
         .admit(
-            SinkRecordId::new(1),
-            occurred_at(SinkRecordId::new(1)),
+            EmitterRecordId::new(1),
+            occurred_at(EmitterRecordId::new(1)),
             younger,
         )
         .await;
@@ -831,9 +833,9 @@ async fn a_full_window_waits_for_the_oldest_until_its_own_deadline() {
     assert_failure(&failure, ExpectedFailure::TimedOut, timeout);
     assert_eq!(
         format!("{failure:#}"),
-        "failed to publish through scripted sink: the broker did not answer within ACK TIMEOUT \
+        "failed to publish through scripted emitter: the broker did not answer within ACK TIMEOUT \
          10ms",
-        "the rendered chain names the sink, then the deadline it missed"
+        "the rendered chain names the emitter, then the deadline it missed"
     );
     assert_eq!(
         printable_description(&failure).as_deref(),
@@ -851,7 +853,7 @@ async fn an_answer_given_at_its_deadline_is_settled() {
     let held = Cell::new(0);
     let began = Instant::now();
     let timeout = Duration::from_millis(10);
-    let mut window = ConfirmationWindow::new(SINK, settings(1, timeout), 1);
+    let mut window = ConfirmationWindow::new(EMITTER, settings(1, timeout), 1);
     let records = [Taken {
         verdict: ScriptedVerdict::Confirmed,
         answer_after: Some(timeout),
@@ -871,7 +873,7 @@ async fn an_answer_given_at_its_deadline_is_settled() {
 async fn driver_backpressure_settles_the_oldest_below_max_and_reports_an_empty_window() {
     let held = Cell::new(0);
     let began = Instant::now();
-    let mut window = ConfirmationWindow::new(SINK, settings(4, Duration::from_millis(20)), 2);
+    let mut window = ConfirmationWindow::new(EMITTER, settings(4, Duration::from_millis(20)), 2);
     let records = [
         Taken {
             verdict: ScriptedVerdict::Confirmed,
@@ -891,7 +893,7 @@ async fn driver_backpressure_settles_the_oldest_below_max_and_reports_an_empty_w
             .settle_next()
             .await
             .assured("the oldest answer arrives by its deadline"),
-        Some(SinkRecordId::new(0))
+        Some(EmitterRecordId::new(0))
     );
     assert_eq!(began.elapsed(), Duration::from_millis(7));
     assert_eq!(
@@ -899,7 +901,7 @@ async fn driver_backpressure_settles_the_oldest_below_max_and_reports_an_empty_w
             .settle_next()
             .await
             .assured("the younger answer has already arrived"),
-        Some(SinkRecordId::new(1))
+        Some(EmitterRecordId::new(1))
     );
     assert!(
         window
@@ -911,10 +913,10 @@ async fn driver_backpressure_settles_the_oldest_below_max_and_reports_an_empty_w
     assert_eq!(began.elapsed(), Duration::from_millis(7));
     assert_eq!(held.get(), 0);
     let outcome = window.finish().await.into_parts();
-    assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+    assert_eq!(outcome.delivered, vec![EmitterRecordId::new(0)]);
     assert_eq!(
         rejected_records(&outcome),
-        vec![RejectedRecord::by_broker(SinkRecordId::new(1))]
+        vec![RejectedRecord::by_broker(EmitterRecordId::new(1))]
     );
     assert!(outcome.infrastructure_error.is_none());
 }
@@ -924,7 +926,7 @@ async fn driver_backpressure_settles_the_oldest_below_max_and_reports_an_empty_w
 async fn finish_settles_every_answer_whatever_order_it_arrives_in() {
     let held = Cell::new(0);
     let began = Instant::now();
-    let mut window = ConfirmationWindow::new(SINK, settings(3, Duration::from_millis(20)), 3);
+    let mut window = ConfirmationWindow::new(EMITTER, settings(3, Duration::from_millis(20)), 3);
     let records = [
         Taken {
             verdict: ScriptedVerdict::Confirmed,
@@ -949,7 +951,7 @@ async fn finish_settles_every_answer_whatever_order_it_arrives_in() {
     assert_eq!(sorted_delivered(&outcome), record_ids(&[0, 2]));
     assert_eq!(
         rejected_records(&outcome),
-        vec![RejectedRecord::by_broker(SinkRecordId::new(1))]
+        vec![RejectedRecord::by_broker(EmitterRecordId::new(1))]
     );
     assert!(outcome.infrastructure_error.is_none());
     assert_eq!(held.get(), 0);
@@ -959,7 +961,7 @@ async fn finish_settles_every_answer_whatever_order_it_arrives_in() {
 #[nervix_primitives::test(start_paused = true)]
 async fn a_failed_oldest_answer_ends_the_publish_and_leaves_its_record_unresolved() {
     let held = Cell::new(0);
-    let mut window = ConfirmationWindow::new(SINK, settings(1, Duration::from_millis(20)), 2);
+    let mut window = ConfirmationWindow::new(EMITTER, settings(1, Duration::from_millis(20)), 2);
     let records = [
         Taken {
             verdict: ScriptedVerdict::Failed,
@@ -984,7 +986,7 @@ async fn a_failed_oldest_answer_ends_the_publish_and_leaves_its_record_unresolve
         .verified("the failed answer ends the publish");
     assert_failure(
         &failure,
-        ExpectedFailure::AnswerFailed(SinkRecordId::new(0)),
+        ExpectedFailure::AnswerFailed(EmitterRecordId::new(0)),
         Duration::from_millis(20),
     );
 }
@@ -994,9 +996,9 @@ async fn a_failed_oldest_answer_ends_the_publish_and_leaves_its_record_unresolve
 #[nervix_primitives::test(start_paused = true)]
 async fn a_deadline_past_the_clock_range_ends_the_publish() {
     let held = Cell::new(0);
-    let mut window = ConfirmationWindow::new(SINK, settings(4, Duration::MAX), 1);
+    let mut window = ConfirmationWindow::new(EMITTER, settings(4, Duration::MAX), 1);
     let answer = ScriptedAnswer::new(
-        SinkRecordId::new(0),
+        EmitterRecordId::new(0),
         ScriptedVerdict::Confirmed,
         Some(Instant::now()),
         &held,
@@ -1004,8 +1006,8 @@ async fn a_deadline_past_the_clock_range_ends_the_publish() {
 
     let admitted = window
         .admit(
-            SinkRecordId::new(0),
-            occurred_at(SinkRecordId::new(0)),
+            EmitterRecordId::new(0),
+            occurred_at(EmitterRecordId::new(0)),
             answer,
         )
         .await;

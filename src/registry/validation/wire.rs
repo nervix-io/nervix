@@ -638,7 +638,8 @@ mod tests {
 
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        EmitSink, SchemaField, SchemaName, SyslogCollectorSink, SyslogSink, WireSchemaField,
+        EmitterEntity, SchemaField, SchemaName, SyslogCollectorEmitter, SyslogEmitter,
+        WireSchemaField,
     };
     use rstest::rstest;
 
@@ -966,8 +967,8 @@ mod tests {
         else {
             unreachable!("emitter helper must build an emitter")
         };
-        emitter.sink = Box::new(EmitSink::Syslog(SyslogSink::Collector(
-            SyslogCollectorSink {
+        emitter.connector = Box::new(EmitterEntity::Syslog(SyslogEmitter::Collector(
+            SyslogCollectorEmitter {
                 mode: nervix_models::SyslogCollectorPublishingMode::NoAck {
                     retry_policy: nervix_models::RetryPolicy {
                         backoff: "250ms".to_string(),

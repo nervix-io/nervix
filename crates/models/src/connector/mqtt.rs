@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The MQTT client Model, the topic source and sink Models with their session,
+//! - **Owns.** The MQTT client Model, the topic source and emitter Models with their session,
 //!   quality-of-service and delivery modes, the topic filter a source subscribes to with the rules
 //!   MQTT holds it to, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The MQTT driver, its configuration keys, or how a topic filter is
 //!   subscribed or published to.
 
@@ -26,16 +26,17 @@ use super::{
         WaitBound,
     },
     configured_client::configured_client,
-    entity_union::{connector_sinks, connector_sources},
+    entity_union::{connector_emitters, connector_ingestors},
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
     AcknowledgementConfirmation, ChoiceRequirement, ClientName, ConnectorKind, DeclaredDelivery,
-    DeclaredQuiesce, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
-    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, PositionClass,
-    RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
-    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    DeclaredQuiesce, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
+    EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
+    EmitterReferenceKind, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, PositionClass, RetryPolicy,
 };
 
 configured_client!(Mqtt: unpooled, config Nervix, CreateClientMqtt => MqttConfigEntry);
@@ -94,7 +95,7 @@ const BROKER_KEPT_SESSION: &[ChoiceRequirement] = &[
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct MqttTopicSource {
+pub struct MqttTopicIngestor {
     pub client: ClientName,
     pub topic: MqttTopicFilter,
     pub instances: NonZeroU64,
@@ -128,7 +129,7 @@ const _: () = assert!(
 );
 
 /// What the connector of a MQTT TOPIC ingestor holds and how long it waits.
-const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
             holds: "each raw MQTT frame, whose protocol bound every CONNECT advertises as its \
@@ -210,7 +211,7 @@ const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a MQTT TOPIC emitter holds and how long it waits.
-const MQTT_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+const MQTT_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "publishes queued for the driver",
         bound: BufferBound::Bounded {
@@ -235,12 +236,12 @@ const MQTT_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["Packets above the broker's maximum packet size are rejected."],
 };
 
-impl SourceEntity for MqttTopicSource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
+impl IngestorDeclaration for MqttTopicIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         headers: None,
-        metadata: SourceMetadataScope::Headers,
+        metadata: IngestorMetadataScope::Headers,
         executes_on_every_cluster_node: false,
-        reference: SourceReferenceKind::Client(ConnectorKind::Mqtt),
+        reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
         position_class: PositionClass::BrokerRedelivered,
         acknowledgement_confirmation: AcknowledgementConfirmation::Written,
         delivery: &[
@@ -296,13 +297,13 @@ impl SourceEntity for MqttTopicSource {
                 ]),
             },
         ],
-        bounds: MQTT_SOURCE_BOUNDS,
+        bounds: MQTT_INGESTOR_BOUNDS,
     };
 }
 
-impl SourceBody for MqttTopicSource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Client(&self.client)
+impl IngestorEntityBody for MqttTopicIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Client(&self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -468,15 +469,15 @@ impl MqttIngestMode {
     }
 }
 
-connector_sources! {
+connector_ingestors! {
     connector Mqtt = "MQTT";
     /// What an MQTT source reads.
-    pub enum MqttSource;
+    pub enum MqttIngestor;
     /// The alterations of the ingestors that read an MQTT entity.
-    pub enum MqttIngestorAlteration;
+    pub enum MqttTopicIngestorAlteration;
     /// The entities an MQTT source reads.
-    pub enum MqttSourceEntity {
-        Topic(MqttTopicSource) = "TOPIC", "MQTT";
+    pub enum MqttIngestorEntity {
+        Topic(MqttTopicIngestor) = "TOPIC", "MQTT";
     }
 }
 
@@ -484,16 +485,16 @@ connector_sources! {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct MqttTopicSink {
+pub struct MqttTopicEmitter {
     pub mode: MqttTopicPublishingMode,
     pub client: ClientName,
     pub topic: MqttTopicName,
 }
 
-impl SinkEntity for MqttTopicSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+impl EmitterDeclaration for MqttTopicEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         headers: None,
-        reference: SinkReferenceKind::Client(ConnectorKind::Mqtt),
+        reference: EmitterReferenceKind::Client(ConnectorKind::Mqtt),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
@@ -505,13 +506,13 @@ impl SinkEntity for MqttTopicSink {
         options: &[],
         envelope: &[],
         properties: &[],
-        bounds: MQTT_SINK_BOUNDS,
+        bounds: MQTT_EMITTER_BOUNDS,
     };
 }
 
-impl SinkBody for MqttTopicSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for MqttTopicEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::Mqtt,
         })
@@ -522,15 +523,15 @@ impl SinkBody for MqttTopicSink {
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector Mqtt = "MQTT";
-    /// What an MQTT sink writes.
-    pub enum MqttSink;
+    /// What an MQTT emitter writes.
+    pub enum MqttEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum MqttEmitterMode;
-    /// The entities an MQTT sink writes.
-    pub enum MqttSinkEntity {
-        Topic(MqttTopicSink, MqttTopicPublishingMode) = "TOPIC";
+    pub enum MqttTopicEmitterMode;
+    /// The entities an MQTT emitter writes.
+    pub enum MqttEmitterEntity {
+        Topic(MqttTopicEmitter, MqttTopicPublishingMode) = "TOPIC";
     }
 }
 

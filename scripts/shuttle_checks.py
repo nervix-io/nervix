@@ -16,6 +16,12 @@ record explored nothing. The command reports how many checks it discovered, sele
 saw complete, and a filter that selects nothing across every package fails, although a package
 with no match inside a nonempty selection is fine.
 
+Checks run beside each other, `--jobs` at a time and by default one per CPU this process may run
+on, so a run lasts about as long as its longest check rather than the sum of every check. A check's
+two runs stay one after the other, because they share its failure directory. The runner starts
+checks in selection order, records each one in the evidence as it starts, and prints a check's
+output, with how long each run took, once the check ends. `--jobs 1` runs the checks in turn.
+
 A failed check leaves `<target>/shuttle-failures/<package>/<test>/` behind: the schedule Shuttle
 persisted for the failing execution, the run's output, and `metadata.json` naming the check, the
 run, the revision, the toolchain and Shuttle's version. `replay` runs exactly that check in a fresh
@@ -36,7 +42,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -324,9 +333,149 @@ def failure_metadata(
     }
 
 
+def available_cpus() -> int:
+    """How many checks run at once by default: one per CPU this process may run on."""
+
+    affinity = getattr(os, "sched_getaffinity", None)
+    if affinity is not None:
+        return len(affinity(0))
+    return os.cpu_count() or 1
+
+
+def positive_count(text: str) -> int:
+    count = int(text)
+    if count < 1:
+        raise argparse.ArgumentTypeError(f"{text} is not a positive number of checks")
+    return count
+
+
+def duration(seconds: float) -> str:
+    minutes, remainder = divmod(round(seconds), 60)
+    return f"{minutes}m {remainder:02d}s"
+
+
+@dataclass(frozen=True)
+class Exploration:
+    """How one run of a check ended, and how long its process took."""
+
+    run: Run
+    outcome: Outcome
+    seconds: float
+
+
+@dataclass(frozen=True)
+class Started:
+    """A check handed to a worker: its failure directory and the evidence that records it."""
+
+    check: Check
+    directory: Path
+    evidence: dict[str, object]
+    runs: list[dict[str, object]]
+
+
+def explore(commands: Commands, check: Check, directory: Path) -> list[Exploration]:
+    """Run one check under its exploration and then under the nondeterminism detector.
+
+    Each run is its own process. Both runs persist a failing schedule in the check's failure
+    directory, so the second starts only once the first has ended; other checks run beside them.
+    """
+
+    command = check_command(check)
+    explorations: list[Exploration] = []
+    for run in RUNS:
+        started = time.monotonic()
+        outcome = commands.run(
+            command,
+            environment={**run.environment, "SHUTTLE_TRACE_DIR": str(directory)},
+            echo=False,
+        )
+        seconds = time.monotonic() - started
+        explorations.append(Exploration(run=run, outcome=outcome, seconds=seconds))
+    return explorations
+
+
+def start(
+    pool: ThreadPoolExecutor,
+    commands: Commands,
+    evidence: Evidence,
+    target: Path,
+    check: Check,
+) -> tuple[Future[list[Exploration]], Started]:
+    """Record that a check begins, give it an empty failure directory, and hand it to a worker."""
+
+    check_evidence = evidence.begin({"package": check.package, "test": check.test})
+    runs: list[dict[str, object]] = []
+    check_evidence["runs"] = runs
+    directory = target / FAILURES / check.package / check.test
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(parents=True)
+    print(f"shuttle: {check.package} {check.test} started", flush=True)
+    future = pool.submit(explore, commands, check, directory)
+    started = Started(check=check, directory=directory, evidence=check_evidence, runs=runs)
+    return future, started
+
+
+def record(
+    commands: Commands, evidence: Evidence, started: Started, explorations: Sequence[Exploration]
+) -> list[str]:
+    """Print an ended check's runs, record them, and keep the evidence of a run that did not complete.
+
+    Returns the check's failures; none means both of its runs completed.
+    """
+
+    check = started.check
+    command = check_command(check)
+    failures: list[str] = []
+    for exploration in explorations:
+        run = exploration.run
+        outcome = exploration.outcome
+        print(
+            f"shuttle: {check.package} {check.test} ({run.name}) ran for "
+            f"{duration(exploration.seconds)}",
+            flush=True,
+        )
+        sys.stdout.write(outcome.output)
+        sys.stdout.flush()
+        started.runs.append({
+            "name": run.name,
+            "exit_status": outcome.status,
+            "completed": completed(outcome),
+            "records": [line.strip() for line in outcome.output.splitlines() if COMPLETED in line],
+        })
+        evidence.write()
+        if completed(outcome):
+            continue
+        if outcome.status == 0:
+            reason = "passed without the record of a completed exploration"
+        else:
+            reason = f"failed with exit status {outcome.status}"
+        (started.directory / f"{run.name}.log").write_text(outcome.output, encoding="utf-8")
+        metadata = failure_metadata(commands, check, run, command, outcome, started.directory)
+        (started.directory / f"{run.name}.json").write_text(
+            json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+        )
+        failures.append(
+            f"{check.package} check {check.test} {reason} in its {run.name} run; evidence "
+            f"in {started.directory}"
+        )
+    if failures:
+        return failures
+    started.evidence["completed"] = True
+    evidence.write()
+    shutil.rmtree(started.directory)
+    return failures
+
+
 def run_checks(
-    commands: Commands, inventory: Inventory, target: Path, filter_text: str, report: Path | None = None
+    commands: Commands,
+    inventory: Inventory,
+    target: Path,
+    filter_text: str,
+    report: Path | None = None,
+    jobs: int = 1,
 ) -> int:
+    if jobs < 1:
+        raise RunnerError(f"{jobs} is not a positive number of checks to run at once")
     evidence = Evidence(report, "shuttle", filter_text, INVENTORY)
     discoveries = [discover(commands, package) for package in inventory.packages()]
     evidence.discover([
@@ -340,51 +489,25 @@ def run_checks(
     executed = 0
     complete = 0
     failures: list[str] = []
-    for check in selected:
-        check_evidence = evidence.begin({"package": check.package, "test": check.test})
-        runs: list[dict[str, object]] = []
-        check_evidence["runs"] = runs
-        directory = target / FAILURES / check.package / check.test
-        shutil.rmtree(directory, ignore_errors=True)
-        directory.mkdir(parents=True)
-        command = check_command(check)
-        executed += 1
-        check_failures: list[str] = []
-        for run in RUNS:
-            print(f"shuttle: {check.package} {check.test} ({run.name})", flush=True)
-            outcome = commands.run(
-                command,
-                environment={**run.environment, "SHUTTLE_TRACE_DIR": str(directory)},
-            )
-            runs.append({
-                "name": run.name,
-                "exit_status": outcome.status,
-                "completed": completed(outcome),
-                "records": [line.strip() for line in outcome.output.splitlines() if COMPLETED in line],
-            })
-            evidence.write()
-            if completed(outcome):
-                continue
-            if outcome.status == 0:
-                reason = "passed without the record of a completed exploration"
-            else:
-                reason = f"failed with exit status {outcome.status}"
-            (directory / f"{run.name}.log").write_text(outcome.output, encoding="utf-8")
-            metadata = failure_metadata(commands, check, run, command, outcome, directory)
-            (directory / f"{run.name}.json").write_text(
-                json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
-            )
-            check_failures.append(
-                f"{check.package} check {check.test} {reason} in its {run.name} run; evidence "
-                f"in {directory}"
-            )
-        if check_failures:
-            failures.extend(check_failures)
-            continue
-        complete += 1
-        check_evidence["completed"] = True
-        evidence.write()
-        shutil.rmtree(directory)
+    # Only this thread starts checks and records them, so the evidence lists the checks in the
+    # order they were selected however their runs end.
+    waiting = deque(selected)
+    running: dict[Future[list[Exploration]], Started] = {}
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        while waiting or running:
+            while waiting and len(running) < jobs:
+                check = waiting.popleft()
+                future, started = start(pool, commands, evidence, target, check)
+                running[future] = started
+                executed += 1
+            ended, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in ended:
+                started = running.pop(future)
+                check_failures = record(commands, evidence, started, future.result())
+                if check_failures:
+                    failures.extend(check_failures)
+                    continue
+                complete += 1
 
     print(
         f"shuttle: discovered {discovered}, selected {len(selected)}, executed {executed}, "
@@ -503,6 +626,12 @@ def main(
     run_parser = subcommands.add_parser("run")
     run_parser.add_argument("filter", nargs="?", default="")
     run_parser.add_argument("--report", type=Path)
+    run_parser.add_argument(
+        "--jobs",
+        type=positive_count,
+        default=available_cpus(),
+        help="how many checks run at once (default: one per CPU this process may run on)",
+    )
     replay_parser = subcommands.add_parser("replay")
     replay_parser.add_argument("schedule", type=Path)
     subcommands.add_parser("replay-check")
@@ -526,7 +655,9 @@ def main(
         target = arguments.target_dir.resolve()
         target.mkdir(parents=True, exist_ok=True)
         if arguments.command == "run":
-            return run_checks(commands, inventory, target, arguments.filter, arguments.report)
+            return run_checks(
+                commands, inventory, target, arguments.filter, arguments.report, arguments.jobs
+            )
         return replay_check(commands, inventory, target)
     except RunnerError as error:
         print(f"shuttle: {error}", file=sys.stderr)

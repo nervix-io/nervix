@@ -28,14 +28,14 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Roto language syntax for UDF bodies | `Roto Language Reference` |
 | Branches, relays, capacity, TTL, and materialized state | `Relay` |
 | Resources, uploads, mounts, and TLS files | `Resources` |
-| Syslog wire schema, codec fields, UDP/TCP/TLS framing, clients, sources, and sinks | `Common` → `Syslog` |
+| Syslog wire schema, codec fields, UDP/TCP/TLS framing, clients, sources, and emitters | `Common` → `Syslog` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
 | Plexus entity modes, ordered options, typed metadata, CONFIG ownership and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
 | Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
 | Constructed Arrow output applications receive and explicitly ACK, retry or reject | `Emitters` → `Client emitters`, `Sessions` → `Emitter Consumers`, and `Client Implementation Manual` → `Emitter Consumers` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
 | Timed generation from materialized state | `Plexus Overview` and `Examples` |
-| Sink transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
+| Emitter transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
 | Session subscriptions and domain clock attachment | `Sessions` |
@@ -169,9 +169,11 @@ relay. Do not use them to scan across branches.
   membership because their listeners execute on every cluster node. Every other ingestor, a
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
   schedule recomputation.
-- For `WEBSOCKETS CONNECTION` recovery and graceful close, read `Ingestors` →
+- For `WEBSOCKETS CONNECTION` literal upgrade headers, frame metadata, strict client CONFIG,
+  handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close, read `Ingestors` →
   `WEBSOCKETS CONNECTION` in the selected documentation index.
   A successful upgrade does not establish data delivery or reset repeated-failure backoff.
+  Check the effective idle bound together with the ping cadence and the peer's inbound activity.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
   optionality match exactly. Declared wire formats are separate entity kinds even when their names
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
@@ -194,12 +196,18 @@ relay. Do not use them to scan across branches.
 - Every multi-input emitter source declares the same payload schema. Its sources may use different
   branch names, but each source retains its own branch through collection and external publish;
   node-wide materialized dependencies and message-error relays match every source branch exactly.
-- Every emitter sink declares its transport-supported `MODE` in the documented position and
+- Every emitter declares its transport-supported `MODE` in the documented position and
   supplies the complete retry policy plus the confirmation window and timeout when that mode
   confirms asynchronously. No operational mode variable is inferred.
 - For Pulsar receipt deadlines and the final wait after `NO ACK` acceptance, read
   [Emitters → Pulsar](../../../docs/src/emitters.md#pulsar) and
-  [Finishing a sink](../../../docs/src/connector-contract.md#finishing-a-sink).
+  [Finishing an emitter](../../../docs/src/connector-contract.md#finishing-a-emitter).
+- A RabbitMQ queue ingestor uses automatic `MODE NO ACK`, prefetch-one `MODE ACK SEQUENTIAL`,
+  or `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
+  Parallel `MAX` is 1 through 65,535 per instance. ACK/NACK follows each delivery's own graph
+  outcome; a rejection requeues that delivery. `NO ACK` disables broker prefetch and cannot
+  recover a delivery already consumed before downstream completion. See
+  [Ingestors → RabbitMQ](../../../docs/src/ingestors.md#rabbitmq).
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
   whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
@@ -261,7 +269,7 @@ relay. Do not use them to scan across branches.
   `FLUSH EACH` as a branch-local domain-logical duration and `FLUSH IMMEDIATE` as a branch-local
   physical 100 µs minimum; start either only when its route buffer changes from empty to non-empty.
 - Treat an emitter's `FLUSH EACH` and the Iceberg `COMMIT EACH` as domain-logical, and its publish
-  retry backoff, acknowledgement keepalive, sink acknowledgement timeout, stop and drain deadlines,
+  retry backoff, acknowledgement keepalive, emitter acknowledgement timeout, stop and drain deadlines,
   and any server-supplied HTTP `Retry-After` as physical. A failed attempt keeps the pending
   batches, their acknowledgements, and the unchanged cadence; never describe a paced domain as
   shortening or lengthening a real retry wait.
@@ -286,6 +294,9 @@ relay. Do not use them to scan across branches.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
+- A Kafka client never sets `allow.auto.create.topics`; `CREATE KAFKA CLIENT` refuses it. Provision each
+  topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
+  it exists.
 - For Kafka source control-call deadlines and bounded execution, follow `Ingestors` → `Client
   Deadlines`. Keep `socket.timeout.ms` distinct from the consumer-group commit caller deadline;
   an unanswered commit is retained before another can start.
@@ -490,7 +501,8 @@ Choose checks relevant to the configured graph:
   retain their disk data.
   Size the server's `--restore-staging-max-bytes` or
   `NERVIX_RESTORE_STAGING_MAX_BYTES` allowance for all concurrent unpublished checkpoints on that
-  node; it defaults to `128GiB` and counts keys and values, including incomplete chunks. It is
+  node; it defaults to the smaller of `128GiB` and the node database's volume, a larger value
+  refuses the node's start, and it counts keys and values, including incomplete chunks. It is
   separate from archive-file staging and does not bound snapshot retention or filesystem
   overhead. Observe `nervix_restore_staging_bytes`, `nervix_restore_staging_limit_bytes` and
   `nervix_restore_staging_reclaimed_bytes_total` at `/metrics`; the backup chapter distinguishes
@@ -533,6 +545,11 @@ Choose checks relevant to the configured graph:
   `nx_session_next_clock_event`. The clock's projections give the logical time, the wait until a
   logical target, and the `TIMESTAMP AT` values the ingestor admits.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
+- `DESCRIBE CLUSTER;` lists the prerequisites every live node brings and the nodes whose Raft
+  heartbeat, gossip interval or clock-skew tolerance differs from the leader's. A node refused as it
+  joins, or by its startup checks, names the setting and both values; read
+  [Node Settings](https://docs.nervix.io/node-settings.html) directly for the rules, which is
+  outside the curated Plexus index.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.
 

@@ -132,9 +132,9 @@ fn parse_and_text_encoding_helpers_roundtrip() {
 /// Every option the node reads as a duration.
 const DURATION_OPTIONS: [&str; 12] = [
     "--node-unavailability-timeout",
+    "--gossip-interval",
+    "--clock-skew-tolerance",
     "--raft-heartbeat-interval",
-    "--raft-election-timeout-min",
-    "--raft-election-timeout-max",
     "--transaction-idle-timeout",
     "--transaction-tombstone-retention",
     "--command-retry-validity",

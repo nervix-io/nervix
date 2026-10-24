@@ -11,9 +11,10 @@ use std::{collections::BTreeSet, time::Duration};
 use futures_util::{StreamExt as _, stream};
 use nervix_dns::{DnsConfiguration, DnsResolver, NameServers};
 use nervix_interconnect::{
-    PeerResolver, TlsConfigBundle, Transport, TransportClock, TransportIdentity, TransportOptions,
+    JoinTerms, PeerResolver, TlsConfigBundle, Transport, TransportClock, TransportIdentity,
+    TransportOptions,
 };
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeName, PrerequisiteTimings};
 use nervix_primitives::{
     sync::{
         Arc,
@@ -78,6 +79,7 @@ async fn client_with_departed_target() -> NetworkClient<()> {
             cluster_id: cluster.to_string(),
             node_id: local.clone(),
             advertised_host: "localhost".to_string(),
+            join_terms: test_join_terms(),
         },
         tls,
         TransportOptions::default(),
@@ -155,4 +157,16 @@ async fn an_ended_append_input_finishes_without_opening_a_transport() {
         answers.next().await.is_none(),
         "ended input has no append acknowledgement"
     );
+}
+
+/// The join terms every test transport brings, so their handshakes accept each other.
+fn test_join_terms() -> JoinTerms {
+    JoinTerms {
+        durability: crate::RAFT_LOG_DURABILITY,
+        timings: PrerequisiteTimings {
+            raft_heartbeat_interval: crate::RaftTimings::default().heartbeat_interval(),
+            gossip_interval: Duration::from_millis(500),
+            clock_skew_tolerance: Duration::from_millis(500),
+        },
+    }
 }

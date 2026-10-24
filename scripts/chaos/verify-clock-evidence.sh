@@ -16,8 +16,9 @@ usage:
       --width-ms N --rate N --result FILE
 
 clock requires every attach and state report to carry the first report's generation and mapping,
-every tick to lie on the mapping's period grid in that generation and to be no later than the
-serving node's own logical time, tick ids to increase within each attachment, ticks to resume on
+every tick to lie on the mapping's period grid in that generation, its boundary to be reached at
+the authority UTC observation, and its serving reading to fall inside the mapping's projection
+from authority UTC through receipt, tick ids to increase within each attachment, ticks to resume on
 every observer after each fault, and every stall of a node that stayed up to fall inside a fault
 and end within the authority bound, and within the replacement bound after a surviving node
 reported the faulted node unavailable. A rotation over every voter must show the stall that
@@ -155,14 +156,32 @@ clock() {
           else
           ($reference.clock | capture("logical origin (?<origin>[^,]+), UTC anchor (?<anchor>[^,]+), time rate (?<rate>.+)$")) as $mapping
           | ($mapping.origin | instant) as $origin
+          | ($mapping.anchor | instant) as $anchor
           | [$states[] | select(.generation != $reference.generation or .clock != $reference.clock)] as $changed
           | [$all[] | select(.kind == "tick")] as $ticks
           | [$ticks[] | select(.generation != $reference.generation)] as $wrong_generation
           | [$ticks[] | (.boundary | instant) as $boundary
              | select($boundary.nanos != $origin.nanos
                       or ($boundary.seconds - $origin.seconds) * 1000 != (.id - 1) * $period_ms)] as $off_grid
-          | [$ticks[] | difference_ms((.logical | instant); (.boundary | instant)) as $lead
-             | select($lead < -10 or $lead > 4 * $period_ms * $rate) | . + {lead_ms: $lead}] as $misprojected
+          # Progress and the serving reading are sampled separately. A pause between them, or a
+          # delayed frame, makes their difference arbitrarily large without changing the mapping.
+          # All Docker observers use the same host UTC: the serving snapshot must fall between
+          # the authority observation and independent receipt, with the existing 10 logical ms
+          # measurement tolerance. Tick age supplies no freshness guarantee.
+          | [$ticks[]
+             | difference_ms((.boundary | instant); $origin) as $boundary_offset
+             | difference_ms((.logical | instant); $origin) as $logical_offset
+             | (([0, difference_ms((.authority | instant); $anchor)] | max) * $rate) as $authority_offset
+             | {seconds: (.ms / 1000 | floor), nanos: ((.ms % 1000) * 1000000)} as $receipt
+             | (([0, difference_ms($receipt; $anchor)] | max) * $rate) as $receipt_offset
+             | select($logical_offset < $boundary_offset - 10
+                      or $boundary_offset > $authority_offset + 10
+                      or $logical_offset < $authority_offset - 10
+                      or $logical_offset > $receipt_offset + 10)
+             | . + {lead_ms: ($logical_offset - $boundary_offset),
+                    authority_lead_ms: ($authority_offset - $boundary_offset),
+                    serving_since_authority_ms: ($logical_offset - $authority_offset),
+                    serving_after_receipt_ms: ($logical_offset - $receipt_offset)}] as $misprojected
           # Each attach or state report begins a new attachment; tick ids increase within one.
           | [$all | group_by(.host)[]
              | reduce .[] as $event ({session: 0, last: null, decreasing: []};
@@ -210,7 +229,7 @@ clock() {
               (if ($changed | length) > 0 then "a re-attached clock reported another generation or mapping" else empty end),
               (if ($wrong_generation | length) > 0 then "ticks arrived for another generation" else empty end),
               (if ($off_grid | length) > 0 then "tick boundaries left the period grid of the mapping" else empty end),
-              (if ($misprojected | length) > 0 then "ticks were ahead of, or far behind, the serving node'"'"'s logical time" else empty end),
+              (if ($misprojected | length) > 0 then "tick timestamps were outside the mapping'"'"'s observation interval" else empty end),
               (if ($decreasing | length) > 0 then "tick ids did not increase within an attachment" else empty end),
               (if ($unexplained | length) > 0 then "ticks stalled while no fault was held" else empty end),
               (if ($unrepaired | length) > 0 then "an authority stall outlasted the authority bound" else empty end),

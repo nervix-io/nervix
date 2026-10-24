@@ -35,9 +35,9 @@ mod zeromq;
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AlterIngestor, AlterIngestorOperation, AlterTransportIngestorOperation, ClientProducerSource,
-    CreateIngestor, CreateStatement, GeneralErrorPolicy, IngestSource, IngestSourceKind,
-    IngestTimestampSource, IngestorAlteration, IngestorEntityModel, IngestorInput, IngestorName,
+    AlterIngestor, AlterIngestorOperation, AlterTransportIngestorOperation, ClientProducerIngestor,
+    CreateIngestor, CreateStatement, GeneralErrorPolicy, IngestTimestampSource, IngestorAlteration,
+    IngestorEntity, IngestorEntityKind, IngestorEntityModel, IngestorInput, IngestorName,
     ShowIngestors, TransportIngestorInput,
 };
 
@@ -64,7 +64,7 @@ pub fn show_ingestors_parser<'src>()
 /// `<CONNECTOR> <ENTITY> INGESTOR`: the head that names the pair an ingestor reads, one composed
 /// phrase so completion offers it as one item.
 fn head<'src>(
-    kind: IngestSourceKind,
+    kind: IngestorEntityKind,
 ) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
     crate::parser_support::connector_entity_head(
         kind.connector(),
@@ -76,9 +76,9 @@ fn head<'src>(
 /// The connector and entity a statement's head names, for completion that reads the head before
 /// the rest of the statement is written.
 pub(crate) fn head_kind<'src>()
--> impl Parser<'src, &'src [Token], IngestSourceKind, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], IngestorEntityKind, extra::Err<ParseError<'src>>> + Clone {
     let mut heads = Vec::new();
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         heads.push(head(kind).to(kind).boxed());
     }
     choice(heads).boxed()
@@ -105,7 +105,7 @@ fn transport_input<'src, S, P>(
     body: P,
 ) -> impl Parser<'src, &'src [Token], DeclaredInput, extra::Err<ParseError<'src>>> + Clone
 where
-    S: IngestorEntityModel + Into<IngestSource> + 'src,
+    S: IngestorEntityModel + Into<IngestorEntity> + 'src,
     P: Parser<'src, &'src [Token], S, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
     head(S::KIND)
@@ -127,7 +127,7 @@ where
 /// `CLIENT PRODUCER INGESTOR <name> FROM <body>`, which decodes nothing and so names no codec.
 fn client_input<'src>()
 -> impl Parser<'src, &'src [Token], DeclaredInput, extra::Err<ParseError<'src>>> + Clone {
-    head(ClientProducerSource::KIND)
+    head(ClientProducerIngestor::KIND)
         .ignore_then(ingestor_name())
         .then_ignore(kw(Identifier::From))
         .then(client::producer_body())
@@ -330,7 +330,7 @@ where
 fn client_alteration<'src>()
 -> impl Parser<'src, &'src [Token], AlterIngestor, extra::Err<ParseError<'src>>> + Clone {
     let operation = choice((set_source(client::producer_body()), shared_operation()));
-    alteration::<ClientProducerSource, _, _>(operation)
+    alteration::<ClientProducerIngestor, _, _>(operation)
 }
 
 pub fn alter_ingestor_parser<'src>()
@@ -422,18 +422,19 @@ mod tests {
 
     use meticulous::ResultExt as _;
     use nervix_models::{
-        ClientIngestMode, ClientIngestorAlteration, ClientProducerSource, CodecName,
-        EndpointIngestMode, FlushPolicy, HttpEndpointSource, HttpIngestorAlteration,
-        HttpRequestIngestMode, HttpRequestSource, HttpSource, IngestQuiesceMode,
-        IngestQuiesceOverflow, KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource,
-        MqttIngestMode, MqttIngestorAlteration, MqttQos, MqttSession, MqttSource, MqttTopicSource,
-        NatsIngestMode, NatsSource, NatsSubjectSource, PrometheusIngestMode, PrometheusQuerySource,
-        PrometheusSource, PulsarIngestMode, PulsarSource, PulsarSubscription,
-        PulsarSubscriptionOwnership, PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource,
-        RabbitMqSource, RedisPubSubIngestMode, RedisPubSubSource, RedisSource, RetryPolicy,
-        SchemaName, SqsIngestMode, SqsQueueSource, SqsSource, SyslogIngestMode,
-        SyslogListenerSource, SyslogSource, WebsocketsConnectionSource, WebsocketsEndpointSource,
-        WebsocketsIngestMode, WebsocketsSource, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqSource,
+        ClientIngestMode, ClientIngestorAlteration, ClientProducerIngestor, CodecName,
+        EndpointIngestMode, FlushPolicy, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestMode,
+        HttpRequestIngestor, HttpRequestIngestorAlteration, IngestQuiesceMode,
+        IngestQuiesceOverflow, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor,
+        MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor,
+        MqttTopicIngestorAlteration, NatsIngestMode, NatsIngestor, NatsSubjectIngestor,
+        PrometheusIngestMode, PrometheusIngestor, PrometheusQueryIngestor, PulsarIngestMode,
+        PulsarIngestor, PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicIngestor,
+        RabbitMqIngestMode, RabbitMqIngestor, RabbitMqQueueIngestor, RedisIngestor,
+        RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SchemaName, SqsIngestMode,
+        SqsIngestor, SqsQueueIngestor, SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor,
+        WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
+        WebsocketsIngestor, ZeroMqIngestMode, ZeroMqIngestor, ZeroMqPullIngestor,
     };
     use nonzero_ext::nonzero;
 
@@ -467,7 +468,7 @@ mod tests {
 
     #[test]
     fn every_pair_keyword_is_an_nspl_keyword() {
-        for kind in IngestSourceKind::all() {
+        for kind in IngestorEntityKind::all() {
             for word in [kind.connector().keyword(), kind.entity_keyword()] {
                 assert!(
                     Identifier::from_str(word).is_ok(),
@@ -572,8 +573,10 @@ mod tests {
              Orders' MODE NO ACK ON QUIESCE SUSPEND",
         ))
         .expect("a case-preserving topic and group parse");
-        let IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
-            topic, offset_mode, ..
+        let IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
+            topic,
+            offset_mode,
+            ..
         })) = &transport(&parsed).source
         else {
             panic!("expected a Kafka topic source");
@@ -724,7 +727,7 @@ mod tests {
              NEWEST;",
         )
         .expect("SET QUIESCE should parse");
-        let IngestorAlteration::Mqtt(MqttIngestorAlteration::Topic(operations)) =
+        let IngestorAlteration::Mqtt(MqttTopicIngestorAlteration::Topic(operations)) =
             &parsed.alteration
         else {
             panic!("the head names an MQTT topic");
@@ -745,7 +748,7 @@ mod tests {
         .expect("ALTER INGESTOR should parse all operations");
 
         assert_eq!(parsed.ingestor.as_str(), "event_source");
-        let IngestorAlteration::Http(HttpIngestorAlteration::Endpoint(operations)) =
+        let IngestorAlteration::Http(HttpRequestIngestorAlteration::Endpoint(operations)) =
             &parsed.alteration
         else {
             panic!("the head names an HTTP endpoint");
@@ -878,7 +881,7 @@ mod tests {
         assert_eq!(parsed.timestamp_source, None);
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+            IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                 client: nervix_models::ClientName::try_from("kafka_main")
                     .expect("valid client identifier"),
                 topic: nervix_models::KafkaTopicName::try_from("notifications")
@@ -1006,7 +1009,7 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+        let IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
             instances, mode, ..
         })) = &transport(&parsed).source
         else {
@@ -1038,7 +1041,7 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource { mode, .. })) =
+        let IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor { mode, .. })) =
             &transport(&parsed).source
         else {
             panic!("expected kafka ingestor source");
@@ -1087,7 +1090,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
+            IngestorEntity::Pulsar(PulsarIngestor::Topic(PulsarTopicIngestor {
                 client: nervix_models::ClientName::try_from("pulsar_main")
                     .expect("valid client identifier"),
                 topic: nervix_models::PulsarTopicName::try_from("notifications")
@@ -1152,7 +1155,7 @@ mod tests {
         );
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
+            IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(RabbitMqQueueIngestor {
                 client: nervix_models::ClientName::try_from("rabbit_main")
                     .expect("valid client identifier"),
                 queue: nervix_models::RabbitMqQueueName::try_from("notifications")
@@ -1187,7 +1190,7 @@ mod tests {
         assert_eq!(parsed.name.as_str(), "redis_notifications");
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
+            IngestorEntity::Redis(RedisIngestor::PubSub(RedisPubSubIngestor {
                 client: nervix_models::ClientName::try_from("redis_main")
                     .expect("valid client identifier"),
                 channel: nervix_models::RedisChannelName::try_from("notifications")
@@ -1224,7 +1227,7 @@ mod tests {
     #[test]
     fn suggests_every_kinded_head_after_create() {
         let suggestions = suggest_create_ingestor("CREATE ", "CREATE ".len());
-        for kind in IngestSourceKind::all() {
+        for kind in IngestorEntityKind::all() {
             let head = format!("{} INGESTOR", kind.phrase());
             assert!(suggestions.contains(&head), "{head} in {suggestions:?}");
         }
@@ -1292,7 +1295,7 @@ mod tests {
             );
             let parsed = parse_create_ingestor(&ingestor_with_source(&source))
                 .unwrap_or_else(|error| panic!("`{source}` should parse: {error:?}"));
-            let IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
+            let IngestorEntity::Pulsar(PulsarIngestor::Topic(PulsarTopicIngestor {
                 subscription,
                 instances,
                 ..
@@ -1502,12 +1505,16 @@ mod tests {
     }
 
     #[test]
-    fn rabbitmq_mode_context_does_not_offer_kafka_only_modes() {
+    fn rabbitmq_mode_context_offers_declared_consumer_modes() {
         let input = "CREATE RABBITMQ QUEUE INGESTOR i FROM t QUEUE 'q' MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
-        assert!(!suggestions.contains(&"NO ACK".to_string()));
-        assert!(!suggestions.contains(&"PARALLEL".to_string()));
+        assert!(suggestions.contains(&"NO ACK".to_string()));
+
+        let input = format!("{input}ACK ");
+        let suggestions = suggest_create_ingestor(&input, input.len());
+        assert!(suggestions.contains(&"SEQUENTIAL".to_string()));
+        assert!(suggestions.contains(&"PARALLEL".to_string()));
     }
 
     #[test]
@@ -1536,7 +1543,7 @@ mod tests {
         assert_eq!(parsed.name.as_str(), "mqtt_notifications");
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
+            IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
                 client: nervix_models::ClientName::try_from("mqtt_main")
                     .expect("valid client identifier"),
                 topic: nervix_models::MqttTopicFilter::try_from("notifications")
@@ -1564,7 +1571,7 @@ mod tests {
 
         let parsed = parse_create_ingestor_tokens(&to_tokens(input)).expect("parse should succeed");
 
-        let IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
+        let IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
             client,
             topic,
             instances,
@@ -1600,7 +1607,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
+            IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
                 client: nervix_models::ClientName::try_from("mqtt_main")
                     .expect("valid client identifier"),
                 topic: nervix_models::MqttTopicFilter::try_from("devices/+/notifications")
@@ -1651,7 +1658,7 @@ mod tests {
         "#;
 
         let parsed = parse_create_ingestor_tokens(&to_tokens(input)).expect("parse should succeed");
-        let IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource { mode, .. })) =
+        let IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor { mode, .. })) =
             &transport(&parsed).source
         else {
             panic!("expected mqtt ingestor source");
@@ -1729,7 +1736,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Nats(NatsSource::Subject(NatsSubjectSource {
+            IngestorEntity::Nats(NatsIngestor::Subject(NatsSubjectIngestor {
                 client: nervix_models::ClientName::try_from("nats_main")
                     .expect("valid client identifier"),
                 subject: nervix_models::NatsSubjectName::try_from("notifications")
@@ -1826,7 +1833,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
+            IngestorEntity::Prometheus(PrometheusIngestor::Query(PrometheusQueryIngestor {
                 client: nervix_models::ClientName::try_from("prom_main")
                     .expect("valid client identifier"),
                 query: r#"label_replace(vector(42.5), "source", "local", "", "")"#.to_string(),
@@ -1847,7 +1854,8 @@ mod tests {
              ACK ON QUIESCE SUSPEND",
         ))
         .expect("a positive whole size between QUERY and EVERY parses");
-        let IngestSource::Prometheus(PrometheusSource::Query(source)) = &transport(&parsed).source
+        let IngestorEntity::Prometheus(PrometheusIngestor::Query(source)) =
+            &transport(&parsed).source
         else {
             panic!("the head names a Prometheus query");
         };
@@ -1944,7 +1952,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Http(HttpSource::Request(HttpRequestSource {
+            IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
                 client: nervix_models::ClientName::try_from("http_main")
                     .expect("valid client identifier"),
                 every: "1s"
@@ -2011,7 +2019,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+            IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
                 endpoint: nervix_models::EndpointName::try_from("http_notifications_endpoint")
                     .expect("valid endpoint identifier"),
                 mode: EndpointIngestMode::NoAck,
@@ -2037,7 +2045,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Websockets(WebsocketsSource::Endpoint(WebsocketsEndpointSource {
+            IngestorEntity::Websockets(WebsocketsIngestor::Endpoint(WebsocketsEndpointIngestor {
                 endpoint: nervix_models::EndpointName::try_from("ws_notifications_endpoint")
                     .expect("valid endpoint identifier"),
                 mode: EndpointIngestMode::NoAck,
@@ -2064,12 +2072,15 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Websockets(WebsocketsSource::Connection(WebsocketsConnectionSource {
-                client: nervix_models::ClientName::try_from("ws_main")
-                    .expect("valid client identifier"),
-                mode: WebsocketsIngestMode::NoAck,
-                quiesce: IngestQuiesceMode::Drop,
-            }))
+            IngestorEntity::Websockets(WebsocketsIngestor::Connection(
+                WebsocketsConnectionIngestor {
+                    headers: Vec::new(),
+                    client: nervix_models::ClientName::try_from("ws_main")
+                        .expect("valid client identifier"),
+                    mode: WebsocketsIngestMode::NoAck,
+                    quiesce: IngestQuiesceMode::Drop,
+                }
+            ))
         );
     }
 
@@ -2089,7 +2100,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
+            IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(ZeroMqPullIngestor {
                 client: nervix_models::ClientName::try_from("zmq_main")
                     .expect("valid client identifier"),
                 mode: ZeroMqIngestMode::NoAck,
@@ -2113,7 +2124,7 @@ mod tests {
         let parsed = parse_create_ingestor(input).expect("parse should succeed");
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
+            IngestorEntity::Syslog(SyslogIngestor::Listener(SyslogListenerIngestor {
                 client: nervix_models::ClientName::try_from("syslog_listener")
                     .expect("valid client identifier"),
                 mode: SyslogIngestMode::NoAck,
@@ -2170,7 +2181,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Sqs(SqsSource::Queue(SqsQueueSource {
+            IngestorEntity::Sqs(SqsIngestor::Queue(SqsQueueIngestor {
                 client: nervix_models::ClientName::try_from("sqs_main")
                     .expect("valid client identifier"),
                 queue: nervix_models::SqsQueueName::try_from("notifications")
@@ -2201,7 +2212,7 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource { instances, .. })) =
+        let IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor { instances, .. })) =
             transport(&parsed).source.clone()
         else {
             panic!("expected kafka ingestor source");
@@ -2222,8 +2233,9 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
-            instances, ..
+        let IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(RabbitMqQueueIngestor {
+            instances,
+            ..
         })) = transport(&parsed).source.clone()
         else {
             panic!("expected rabbitmq ingestor source");
@@ -2244,7 +2256,7 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Sqs(SqsSource::Queue(SqsQueueSource { instances, .. })) =
+        let IngestorEntity::Sqs(SqsIngestor::Queue(SqsQueueIngestor { instances, .. })) =
             transport(&parsed).source.clone()
         else {
             panic!("expected sqs ingestor source");
@@ -2349,7 +2361,7 @@ mod tests {
                                BACKOFF 100ms MAX 5s ON QUIESCE SUSPEND";
 
     /// The head, the name and the body of a client producer ingestor.
-    fn client_source() -> String {
+    fn client_entity() -> String {
         format!("CLIENT PRODUCER INGESTOR submit_events FROM {CLIENT_BODY}")
     }
 
@@ -2364,11 +2376,11 @@ mod tests {
 
     #[test]
     fn parses_a_client_source_without_a_codec() {
-        let parsed = parse_create_ingestor(&client_ingestor(&client_source()))
+        let parsed = parse_create_ingestor(&client_ingestor(&client_entity()))
             .expect("a client source should parse");
         assert_eq!(
             parsed.input,
-            IngestorInput::Client(ClientProducerSource {
+            IngestorInput::Client(ClientProducerIngestor {
                 schema: SchemaName::parse("event").expect("valid schema name"),
                 mode: ClientIngestMode {
                     window: nervix_models::AckWindow::Parallel {

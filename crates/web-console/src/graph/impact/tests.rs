@@ -563,20 +563,20 @@ fn removed_topology_stays_in_the_drawing_and_out_of_the_after_view() {
     let backup = unbranched(ModelKind::Relay, "backup");
     let dropped = unbranched(ModelKind::Junction, "legacy_route");
     let kept = unbranched(ModelKind::Junction, "route");
-    let sink = unbranched(ModelKind::Relay, "sink");
+    let connector = unbranched(ModelKind::Relay, "emitter");
     let before = topology(
-        [&feed, &backup, &dropped, &kept, &sink].map(|coverage| held(coverage, &[1])),
+        [&feed, &backup, &dropped, &kept, &connector].map(|coverage| held(coverage, &[1])),
         [
             flows(&feed, &dropped, &[1]),
-            flows(&dropped, &sink, &[1]),
+            flows(&dropped, &connector, &[1]),
             flows(&feed, &kept, &[1]),
-            flows(&kept, &sink, &[1]),
+            flows(&kept, &connector, &[1]),
         ],
     );
     // The junction is dropped, and the one that remains reads the backup relay instead.
     let after = topology(
-        [&feed, &backup, &kept, &sink].map(|coverage| held(coverage, &[1])),
-        [flows(&backup, &kept, &[1]), flows(&kept, &sink, &[1])],
+        [&feed, &backup, &kept, &connector].map(|coverage| held(coverage, &[1])),
+        [flows(&backup, &kept, &[1]), flows(&kept, &connector, &[1])],
     );
     let effects = ImpactEffects {
         changed_configuration: CanonicalImpactSet::new([

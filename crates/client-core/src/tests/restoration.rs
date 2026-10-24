@@ -70,7 +70,11 @@ impl Loopback {
     async fn end_exchange(&self) {
         let generation = self.client.inner.exchange.lock().await.generation.clone();
         self.pending.lock().close();
-        self.client.inner.events.sinks.close_generation(&generation);
+        self.client
+            .inner
+            .events
+            .emitters
+            .close_generation(&generation);
     }
 
     /// Waits until the lifecycle of `subscription_name` is `expected`.
@@ -79,7 +83,7 @@ impl Loopback {
         subscription_name: &str,
         expected: Option<SubscriptionLifecycle>,
     ) {
-        let mut changed = self.client.inner.events.sinks.desired.watch();
+        let mut changed = self.client.inner.events.emitters.desired.watch();
         nervix_primitives::time::timeout(DEADLINE, async {
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -169,7 +173,7 @@ async fn deleting_a_failed_delivery_whose_session_ended_releases_the_name() {
         .client
         .inner
         .events
-        .sinks
+        .emitters
         .desired
         .overflow(&subscription("live", 1), &generation);
     assert_eq!(

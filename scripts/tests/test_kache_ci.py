@@ -33,6 +33,7 @@ WORKFLOWS = (
     Path(".github/workflows/docker-build.yaml"),
     Path(".github/workflows/bolero.yaml"),
 )
+CACHE_RECOVERY_BYTES = 64 * 1024**3
 # Every job that builds Rust through kache, by workflow.
 KACHE_JOBS = {
     "check.yaml": {
@@ -129,6 +130,9 @@ class KacheWorkflowTests(unittest.TestCase):
             workflow = path.read_text()
             self.assertIn('KACHE_VERSION: "1.2.1"', workflow_env(workflow))
             self.assertIn('KACHE_REMOTE_KEY_LISTING: "false"', workflow_env(workflow))
+            self.assertIn(
+                f'KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "{CACHE_RECOVERY_BYTES}"', workflow_env(workflow)
+            )
             self.assertNotIn("sync --push", workflow)
             self.assertNotIn("configure_kache_remote", workflow)
             self.assertNotIn("actions/cache@", workflow)
@@ -149,7 +153,6 @@ class KacheWorkflowTests(unittest.TestCase):
                             "version": "${{ env.KACHE_VERSION }}",
                             "github-cache": '"false"',
                             "cache-executables": '"true"',
-                            "max-size": '"1TiB"',
                             "pr-comment": '"false"',
                         },
                     )
@@ -246,7 +249,7 @@ class KacheWorkflowTests(unittest.TestCase):
         self.assertIn("COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py", dockerfile)
         self.assertIn("ENV RUSTC_WRAPPER=kache", dockerfile)
         self.assertIn("ENV KACHE_CACHE_EXECUTABLES=true", dockerfile)
-        self.assertIn("ENV KACHE_MAX_SIZE=1TiB", dockerfile)
+        self.assertIn(f"ENV KACHE_AUTO_RECOVER_MIN_FREE_BYTES={CACHE_RECOVERY_BYTES}", dockerfile)
         self.assertIn("ENV KACHE_REMOTE_KEY_LISTING=false", dockerfile)
         configure = dockerfile.index('python3 scripts/kache_remote.py configure "${KACHE_CONFIG}"')
         daemon = dockerfile.index("kache daemon start")

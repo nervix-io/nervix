@@ -104,6 +104,7 @@ impl InterconnectTlsMaterial {
 
 pub(in crate::application) async fn reload_interconnect_tls(
     transport: Transport,
+    cluster: Arc<ClusterHandle>,
     paths: InterconnectTlsPaths,
     initial_fingerprint: blake3::Hash,
     shutdown: CancellationToken,
@@ -156,6 +157,7 @@ pub(in crate::application) async fn reload_interconnect_tls(
                 continue;
             }
         };
+        let previous_trust_root = transport.local_prerequisites().trust_root;
         if let Err(error) = transport.replace_tls(replacement).await {
             let failure = error.to_string();
             if reported_failure.as_ref() != Some(&failure) {
@@ -163,6 +165,16 @@ pub(in crate::application) async fn reload_interconnect_tls(
                 reported_failure = Some(failure);
             }
             continue;
+        }
+        // Peers judge this node by the record its gossip publishes and its handshakes carry, so a
+        // reload that changed the trust root republishes the record the handshakes now carry.
+        let prerequisites = transport.local_prerequisites();
+        if prerequisites.trust_root != previous_trust_root {
+            cluster.publish_local_prerequisites(&prerequisites).await;
+            info!(
+                trust_root = %prerequisites.trust_root,
+                "published the trust root of the reloaded interconnect credentials"
+            );
         }
 
         applied_fingerprint = fingerprint;

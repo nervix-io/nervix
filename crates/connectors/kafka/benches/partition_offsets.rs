@@ -1,6 +1,6 @@
 //! Criterion cost of folding acknowledged and rejected Kafka positions per partition.
 //!
-//! A source folds every acknowledgement batch to each partition's latest offset, and every
+//! A ingestor folds every acknowledgement batch to each partition's latest offset, and every
 //! rejection to each partition's earliest message. Positions spread over one partition per topic
 //! mostly repeat a partition; positions spread over as many partitions as there are positions each
 //! name a new one. Both topics repeat throughout.

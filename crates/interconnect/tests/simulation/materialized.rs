@@ -237,17 +237,38 @@ fn exchange(run: ScenarioRun) -> Result<(), SimulationError> {
                             if revision == 1 && tenant == "acme" {
                                 fault_snapshot = Some(snapshot.clone());
                             }
-                            let mut body = client
-                                .request_stream(
-                                    &peer,
-                                    FetchStateCheckpoint {
-                                        placement: placement(tenant),
-                                        lsm: snapshot.lsm,
-                                        read: StateCheckpointRead::Published,
-                                    },
-                                )
+                            // The partition below drops what the first owner still had in
+                            // flight on the bulk connection, and the simulated TCP never resends
+                            // it, so that connection stays half-open after the repair. Its first
+                            // request at the replacement revision can meet the replaced owner's
+                            // reset; the next lease reconnects to the current owner.
+                            let mut body =
+                                nervix_primitives::time::timeout(Duration::from_secs(90), async {
+                                    loop {
+                                        let opened = client
+                                            .request_stream(
+                                                &peer,
+                                                FetchStateCheckpoint {
+                                                    placement: placement(tenant),
+                                                    lsm: snapshot.lsm,
+                                                    read: StateCheckpointRead::Published,
+                                                },
+                                            )
+                                            .await;
+                                        match opened {
+                                            Ok(body) => break body,
+                                            Err(_) if revision == 2 => {
+                                                nervix_primitives::task::yield_now().await
+                                            }
+                                            Err(error) => panic!(
+                                                "the first owner failed to open a checkpoint \
+                                                 stream: {error}"
+                                            ),
+                                        }
+                                    }
+                                })
                                 .await
-                                .assured("the selected checkpoint opens as a bulk stream");
+                                .assured("replacement recovery is bounded by simulated time");
                             assert_eq!(body.content_length(), snapshot.length);
                             let mut payload = Vec::new();
                             while let Some(chunk) = body

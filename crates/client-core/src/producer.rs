@@ -563,7 +563,7 @@ impl Client {
             let exchange = self.inner.exchange.lock().await;
             (exchange.requests(), exchange.generation.clone())
         };
-        let registry = self.inner.events.sinks.producers.clone();
+        let registry = self.inner.events.emitters.producers.clone();
         let client = self.clone();
         let (answer, answered) = oneshot::channel();
         // The open runs in a task of its own, so a caller that stops waiting leaves behind a task

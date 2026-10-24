@@ -516,7 +516,7 @@ run_pause_resume() {
     jq -s \
         --argjson source_end "${input_end}" \
         --arg group_session_timeout "${pause_group_session_timeout_seconds}s" \
-        '{configured_liveness:{raft_heartbeat_interval:"250ms",raft_election_timeout_min:"10s",raft_election_timeout_max:"12s",node_unavailability_timeout:"15s",kafka_consumer_session_timeout:$group_session_timeout},source_final_boundary:$source_end,rounds:.}' \
+        '{configured_liveness:{raft_heartbeat_interval:"1500ms",raft_election_timeout_min:"9s",raft_election_timeout_max:"18s",node_unavailability_timeout:"15s",kafka_consumer_session_timeout:$group_session_timeout},source_final_boundary:$source_end,rounds:.}' \
         "${artifact_dir}"/pauses/[1-4]-*/result.json \
         >"${artifact_dir}/results/pause-progress.json"
 }

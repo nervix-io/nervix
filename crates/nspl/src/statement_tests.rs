@@ -225,7 +225,7 @@ fn a_bare_keyword_is_not_accepted_as_a_duration() {
     .expect("an identifier parses and is validated where it is consumed");
 }
 
-/// A codec is required by the sink, so the grammar asks for it right after the sink.
+/// A codec is required by the emitter, so the grammar asks for it right after the emitter.
 ///
 /// Written before `TO`, the requirement could only be checked once the whole statement was
 /// read, and a `try_map` over the whole statement reports its failure at the statement's first
@@ -237,10 +237,10 @@ fn a_cross_clause_constraint_is_reported_where_it_was_broken() {
         "CREATE KAFKA TOPIC EMITTER e FROM r TO c TOPIC 't' MODE NO ACK RETRY POLICY BACKOFF \
          250ms MAX 30s FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG",
     )
-    .expect_err("an encoded sink needs a codec");
+    .expect_err("an encoded emitter needs a codec");
     assert!(
         format!("{error:?}").contains("expected ENCODE USING"),
-        "the codec is required by the sink, so the grammar should ask for it: {error:?}"
+        "the codec is required by the emitter, so the grammar should ask for it: {error:?}"
     );
 }
 
@@ -640,6 +640,7 @@ fn parses_describe_resource_summary_statement() {
 fn describe_context_suggestions_include_resource_and_stream() {
     let input = "DESCRIBE ";
     let suggestions = suggest_statement(input, input.len());
+    assert!(suggestions.contains(&"CLUSTER".to_string()));
     assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
     assert!(suggestions.contains(&"DOMAIN".to_string()));
     assert!(suggestions.contains(&"EMITTER".to_string()));
@@ -649,6 +650,22 @@ fn describe_context_suggestions_include_resource_and_stream() {
     assert!(suggestions.contains(&"RESOURCE".to_string()));
     assert!(suggestions.contains(&"RELAY".to_string()));
     assert!(suggestions.contains(&"WINDOW".to_string()));
+}
+
+#[test]
+fn parses_describe_cluster_statement() {
+    let parsed = parse_statement("DESCRIBE CLUSTER;").expect("parse should succeed");
+    assert_eq!(
+        parsed,
+        Statement::DescribeCluster(nervix_models::DescribeCluster)
+    );
+}
+
+#[test]
+fn describe_cluster_context_offers_no_clause_of_show_cluster_status() {
+    let input = "DESCRIBE CLUSTER ";
+    let suggestions = suggest_statement(input, input.len());
+    assert!(!suggestions.contains(&"STATUS".to_string()));
 }
 
 #[test]
@@ -1292,8 +1309,8 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
         &[]
     )]
 #[case::alter_emitter(
-        "ALTER ZEROMQ PUSH EMITTER event_sink SET TO sink_b MODE NO ACK RETRY POLICY BACKOFF 250ms \
-             MAX 30s ENCODE USING event_codec, SET CLIENT sink_c, SET ENCODE USING event_codec, SET COLLECT FOR 10ms MAX \
+        "ALTER ZEROMQ PUSH EMITTER event_emitter SET TO emitter_b MODE NO ACK RETRY POLICY BACKOFF 250ms \
+             MAX 30s ENCODE USING event_codec, SET CLIENT emitter_c, SET ENCODE USING event_codec, SET COLLECT FOR 10ms MAX \
              BATCH SIZE 1MiB, SET DETACHED, SET FLUSH IMMEDIATE;",
         None,
         &[]
