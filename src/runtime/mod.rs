@@ -303,7 +303,9 @@ mod relay_interaction;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
 pub mod relay_interaction_benchmark;
+mod relay_memory_hold;
 mod relay_processor_node;
+mod relay_send_attempts;
 mod relay_subscription;
 mod relay_transit;
 mod remote_ack_owner;
@@ -584,12 +586,13 @@ use relay_interaction::{
     RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
 };
 use relay_processor_node::RelayProcessorError;
+use relay_send_attempts::GrantCapacityRefusals;
 use relay_transit::{
     RelayAdmissions, RelayOwnerAdmission, RelayOwnerBatchCompletion, RelayRoutedAdmission,
     RelayTransit,
 };
 use remote_ack_owner::RemoteDispatchRegistry;
-use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatcher};
+use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteAckStorage, RemoteDispatcher};
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};
 use schedule_apply::ScheduleApplication;
 use scheduled_node::{

@@ -861,14 +861,11 @@ message it unfolded into has completed its own route or error delivery.
 Remote delivery retains that host-owned ACK share in a bounded delivery owner, with independent
 row outcomes and an exact generation identity. Admission refusal or cancellation before admission
 returns the share negatively; admitted records remain pending through keepalives and required
-waits until their terminal outcome or the silence bound. A relay owner whose relay memory has no
-room for the acknowledgement watches of a delivery holds the delivery back unadmitted instead of
-refusing it, and the host's dispatch waits for that admission within its five-minute bound. A
-source in `MODE NO ACK` therefore stops reading while its delivery is held, as under any relay
-backpressure, and its output is delivered once the relay owner has room rather than lost. In an
-acknowledged mode the held rows' shares stay pending without keepalives, so a hold longer than the
-source's `ACK TIMEOUT` rejects their positions and the source delivers them again, possibly after the
-held delivery was admitted. Relay construction retains the domain's
+waits until their terminal outcome or the silence bound. A delivery that finds no relay memory for
+it, on the receiving node for its grant or its acknowledgement watches, or on the sending node for
+its acknowledgement records, is held back rather than refused, within one five-minute bound;
+[Source loops while a delivery is held](#source-loops-while-a-delivery-is-held) describes what that
+means for the source. Relay construction retains the domain's
 ACK-root tracker, so intake does not resolve a mutable domain registry for each row. Receiver
 watchers retain the sender's full process identity and charge their memory to the relay budget;
 sender replacement or shutdown ends them. These correlations remain volatile and are never a
@@ -1004,6 +1001,25 @@ sequenceDiagram
         Host->>Host: Apply declared retry policy
     end
 ```
+
+### Source loops while a delivery is held
+
+A remote delivery waits, instead of failing, while relay memory has no room for it. The receiving
+node holds an unadmitted delivery back while its relay memory has no room for the delivery's
+acknowledgement watches; the sending node holds a delivery back while the receiver refuses its
+grant for capacity; and the sending node waits for room in its own relay memory to store the
+delivery's acknowledgement records. The host's dispatch waits through each of these within the
+delivery's five-minute bound, as [Held Deliveries](./interconnect.md#held-deliveries) describes.
+
+A held delivery is relay backpressure like any other. A source in `MODE NO ACK` stops reading while
+its delivery is held, and its output is delivered once the room returns rather than lost; only a
+hold that outlasts the five-minute bound fails the delivery and loses its rows. A `KAFKA TOPIC`
+consumer-group member whose loop is held longer than its `max.poll.interval.ms` leaves its group,
+as under any other backpressure that holds its loop. librdkafka's default for that interval is five
+minutes, the same as the bound, so a consumer that keeps the default leaves its group only when a
+hold comes close to the bound. In an acknowledged mode the held rows' shares stay pending without
+keepalives, so a hold longer than the source's `ACK TIMEOUT` rejects their positions and the source
+delivers them again, possibly after the held delivery was admitted.
 
 ### Interrupted reads
 
