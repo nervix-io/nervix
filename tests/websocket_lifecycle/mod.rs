@@ -16,6 +16,7 @@ pub(super) use peer::WebsocketPeer;
 
 use super::{ScenarioWorld, draw_scenario_port, initialize_scenario_identity};
 
+mod bounds;
 mod peer;
 
 #[given("a WebSocket declaration peer verifies upgrade headers and sends text and binary frames")]

@@ -723,7 +723,7 @@ test-deadlock-probes features="deloxide" *args:
 # The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
 # and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
 # this list to the inventory.
-shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-sqs", "nervix-connector-syslog", "nervix-consensus", "nervix-server", "nervix-deadlock"]
+shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-sqs", "nervix-connector-syslog", "nervix-connector-websockets", "nervix-consensus", "nervix-server", "nervix-deadlock"]
 
 # Explore every registered Shuttle check of a production owner, each in its own process: under the
 # exploration it declares, then under the uncontrolled-nondeterminism detector. The inventory in
@@ -1027,6 +1027,11 @@ test-connectors *args:
 # Run the WebSockets transport and signaling owners without unrelated connector test roots.
 test-websockets *args:
     cargo test --package nervix-connector-websockets --lib -- {{ args }}
+
+# Diagnose one WebSockets owner check with its replayable schedule. `test-shuttle` remains the
+# inventory, completion and nondeterminism gate for qualification.
+test-websockets-shuttle check:
+    SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-connector-websockets/" + check) }} cargo test --package nervix-connector-websockets --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
 
 # Run the session wire codec tests and the gRPC and WebSocket sessions that carry its frames.
 test-client-wire *args:
@@ -2258,6 +2263,7 @@ clippy_shuttle_packages := [
     "nervix-execution",
     "nervix-interconnect",
     "nervix-wasm",
+    "nervix-connector-websockets",
 ]
 
 [private, parallel]
@@ -2289,7 +2295,7 @@ cargo-clippy-shuttle jobs=default_jobs: (run-with-jobs "shuttle-clippy-targets" 
 shuttle-clippy-targets: \
     *(clippy-target *clippy_shuttle_packages ["--lib", "--features", "shuttle"]) \
     *(clippy-target *["nervix-connector-kafka", "nervix-consensus", "nervix-server"] ["--lib", "--features", "shuttle testing"]) \
-    *(clippy-target *["nervix-connector-prometheus", "nervix-connector-websockets"] ["--lib", "--features", "nervix-connector/shuttle nervix-primitives/shuttle"]) \
+    *(clippy-target *["nervix-connector-prometheus"] ["--lib", "--features", "nervix-connector/shuttle nervix-primitives/shuttle"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "shuttle native"]) \
     *(clippy-target *shuttle_test_packages ["--lib", "--profile", "test", "--features", "shuttle"])
 

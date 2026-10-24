@@ -2051,6 +2051,21 @@ contract; its local conversions remain analyzed. The registered `websocket-retai
 field and exact snapshot identity through the production retain/replay conversion. Client ping
 timer and socket scheduling remain outside the detector and are exercised by real-peer owner tests.
 
+The WebSockets signaling handoff uses one bounded primitive mpsc channel only while signaling
+accepts data and while its completed frames drain. A full queue backpressures signaling within its
+TIMEOUT. The negotiating future owns the queue, and completion alone transfers it into source
+reads; cancellation or failure ends its exact lifetime. Suspension retains a completed queue and
+drains it before reconnecting. Once drained, the source drops the channel and steady socket reads
+reach only task-owned state. This async-only queue protocol adds no tracked blocking-lock owner;
+Deloxide does not establish its cancellation or capacity behavior. The three registered checks in
+`crates/connectors/websockets/src/connection/ingestor/handshake/shuttle_tests.rs` exercise successful FIFO/header
+handoff, a full queue racing expiry, and dropping negotiation before readiness through the
+production owner. `just test-shuttle handshake` checks inventory, completed exploration and
+nondeterminism; `just test-websockets-shuttle <full-check-name>` supports focused diagnosis with a
+replayable failure schedule. One-/three-node public scenarios separately verify real-peer
+handshake backpressure, ordered delivery and idle reconnection. Model checks claim no socket or
+wall-clock coverage.
+
 The native backup-wait workloads reach the client's pending-reply locks during multi-domain
 capture, bounded wait expiry and recovery under the same execution reference. They run on one-
 and three-node clusters, including expiry before the second cut, in both selections and name the

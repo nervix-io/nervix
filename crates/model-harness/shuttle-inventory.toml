@@ -262,3 +262,11 @@ checks = [
   "listener::tests::shuttle_a_decoded_frame_racing_suspension_is_handed_off_once",
 ]
 name = "nervix-connector-syslog"
+
+[[package]]
+checks = [
+  "connection::ingestor::handshake::shuttle_tests::shuttle_a_completed_or_cancelled_handshake_preserves_its_exact_frame_lifetime",
+  "connection::ingestor::handshake::shuttle_tests::shuttle_a_full_handshake_handoff_backpressures_until_expiry_and_releases_every_slot",
+  "connection::ingestor::handshake::shuttle_tests::shuttle_a_handshake_future_dropped_before_readiness_ends_its_exact_handoff",
+]
+name = "nervix-connector-websockets"

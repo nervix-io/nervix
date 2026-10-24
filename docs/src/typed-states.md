@@ -133,6 +133,15 @@ an execution plan receives it. `WebsocketDataFrame` carries either text or binar
 text tag cannot accompany invalid UTF-8. Each message retains its connection's immutable response
 header snapshot; the quiesce buffer retains the same handle beside the typed frame kind.
 
+The validated WebSockets client configuration carries the handshake capacity as `NonZeroU16` and
+message/frame limits as `NonZeroU32`. Decimal CONFIG values cross this boundary once; zero,
+overflow and an unschedulable ping-derived idle deadline are typed configuration refusals. The
+effective idle duration is already established before planning. A handshake attempt owns its
+bounded queue until signaling succeeds; only the completed queue moves into ordinary source
+reads. Dropping or failing the negotiating future drops that exact queue, so its frames cannot
+become data for a replacement connection. After a completed queue drains, its absent channel is
+represented by `None`, and steady reads use only task-owned connection state.
+
 Zero work outstanding, an initial sequence value, an empty payload, and a genuinely empty result
 remain ordinary values. A documented scalar function may return zero for a particular input;
 that result is part of the function contract. Arrow values under a null or failure validity mask

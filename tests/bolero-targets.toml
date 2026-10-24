@@ -3221,10 +3221,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/websockets/__fuzz__/connector__websockets__config_tests__bolero_client_config_preserves_every_valid_connection_setting/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "websocket-client-config"
-invariant = "Every bounded valid ws/wss configuration preserves the complete endpoint, connection timeout and ping interval while applying the declared TLS pairing rules."
+invariant = "Every bounded valid ws/wss configuration preserves the complete endpoint, connection and ping durations, effective idle deadline, handshake capacity and incoming message/frame limits while applying the declared TLS pairing rules."
 manifest = "Cargo.toml"
 max_input_bytes = 32
 package = "nervix-models"

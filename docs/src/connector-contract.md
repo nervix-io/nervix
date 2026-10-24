@@ -598,7 +598,7 @@ deadline keys mean the same thing for every connector:
 | --- | --- |
 | `timeout_ms` | The whole of one request or operation: name resolution, connection setup, TLS and the answer. |
 | `connect_timeout_ms` | Establishing a connection: name resolution, the address attempts, TLS and the protocol's own handshake. |
-| `idle_timeout_ms` | Silence while actively reading an established connection, including its liveness probe; expiry closes the connection. Transport backpressure is outside an active read. |
+| `idle_timeout_ms` | Silence while waiting for peer activity on an established connection, including its liveness probe; expiry closes the connection. Each entity declares its activity and whether cancellation or handoff backpressure retains the activity deadline. |
 
 A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or by
 `idle_timeout_ms`, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
@@ -2005,13 +2005,21 @@ sequenceDiagram
   `WEBSOCKETS CONNECTION` source through `IngestorConnector` and `BrokerIngestorConnector`. It has
   no emitter or listening endpoint. Its plan carries resolved client configuration, the node
   resolver, validated literal upgrade headers and an optional compiled signaling protocol. The
-  vocabulary owns its strict CONFIG schema: endpoint, positive connection/ping durations and TLS
+  vocabulary owns its strict CONFIG schema: endpoint, positive connection/ping/idle durations,
+  positive handoff/message/frame limits and TLS
   file keys restricted to secure endpoints with paired client identity files. Registry creation
   and source construction after template rendering both validate it. The omitted connection
   timeout is thirty seconds; omitted ping cadence means only answering peer pings. `open` prepares local transport and TLS
   state without resolving a name or connecting; `resume` resolves and connects, completes any
   signaling handshake, and only then reports readiness. Accepted data from a successful
-  handshake is queued for polling before new socket frames. Text and binary payload-carrying
+  handshake stays in one bounded `HandshakeFrames` handoff for polling before new socket frames.
+  Its capacity is `handshake_buffer_capacity` (default 16 messages), with each message bounded by
+  `max_message_size` (default 64 MiB) and each transport frame by `max_frame_size` (default 16 MiB).
+  The full handoff backpressures signaling, retaining at most one further accepted frame while
+  waiting for room within the protocol's `TIMEOUT`. The negotiating future owns this queue, so a
+  failed or cancelled handshake discards its handoff before another connection starts. Only
+  successful signaling publishes it for source reads. The channel is created only for signaling and released after handoff
+  drains; ordinary socket reads then inspect task-owned absence. Text and binary payload-carrying
   variants retain their kind through signaling and become bytes for the host to decode. Each
   connection captures its printable ASCII upgrade response headers once; queued and delivered messages
   share that immutable snapshot, so suspension, reconnection and quiesce replay preserve the
@@ -2021,8 +2029,13 @@ sequenceDiagram
   signaling at the configured cadence, with the close handshake's existing one-second budget
   declared once in the vocabulary and shared by both transport operations, and continue alongside
   data reads. Protocol control frames remain transport concerns.
-  Suspension drops the connection while retaining queued payloads, and close also clears that
-  queue. Transport failure requires another resume of the retained source.
+  `idle_timeout_ms` bounds silence; omission derives three configured ping intervals, or thirty
+  seconds without configured pings. Received data and control frames refresh the absolute activity
+  deadline; local pings and read cancellation do not. An explicit idle value overrides derivation.
+  Incoming frame or message overflow fails the read and ends the connection, as `fail_read` declares.
+  The host reconnects on its policy. Suspension closes the connection while retaining successful
+  handshake payloads, which drain before another connection opens; close clears the queue.
+  Transport failure requires another resume of the retained source.
   The host composer currently resolves the named signaling protocol and chooses buffered intake,
   a flush after each intake, and refusal with counting when unacknowledged unfolding cannot enter
   the executor. Holding its polling loop would also stop answering the peer's pings. These

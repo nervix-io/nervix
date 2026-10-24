@@ -859,6 +859,12 @@ broker ingestor's acknowledgement that its transport fails to confirm, and a rej
 take back, become the ingestor's transient status with the innermost context of the source's
 report as the reason, and only a later confirmed acknowledgement clears it.
 
+A WebSockets connection's idle expiry keeps `DeadlineElapsed` with the explicit
+`idle_timeout_ms` key, or `WebsocketsConnectionIngestorFailure::IdleTimeout` with its derived effective budget,
+beneath `IngestorError::Read`. The fieldless timer expiry is retained as a typed attachment, so the
+innermost context projected into `DESCRIBE` still names the actionable key or bound. Oversized
+frames or messages retain the driver's typed capacity failure and end that connection's read.
+
 Each source or emitter publishes its safe transient error and optional retry together. An emitter
 retains task-owned and connector-owned failures independently in one atomic publication. A publish
 or commit outcome clears the task failure; a retained connector's progress clears the connector
@@ -955,7 +961,8 @@ is created. The refusal names the connector, the client and the domain, with the
 or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
 domain 'shop' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string`.
 A `WEBSOCKETS CLIENT` uses the same validation boundary with
-`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint or positive-duration values,
+`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint, positive-duration or
+portable positive limit values, an unschedulable ping-derived idle bound,
 TLS keys on `ws`, and unpaired identity files are typed refusals naming their key, client and domain.
 `WebsocketsUpgradeHeadersError` names the connection ingestor and offending field without printing
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed

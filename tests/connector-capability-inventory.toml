@@ -959,6 +959,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER idle_timeout_ms"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_connection_bounds.feature", scenario = "A WebSocket connection reports a silent peer through idle_timeout_ms on <cluster_size> nodes" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "WEBSOCKETS ENDPOINT INGESTOR"
 scenarios = [

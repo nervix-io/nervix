@@ -234,6 +234,9 @@ fn buffer_bound(bound: BufferBound) -> String {
             "when full, immediately refuses the request for its sender to retry"
         }
         BufferOverflow::FailPoll => "when exceeded, fails the poll; the next poll reads again",
+        BufferOverflow::FailRead => {
+            "when exceeded, fails the read and reconnects on the retry policy"
+        }
     };
     format!("{capacity}; {overflow}")
 }
@@ -247,6 +250,7 @@ fn wait_bound(bound: WaitBound) -> String {
                     format!("{} when omitted", humantime::format_duration(default))
                 }
                 OmittedDeadline::Unbounded => "unbounded when omitted".to_owned(),
+                OmittedDeadline::Derived(rule) => format!("when omitted, {rule}"),
             };
             format!("`{}`; {omitted}", key.key())
         }
