@@ -340,7 +340,11 @@ second pass after the gate deadline reclaims work that was active during the fir
 An ownership handoff sends engagement, drain status and release only to the hold's participants:
 the live nodes that run part of the moved unit's boundary, as
 [Control Plane](./control-plane.md#planned-ownership-handoffs-and-failover) defines them. A slow or
-lossy link to any other node therefore takes no part in the handoff's preparation deadline.
+lossy link to any other node therefore takes no part in the handoff's preparation deadline. The
+ownership move of a graceful-shutdown drain also asks only the participants whether they have
+prepared the published runtime revision before the destination activates, so such a link takes no
+part in its activation deadline either. Every other planned handoff activates after the
+cluster-wide runtime-revision barrier of the command that moved it.
 Ownership-handoff engagement answers after admission is fenced and its force flush is requested.
 The coordinator then queries the exact operation's drain status. A participant publishes its capture
 freeze before returning a drained status, and capture requires that coordination identity's freeze
@@ -561,7 +565,8 @@ producer once that window is spent, and five seconds without progress resets the
 its admission and memory. A relay batch the receiving application holds without admitting keeps
 the reservation of its exact body, the largest decoded batch, and decode scratch. Another channel
 still receives grants and admission beside it, and cancelling the held batch returns the whole
-reservation once the application drops the batch.
+reservation once the application drops the batch. Once the application has decoded a batch, it keeps
+only the batch's body and decoded columns charged while its runtime takes the batch in.
 
 A CPU class admits each job separately: one of its workers runs, a bounded number wait, and the
 next job is refused at once instead of joining an unbounded queue. A typed request runs several
@@ -669,19 +674,26 @@ acknowledgements remain specific to each destination channel.
 
 A delivery proceeds as follows:
 
-1. The sender leases a relay-body stream before requesting receiver capacity. This prevents a
+1. A delivery that carries record acknowledgements first stores them on the sender, charged to its
+   relay memory. It does so inside the delivery's channel and before the Arrow body is encoded, and
+   waits for room while the sender's relay budget has none, as
+   [Held Deliveries](#held-deliveries) describes.
+2. The sender leases a relay-body stream before requesting receiver capacity. This prevents a
    saturated body pool from holding a remote reservation that it cannot use.
-2. The sender requests a grant over the reserved management admission quota. The request identifies
+3. The sender requests a grant over the reserved management admission quota. The request identifies
    the delivery process, channel, sequence, payload length, branch, relay, and acknowledgement shape.
-3. The receiver verifies the sender process epoch and delivery order. Before issuing a grant, it
+4. The receiver verifies the sender process epoch and delivery order. Before issuing a grant, it
    reserves the encoded body, maximum decoded batch and scratch memory, an incoming queue item, and
-   capacity for the eventual terminal admission outcome.
-4. The grant remains valid for five seconds. The sender transmits the exact Arrow IPC body over the
+   capacity for the eventual terminal admission outcome. A grant it cannot issue is answered with a
+   typed refusal, never with an HTTP error, and the sender decides from the refusal's class alone:
+   a capacity refusal holds the delivery back, and a permanent one fails it, as
+   [Held Deliveries](#held-deliveries) describes.
+5. The grant remains valid for five seconds. The sender transmits the exact Arrow IPC body over the
    relay pool and names the grant and both process epochs.
-5. The receiver reads exactly the granted length under the reservation, records body receipt, and
+6. The receiver reads exactly the granted length under the reservation, records body receipt, and
    places the work in its bounded application queue. The HTTP/2 body response confirms receipt by
    the receiving process only.
-6. The application lane validates the body's Arrow IPC stream, which must hold a schema message
+7. The application lane validates the body's Arrow IPC stream, which must hold a schema message
    of the field types Nervix carries, one uncompressed record batch that declares the field nodes
    and buffers that schema's fields take with every buffer inside its body, and the end-of-stream
    marker, and then the exact schema, metadata, branch, and record-acknowledgement count, then
@@ -691,14 +703,17 @@ A delivery proceeds as follows:
    with the typed `RemoteRelayDecodeError` beneath it, which names what the payload got wrong and
    keeps the decoder's own failure beneath that, and answers the payload's admission registration
    negatively with the whole chain rendered as the reason. A payload that carries no admission
-   registration is refused the same way, with no registration to answer.
-7. When the concrete runtime branch accepts the batch, the receiver sends a terminal admission
+   registration is refused the same way, with no registration to answer. Once the body is
+   decoded, the delivery keeps only its body and its decoded columns charged and returns the rest
+   of its grant's reservation, the decode room it did not need, before the runtime takes the batch
+   in.
+8. When the concrete runtime branch accepts the batch, the receiver sends a terminal admission
    outcome over the reserved management capacity. The sender can then release the channel for the
    next batch. A batch that carries record acknowledgements is admitted only once the receiver has
    charged its acknowledgement watches; while the relay budget has no room for them, the receiver
    holds the batch back unadmitted, as
    [Bounded Correlation And Peer Owners](#bounded-correlation-and-peer-owners) describes.
-8. If the send includes record acknowledgements, later acknowledgement events report downstream
+9. If the send includes record acknowledgements, later acknowledgement events report downstream
    processing completion. Detached sends and subscription fan-out end at admission.
 
 These steps expose three intentionally different outcomes:
@@ -710,7 +725,8 @@ These steps expose three intentionally different outcomes:
 
 While admission or an attached acknowledgement is unresolved, the receiver sends coalesced progress
 events through the reserved management quota. The sender treats five seconds without progress as a
-stalled exchange and bounds the total admission wait at five minutes. Once the delivery is admitted,
+stalled exchange, where a capacity refusal of its grant counts as progress, and bounds the whole
+delivery, from storing its records to its admission, at five minutes. Once the delivery is admitted,
 the sender waits for an attached record acknowledgement only while the receiver keeps reporting it,
 and fails one the receiver reports nothing about for fifteen seconds, as
 [Acknowledgement Registrations](#acknowledgement-registrations) describes. Progress keeps a live
@@ -806,8 +822,9 @@ task; a wide frame therefore does not allocate one task per acknowledgement. Pen
 progress every 100 milliseconds, below the registrar's fifteen-second silence bound even when two
 reports each exhaust their dispatch deadline. The same cadence keeps local emitter and
 message-error acknowledgements alive while a connector request is pending, giving a one-second
-source `ACK TIMEOUT` multiple chances to observe progress. Refusing record storage is typed and
-occurs before the delivery is sent. Cancellation before admission resolves every held share
+source `ACK TIMEOUT` multiple chances to observe progress. Record storage waits for room before the
+delivery's body is encoded, as [Held Deliveries](#held-deliveries) describes; refusing it is typed
+and occurs before the delivery is sent. Cancellation before admission resolves every held share
 negatively and returns its position. Completion of the last record returns the delivery storage and
 its charge.
 
@@ -879,6 +896,63 @@ than the budget holds. Authentication before gossip membership permits discovery
 operations wait for live membership. An owner still awaiting membership ends after ten minutes and
 closes its bound intake connections. Routing publication has at most the configured peer limit;
 normal frame and ACK operations use retained owners rather than a node-wide shared-map guard.
+
+### Held Deliveries
+
+A delivery is held back rather than failed while relay memory on either end has no room for it at
+the moment, because that lack of room ends as the node's other relay work resolves.
+
+A receiver refuses a grant for capacity when its relay budget cannot reserve the body, the largest
+decoded batch and decode scratch, when its application queue has no item left, when the capacity
+it keeps for terminal admission outcomes is taken, or when the delivery's channel still has an
+unadmitted batch. Every other refusal is permanent for the grant that asked: its sender epoch, body
+length or admission registration is wrong, its content conflicts with what its delivery identity
+was first granted with, its sequence is out of order, or its admission registration is already
+active. The refusal crosses the wire as a typed `RelayGrantRefusal`, never as an HTTP status or
+text, and the sender decides from its class alone. A permanent refusal fails the delivery at once.
+
+A capacity refusal holds a routed or owner-ingress delivery back. The receiver answered, so the
+refusal does not count toward the five-second stall bound: the sender asks for a grant again after
+a wait that starts at 25 milliseconds and doubles after each further capacity refusal, up to 2.5
+seconds, half the stall bound, and the stall bound starts again when it asks, so each ask has the
+whole bound for its grant and its body, as the delivery's first ask has. Each ask leases the
+delivery's streams again, encodes the grant's row metadata again, and has the receiver read and
+decode that metadata again; after its first few seconds a held delivery therefore asks at most once
+every 2.5 seconds, and each ask holds one of the four admission streams the management connection
+reserves for one round trip. A held sender keeps its encoded body and its channel, and holds no
+grant and no memory on the receiver. Subscription fan-out is not held: a capacity refusal of its
+grant is retried within the five-second dispatch bound like any failed send, so a session
+subscription never holds the relay owner's fan-out longer than that.
+
+Storing a delivery's record acknowledgements waits for room in the sender's own relay budget the
+way a receiver's watch charge does: it reads the budget every 10 milliseconds, registers for no
+release notification, and never queues in the budget. It waits inside the delivery's channel, so
+the deliveries of one channel keep their order, and before the body is encoded, so a delivery
+waiting for record storage holds no encoded body. Ending the delivery's channel, by evicting its
+branch or retiring its route, ends the wait and resolves the rows' shares negatively. Only a charge
+larger than the whole budget, or one still without room when the delivery's bound passes, is
+refused, as `CorrelationMemory` with the budget's typed `AdmissionError` beneath it.
+
+One five-minute bound covers the whole delivery: storing its records, holding its grant, and
+waiting for its admission. A delivery still held when the bound passes fails as before: a source in
+`MODE NO ACK` loses its rows and an acknowledged source delivers them again.
+[Source loops while a delivery is held](./connector-contract.md#source-loops-while-a-delivery-is-held)
+describes what a held delivery means for the source that produced it.
+
+A receiver keeps a granted delivery's reservation until the runtime has taken the batch in, and a
+relay owner's runtime takes a batch in only once its buffer has room. Two relay owners that fan out
+to each other's consumers could therefore pin each other's relay memory: each owner's buffer waits
+on a fan-out delivery the other node holds back, while the deliveries filling the other node's
+relay memory wait on that node's own full buffer. A received batch therefore returns the decode
+room of its grant as soon as it is decoded, keeping only its body and its decoded columns charged.
+Such a cycle then needs the decoded data of the deliveries waiting on full buffers, together with
+the encoded bodies of held senders, to fill the relay budgets of both nodes. The five-minute bound
+ends it, failing the held deliveries as the five-second dispatch bound did before deliveries were
+held.
+
+`nervix_interconnect_relay_grant_refusals_total` counts the refusals a node answered and the ones it
+received, by direction and reason; a rising count of capacity refusals received means held
+deliveries are waiting for the receiver's room.
 
 ### Ordering, Retry, And Reconciliation
 
@@ -1797,8 +1871,9 @@ errors remain available to the operation owner, which decides whether a request 
 The interconnect does not infer idempotency for arbitrary control-plane or runtime operations.
 Local transport operations return `error_stack` reports. TLS and wire failures retain their typed
 causes beneath `TransportError`; typed requests and stream readers add `RequestError` context while
-retaining the transport report. Deadline, shutdown, quota, cancellation, relay-rejection, and
-indeterminate-delivery decisions inspect the current typed context, not formatted report text.
+retaining the transport report. Deadline, shutdown, quota, cancellation, relay-rejection, relay
+grant refusal, and indeterminate-delivery decisions inspect the current typed context, not
+formatted report text.
 Runtime dispatch, relay admission-response and remote acknowledgement logs render every context
 of those local reports. State synchronization, checkpoint announcement and replica catch-up logs
 also retain the underlying request, placement or storage cause when their owner adds context.
@@ -1829,9 +1904,10 @@ exact durable discard, activation, or schedule-based reconciliation resolves tha
 
 Each node exports interconnect measurements through its local metrics endpoint. The main groups
 cover connection and stream occupancy, pending operations, setup failures and resets, quota
-exhaustion, request latency, relay channels and grants, admission wait, unresolved delivery age, and
-bulk-transfer bytes. Interconnect memory, worker queues, reactor delay, and consensus retention show
-whether pressure originates in transport, execution, or the protocol using it. A connection attempt
+exhaustion, request latency, relay channels and grants, grant refusals by direction and reason,
+admission wait, unresolved delivery age, and bulk-transfer bytes. Interconnect memory, worker
+queues, reactor delay, and consensus retention show whether pressure originates in transport,
+execution, or the protocol using it. A connection attempt
 that could not resolve its peer's advertised host is counted with reason `resolution`, apart from
 setup, handshake, capacity, and closed failures, so a DNS outage is visible as itself.
 
@@ -1847,8 +1923,9 @@ from local ones.
 
 Metric labels are bounded dimensions such as traffic class, direction, operation, outcome, and
 reason. They do not include peer, domain, relay, branch, delivery identity, or payload values.
-An owner-delivery admission failure logs its domain, relay, non-sensitive branch fingerprint and
-target, together with the transport report's retained cancellation and rejection causes. The
+An owner-delivery admission failure, and an owner delivery whose acknowledgement records could not
+be stored, log the domain, relay, non-sensitive branch fingerprint and target, together with the
+report's retained cancellation, rejection and admission causes. The
 undelivered batch and branch field values stay out of that diagnostic.
 Per-batch and payload-bearing logs use debug or trace levels and do not expose sensitive field
 values. See [Metrics And Observability](./metrics-and-observability.md) for the metric and logging

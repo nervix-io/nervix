@@ -105,11 +105,12 @@ use crate::common::{
         SUBSCRIBED_LINE, corpus_report,
     },
     cluster::{
-        BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
-        HttpsPublishLoopOutcome, InterconnectCredentialFault, TEST_AUTH_PASSWORD,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
-        assert_kafka_consumer_group_next_offset_through, client_connect_options, client_domain,
-        command_connect_options, observe_kafka_through, publish_kafka_record_through,
+        AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, Cluster,
+        DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
+        InterconnectCredentialFault, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig,
+        TestSession, WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
+        client_connect_options, client_domain, command_connect_options, observe_kafka_through,
+        publish_kafka_record_through,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
@@ -147,7 +148,8 @@ use crate::common::{
         begin_suite_measurement, suite_summary,
     },
     scenario_schedule::{
-        FeatureLimit, ScenarioAdmission, ScenarioLength, ScenarioRunSlots, prioritize_features,
+        FeatureLimit, SCENARIO_RETRIES, ScenarioAdmission, ScenarioLength, ScenarioRunSlots,
+        prioritize_features,
     },
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
@@ -759,6 +761,21 @@ impl ScenarioWorld {
             published.age()
         );
         append_cucumber_log_line(marker.trim_end());
+    }
+
+    /// Publishes that the scenario's admission holds `run_slots` run slots and its steps start.
+    fn start_running(&self, run_slots: usize) {
+        let Some(registration) = &self.active_scenario else {
+            return;
+        };
+        let published = registration.start_running(run_slots);
+        append_cucumber_log_line(&format!(
+            "scenario {}: {} suite_age={:?} age={:?} run_slots={run_slots}",
+            published.phase,
+            published.identity,
+            ActiveScenario::suite_age(),
+            published.age()
+        ));
     }
 
     fn wait_for_admission(&self, reason: common::scenario_schedule::AdmissionWait) {
@@ -12506,10 +12523,79 @@ async fn when_node_releases_filled_relay_memory(world: &mut ScenarioWorld, node_
         .release_relay_memory_fill_on(&crate::common::cluster::node_name(&node_id));
 }
 
+/// Takes all of a node's free relay memory now, except the little the node needs to read and
+/// answer the relay grant requests it receives, so every grant another node asks it for finds no
+/// room for its delivery.
+#[when(expr = "node {string} fills its relay memory, leaving room for no relay grant")]
+async fn when_node_fills_relay_memory_leaving_room_for_no_grant(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .fill_relay_memory_leaving_room_for_no_grant_on(&crate::common::cluster::node_name(
+            &node_id,
+        ));
+}
+
+/// Arms a node to take all of its free relay memory just before it stores the acknowledgement
+/// records of the next delivery it sends another node, so that delivery finds its own relay
+/// budget full exactly when it needs room for them.
+#[when(
+    expr = "node {string} fills its relay memory before it stores the records of its next delivery"
+)]
+async fn when_node_fills_relay_memory_before_record_storage(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .fill_relay_memory_before_next_record_storage_on(crate::common::cluster::node_name(
+            &node_id,
+        ));
+}
+
+/// Keeps the relay memory a node's fill took for `duration` longer and then returns it.
+///
+/// The duration is the length of the shortage the scenario imposes, not a wait for anything to
+/// happen: a shortage that outlasts the sender's five-second dispatch bound is what tells a
+/// delivery held back apart from one its sender gave up on.
+#[when(expr = "node {string} keeps its relay memory filled for {string} before releasing it")]
+async fn when_node_keeps_relay_memory_filled_before_releasing(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    duration: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node = crate::common::cluster::node_name(&node_id);
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    assert!(
+        world.fault_injection.relay_memory_fill_holds_on(&node),
+        "node '{node_id}' holds no filled relay memory to keep"
+    );
+    nervix_primitives::time::sleep(duration).await;
+    world.fault_injection.release_relay_memory_fill_on(&node);
+}
+
 #[given(expr = "relay owner fan-out for domain {string} is paused before dispatch")]
 async fn given_owner_relay_fanout_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
     world.fault_injection.pause_owner_relay_fanout(domain);
+}
+
+#[given(expr = "relay owner fan-out for domain {string} waits {string} before each batch")]
+async fn given_owner_relay_fanout_waits_before_each_batch(
+    world: &mut ScenarioWorld,
+    domain: String,
+    delay: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let delay = parse_duration_text(&delay).assured("the scenario duration is valid");
+    world
+        .fault_injection
+        .delay_owner_relay_fanout(domain, delay);
 }
 
 #[given(
@@ -13406,6 +13492,61 @@ async fn then_kafka_consumer_group_eventually_has_consumers(
         .expect("kafka consumer group did not reach expected member count");
 }
 
+#[then(expr = "Kafka topic {string} does not exist")]
+async fn then_kafka_topic_does_not_exist(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    let exists = world
+        .cluster()
+        .kafka_topic_exists(&topic)
+        .expect("failed to read Kafka topic metadata");
+    assert!(
+        !exists,
+        "Kafka topic '{topic}' exists, but nothing in the scenario created it"
+    );
+}
+
+/// The consumer group names a step's docstring lists, one per line.
+fn kafka_consumer_group_names(world: &ScenarioWorld, step: &Step) -> BTreeSet<String> {
+    let mut groups = BTreeSet::new();
+    for line in docstring(step).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        groups.insert(expand_placeholders(world, line));
+    }
+    groups
+}
+
+#[then(expr = "within {string} Kafka lists these consumer groups")]
+async fn then_within_kafka_lists_these_consumer_groups(
+    world: &mut ScenarioWorld,
+    within: String,
+    #[step] step: &Step,
+) {
+    let within = parse_duration_text(&within).expect("within must be a valid duration");
+    let groups = kafka_consumer_group_names(world, step);
+    world
+        .cluster()
+        .wait_for_kafka_consumer_groups_listed(&groups, true, within)
+        .await
+        .expect("Kafka did not list the consumer groups");
+}
+
+/// A consumer group that must never exist: one check, since waiting would not strengthen it.
+#[then(expr = "Kafka lists none of these consumer groups")]
+async fn then_kafka_lists_none_of_these_consumer_groups(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let groups = kafka_consumer_group_names(world, step);
+    world
+        .cluster()
+        .wait_for_kafka_consumer_groups_listed(&groups, false, Duration::ZERO)
+        .await
+        .expect("Kafka lists consumer groups");
+}
+
 /// Joins a member that Nervix does not run to the group. It takes the topic's first partitions from
 /// Nervix's consumers and holds them, reading without committing, until it leaves.
 #[when(expr = "an external member joins Kafka consumer group {string} on topic {string}")]
@@ -14268,6 +14409,7 @@ async fn when_these_nspl_commands_are_attempted_on_node(
 }
 
 #[when("these NSPL commands begin executing in the background")]
+#[when("these Plexus commands begin executing in the background")]
 #[when("these Plexus statements begin executing in the background")]
 async fn when_these_nspl_commands_begin_executing_in_the_background(
     world: &mut ScenarioWorld,
@@ -23633,6 +23775,7 @@ async fn given_rabbitmq_queue_exists(world: &mut ScenarioWorld, queue: String) {
 }
 
 #[given(expr = "Kafka topic {string} exists with {int} partitions")]
+#[when(expr = "the operator provisions Kafka topic {string} with {int} partitions")]
 async fn given_kafka_topic_exists_with_partitions(
     world: &mut ScenarioWorld,
     topic: String,
@@ -26289,6 +26432,57 @@ async fn when_sequential_metric_http_payloads_are_posted(
             .await
             .unwrap_or_else(|error| panic!("failed to post http payload {value}: {error}"));
     }
+}
+
+/// How long one acknowledged metric may take to be acknowledged, its retries included. The endpoint
+/// answers each attempt within its ACK timeout, so this only bounds an endpoint that keeps refusing
+/// the metric.
+const METRIC_ACKNOWLEDGEMENT_WAIT: Duration = Duration::from_secs(300);
+
+/// Posts `{"value":1}` through `{"value":<count>}`, starting each in order once fewer than
+/// `window` posts are waiting for their graph acknowledgement, and returns once every post is
+/// answered. An acknowledged endpoint answers a post only after the relay owner handed the row to
+/// its consumers and to the nodes that subscribe to it, so the relay then holds none of the rows.
+/// An unacknowledged endpoint answers as soon as the row is queued on the node that took it.
+#[when(
+    expr = "{int} metric http payloads are posted with acknowledgement, {int} at a time, to host \
+            {string} path {string}"
+)]
+async fn when_metric_http_payloads_are_posted_with_acknowledgement(
+    world: &mut ScenarioWorld,
+    count: u64,
+    window: usize,
+    host: String,
+    path: String,
+) {
+    assert!(
+        window > 0,
+        "an acknowledged posting window holds at least one post"
+    );
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    append_cucumber_log_line(&format!(
+        "http publish acknowledged metrics: node=node-1 host={host} path={path} count={count} \
+         window={window}"
+    ));
+    let publisher = world.cluster().acknowledged_http_publisher(
+        "node-1",
+        &host,
+        &path,
+        METRIC_ACKNOWLEDGEMENT_WAIT,
+    );
+    futures_util::stream::iter(1..=count)
+        .for_each_concurrent(window, |value| post_acknowledged_metric(&publisher, value))
+        .await;
+}
+
+/// Posts `{"value":<value>}` through `publisher` and fails the step unless it is acknowledged.
+async fn post_acknowledged_metric(publisher: &AcknowledgedHttpPublisher, value: u64) {
+    let payload = format!(r#"{{"value":{value}}}"#);
+    publisher
+        .publish(&payload)
+        .await
+        .unwrap_or_else(|error| panic!("metric {value} was not acknowledged: {error}"));
 }
 
 #[when(expr = "http payload encoded as {string} is posted to host {string} path {string}")]
@@ -32028,7 +32222,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     let run = ScenarioWorld::cucumber::<&str>()
         .with_parser(PrioritizedScenarioParser)
         .max_concurrent_scenarios(usize::MAX)
-        .retries(2)
+        .retries(SCENARIO_RETRIES)
         .before(move |feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
@@ -32049,16 +32243,17 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     scenario_line,
                     length,
                 );
-                let attempt = registration.attempt();
+                let run = registration.run();
                 world.active_scenario = Some(registration);
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, length, &feature_name, attempt, |reason| {
+                    .admit_with(limit, length, &feature_name, run, |reason| {
                         world.wait_for_admission(reason)
                     })
                     .await;
+                let held_slots = admission.slots();
                 world.scenario_admission = Some(admission);
-                world.enter_phase(ScenarioPhase::Body, "");
+                world.start_running(held_slots);
             })
         })
         .after(|_feature, _rule, _scenario, finished, world| {

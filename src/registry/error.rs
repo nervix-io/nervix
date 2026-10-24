@@ -18,7 +18,7 @@ use error_stack::{Context, Report};
 use nervix_models::{
     BranchSelection, ClientName, ConnectorKind, DomainName, EmitSinkKind, EndpointName,
     EndpointType, FieldName, IngestSourceKind, ModelKind, ModelName, PrometheusClientConfigError,
-    RelayName,
+    RelayName, WebsocketsClientConfigError, WebsocketsUpgradeHeadersError,
 };
 use thiserror::Error;
 
@@ -42,6 +42,27 @@ pub(crate) enum OtelMappingSection {
     Attributes,
     #[strum(serialize = "RESOURCE")]
     Resource,
+}
+
+/// A client CONFIG key whose value Nervix decides for the connector, so a client may not set it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::AsRefStr)]
+pub(crate) enum NervixOwnedConfigKey {
+    #[strum(serialize = "allow.auto.create.topics")]
+    KafkaAllowAutoCreateTopics,
+}
+
+impl NervixOwnedConfigKey {
+    /// Every key Nervix decides for a Kafka client.
+    pub(crate) const KAFKA: [Self; 1] = [Self::KafkaAllowAutoCreateTopics];
+
+    /// Why Nervix keeps the key's value for itself.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::KafkaAllowAutoCreateTopics => {
+                "Nervix never lets a Kafka consumer create the topic it reads"
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +176,21 @@ pub(crate) enum RegistryError {
         domain: DomainName,
         client: ClientName,
         issue: PrometheusClientConfigError,
+    },
+    #[error(
+        "{} client '{client}' in domain '{domain}' cannot use its CONFIG: {issue}",
+        ConnectorKind::Websockets
+    )]
+    InvalidWebsocketsClientConfig {
+        domain: DomainName,
+        client: ClientName,
+        issue: WebsocketsClientConfigError,
+    },
+    #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its HEADERS: {issue}")]
+    InvalidWebsocketsUpgradeHeaders {
+        domain: DomainName,
+        ingestor: ModelName,
+        issue: WebsocketsUpgradeHeadersError,
     },
     #[error("branch '{branch}' in domain '{domain}' uses BYTES in field '{field}'")]
     BranchFieldContainsBytes {
@@ -312,6 +348,15 @@ pub(crate) enum RegistryError {
         domain: String,
         identifier: String,
         reason: String,
+    },
+    #[error(
+        "client '{client}' in domain '{domain}' cannot set CONFIG key '{key}': {}",
+        .key.reason()
+    )]
+    NervixOwnedClientConfigKey {
+        domain: DomainName,
+        client: ModelName,
+        key: NervixOwnedConfigKey,
     },
     #[error("codec '{codec}' in domain '{domain}' has an invalid {direction} jaq transformation")]
     InvalidCodecJaq {

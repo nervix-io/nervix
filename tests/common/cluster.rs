@@ -1742,6 +1742,48 @@ impl Cluster {
         }
     }
 
+    /// Whether the Kafka broker knows `topic`. The metadata request names the topic from a
+    /// consumer, which never lets the broker create it.
+    pub(crate) fn kafka_topic_exists(&self, topic: &str) -> io::Result<bool> {
+        let partitions = kafka_topic_partition_count(&self.dependencies, topic)?;
+        Ok(partitions.is_some())
+    }
+
+    /// Waits until the broker lists every group of `groups`, when `listed` is true, or none of
+    /// them, when it is false.
+    pub(crate) async fn wait_for_kafka_consumer_groups_listed(
+        &self,
+        groups: &BTreeSet<String>,
+        listed: bool,
+        within: Duration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + within;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let broker_groups = kafka_listed_consumer_groups(&self.dependencies)?;
+            let present = groups
+                .intersection(&broker_groups)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let settled = if listed {
+                present == *groups
+            } else {
+                present.is_empty()
+            };
+            if settled {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                let expected = if listed { "all" } else { "none" };
+                return Err(io::Error::other(format!(
+                    "expected Kafka to list {expected} of consumer groups {groups:?} within \
+                     {within:?}; it lists {present:?} of them"
+                )));
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
     pub(crate) async fn assert_kafka_consumer_group_next_offset(
         &self,
         group: &str,
@@ -2344,6 +2386,27 @@ impl Cluster {
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         publish_http(&handle.spec, host, path, payload).await
+    }
+
+    /// A publisher to the acknowledged HTTP endpoint at `host` and `path` on `node_id`, which
+    /// waits at most `wait` for each payload's graph acknowledgement.
+    pub(crate) fn acknowledged_http_publisher(
+        &self,
+        node_id: &str,
+        host: &str,
+        path: &str,
+        wait: Duration,
+    ) -> AcknowledgedHttpPublisher {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        AcknowledgedHttpPublisher {
+            client: reqwest::Client::new(),
+            uri: handle.spec.http_uri(path),
+            host: host.to_owned(),
+            wait,
+        }
     }
 
     pub(crate) fn spawn_http_publish(
@@ -4206,6 +4269,86 @@ async fn publish_http_bytes_with_headers(
     publish_http_uri_with_headers(spec.http_uri(path), host, payload, content_type, headers).await
 }
 
+/// The retry delay of an acknowledged endpoint's refusal that names none.
+const ACKNOWLEDGED_HTTP_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Posts payloads to one acknowledged HTTP endpoint through one client, so the posts a step keeps
+/// in flight together share its connections.
+pub(crate) struct AcknowledgedHttpPublisher {
+    client: reqwest::Client,
+    uri: String,
+    host: String,
+    /// How long one payload may take to be acknowledged, its retries included.
+    wait: Duration,
+}
+
+impl AcknowledgedHttpPublisher {
+    /// Posts `payload` until the endpoint answers 200 with a completed outcome.
+    ///
+    /// The sender owns the retry of a 503: a full ACK window, a downstream refusal, an expired ACK
+    /// timeout and a quiesced intake are all answered that way, with the delay to wait. A retried
+    /// payload may be delivered twice, because a timed-out attempt is not rolled back. The wait
+    /// bounds only an endpoint that keeps refusing the payload; every attempt is answered within
+    /// the endpoint's ACK timeout.
+    pub(crate) async fn publish(&self, payload: &str) -> io::Result<()> {
+        let deadline = Instant::now() + self.wait;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let response = self
+                .client
+                .post(&self.uri)
+                .header("Host", &self.host)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(payload.to_owned())
+                .send()
+                .await
+                .map_err(io::Error::other)?;
+            let status = response.status();
+            let retry_delay = match response.headers().get(reqwest::header::RETRY_AFTER) {
+                Some(value) => {
+                    let seconds = value
+                        .to_str()
+                        .map_err(io::Error::other)?
+                        .parse::<u64>()
+                        .map_err(io::Error::other)?;
+                    Duration::from_secs(seconds)
+                }
+                None => ACKNOWLEDGED_HTTP_RETRY_DELAY,
+            };
+            let body = response.bytes().await.map_err(io::Error::other)?;
+            let outcome: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
+                io::Error::other(format!(
+                    "the endpoint answered {status} outside its outcome vocabulary: {error}"
+                ))
+            })?;
+            if status == reqwest::StatusCode::OK {
+                if outcome != serde_json::json!({ "outcome": "completed", "cause": "none" }) {
+                    return Err(io::Error::other(format!(
+                        "the endpoint answered 200 without completing the payload: {outcome}"
+                    )));
+                }
+                return Ok(());
+            }
+            if status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                return Err(io::Error::other(format!(
+                    "the endpoint refused the payload for good: {status} {outcome}"
+                )));
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "the payload was not acknowledged within {:?}; the last answer was \
+                         {status} {outcome}",
+                        self.wait
+                    ),
+                ));
+            }
+            sleep(retry_delay).await;
+        }
+    }
+}
+
 pub(crate) async fn publish_http_uri_with_headers(
     uri: String,
     host: &str,
@@ -5447,6 +5590,29 @@ fn kafka_consumer_group_member_count(
         .find(|info| info.name() == group)
         .ok_or_else(|| io::Error::other(format!("kafka consumer group '{group}' not found")))?;
     Ok(info.members().len())
+}
+
+/// The consumer groups the Kafka broker lists. A group with neither members nor committed offsets
+/// does not exist on the broker, so the listing leaves it out.
+fn kafka_listed_consumer_groups(
+    dependencies: &DependencyEndpoints,
+) -> io::Result<BTreeSet<String>> {
+    let mut client_config = kafka_client_config(dependencies)?;
+    let consumer: BaseConsumer = client_config
+        .set(
+            "group.id",
+            format!("nervix-cucumber-admin-{}", Uuid::now_v7().as_simple()),
+        )
+        .create()
+        .map_err(io::Error::other)?;
+    let group_list = consumer
+        .fetch_group_list(None, Duration::from_secs(10))
+        .map_err(io::Error::other)?;
+    let mut listed = BTreeSet::new();
+    for group in group_list.groups() {
+        listed.insert(group.name().to_string());
+    }
+    Ok(listed)
 }
 
 fn kafka_consumer_group_next_offset(

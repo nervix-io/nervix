@@ -328,9 +328,10 @@ impl Reservation {
     /// kibibytes of its class for as long as it is queued.
     ///
     /// Deliberately not public. Narrowing a charge is only correct alongside narrowing the
-    /// allocation it stands for, and `BudgetedBuffer::into_parts` is the one place that does both;
-    /// exposing this on its own would offer callers a way to make the budget stop measuring the
-    /// memory it bounds.
+    /// allocation it stands for: `BudgetedBuffer::into_parts` narrows a writer's charge to what it
+    /// wrote, and `ChargedBytes::keep_charge_for` narrows a body's charge to the body and the data
+    /// decoded from it. Exposing this on its own would offer callers a way to make the budget stop
+    /// measuring the memory it bounds.
     pub(crate) fn shrink_to(&mut self, bytes: u64) {
         let Ok(target) = u32::try_from(bytes) else {
             return;
@@ -491,9 +492,9 @@ pub struct ChargedBytes {
 #[derive(Debug)]
 struct ChargedAllocation {
     bytes: Vec<u8>,
-    // Held for exactly as long as `bytes` is, and never read: the charge is the reservation's
-    // existence, not its value.
-    _reservation: Reservation,
+    // Held for exactly as long as `bytes` is. Its value is read only to give back room charged
+    // beyond the bytes.
+    reservation: Reservation,
 }
 
 impl ChargedBytes {
@@ -502,13 +503,29 @@ impl ChargedBytes {
     pub fn from_owned(bytes: Vec<u8>, reservation: Reservation) -> Self {
         let end = bytes.len();
         Self {
-            allocation: Arc::new(ChargedAllocation {
-                bytes,
-                _reservation: reservation,
-            }),
+            allocation: Arc::new(ChargedAllocation { bytes, reservation }),
             start: 0,
             end,
         }
+    }
+
+    /// Return to its class the charge this allocation holds beyond its own bytes and `additional`
+    /// bytes more, when this handle is the allocation's only one.
+    ///
+    /// Bytes that arrived under a charge for an operation larger than themselves, such as a relay
+    /// body whose grant also reserved room to decode it, give the room back this way once the
+    /// operation knows how much of it the data kept beside the bytes takes. An allocation another
+    /// handle still shares keeps its whole charge, since that handle may still need the room.
+    pub fn keep_charge_for(&mut self, additional: u64) {
+        let Some(allocation) = Arc::get_mut(&mut self.allocation) else {
+            return;
+        };
+        let own: u64 = allocation.bytes.len().arch_into();
+        // Room beyond what any charge can count is beyond this charge too.
+        let Some(kept) = own.checked_add(additional) else {
+            return;
+        };
+        allocation.reservation.shrink_to(kept);
     }
 
     /// Freeze what an incremental writer produced. The writer's unused room, and the charge that

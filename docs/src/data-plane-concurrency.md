@@ -106,7 +106,11 @@ reads the budget again every 10 milliseconds; it registers for no release notifi
 queues in the budget's semaphore, whose released permits would otherwise go to the held charge
 ahead of the relay work that frees it. The batch task returns each watch's share as that watch
 ends, through its exclusively owned reservation, so the hold involves no shared state beyond the
-budget's own atomic permit count.
+budget's own atomic permit count. A sender storing a delivery's record acknowledgements waits for
+room through the same hold, inside the delivery's channel slot, and a sender whose grant the
+receiver refused for capacity waits on its own timer before it asks again. Neither registers for a
+notification, so neither adds a wait-and-notify protocol: each ends on its own timer, its bound, or
+the cancellation of its channel.
 The registered wire number selects the position, exact generation and row without a concurrent
 map lookup. The process identity is checked before routing. Generation exhaustion seals the
 position, and cancellation, timeout, terminal resolution and shutdown compete to take each row
@@ -2038,6 +2042,14 @@ locks. Socket I/O, close-handshake deadlines and reconnect timers remain outside
 observation; public peer observations measure the delays, and a paused-clock host regression checks
 that successful upgrades keep backoff until a delivered batch resets it. Direct connector tests
 exercise suspension and close without claiming those socket waits are tracked locks.
+The declaration-buffer workloads engage the tracked entity gate, admit text and binary frames
+under BUFFER, and replay them after a codec change on one and three nodes. Their scenario and
+stress records name the entity-gate and quiesce-buffer owners. Connection response headers are
+published once and shared by messages and retained buffer entries; this adds no lock or mutable
+map on the frame path. Upgrade-field installation has a focused external-iterator dispatch
+contract; its local conversions remain analyzed. The registered `websocket-retained-metadata` Bolero property checks every
+field and exact snapshot identity through the production retain/replay conversion. Client ping
+timer and socket scheduling remain outside the detector and are exercised by real-peer owner tests.
 
 The native backup-wait workloads reach the client's pending-reply locks during multi-domain
 capture, bounded wait expiry and recovery under the same execution reference. They run on one-

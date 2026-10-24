@@ -27,6 +27,8 @@ permissions:
 env:
   KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
+  # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
+  KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "68719476736"
 
 jobs:
   meta:

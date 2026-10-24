@@ -154,6 +154,20 @@ impl ConfiguredFaultInjection {
     ) {
     }
 
+    pub(in crate::runtime) fn fill_relay_memory_before_record_storage_if_armed(
+        &self,
+        _node_id: &ClusterNodeName,
+        _executor: &nervix_execution::Executor,
+    ) {
+    }
+
+    pub(in crate::runtime) fn register_relay_memory_owner(
+        &self,
+        _node_id: &ClusterNodeName,
+        _executor: &nervix_execution::Executor,
+    ) {
+    }
+
     pub(in crate::runtime) async fn pause_owner_relay_fanout_if_armed(&self, _domain: &DomainName) {
     }
 
