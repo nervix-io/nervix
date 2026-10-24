@@ -36,6 +36,7 @@ mod impact;
 mod infrastructure;
 mod ingestor;
 mod model;
+mod prerequisites;
 mod processor;
 mod remote;
 mod route;

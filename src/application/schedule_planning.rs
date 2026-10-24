@@ -380,6 +380,7 @@ mod tests {
             client_url: None,
             console_url: None,
             interconnect_endpoint: None,
+            prerequisites: None,
         }
     }
 

@@ -153,6 +153,7 @@ tags = [
   "@kept_ingestor_offsets",
   "@redis_subscription_backpressure",
   "@redis_idle_subscription",
+  "@node_prerequisite_refusal",
 ]
 target = "test:scenarios"
 
@@ -1290,6 +1291,26 @@ scenario = "An NSPL cluster backup waits across independent domain cut budgets"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "A joining node whose Raft heartbeat a member cannot run beside is refused at its first handshake and stops itself through the shutdown coordinator, while the members keep their leader. The handshake, the join progress watch and the gossip view are untracked."
+examples = 2
+feature = "tests/features/cluster/node_prerequisites.feature"
+id = "scenario.prerequisite-join-refusal"
+invariant = "A joining node beyond the heartbeat bound stops with a refusal naming the prerequisite and both values, and the cluster keeps its voters and a stable leader."
+invocation = "scenarios"
+scenario = "A node whose heartbeat is outside the compatibility bound is refused on a cluster of <cluster_size>"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A node whose memory limit cannot hold its memory budgets is refused by the startup preflight before any store opens or listener binds, then starts with a sufficient limit and rejoins. The preflight's filesystem probes run on the executor's storage workers."
+examples = 2
+feature = "tests/features/cluster/node_prerequisites.feature"
+id = "scenario.prerequisite-preflight-refusal"
+invariant = "A refused preflight leaves nothing behind that keeps the same node from starting again with a limit that holds its budgets."
+invocation = "scenarios"
+scenario = "A node whose memory limit cannot hold its memory budgets refuses to start at preflight on a cluster of <cluster_size>"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Whole-cluster teardown, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. Watch channels and the test fault map are untracked."
 examples = 1
 feature = "tests/features/cluster/restarted_voter_observation.feature"
@@ -1547,6 +1568,26 @@ id = "stress.inferencer-inspection-admission"
 invariant = "A full bulk queue refuses model inspection before storing the inferencer, and releasing the queue permits the same inferencer to be validated and created on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "Inferencer model inspection refuses a full bulk queue and recovers"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a joining node whose Raft heartbeat a member cannot run beside is refused at its first handshake and stops itself through the shutdown coordinator, while the members keep their leader. The handshake, the join progress watch and the gossip view are untracked."
+examples = 2
+feature = "tests/features/cluster/node_prerequisites.feature"
+id = "stress.prerequisite-join-refusal"
+invariant = "A joining node beyond the heartbeat bound stops with a refusal naming the prerequisite and both values, and the cluster keeps its voters and a stable leader."
+invocation = "stress-scenarios"
+scenario = "A node whose heartbeat is outside the compatibility bound is refused on a cluster of <cluster_size>"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a node whose memory limit cannot hold its memory budgets is refused by the startup preflight before any store opens or listener binds, then starts with a sufficient limit and rejoins. The preflight's filesystem probes run on the executor's storage workers."
+examples = 2
+feature = "tests/features/cluster/node_prerequisites.feature"
+id = "stress.prerequisite-preflight-refusal"
+invariant = "A refused preflight leaves nothing behind that keeps the same node from starting again with a limit that holds its budgets."
+invocation = "stress-scenarios"
+scenario = "A node whose memory limit cannot hold its memory budgets refuses to start at preflight on a cluster of <cluster_size>"
 selections = ["deloxide-stress"]
 
 [[workload]]

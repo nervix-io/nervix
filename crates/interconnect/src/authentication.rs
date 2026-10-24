@@ -18,7 +18,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use error_stack::Report;
-use nervix_models::{ClusterNodeName, NodeEndpoint};
+use nervix_models::{ClusterNodeName, NodeEndpoint, PrerequisiteMismatch};
 use nervix_primitives::{
     sync::StdArc,
     time::{Instant, timeout},
@@ -239,10 +239,13 @@ impl TlsConfigBundle {
             .ensure_current(&identity)
             .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
         if identity.cluster_id != cluster_id {
-            return Err(Report::new(TransportError::InvalidHandshake(format!(
-                "peer certificate identifies cluster '{}', expected '{}'",
-                identity.cluster_id, cluster_id
-            ))));
+            return Err(Report::new(TransportError::IncompatiblePeer {
+                peer: identity.node_id,
+                mismatch: PrerequisiteMismatch::ClusterIdentity {
+                    local: cluster_id.to_string(),
+                    peer: identity.cluster_id,
+                },
+            }));
         }
         if let Some(expected_node) = expected_node
             && &identity.node_id != expected_node

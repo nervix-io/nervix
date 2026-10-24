@@ -35,17 +35,17 @@ pub struct RuntimeArgs {
     #[arg(
         long = RestoreStagingMaxBytes::NAME,
         env = "NERVIX_RESTORE_STAGING_MAX_BYTES",
-        default_value_t = HumanBytes(RestoreStagingMaxBytes::default_value(&())),
-        help = "Maximum unpublished restore checkpoint key and value bytes per node"
+        help = "Maximum unpublished restore checkpoint key and value bytes per node; without it \
+                the smaller of 128 GiB and the capacity of the database's volume"
     )]
-    pub restore_staging_max_bytes: HumanBytes,
+    pub restore_staging_max_bytes: Option<HumanBytes>,
 }
 
 impl RuntimeArgs {
     pub(super) fn settings(&self) -> RuntimeSettings {
         RuntimeSettings::resolve(
             Some(self.state_snapshot_interval.0),
-            Some(self.restore_staging_max_bytes.0),
+            self.restore_staging_max_bytes.map(|bytes| bytes.0),
         )
         .assured("the runtime settings declare no validation")
     }
@@ -53,12 +53,14 @@ impl RuntimeArgs {
     pub(super) fn from_settings(settings: &RuntimeSettings) -> Self {
         Self {
             state_snapshot_interval: HumanDuration(settings.state_snapshot_interval()),
-            restore_staging_max_bytes: HumanBytes(*settings.restore_staging_max_bytes.value()),
+            restore_staging_max_bytes: settings.restore_staging_max_bytes().map(HumanBytes),
         }
     }
 
     pub(super) fn render(&self, command_line: &mut CommandLine) {
         command_line.option(StateSnapshotInterval::NAME, self.state_snapshot_interval);
-        command_line.option(RestoreStagingMaxBytes::NAME, self.restore_staging_max_bytes);
+        if let Some(bytes) = self.restore_staging_max_bytes {
+            command_line.option(RestoreStagingMaxBytes::NAME, bytes);
+        }
     }
 }

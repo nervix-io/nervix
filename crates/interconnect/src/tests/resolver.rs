@@ -2,8 +2,8 @@
 //!
 //! Layer: test harness.
 //!
-//! - **Owns.** A transport identity advertising `localhost`, and a resolver that answers it without a
-//!   name server.
+//! - **Owns.** A transport identity advertising `localhost` with the join terms every test transport
+//!   shares, and a resolver that answers it without a name server.
 //! - **Depends on.** `nervix-dns` in production builds and the simulated resolver in the Turmoil
 //!   build.
 //! - **Must not know.** What the tests that use them check.
@@ -13,19 +13,35 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
+use std::time::Duration;
+
 #[cfg(not(feature = "turmoil"))]
 use meticulous::ResultExt as _;
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeName, PrerequisiteTimings, RaftLogDurability};
 #[cfg(not(feature = "turmoil"))]
 use tempfile::tempdir;
 
-use crate::{PeerResolver, TransportIdentity};
+use crate::{JoinTerms, PeerResolver, TransportIdentity};
 
 pub(super) fn localhost_identity(cluster_id: &str, node_id: ClusterNodeName) -> TransportIdentity {
     TransportIdentity {
         cluster_id: cluster_id.to_string(),
         node_id,
         advertised_host: "localhost".to_string(),
+        join_terms: test_join_terms(),
+    }
+}
+
+/// The join terms every test transport brings unless a test gives it others, so their handshakes
+/// accept each other.
+pub(super) fn test_join_terms() -> JoinTerms {
+    JoinTerms {
+        durability: RaftLogDurability::FsyncEveryAppend,
+        timings: PrerequisiteTimings {
+            raft_heartbeat_interval: Duration::from_millis(250),
+            gossip_interval: Duration::from_millis(500),
+            clock_skew_tolerance: Duration::from_millis(500),
+        },
     }
 }
 
