@@ -347,8 +347,14 @@ installation therefore publishes nothing to an attached client.
 The observer reads a tick only while the installation is paced and of that tick's generation. It
 adds the serving node's own logical reading, taken as the tick frame is built: one snapshot of the
 installed generation, read through the same watermarked read that execution uses. The observer
-retains the progress watch's sender while the attachment lives, so removing the domain closes
-neither wait before the lifecycle publishes missing and wakes delivery to send the end frame.
+samples accepted progress before taking that reading. A process pause between the samples can
+therefore pair an earlier tick with a much later serving reading, and transport delay can deliver
+both samples later still. Their difference is not a bound on projection error or tick freshness;
+accepted progress does not bound the independently projected readable time.
+
+The observer retains the progress watch's sender while the attachment lives, so removing the
+domain closes neither wait before the lifecycle publishes missing and wakes delivery to send the
+end frame.
 
 ### Attachments And Their Delivery
 
