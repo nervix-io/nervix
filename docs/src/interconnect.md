@@ -514,6 +514,18 @@ connection begins with a 256 KiB receive window, and request headers are limited
 receiver releases more HTTP/2 credit only as it accepts and accounts for more data. Large streamed
 objects can therefore cross the cluster without either endpoint holding the whole object in memory.
 
+A bulk connection grants more, on the side that opened it and receives its responses. Each of its
+four streams gets the bulk receive window, 1 MiB by default (the `interconnect-bulk-receive-window`
+node capability), and the connection gets room for all four at once. A sender moves at most one
+window of a response per round trip, and on a loaded node every round trip waits for several
+scheduled tasks on both sides. With a 64 KiB window a 40 MiB guest save needs 640 round trips; with
+1 MiB it needs 40. The window is never advertised without backing: every stream on a bulk
+connection, its binding exchange included, reserves one window from the `bulk_window` memory class
+before its request leaves, and returns it when the stream ends. A bulk request waits for a window,
+within its own deadline, while every window is held; a binding exchange waits within the
+connection's setup deadline. The other pools keep the windows above, and the request bodies a bulk
+connection carries toward its peer arrive under that peer's 64 KiB windows.
+
 ## Traffic And Resource Isolation
 
 An operation's type fixes its pool, admission quota, response type, and deadline policy. Callers do
@@ -597,8 +609,14 @@ Memory and CPU execution are isolated by class:
 | Commands and replication | 24 MiB | Control |
 | Relay | 192 MiB | Data |
 | Bulk | 32 MiB | Bulk |
+| Bulk receive windows | 16 MiB | None |
 
-The total interconnect memory budget is 256 MiB. Reservations cannot borrow from another class. The
+The total interconnect memory budget is 272 MiB. Reservations cannot borrow from another class. The
+bulk receive windows are a class of their own because an open bulk stream charges the chunks its
+reader takes to Bulk. A stream waiting for a window therefore never holds the room an open stream's
+next chunk needs, and an open stream needs nothing more from the window class to finish. A full
+window class delays new bulk streams and never stalls one already running. Sixteen default windows
+fit, as many as the resource and snapshot transfers a node admits outbound at once. The
 relay budget holds two worst-case operations, each consisting of a 32 MiB encoded body, a 32 MiB
 decoded batch, and 16 MiB of decode scratch space. The commands and replication budget holds the
 four decoded replication batches a follower keeps resident beside one batch being encoded, so a
@@ -612,10 +630,11 @@ peer therefore holds at most the stream slots of its own connections. Once it ho
 management streams of a connection, a further shared operation to that peer waits for a slot
 until its own deadline, while liveness, cancellation, and discovery still use the reserved streams
 of the same connection. Every connection to another peer keeps all of its slots. A stream whose
-reader stops reading holds one HTTP/2 stream window of response bytes: flow control stops the
-producer once that window is spent, and five seconds without progress resets the stream and returns
-its admission and memory. A relay batch the receiving application holds without admitting keeps
-the reservation of its exact body, the largest decoded batch, and decode scratch. Another channel
+reader stops reading holds one receive window of response bytes, which on a bulk stream is its
+backed bulk receive window. Flow control stops the producer once that window is spent, and five
+seconds without progress resets the stream and returns its admission and memory. A relay batch the
+receiving application holds without admitting keeps the reservation of its exact body, the largest
+decoded batch, and decode scratch. Another channel
 still receives grants and admission beside it, and cancelling the held batch returns the whole
 reservation once the application drops the batch. Once the application has decoded a batch, it keeps
 only the batch's body and decoded columns charged while its runtime takes the batch in.
@@ -1246,7 +1265,8 @@ Resource archives and runtime-state snapshots use streamed bulk responses with a
 length. Consensus snapshots use bounded begin, chunk, and finish operations on the same isolated
 bulk class. Receivers stage and validate the owning artifact while releasing HTTP/2 credit chunk by
 chunk. The whole transfer may exceed the 32 MiB bulk-memory budget because only bounded chunks and
-the active decoded section are resident at once.
+the active decoded section are resident at once. At most one bulk receive window of a response is in
+flight toward its receiver, backed by that stream's window reservation.
 [Resource Versions And Bindings](./resource-versions.md#publication-and-transfer) defines when a
 node fetches a resource archive and how it verifies and records the fetched version.
 
@@ -1451,10 +1471,13 @@ Branch-aggregate metrics retain the exact encoded bytes first selected for each 
 elapsed times are captured once. Describing, streaming and persisting that revision therefore
 agree byte for byte, and restoration retains the incoming bytes until the next metric update.
 The replica opens a Snapshot-subquota bulk stream for the described revision; the owner refuses a revision it no longer
-holds. Chunks are at most the configured bulk chunk size (64 KiB by default). Each side admits the
-whole captured or received allocation against `restore_metadata`, up to a 256 MiB checkpoint
-transfer bound. The replica checks the stream's declared length, received length and digest before
-the checkpoint can reach its assignment-fenced installation and stable-storage acknowledgement.
+holds. Chunks are at most the configured bulk chunk size (64 KiB by default). The stream's bulk
+receive window lets the owner keep sixteen default chunks in flight. Bandwidth, not round trips,
+therefore paces a large checkpoint, and a loaded replica fetches a 40 MiB guest save in 40 window
+round trips rather than 640. Each side admits the whole captured or received allocation against
+`restore_metadata`, up to a 256 MiB checkpoint transfer bound. The replica checks the stream's
+declared length, received length and digest before the checkpoint can reach its assignment-fenced
+installation and stable-storage acknowledgement.
 Debug events name the placement, revision and declared length when streaming and after verification,
 without logging checkpoint bytes. A branch checkpoint listing request names the entity's branch
 lifecycle placement and the cursor the replica's previous listing
@@ -1977,7 +2000,10 @@ queues, reactor delay, and consensus retention show whether pressure originates 
 execution, or the protocol using it. A connection attempt that could not resolve its peer's
 advertised host is counted with reason `resolution`, and one that ended in a prerequisite refusal
 with reason `prerequisite`, apart from setup, handshake, capacity, and closed failures, so a DNS
-outage and a node that cannot run beside its peer are each visible as themselves.
+outage and a node that cannot run beside its peer are each visible as themselves. The
+`bulk_window` class of the execution memory series counts the bulk receive windows a node backs:
+its reserved bytes are one window for every bulk stream the node has open, and its reservation
+count grows with every bulk stream it opens.
 
 Typed-request observations are labeled by the subquota a request uses: operation `liveness` counts
 application health together with the other requests of that subquota, the drain-status polls of

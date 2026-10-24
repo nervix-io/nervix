@@ -79,11 +79,14 @@ Holding one of those source loops pushes back into its transport, so a node whos
 extension workers stay full delays polls and lets those transports buffer or drop at their own
 bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
-Transient memory is 275 MiB per node, divided into ceilings that cannot borrow from each other:
+Transient memory is 291 MiB per node, divided into ceilings that cannot borrow from each other:
 8 MiB for management, 24 MiB for commands and replication, 192 MiB for relay work, 32 MiB for
-bulk buffers and 19 MiB for credentials. One relay operation may hold at most 32 MiB of encoded body, 32 MiB of decoded data
-and 16 MiB of conversion scratch, and the relay budget is sized to hold two such operations at
-once so one blocked channel cannot exhaust the capacity another needs.
+bulk buffers, 16 MiB for the receive windows of bulk streams and 19 MiB for credentials. Each bulk
+stream a node opens, such as a resource, checkpoint or snapshot fetch, holds one 1 MiB receive
+window for as long as it is open, so sixteen bulk streams run at once and a seventeenth waits for
+a window within its own request deadline. One relay operation may hold at most 32 MiB of encoded
+body, 32 MiB of decoded data and 16 MiB of conversion scratch, and the relay budget is sized to hold
+two such operations at once so one blocked channel cannot exhaust the capacity another needs.
 An Iceberg commit charges the bulk budget for the staged files it reads back, only when the budget
 has room for them now, so a commit whose staged files exceed the budget reads them in groups, a
 single staged file larger than the budget waits until the whole budget is free and is charged all
