@@ -86,6 +86,17 @@ An opaque bootstrap proxy alone does not establish a Pulsar broker fault because
 otherwise connect directly to the broker. The exact payload oracle checks each sequence once after
 recovery, including a producer with all 100 receipt slots occupied.
 
+The Pulsar producer-finish outline posts through an acknowledged HTTP endpoint, `MODE ACK MAX
+100 ACK TIMEOUT 60s` with `ON QUIESCE REJECT RETRY AFTER 1s`. Its window holds the fixture's maximum
+of one hundred concurrent posts. One client posts them concurrently and requires HTTP 200 with a
+completed endpoint outcome within each request's sixty-second response budget. The Pulsar emitter
+stays in `MODE NO ACK`, so each post completes once that producer accepts its record, without
+waiting for the paused broker's receipt. The sent counter's thirty-second wait then observes
+producer acceptance rather than timing a queued relay backlog after an intake-only 202 response.
+STOP still has to await the broker receipts after the endpoint resumes, with the same drain bound,
+measured resume ordering and exact sequenced-payload oracle on one and three nodes. The separate
+long-receipt outline keeps its own intake mode.
+
 The MySQL shared-pool isolation scenario owns independent root sessions holding `LOCK TABLES`
 write locks. It observes a pending metadata lock on the server before queuing the next writer,
 and observes each emitter's public pool-wait state to establish the borrowing order. Releasing

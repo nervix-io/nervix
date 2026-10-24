@@ -14,7 +14,9 @@
 use cucumber::{gherkin::Step, then, when};
 use meticulous::{OptionExt as _, ResultExt as _};
 
-use super::{ScenarioWorld, parse_duration_text, when_http_payload_is_posted_to_node};
+use super::{
+    ScenarioWorld, expand_placeholders, parse_duration_text, when_http_payload_is_posted_to_node,
+};
 
 #[when(expr = "this HTTP payload is posted while the Pulsar endpoint resumes after {string}")]
 async fn post_during_pulsar_fault(world: &mut ScenarioWorld, delay: String, #[step] step: &Step) {
@@ -36,25 +38,53 @@ async fn post_during_pulsar_fault(world: &mut ScenarioWorld, delay: String, #[st
 }
 
 #[when(expr = "{int} sequenced HTTP payloads are posted to the Pulsar emitter")]
-async fn post_sequenced_payloads(world: &mut ScenarioWorld, count: usize, #[step] step: &Step) {
+async fn post_sequenced_payloads(world: &mut ScenarioWorld, count: usize) {
     assert!(
         (1..=100).contains(&count),
         "the fixture bounds its producer queue proof at 100 records"
     );
-    let mut payloads = step.clone();
-    payloads.docstring = Some(
-        (1..=count)
-            .map(|sequence| format!(r#"{{"sequence":{sequence}}}"#))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
-    super::when_http_payloads_are_posted_concurrently(
-        world,
-        "pulsar-{{test_id}}.example.com".to_string(),
-        "/events".to_string(),
-        &payloads,
-    )
-    .await;
+    let host = expand_placeholders(world, "pulsar-{{test_id}}.example.com");
+    let uri = world
+        .cluster()
+        .http_uri("node-1", "/events")
+        .assured("the scenario's HTTP intake is available");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .assured("the acknowledged payload client is valid");
+    let posts = (1..=count).map(|sequence| {
+        let (client, uri, host) = (&client, uri.as_str(), host.as_str());
+        async move {
+            let response = client
+                .post(uri)
+                .header(reqwest::header::HOST, host)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(format!(r#"{{"sequence":{sequence}}}"#))
+                .send()
+                .await
+                .assured("the sequenced HTTP request must receive an endpoint outcome");
+            let status = response.status();
+            let body = response
+                .bytes()
+                .await
+                .assured("the sequenced HTTP response body must be available");
+            assert_eq!(
+                status,
+                reqwest::StatusCode::OK,
+                "sequence {sequence} did not complete: {}",
+                String::from_utf8_lossy(&body),
+            );
+            let outcome: serde_json::Value = serde_json::from_slice(&body)
+                .assured("the HTTP intake must return a structured endpoint outcome");
+            assert_eq!(
+                outcome,
+                serde_json::json!({ "outcome": "completed", "cause": "none" }),
+                "sequence {sequence} must complete its graph acknowledgement",
+            );
+        }
+    });
+    futures_util::future::join_all(posts).await;
+    world.last_publish_at = Some(nervix_primitives::time::Instant::now());
 }
 
 #[then(
