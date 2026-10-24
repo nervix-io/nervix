@@ -217,6 +217,9 @@ struct FaultInjectionState {
     relay_memory_owners: DashMap<ClusterNodeName, Executor, RandomState>,
     /// The owner pauses one buffered batch before it acquires a dispatch permit and loads routes.
     owner_relay_fanout_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// The owner waits this long before it fans out each buffered batch of a domain's relays, so
+    /// the rows its sources admitted reach their consumers slowly, as on a loaded node.
+    owner_relay_fanout_delays: DashMap<String, Duration, RandomState>,
     /// A local schedule swap pauses after removing one attached emitter from its relay.
     emitter_swap_after_detach_pauses:
         DashMap<(DomainName, EmitterName), Arc<TestPause>, RandomState>,
@@ -482,6 +485,7 @@ impl Default for FaultInjection {
                 relay_memory_fills: DashMap::default(),
                 relay_memory_owners: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),
+                owner_relay_fanout_delays: DashMap::default(),
                 emitter_swap_after_detach_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
@@ -1745,6 +1749,13 @@ impl FaultInjection {
         );
     }
 
+    /// Makes the owner of each of `domain`'s relays wait `delay` before it fans out every batch.
+    pub fn delay_owner_relay_fanout(&self, domain: impl Into<String>, delay: Duration) {
+        self.inner
+            .owner_relay_fanout_delays
+            .insert(domain.into().to_ascii_lowercase(), delay);
+    }
+
     pub async fn wait_for_owner_relay_fanout_pause(&self, domain: &str) {
         let pause = self.owner_relay_fanout_pause(&domain.to_ascii_lowercase());
         pause.wait_until_reached().await;
@@ -2587,13 +2598,22 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "one scenario-owned relay fanout pause is claimed once",
+            reason = "a scenario-owned relay fanout delay is read for every batch, and one \
+                      scenario-owned relay fanout pause is claimed once",
             key = "one test domain",
-            bound = "one keyed read; its guard ends before the test-controlled wait"
+            bound = "two keyed reads; each guard ends before its test-controlled wait"
         )
     )]
     pub(crate) async fn pause_owner_relay_fanout_if_armed(&self, domain: &DomainName) {
         let key = domain.as_str().to_ascii_lowercase();
+        let delay = self
+            .inner
+            .owner_relay_fanout_delays
+            .get(&key)
+            .map(|delay| *delay.value());
+        if let Some(delay) = delay {
+            nervix_primitives::time::sleep(delay).await;
+        }
         let Some(pause) = self
             .inner
             .owner_relay_fanout_pauses
