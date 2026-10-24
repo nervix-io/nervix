@@ -68,6 +68,12 @@ pub enum MemoryClass {
     Commands,
     Relay,
     Bulk,
+    /// The receive window every open bulk stream grants its sender: what the transport may hold
+    /// for that stream before its reader takes it. A stream holds its window from before its
+    /// request leaves until the stream ends, and the chunks its reader takes are charged to `Bulk`.
+    /// Kept apart from `Bulk`, a stream waiting for a window never takes the room an open stream's
+    /// next chunk needs, and an open stream needs nothing more from this class to finish.
+    BulkWindow,
     /// Retained archive descriptions, restore planning, native conversion and serializer scratch.
     /// This reservation follows the description until its last reader exits; bounded I/O and
     /// generation publication use Bulk independently.
@@ -82,6 +88,7 @@ impl MemoryClass {
             Self::Commands => "commands",
             Self::Relay => "relay",
             Self::Bulk => "bulk",
+            Self::BulkWindow => "bulk_window",
             Self::RestoreMetadata => "restore_metadata",
             Self::Credentials => "credentials",
         }
@@ -217,14 +224,17 @@ pub struct MemoryBudgets {
     pub commands: ByteUnit,
     pub relay: ByteUnit,
     pub bulk: ByteUnit,
+    /// The receive windows of the bulk streams a node has open at once.
+    pub bulk_window: ByteUnit,
     pub restore_metadata: ByteUnit,
     pub credentials: ByteUnit,
 }
 
 impl Default for MemoryBudgets {
-    /// 275 MiB of execution buffers plus 2 GiB of admitted retained restore metadata:
+    /// 291 MiB of execution buffers plus 2 GiB of admitted retained restore metadata:
     /// 8 MiB reserved for management, 24 MiB for commands and replication,
-    /// 192 MiB for relay work, 32 MiB for bulk buffers and 19 MiB for the one password hash a node
+    /// 192 MiB for relay work, 32 MiB for bulk buffers, 16 MiB for the receive windows of bulk
+    /// streams, sixteen of the default 1 MiB windows, and 19 MiB for the one password hash a node
     /// computes at a time.
     fn default() -> Self {
         Self {
@@ -232,6 +242,7 @@ impl Default for MemoryBudgets {
             commands: ByteUnit::Mebibyte(24),
             relay: ByteUnit::Mebibyte(192),
             bulk: ByteUnit::Mebibyte(32),
+            bulk_window: ByteUnit::Mebibyte(16),
             restore_metadata: ByteUnit::Gibibyte(2),
             credentials: CREDENTIAL_WORKING_BYTES,
         }
@@ -352,6 +363,7 @@ pub(crate) struct ValidatedBudgets {
     pub(crate) commands: u32,
     pub(crate) relay: u32,
     pub(crate) bulk: u32,
+    pub(crate) bulk_window: u32,
     pub(crate) restore_metadata: u32,
     pub(crate) credentials: u32,
 }
@@ -494,6 +506,14 @@ impl ExecutionConfig {
                     self.budgets.bulk,
                     "sealed snapshot section beside one body chunk",
                     bulk_required,
+                )?,
+                // The window each bulk stream backs is the transport's setting, so the transport
+                // checks that this budget holds one when it binds.
+                bulk_window: permits(
+                    MemoryClass::BulkWindow.as_str(),
+                    self.budgets.bulk_window,
+                    "bulk stream receive window",
+                    1,
                 )?,
                 restore_metadata: permits(
                     MemoryClass::RestoreMetadata.as_str(),

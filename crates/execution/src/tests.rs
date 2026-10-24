@@ -173,6 +173,54 @@ async fn retained_restore_metadata_is_admitted_independently_of_bulk_buffers() {
     drop(bulk);
 }
 
+/// An open bulk stream holds its receive window while its reader's chunks are charged to bulk
+/// buffers. With every window of the node held, a chunk still finds room, and with every bulk
+/// buffer held, a waiting stream still gets the window another stream returns.
+#[nervix_primitives::test]
+async fn bulk_receive_windows_are_admitted_independently_of_bulk_buffers() {
+    use meticulous::ResultExt as _;
+
+    let executor = small_executor();
+    let snapshot = executor.snapshot();
+    assert_eq!(
+        snapshot.bulk_window_memory.capacity_bytes,
+        ByteUnit::Mebibyte(16).as_u64()
+    );
+    assert_eq!(MemoryClass::BulkWindow.as_str(), "bulk_window");
+    let windows = executor
+        .try_reserve(
+            MemoryClass::BulkWindow,
+            snapshot.bulk_window_memory.capacity_bytes,
+        )
+        .assured("every window of the class is available");
+    let chunk = executor
+        .try_reserve(MemoryClass::Bulk, snapshot.bulk_memory.capacity_bytes)
+        .assured("bulk buffers have independent admission");
+    let error = executor
+        .try_reserve(MemoryClass::BulkWindow, 1)
+        .err()
+        .assured("the occupied window class refuses another window");
+    assert_eq!(
+        *error.current_context(),
+        AdmissionError::BudgetExhausted {
+            class: "bulk_window",
+            requested: 1
+        }
+    );
+    drop(windows);
+    assert_eq!(executor.snapshot().bulk_window_memory.reserved_bytes, 0);
+    assert_eq!(
+        executor.snapshot().bulk_memory.reserved_bytes,
+        snapshot.bulk_memory.capacity_bytes
+    );
+    let window = executor
+        .reserve(MemoryClass::BulkWindow, ByteUnit::Mebibyte(1).as_u64())
+        .await
+        .assured("a returned window admits the next stream although bulk buffers are full");
+    drop(window);
+    drop(chunk);
+}
+
 #[nervix_primitives::test]
 async fn a_relay_budget_below_two_maximum_operations_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
@@ -190,6 +238,24 @@ async fn a_relay_budget_below_two_maximum_operations_fails_to_start() {
             operation: "pair of relay operations",
             budget: ByteUnit::Mebibyte(96).as_u64(),
             required: ByteUnit::Mebibyte(160).as_u64(),
+        }
+    );
+}
+
+#[nervix_primitives::test]
+async fn an_empty_bulk_window_budget_fails_to_start() {
+    let error = Executor::new(ExecutionConfig {
+        budgets: MemoryBudgets {
+            bulk_window: ByteUnit::Byte(0),
+            ..MemoryBudgets::default()
+        },
+        ..ExecutionConfig::default()
+    })
+    .expect_err("a budget that backs no bulk stream's window is rejected");
+    assert_eq!(
+        *error.current_context(),
+        ExecutionConfigError::EmptyBudget {
+            class: "bulk_window"
         }
     );
 }
@@ -493,6 +559,7 @@ mod shuttle_checks {
             ("commands", snapshot.commands_memory),
             ("relay", snapshot.relay_memory),
             ("bulk", snapshot.bulk_memory),
+            ("bulk_window", snapshot.bulk_window_memory),
             ("restore_metadata", snapshot.restore_metadata_memory),
             ("credentials", snapshot.credentials_memory),
         ] {
@@ -528,6 +595,7 @@ mod shuttle_checks {
             ("commands", snapshot.commands_memory),
             ("relay", snapshot.relay_memory),
             ("bulk", snapshot.bulk_memory),
+            ("bulk_window", snapshot.bulk_window_memory),
             ("restore_metadata", snapshot.restore_metadata_memory),
             ("credentials", snapshot.credentials_memory),
         ] {

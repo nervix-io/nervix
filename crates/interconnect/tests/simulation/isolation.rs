@@ -42,7 +42,9 @@ const HUB_PENDING_JOBS: usize = 8;
 /// Burst requests beyond what one worker and its full wait queue admit.
 const REFUSED_JOBS: usize = 2;
 const STREAM_CHUNK_BYTES: usize = 16 * 1024;
-const STREAM_BYTES: u64 = 256 * 1024;
+/// Twice the default bulk receive window, so an unread stream stops at its window with as much
+/// again left to send.
+const STREAM_BYTES: u64 = 2 * 1024 * 1024;
 /// The current serialized grant for this fixture's names, empty row metadata and one registrar.
 const HELD_RELAY_METADATA_BYTES: u64 = 136;
 /// How long one more shared management request waits for a stream on the saturated connection.
@@ -289,6 +291,7 @@ impl HostBounds {
             executor.commands_memory,
             executor.relay_memory,
             executor.bulk_memory,
+            executor.bulk_window_memory,
             executor.credentials_memory,
         ] {
             assert!(
@@ -369,6 +372,7 @@ impl Observation {
             executor.commands_memory,
             executor.relay_memory,
             executor.bulk_memory,
+            executor.bulk_window_memory,
             executor.credentials_memory,
         ] {
             assert_eq!(budget.reserved_bytes, 0, "{host}: {self:?}");
@@ -627,6 +631,17 @@ impl PeerHost {
         self.streams.push(stream);
         let observation = self.observe();
         assert_eq!(observation.leased(PoolClass::Bulk), self.streams.len());
+        let streams = u64::try_from(self.streams.len()).assured("fixture stream counts are small");
+        let windows = TransportOptions::default()
+            .bulk_receive_window
+            .value()
+            .as_u64()
+            .checked_mul(streams)
+            .assured("fixture stream windows are small");
+        assert_eq!(
+            observation.executor.bulk_window_memory.reserved_bytes, windows,
+            "every unread stream backs exactly its one window"
+        );
         assert_eq!(
             observation.pending(ConnectionDirection::Outbound, RequestSubquota::Resource),
             self.streams.len()
@@ -694,9 +709,10 @@ impl PeerHost {
             0
         );
         assert_eq!(observation.executor.bulk_memory.reserved_bytes, 0);
+        assert_eq!(observation.executor.bulk_window_memory.reserved_bytes, 0);
         self.trace.record(
             self.name,
-            format!("unread streams ended after {received} bytes; leases returned"),
+            format!("unread streams ended after {received} bytes; leases and windows returned"),
         );
         received
     }
@@ -1172,11 +1188,15 @@ impl HubHost {
     }
 
     /// The stalled peer opens resource streams and never reads them. HTTP/2 flow control stops
-    /// the hub after one stream window each, the progress deadline returns their admissions and
-    /// memory, and the healthy peer's stream is unaffected throughout.
+    /// the hub after one bulk receive window each, the progress deadline returns their admissions
+    /// and memory, and the healthy peer's stream is unaffected throughout.
     async fn stall_bulk_flow_control(&mut self) {
         let options = TransportOptions::default();
-        let window = u64::from(options.initial_stream_window_bytes);
+        let window = options.bulk_receive_window.value().as_u64();
+        assert!(
+            window < STREAM_BYTES,
+            "the fixture stream outlasts one bulk receive window"
+        );
         let before = self.observe();
         let sent_before = before.bulk_sent();
         let bulk_before = before.executor.bulk_memory.reserved_bytes;
@@ -1191,7 +1211,7 @@ impl HubHost {
 
         // The hub is read every tick from before each stream opens, so the moment its window runs
         // out, and with it the start of the progress deadline, is observed within one tick.
-        let ((), (first, first_stalled_at)) = tokio::join!(
+        let ((), (_, first_stalled_at)) = tokio::join!(
             self.stalled.call(PeerCommand::StallStream),
             self.wait_until_at(
                 "the first unread stream to fill its window",
@@ -1203,19 +1223,40 @@ impl HubHost {
                 }
             )
         );
+        // The frames a window admitted can still be leaving the hub when its producer stops on
+        // the chunk the window refused, up to two more chunks per stream. Once they have left, an
+        // unread stream holds that chunk beside its request's own charge, however large its
+        // window is.
+        let chunk = u64::try_from(STREAM_CHUNK_BYTES).assured("the chunk size fits in u64");
+        let unsettled = |streams: u64| {
+            let pair = chunk
+                .checked_mul(2)
+                .assured("fixture stream charges are small");
+            let chunks = pair
+                .checked_mul(streams)
+                .assured("fixture stream charges are small");
+            chunks
+                .checked_add(bulk_before)
+                .assured("fixture stream charges are small")
+        };
+        let first = self
+            .wait_until(
+                "the first unread stream to hold only the chunk its window refused",
+                |observation| observation.executor.bulk_memory.reserved_bytes < unsettled(1),
+            )
+            .await;
         let per_stream = first
             .executor
             .bulk_memory
             .reserved_bytes
             .checked_sub(bulk_before)
             .assured("the stalled stream adds its charge");
-        let chunk = u64::try_from(STREAM_CHUNK_BYTES).assured("the chunk size fits in u64");
         assert!(
             per_stream >= chunk,
             "the hub holds the chunk the window refused: {first:?}"
         );
 
-        let ((), (second, second_stalled_at)) = tokio::join!(
+        let ((), (_, second_stalled_at)) = tokio::join!(
             self.stalled.call(PeerCommand::StallStream),
             self.wait_until_at(
                 "the second unread stream to fill its window",
@@ -1227,16 +1268,17 @@ impl HubHost {
                 }
             )
         );
-        let both_streams = per_stream
+        let charges = per_stream
             .checked_mul(2)
             .assured("two stream charges are small");
-        assert_eq!(
-            second.executor.bulk_memory.reserved_bytes,
-            both_streams
-                .checked_add(bulk_before)
-                .assured("two stream charges are small"),
-            "{second:?}"
-        );
+        let both_streams = charges
+            .checked_add(bulk_before)
+            .assured("two stream charges are small");
+        self.wait_until(
+            "both unread streams to hold only the chunks their windows refused",
+            |observation| observation.executor.bulk_memory.reserved_bytes == both_streams,
+        )
+        .await;
         self.trace.record(
             HUB,
             format!("two unread resource streams stopped at {window} bytes each"),

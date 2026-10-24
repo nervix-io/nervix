@@ -25,7 +25,8 @@ use nervix_models::{
     DomainClockProgress, DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind,
     ModelName, NodeEndpoint, NodeRef, OwnershipStateRecoveryOutcome, OwnershipStateReset,
     RelayName, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
-    RemoteRuntimeRecordMetadata, ResourceName, SubscriptionBinding, Timestamp, WasmStateResetScope,
+    RemoteRuntimeRecordMetadata, ResourceName, Setting, SubscriptionBinding, Timestamp,
+    WasmStateResetScope,
 };
 use nervix_primitives::{sync::mpsc, unmodeled::sync::OnceLock};
 use nervix_recovery::Discarded as _;
@@ -46,6 +47,7 @@ mod peer_target;
 mod pool;
 mod request;
 mod runtime_state;
+mod settings;
 #[cfg(all(test, feature = "turmoil"))]
 #[path = "../tests/simulation/runner.rs"]
 mod simulation_runner;
@@ -92,6 +94,7 @@ pub use runtime_state::{
     StatePlacementEnvelope, StateReplicationAck, StateSchema, StateSnapshotEnvelope,
     StateSyncRequest, StateSyncResponse, SyncKafkaOffsets,
 };
+pub use settings::{BulkReceiveWindow, BulkReceiveWindowError};
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,
     RecoverWasmProcessorStateRequest, RecoverWasmProcessorStateResponse,
@@ -135,8 +138,14 @@ pub struct TransportOptions {
     /// least recently used one is forgotten so the peer's next channel is still admitted. It must
     /// exceed `incoming_queue_capacity`.
     pub relay_channel_watermark_capacity: usize,
+    /// The HTTP/2 receive windows of every pool but bulk: what one stream, and one connection,
+    /// may receive before its reader returns any of it.
     pub initial_stream_window_bytes: u32,
     pub initial_connection_window_bytes: u32,
+    /// The receive window each stream of a bulk connection grants its sender. A bulk connection
+    /// grants all of its streams this window at once, and every stream it leases backs its window
+    /// with a `bulk_window` reservation for as long as it is open.
+    pub bulk_receive_window: Setting<BulkReceiveWindow>,
     pub max_header_bytes: u32,
     pub connection_setup_timeout: Duration,
     pub request_timeout: Duration,
@@ -158,6 +167,7 @@ impl Default for TransportOptions {
             relay_channel_watermark_capacity: DEFAULT_RELAY_CHANNEL_WATERMARK_CAPACITY,
             initial_stream_window_bytes: DEFAULT_STREAM_WINDOW_BYTES,
             initial_connection_window_bytes: DEFAULT_CONNECTION_WINDOW_BYTES,
+            bulk_receive_window: BulkReceiveWindow::default_window(),
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
             connection_setup_timeout: DEFAULT_CONNECTION_SETUP_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
@@ -1090,6 +1100,13 @@ pub enum TransportError {
     },
     #[error("body stream made no progress for {timeout:?}")]
     ProgressTimeout { timeout: Duration },
+    #[error(
+        "a {window}-byte bulk receive window does not fit the {budget}-byte bulk_window memory \
+         budget that backs it"
+    )]
+    BulkReceiveWindowUnbacked { window: u64, budget: u64 },
+    #[error("no bulk receive window was reserved for a stream to node '{peer}'")]
+    BulkReceiveWindowRefused { peer: ClusterNodeName },
     #[error("transport is shutting down")]
     ShuttingDown,
     #[error("connection to {0} is closed")]

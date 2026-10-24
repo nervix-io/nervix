@@ -567,7 +567,7 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | host isolation | `simulated_hosts_keep_their_own_names_sockets_and_clocks` | 43, 7053 | 15 s / 20,000 / 60 s | Once both report that they listen, two hosts listening on one port are each reached at their own address, a name no host holds fails as not existing without time passing, and a ten-second wait completes only on the simulated clock |
 | bounded CPU worker | `bounded_cpu_job_runs_on_the_simulated_scheduler` | 1–12 | 1 s / 200 / 3 s | Every CPU and memory class runs its job on the scheduler thread, and every queue and reservation returns to zero |
 | typed Arrow exchange | `transport::production_transport_exchanges_typed_arrow_batch_and_state_frames_over_simulated_tcp` | 49 | 30 s / 50,000 / 90 s | After a listener rebind, production TLS, HTTP/2, typed envelopes, and Arrow IPC carry a typed request, a relay payload and generation-qualified state frames |
-| materialized state owner replacement | `transport::materialized::materialized_branch_state_transfers_reconnect_to_the_replacement_owner` | 51, 53 | 180 s / 200,000 / 120 s | Two branch placements describe and stream a 3 MiB Arrow payload at revision 1, then a partition after the first received frame interrupts another fetch. After repair and serving transport replacement, both branches transfer at revision 2. The client verifies exact length and digest at both revisions. This exercises the transport and typed checkpoint envelope; server installation, disk durability and whole-cluster recovery are covered separately. |
+| materialized state owner replacement | `transport::materialized::materialized_branch_state_transfers_reconnect_to_the_replacement_owner` | 51, 53 | 180 s / 200,000 / 120 s | Two branch placements describe and stream a 3 MiB Arrow payload at revision 1, then a partition after the first received frame interrupts another fetch. The partition drops what the first owner still had in flight under the bulk receive window, and the simulated TCP never resends it, so the bulk connection stays half-open after repair; like the description request, a revision-2 fetch that meets the replaced owner's reset on it is retried on a fresh connection. After repair and serving transport replacement, both branches transfer at revision 2. The client verifies exact length and digest at both revisions. This exercises the transport and typed checkpoint envelope; server installation, disk durability and whole-cluster recovery are covered separately. |
 | multiple authenticated peers preserve remote failure classes | `transport::multiple_peers_keep_remote_failure_classes_and_reject_invalid_authentication` | 57 | 30 s / 50,000 / 90 s | One client resolves and exchanges typed Arrow responses with two peers, each peer's rejected, unavailable, not-ready, and failed outcomes arrive as their own remote failure classes naming their subject, and a dial under a DNS identity the certificate does not name is rejected |
 | partition before connect | `transport::network_disruption_respects_deadlines_and_repairs_authenticated_service` | 61 | 85 s / 100,000 / 90 s | Setup fails and liveness times out through twelve seconds of partition; repair restores authenticated service |
 | one-way partition before connect | The same | 62 | 85 s / 100,000 / 90 s | The same, with only server-to-client messages dropped |
@@ -682,9 +682,11 @@ Key transitions assert exact values. The stalled peer holds all 32 shared manage
 connection while liveness, cancellation, and discovery still use the reserved streams, and one more
 shared operation waits until its own deadline. A burst fills the one bulk worker and its eight-job
 queue, the two submissions beyond them are refused without a charge, and control work is admitted in
-the same pass. Unread streams stop at one HTTP/2 window each and release their admission and memory
-at the five-second progress deadline. The held relay reserves its exact body, largest decoded batch,
-and scratch, plus its retained grant metadata, until cancellation and release of the borrowed intake.
+the same pass. Unread 2 MiB resource streams stop at one bulk receive window each, which the stalled
+peer backs with one `bulk_window` reservation per stream. They release their admission and memory at
+the five-second progress deadline, and the stalled peer returns every window once its streams end.
+The held relay reserves its exact body, largest decoded batch, and scratch, plus its retained grant
+metadata, until cancellation and release of the borrowed intake.
 
 The fixture then holds the stalled link. The hub's own liveness deadline ends its probe to the
 stalled peer while the healthy peer keeps exchanging every traffic class. Removing the stalled peer

@@ -1445,6 +1445,12 @@ answering node's classified result of an operation it received, `Rejected`, `Una
 interest. [Failure Ownership And Persistence](./interconnect.md#failure-ownership-and-persistence)
 owns what each means for a requester.
 
+A bulk stream that cannot back its receive window sends nothing. Waiting for a window past the
+request's deadline reports `RequestTimeout`, like waiting for a stream slot. A `bulk_window` budget
+that refuses the reservation reports `BulkReceiveWindowRefused` naming the peer, with the typed
+`AdmissionError` beneath it. A transport whose budget cannot back even one window refuses to bind
+with `BulkReceiveWindowUnbacked`, which carries the window and the budget as numbers.
+
 The interconnect validates and bounds the wire request before its operation handler runs. A
 delivery correlation that has no free position reports `CorrelationCapacity`; an exhausted
 generation reports `CorrelationIdentityExhausted`; failure to reserve record storage reports
