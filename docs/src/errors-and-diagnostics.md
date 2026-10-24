@@ -695,7 +695,11 @@ which keeps it beneath `MqttTopicIngestorError::Acknowledge`; a task that fails 
 publish for room in a full read-ahead fails as `MqttTopicIngestorError::ReadAheadFull`, naming the
 read-ahead's capacity, because nothing would write it before the host reads again, and one whose
 connection wrote nothing for a keep-alive interval fails as
-`MqttTopicIngestorError::AcknowledgementDeadline`, naming the keep-alive. A emitter's event
+`MqttTopicIngestorError::AcknowledgementDeadline`, naming the keep-alive. The same causes apply when an
+ingestor read acknowledges an oversized publish: they remain beneath `IngestorError::Read`, and the
+ingestor drops the connection. A successfully acknowledged oversized publish is an ordinary
+`IngestorBatch::Oversized` outcome, counted by the host without a diagnostic or codec rejection.
+An emitter's event
 loop records the connection error's message as the emitter's transient error, which
 `DESCRIBE EMITTER` shows, and reconnects on the emitter's retry policy. None rejects a record or
 acknowledges input. A QoS 1 or 2 publish keeps the driver's `ClientError` when the client refuses

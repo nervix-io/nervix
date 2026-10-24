@@ -25175,11 +25175,12 @@ async fn when_mqtt_qos1_message_is_published(
         .expect("failed to publish mqtt QoS 1 message");
 }
 
-/// Publishes one QoS 1 message whose payload is exactly `bytes` long: a JSON object whose one
-/// string field pads it to that size.
-#[when(expr = "an MQTT QoS 1 message of {int} bytes is published to topic {string}")]
-async fn when_sized_mqtt_qos1_message_is_published(
+/// Publishes `count` QoS 1 messages whose payloads are exactly `bytes` long: JSON objects whose
+/// one string field pads them to that size.
+#[when(expr = "{int} MQTT QoS 1 messages of {int} bytes are published to topic {string}")]
+async fn when_sized_mqtt_qos1_messages_are_published(
     world: &mut ScenarioWorld,
+    count: usize,
     bytes: usize,
     topic: String,
 ) {
@@ -25193,9 +25194,9 @@ async fn when_sized_mqtt_qos1_message_is_published(
     wait_for_mqtt_ingestors_ready(world).await;
     world
         .cluster()
-        .publish_mqtt_qos1(&topic, &payload)
+        .publish_mqtt_qos1_burst(&topic, &payload, count)
         .await
-        .expect("failed to publish the sized MQTT QoS 1 message");
+        .expect("failed to publish the sized MQTT QoS 1 messages");
 }
 
 #[when(expr = "RabbitMQ message is published to queue {string}")]

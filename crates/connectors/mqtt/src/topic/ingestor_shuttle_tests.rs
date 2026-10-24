@@ -32,8 +32,8 @@ use nervix_primitives::{
 use rumqttc::{Publish, QoS};
 
 use super::{
-    MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorMessage, MqttTopicIngestorResult,
-    PublishRead,
+    GatherPublishOutcome, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorMessage,
+    MqttTopicIngestorResult, PublishRead, PublishReadOutcome,
 };
 
 const CHECK_TASK_JOINS: &str =
@@ -53,12 +53,24 @@ struct DeliveredPublishes {
     publishes: mpsc::UnboundedReceiver<Publish>,
 }
 
-impl PublishRead for DeliveredPublishes {
-    async fn next_publish(&mut self) -> MqttTopicIngestorResult<Publish> {
+impl DeliveredPublishes {
+    async fn receive(&mut self) -> MqttTopicIngestorResult<Publish> {
         match self.publishes.recv().await {
             Some(publish) => Ok(publish),
             None => Err(Report::new(MqttTopicIngestorError::Receive)),
         }
+    }
+}
+
+impl PublishRead for DeliveredPublishes {
+    async fn next_publish(&mut self) -> MqttTopicIngestorResult<PublishReadOutcome> {
+        Ok(PublishReadOutcome::Message(Box::new(self.receive().await?)))
+    }
+
+    async fn gather_publish(&mut self) -> MqttTopicIngestorResult<GatherPublishOutcome> {
+        Ok(GatherPublishOutcome::Message(Box::new(
+            self.receive().await?,
+        )))
     }
 }
 
@@ -143,7 +155,7 @@ fn a_cancelled_read_hands_over_every_publish_the_broker_delivered(
             IngestorBatch::Messages(messages) => (ids(&messages), false),
             IngestorBatch::Interrupted { gathered } => (ids(&gathered), true),
             IngestorBatch::Oversized { payloads } => {
-                panic!("an MQTT read drops no publish for its size, yet it dropped {payloads}")
+                panic!("this ordinary-publish fixture unexpectedly dropped {payloads}")
             }
             IngestorBatch::ResumeRequired | IngestorBatch::Closed => {
                 panic!("a read from a connection neither resumes nor closes")
