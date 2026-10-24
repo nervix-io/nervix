@@ -7,9 +7,9 @@
 
 use meticulous::ResultExt as _;
 use nervix_models::{
-    AckMode, AckWindow, Assignment, AssignmentTarget, ClientConsumerSink, ClientSink, EmitterBody,
-    ErrorPolicies, Expression, Float64Literal, Literal, ParseAsType, ProcessorInputs, RetryPolicy,
-    RouteConstruction,
+    AckMode, AckWindow, Assignment, AssignmentTarget, ClientConsumerEmitter, ClientEmitter,
+    EmitterBody, ErrorPolicies, Expression, Float64Literal, Literal, ParseAsType, ProcessorInputs,
+    RetryPolicy, RouteConstruction,
 };
 
 use super::*;
@@ -27,17 +27,19 @@ impl Default for EndpointFixture {
                 name: named("output"),
                 from: ProcessorInputs::single(named("input")),
                 body: EmitterBody::Client,
-                sink: Box::new(EmitSink::Client(ClientSink::Consumer(ClientConsumerSink {
-                    mode: nervix_models::ClientConsumerPublishingMode::Ack {
-                        window: AckWindow::Sequential,
-                        ack_timeout: "1s".to_string(),
-                        retry_policy: RetryPolicy {
-                            backoff: "1s".to_string(),
-                            max_backoff: "30s".to_string(),
+                connector: Box::new(EmitterEntity::Client(ClientEmitter::Consumer(
+                    ClientConsumerEmitter {
+                        mode: nervix_models::ClientConsumerPublishingMode::Ack {
+                            window: AckWindow::Sequential,
+                            ack_timeout: "1s".to_string(),
+                            retry_policy: RetryPolicy {
+                                backoff: "1s".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
                         },
+                        schema: named("output_schema"),
                     },
-                    schema: named("output_schema"),
-                }))),
+                ))),
                 batch: None,
                 flush_policy: FlushPolicy::Immediate,
                 error_policies: ErrorPolicies::handled_by_log(),

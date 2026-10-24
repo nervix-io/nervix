@@ -73,8 +73,8 @@ Each class also holds at most 1,024 jobs waiting for a worker; a job beyond that
 the work that submitted it reports the refusal as its own failure. The one exception is work the
 node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
 place instead, while its payload stays counted in the buffer. So does the unfolding of a poll a
-paced source handed over, and of a payload a NATS, ZeroMQ or Syslog source read without an
-acknowledgement, and an Iceberg commit's read of the staged files its sink already accepted.
+paced ingestor handed over, and of a payload a NATS, ZeroMQ or Syslog source read without an
+acknowledgement, and an Iceberg commit's read of the staged files its emitter already accepted.
 Holding one of those source loops pushes back into its transport, so a node whose
 extension workers stay full delays polls and lets those transports buffer or drop at their own
 bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
@@ -91,12 +91,17 @@ of it, and a commit refused for room is retried by its emitter.
 The relay budget also carries the acknowledgement watches a relay owner keeps for rows another node
 delivered with acknowledgements: 1 KiB per row until the owner reports that row's outcome, and
 4 KiB per delivery. A delivery of 8 MiB of 164-byte rows therefore needs about 51 MiB of watches
-beside the 56 MiB its body and decoding reserve. When rows arrive faster than the owner reports
+beside the 56 MiB its grant reserves for its body and decoding until the body is decoded, when it
+keeps only its body and decoded columns. When rows arrive faster than the owner reports
 them, their watches fill the budget and the owner holds further deliveries back until reported
 rows return their share. Sustained remote delivery with acknowledgements is then bounded by how
 fast acknowledgements return to the sending node, not by the budget's size, and a source that sends
-there waits instead of failing. The budgets are fixed defaults and do not follow the node's own
-memory.
+there waits instead of failing. A grant reserves the largest decoded batch and the scratch room
+whatever the body's size, so the budget grants about three deliveries at once; a sender whose grant
+is refused for that room, and a sender whose own budget has no room to store the acknowledgements
+of the rows it sends, hold their delivery back and wait as well; see
+[Held Deliveries](./interconnect.md#held-deliveries). The budgets are fixed defaults and do not
+follow the node's own memory.
 The commands budget also holds the 16 MiB working reservation for one normalized consensus state
 write; half is the keyed payload ceiling and half covers database journal encoding and descriptors.
 The credentials budget holds the 19 MiB Argon2id works in for one password, so a node computes one
@@ -134,7 +139,7 @@ not pay for a window's state, and a window width does not bound a correlator.
   buffers. `MAX BATCH SIZE` only clamps a batch and never grows one: the batch a route emits is
   roughly arrival rate × interval, up to the byte cap. Larger batches reduce per-batch cost only
   at boundaries that work per batch; see the [flush tuning guidance](nspl-overview.md) for which
-  sinks those are. `FLUSH IMMEDIATE` minimizes configured wait but still micro-batches.
+  emitters those are. `FLUSH IMMEDIATE` minimizes configured wait but still micro-batches.
 - Cluster interconnect carries each relay batch as one Arrow IPC body with a fixed 32 MiB limit.
   It reserves one unadmitted batch and one terminal outcome per active logical channel. Channels
   are concrete-branch local, so waiting work in one branch does not consume another branch's

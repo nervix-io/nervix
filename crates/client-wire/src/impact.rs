@@ -104,7 +104,7 @@ wire_enum!(ALL_MODEL_CHANGE_ASPECTS: ModelChangeAspect => wire::ModelChangeAspec
     ReordererMaxTime,
     EmitterInput,
     EmitterInputWhere,
-    EmitterSink,
+    EmitterConnector,
     EmitterClient,
     EmitterCodec,
     EmitterCollectPolicy,

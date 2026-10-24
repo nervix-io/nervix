@@ -281,7 +281,7 @@ fn intake_stop_wakes_a_held_response_without_waiting_for_source_close() {
 }
 
 #[test]
-fn shuttle_endpoint_intake_stop_wakes_a_held_response_without_waiting_for_source_close() {
+fn shuttle_endpoint_intake_stop_wakes_a_held_response_without_waiting_for_ingestor_close() {
     check_interleavings(intake_stop_wakes_a_held_response_without_waiting_for_source_close);
 }
 

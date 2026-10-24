@@ -24,8 +24,9 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ClientProducerSource, ClientSourceEntity, CodecName, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSource, IngestSourceKind, ModelKind, ModelName, SourceEntity,
+    ClientIngestorEntity, ClientProducerIngestor, CodecName, IngestAcknowledgement,
+    IngestQuiesceMode, IngestorDeclaration, IngestorEntity, IngestorEntityKind, ModelKind,
+    ModelName,
 };
 
 /// The only quiesce mode a client source honors: admission stops and the producer keeps its
@@ -40,7 +41,7 @@ pub enum IngestorInput {
     /// An external transport whose payloads the codec decodes.
     Transport(TransportIngestorInput),
     /// Typed batches application clients submit through their sessions.
-    Client(ClientProducerSource),
+    Client(ClientProducerIngestor),
 }
 
 /// An external transport and the codec that decodes the payloads it delivers.
@@ -48,29 +49,29 @@ pub enum IngestorInput {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct TransportIngestorInput {
-    pub source: IngestSource,
+    pub source: IngestorEntity,
     pub codec: CodecName,
 }
 
 impl IngestorInput {
     /// The connector and entity of the source, which capability decisions read: whether its
     /// messages carry headers, which metadata they expose, and where it executes.
-    pub const fn source_kind(&self) -> IngestSourceKind {
+    pub const fn entity_kind(&self) -> IngestorEntityKind {
         match self {
             Self::Transport(input) => input.source.kind(),
-            Self::Client(_) => IngestSourceKind::Client(ClientSourceEntity::Producer),
+            Self::Client(_) => IngestorEntityKind::Client(ClientIngestorEntity::Producer),
         }
     }
 
     /// The phrase that names the pair this input reads, its connector's keyword then its entity's,
     /// as the statement's head, `DESCRIBE` and diagnostics name it.
     pub fn source_phrase(&self) -> &'static str {
-        self.source_kind().phrase()
+        self.entity_kind().phrase()
     }
 
     /// Whether this input executes on every live cluster node rather than on one scheduled owner.
     pub fn executes_on_every_cluster_node(&self) -> bool {
-        self.source_kind()
+        self.entity_kind()
             .capabilities()
             .executes_on_every_cluster_node
     }
@@ -78,7 +79,7 @@ impl IngestorInput {
     /// Whether the messages this input delivers carry transport headers that `read_header` and
     /// `read_headers` can read.
     pub fn reads_headers(&self) -> bool {
-        self.source_kind().reads_headers()
+        self.entity_kind().reads_headers()
     }
 
     /// The model this input references: the client or endpoint a transport reads through, or the
@@ -92,19 +93,19 @@ impl IngestorInput {
 
     /// The kind of the model [`Self::source_ref`] names.
     pub fn source_model_kind(&self) -> ModelKind {
-        self.source_kind().capabilities().reference.model_kind()
+        self.entity_kind().capabilities().reference.model_kind()
     }
 
     /// The external transport this input reads. A client source reads none.
-    pub fn transport_source(&self) -> Option<&IngestSource> {
+    pub fn transport_entity(&self) -> Option<&IngestorEntity> {
         match self {
             Self::Transport(input) => Some(&input.source),
             Self::Client(_) => None,
         }
     }
 
-    /// The mutable form of [`Self::transport_source`], which an alteration sets.
-    pub(crate) fn transport_source_mut(&mut self) -> Option<&mut IngestSource> {
+    /// The mutable form of [`Self::transport_entity`], which an alteration sets.
+    pub(crate) fn transport_source_mut(&mut self) -> Option<&mut IngestorEntity> {
         match self {
             Self::Transport(input) => Some(&mut input.source),
             Self::Client(_) => None,
@@ -112,7 +113,7 @@ impl IngestorInput {
     }
 
     /// The source application clients produce into. A transport input has none.
-    pub(crate) fn client_source_mut(&mut self) -> Option<&mut ClientProducerSource> {
+    pub(crate) fn client_entity_mut(&mut self) -> Option<&mut ClientProducerIngestor> {
         match self {
             Self::Transport(_) => None,
             Self::Client(source) => Some(source),
@@ -146,7 +147,7 @@ impl IngestorInput {
     pub fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
         match self {
             Self::Transport(input) => input.source.supports_quiesce(quiesce),
-            Self::Client(_) => ClientProducerSource::CAPABILITIES
+            Self::Client(_) => ClientProducerIngestor::CAPABILITIES
                 .declared_quiesce(quiesce.kind())
                 .is_some(),
         }

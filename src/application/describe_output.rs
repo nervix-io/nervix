@@ -27,13 +27,13 @@ use nervix_interconnect::{
 use nervix_models::{
     BranchSelection, CanonicalNsplError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor,
-    CreateReorderer, CreateWindowProcessor, EmitterBody, FieldPath, HeaderModel, IngestSource,
-    IngestTimestampSource, IngestorInput, KafkaOffsetMode, KafkaSource, KafkaTopicSource, Model,
-    ModelKind, ModelName, NodeRef, PlacementName, PlacementPolicy, ProcessorInputs,
-    ProcessorOutputs, PrometheusSource, PulsarSource, PulsarTopicSource, RelayName,
-    RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
-    ResourceUsage, ResourceVersionEntries, ScheduledNode, WasmStateInspection, expression_to_nspl,
-    ingest_quiesce_to_nspl, ingestor_input_body_to_nspl,
+    CreateReorderer, CreateWindowProcessor, EmitterBody, FieldPath, HeaderModel,
+    IngestTimestampSource, IngestorEntity, IngestorInput, KafkaIngestor, KafkaOffsetMode,
+    KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef, PlacementName, PlacementPolicy,
+    ProcessorInputs, ProcessorOutputs, PrometheusIngestor, PulsarIngestor, PulsarTopicIngestor,
+    RelayName, RequestedResourceVersion, ResourceDescription, ResourceEntryContent,
+    ResourceManifestEntry, ResourceUsage, ResourceVersionEntries, ScheduledNode,
+    WasmStateInspection, expression_to_nspl, ingest_quiesce_to_nspl, ingestor_input_body_to_nspl,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use sorted_vec::SortedSet;
@@ -393,12 +393,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
     };
     lines.push(format!("reconnect wait: {reconnect_wait}"));
 
-    if let Some(IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+    if let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
         topic,
         offset_mode,
         instances,
         ..
-    }))) = ingestor.input.transport_source()
+    }))) = ingestor.input.transport_entity()
     {
         lines.push(format!("kafka topic: {}", topic.as_str()));
         lines.push(format!(
@@ -438,12 +438,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
                 lines.push(format!("kafka instance {instance_idx} partitions: -"));
             }
         }
-    } else if let Some(IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
+    } else if let Some(IngestorEntity::Pulsar(PulsarIngestor::Topic(PulsarTopicIngestor {
         topic,
         subscription,
         instances,
         ..
-    }))) = ingestor.input.transport_source()
+    }))) = ingestor.input.transport_entity()
     {
         lines.push(format!("pulsar topic: {}", topic.as_str()));
         lines.push(format!(
@@ -455,8 +455,8 @@ pub(in crate::application) fn format_ingestor_describe_output(
             subscription.ownership.keywords()
         ));
         lines.push(format!("pulsar instances: {instances}"));
-    } else if let Some(IngestSource::Prometheus(PrometheusSource::Query(source))) =
-        ingestor.input.transport_source()
+    } else if let Some(IngestorEntity::Prometheus(PrometheusIngestor::Query(source))) =
+        ingestor.input.transport_entity()
     {
         lines.push(format!(
             "prometheus max body size: {}",
@@ -465,7 +465,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
     }
     lines.push(format!(
         "headers: {}",
-        format_header_model(ingestor.input.source_kind().capabilities().headers)
+        format_header_model(ingestor.input.entity_kind().capabilities().headers)
     ));
 
     lines.join("\n")
@@ -981,7 +981,7 @@ pub(in crate::application) fn format_emitter_describe_output(
                 EmitterBody::Client => "native Arrow",
             }
         ),
-        format!("to: {}", emitter.sink.destination_to_plexus()?),
+        format!("to: {}", emitter.connector.destination_to_plexus()?),
         match &emitter.batch {
             Some(batch) => format!("batch: {batch}"),
             None => "batch: none".to_string(),
@@ -989,7 +989,7 @@ pub(in crate::application) fn format_emitter_describe_output(
         format!("flush: {}", emitter.flush_policy.to_canonical_nspl()),
         format!(
             "publishing mode: {}",
-            emitter.sink.publishing().to_canonical_plexus()
+            emitter.connector.publishing().to_canonical_plexus()
         ),
         format!(
             "filter-map: {}",
@@ -1001,7 +1001,7 @@ pub(in crate::application) fn format_emitter_describe_output(
         ),
         format!(
             "headers: {}",
-            format_header_model(emitter.sink.capabilities().headers)
+            format_header_model(emitter.connector.capabilities().headers)
         ),
     ]);
     Ok(lines.join("\n"))
@@ -1694,25 +1694,25 @@ mod tests {
         let nodes = vec![
             placement_member("shared", ModelKind::Junction),
             placement_member("shared", ModelKind::Deduplicator),
-            placement_member("sink", ModelKind::Emitter),
+            placement_member("emitter", ModelKind::Emitter),
         ];
 
         assert_eq!(
             format_placement_runtime_nodes(&nodes),
-            "junction:shared, deduplicator:shared, sink"
+            "junction:shared, deduplicator:shared, emitter"
         );
         assert_eq!(
             format_placement_runtime_nodes(&[
                 placement_member("source", ModelKind::Junction),
-                placement_member("sink", ModelKind::Emitter),
+                placement_member("emitter", ModelKind::Emitter),
             ]),
-            "source, sink"
+            "source, emitter"
         );
     }
 
     #[test]
     fn a_prometheus_ingestor_describes_the_response_bound_in_effect() {
-        use nervix_models::{IngestQuiesceMode, PrometheusIngestMode, PrometheusQuerySource};
+        use nervix_models::{IngestQuiesceMode, PrometheusIngestMode, PrometheusQueryIngestor};
 
         use super::super::test_fixtures::{named, scheduled_node};
 
@@ -1746,7 +1746,7 @@ mod tests {
             let IngestorInput::Transport(input) = &mut ingestor.input else {
                 panic!("the fixture constructs a transport ingestor");
             };
-            input.source = PrometheusQuerySource {
+            input.source = PrometheusQueryIngestor {
                 client: named("prom_main"),
                 query: "up".to_owned(),
                 max_body_size,
@@ -1774,8 +1774,8 @@ mod tests {
     #[test]
     fn placement_completion_respects_every_node_ingestor_declarations() {
         use nervix_models::{
-            EndpointIngestMode, HttpEndpointSource, IngestQuiesceMode, IngestSource,
-            SyslogIngestMode, SyslogListenerSource, WebsocketsEndpointSource,
+            EndpointIngestMode, HttpEndpointIngestor, IngestQuiesceMode, IngestorEntity,
+            SyslogIngestMode, SyslogListenerIngestor, WebsocketsEndpointIngestor,
         };
 
         use super::super::test_fixtures::{named, scheduled_node};
@@ -1785,8 +1785,8 @@ mod tests {
             scheduled.config.as_ref()
         ));
 
-        let sources: [IngestSource; 3] = [
-            HttpEndpointSource {
+        let sources: [IngestorEntity; 3] = [
+            HttpEndpointIngestor {
                 endpoint: named("http_intake"),
                 mode: EndpointIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Reject {
@@ -1794,7 +1794,7 @@ mod tests {
                 },
             }
             .into(),
-            WebsocketsEndpointSource {
+            WebsocketsEndpointIngestor {
                 endpoint: named("websocket_intake"),
                 mode: EndpointIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
@@ -1802,7 +1802,7 @@ mod tests {
                 },
             }
             .into(),
-            SyslogListenerSource {
+            SyslogListenerIngestor {
                 client: named("syslog_listener"),
                 mode: SyslogIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,

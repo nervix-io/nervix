@@ -84,8 +84,8 @@ pub(super) enum IngestMetadataError {
     },
     #[error("ingest metadata builders for {builders:?} cannot append a {row:?} row")]
     BuilderScopeMismatch {
-        builders: SourceMetadataScope,
-        row: SourceMetadataScope,
+        builders: IngestorMetadataScope,
+        row: IngestorMetadataScope,
     },
     #[error("failed to build ingest metadata integration columns")]
     BuildIntegrationColumns,
@@ -135,7 +135,7 @@ pub(super) enum IngestIntegrationBuilders {
 /// finishes it once when the group closes. No Arrow array, batch or builder is created per
 /// message, and no one-row batch is ever concatenated.
 pub(super) struct IngestMetadataBuilders {
-    pub(super) scope: SourceMetadataScope,
+    pub(super) scope: IngestorMetadataScope,
     pub(super) integration: IngestIntegrationBuilders,
     pub(super) header_names: ListBuilder<StringBuilder>,
     pub(super) header_values: ListBuilder<StringBuilder>,
@@ -158,9 +158,12 @@ impl IngestMetadataBuilders {
     /// Header builders start empty because most sources carry no headers at all.
     /// A frame-label capacity outside the address space returns a typed error before allocation.
     #[inline(never)]
-    pub(super) fn new(scope: SourceMetadataScope, row_bound: usize) -> IngestMetadataResult<Self> {
+    pub(super) fn new(
+        scope: IngestorMetadataScope,
+        row_bound: usize,
+    ) -> IngestMetadataResult<Self> {
         let integration = match scope {
-            SourceMetadataScope::Websockets => {
+            IngestorMetadataScope::Websockets => {
                 let mut maximum_label_bytes = 0;
                 for kind in WebsocketsFrameType::iter() {
                     maximum_label_bytes = maximum_label_bytes.max(kind.as_ref().len());
@@ -176,17 +179,17 @@ impl IngestMetadataBuilders {
                     frame_type: StringBuilder::with_capacity(row_bound, label_capacity),
                 }
             }
-            SourceMetadataScope::Kafka => {
+            IngestorMetadataScope::Kafka => {
                 IngestIntegrationBuilders::Kafka(Box::new(KafkaIntegrationBuilders {
                     topic: StringBuilder::with_capacity(row_bound, 0),
                     partition: Int32Builder::with_capacity(row_bound),
                     offset: Int64Builder::with_capacity(row_bound),
                 }))
             }
-            SourceMetadataScope::Syslog => IngestIntegrationBuilders::Syslog {
+            IngestorMetadataScope::Syslog => IngestIntegrationBuilders::Syslog {
                 peer_addr: StringBuilder::with_capacity(row_bound, 0),
             },
-            SourceMetadataScope::Headers => IngestIntegrationBuilders::Headers,
+            IngestorMetadataScope::Headers => IngestIntegrationBuilders::Headers,
         };
         let item_field =
             || StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
@@ -332,7 +335,7 @@ impl IngestFilterMapMetadata {
     /// The metadata of `rows` messages that arrived without transport headers or integration
     /// fields, as every row of a client batch does.
     pub(super) fn headerless(rows: usize) -> IngestMetadataResult<Self> {
-        let mut builders = IngestMetadataBuilders::new(SourceMetadataScope::Headers, rows)?;
+        let mut builders = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, rows)?;
         let row = IngestMetadataRow::Headers {
             headers: &NoIngestHeaders,
         };
@@ -552,8 +555,8 @@ mod tests {
     use arrow_array::Array;
     use nervix_connector::NoIngestHeaders;
     use nervix_models::{
-        CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, IngestSource, JsonType,
-        KafkaSource, KafkaTopicSource, MessageErrorOperation, ModelName, ParseAsType,
+        CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, IngestorEntity, JsonType,
+        KafkaIngestor, KafkaTopicIngestor, MessageErrorOperation, ModelName, ParseAsType,
         ResolvedCodecWireFormat, RetryPolicy, SchemaField, Timestamp, WireSchemaField,
     };
     use nervix_primitives::sync::Arc;
@@ -604,7 +607,8 @@ mod tests {
 
     #[test]
     fn websockets_metadata_refuses_an_unaddressable_capacity() {
-        let error = match IngestMetadataBuilders::new(SourceMetadataScope::Websockets, usize::MAX) {
+        let error = match IngestMetadataBuilders::new(IngestorMetadataScope::Websockets, usize::MAX)
+        {
             Ok(_) => panic!("an unaddressable frame-label capacity must fail before allocation"),
             Err(error) => error,
         };
@@ -619,7 +623,7 @@ mod tests {
 
     #[test]
     fn metadata_shape_failures_keep_their_typed_context() {
-        let mut kafka_builders = IngestMetadataBuilders::new(SourceMetadataScope::Kafka, 1)
+        let mut kafka_builders = IngestMetadataBuilders::new(IngestorMetadataScope::Kafka, 1)
             .expect("one Kafka metadata row fits");
         let mismatch = kafka_builders
             .append(&IngestMetadataRow::Headers {
@@ -629,8 +633,8 @@ mod tests {
         assert!(matches!(
             mismatch.current_context(),
             IngestMetadataError::BuilderScopeMismatch {
-                builders: SourceMetadataScope::Kafka,
-                row: SourceMetadataScope::Headers,
+                builders: IngestorMetadataScope::Kafka,
+                row: IngestorMetadataScope::Headers,
             }
         ));
 
@@ -643,7 +647,7 @@ mod tests {
             IngestMetadataError::BuildIntegrationColumns
         ));
 
-        let mut header_builders = IngestMetadataBuilders::new(SourceMetadataScope::Headers, 1)
+        let mut header_builders = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
             .expect("one header metadata row fits");
         header_builders
             .append(&IngestMetadataRow::Headers {
@@ -663,7 +667,7 @@ mod tests {
             }
         ));
 
-        let mut builders = IngestMetadataBuilders::new(SourceMetadataScope::Headers, 1)
+        let mut builders = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
             .expect("one header metadata row fits");
         builders
             .append(&IngestMetadataRow::Headers {
@@ -703,7 +707,7 @@ mod tests {
         let topic = "metering_events";
         let headers = TestIngestHeaders(&[("route", "primary")]);
         let codec = metering_value_codec();
-        let mut group = PendingIngestGroup::new(SourceMetadataScope::Kafka, 8);
+        let mut group = PendingIngestGroup::new(IngestorMetadataScope::Kafka, 8);
 
         INGEST_METADATA_BUILDER_SETS_OPENED.with(|count| count.set(0));
         INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(0));
@@ -775,7 +779,7 @@ mod tests {
         ]);
         let program = bind_ingestor_route_for_test(
             &named::<ModelName>("logic_ingestor"),
-            SourceMetadataScope::Kafka,
+            IngestorMetadataScope::Kafka,
             true,
             &construction(
                 "INHERIT tenant SET topic = metadata.topic, partition = metadata.partition, \
@@ -835,7 +839,7 @@ mod tests {
             ("raw".to_string(), RuntimeValue::String("meta".to_string())),
         ]);
         let metadata = ingest_metadata_for_test(
-            SourceMetadataScope::Kafka,
+            IngestorMetadataScope::Kafka,
             &[IngestMetadataRow::Kafka {
                 topic: "logic_notifications_t123",
                 partition: 2,
@@ -870,7 +874,7 @@ mod tests {
         assert!(row_value(&output, "raw").is_none());
 
         let grouped_metadata = ingest_metadata_for_test(
-            SourceMetadataScope::Kafka,
+            IngestorMetadataScope::Kafka,
             &[
                 IngestMetadataRow::Kafka {
                     topic: "logic_notifications_t123",
@@ -914,7 +918,7 @@ mod tests {
         let first_headers = TestIngestHeaders(&[("route", "primary")]);
         let second_headers = TestIngestHeaders(&[("route", "secondary")]);
         let metadata = ingest_metadata_for_test(
-            SourceMetadataScope::Headers,
+            IngestorMetadataScope::Headers,
             &[
                 IngestMetadataRow::Headers {
                     headers: &first_headers,
@@ -1002,7 +1006,7 @@ mod tests {
                 },
             ],
         }));
-        let source = IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+        let source = IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
             client: named("logic_kafka"),
             topic: named("logic_notifications"),
             offset_mode: nervix_models::KafkaOffsetMode::Domain,
@@ -1018,7 +1022,7 @@ mod tests {
         }));
         let program = bind_ingestor_route_for_test(
             &named::<ModelName>("header_ingestor"),
-            SourceMetadataScope::Kafka,
+            IngestorMetadataScope::Kafka,
             source.reads_headers(),
             &construction(
                 "INHERIT tenant SET first = read_header(lower(input.header_name)), total = \
@@ -1056,7 +1060,7 @@ mod tests {
             ("route", "secondary"),
         ]);
         let metadata = ingest_metadata_for_test(
-            SourceMetadataScope::Headers,
+            IngestorMetadataScope::Headers,
             &[IngestMetadataRow::Headers {
                 headers: &first_headers,
             }],
@@ -1098,7 +1102,7 @@ mod tests {
                 .expect("grouped carrier must concatenate");
         let second_headers = TestIngestHeaders(&[("tenant", "acme"), ("route", "backup")]);
         let grouped_metadata = ingest_metadata_for_test(
-            SourceMetadataScope::Headers,
+            IngestorMetadataScope::Headers,
             &[
                 IngestMetadataRow::Headers {
                     headers: &first_headers,

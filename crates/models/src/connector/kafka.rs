@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Kafka client Model, the topic source and sink Models with their offset and
+//! - **Owns.** The Kafka client Model, the topic source and emitter Models with their offset and
 //!   delivery modes, the topic and consumer group names a source reads with the rules Kafka holds
 //!   them to, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The Kafka driver, its configuration keys, or how a topic is consumed or
 //!   produced to.
 
@@ -25,17 +25,17 @@ use super::{
         WaitBound,
     },
     configured_client::configured_client,
-    entity_union::{connector_sinks, connector_sources},
+    entity_union::{connector_emitters, connector_ingestors},
     external_name::{ExternalNameError, external_names, refuse_control_characters, require_length},
 };
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, HeaderLayout, HeaderModel,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
-    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
-    PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind,
+    EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
+    EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
+    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
 };
 
 configured_client!(Kafka: unpooled, config Driver, CreateClientKafka => KafkaConfigEntry);
@@ -79,7 +79,7 @@ fn kafka_consumer_group_rule(text: &str) -> Result<(), ExternalNameError> {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct KafkaTopicSource {
+pub struct KafkaTopicIngestor {
     pub client: ClientName,
     pub topic: KafkaTopicName,
     pub offset_mode: KafkaOffsetMode,
@@ -89,7 +89,7 @@ pub struct KafkaTopicSource {
 }
 
 /// What the connector of a KAFKA TOPIC ingestor holds and how long it waits.
-const KAFKA_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
             holds: "messages librdkafka prefetches",
@@ -156,7 +156,7 @@ const KAFKA_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a KAFKA TOPIC emitter holds and how long it waits.
-const KAFKA_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
             holds: "records the producer queues under ACK",
@@ -215,13 +215,13 @@ const KAFKA_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
 };
 
-impl SourceEntity for KafkaTopicSource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
+impl IngestorDeclaration for KafkaTopicIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // A Kafka record carries its headers as a list, in the order written, repeats included.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
-        metadata: SourceMetadataScope::Kafka,
+        metadata: IngestorMetadataScope::Kafka,
         executes_on_every_cluster_node: false,
-        reference: SourceReferenceKind::Client(ConnectorKind::Kafka),
+        reference: IngestorReferenceKind::Client(ConnectorKind::Kafka),
         position_class: PositionClass::Replayable,
         acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
         delivery: &[
@@ -253,13 +253,13 @@ impl SourceEntity for KafkaTopicSource {
             },
             OptionDeclaration::INSTANCES,
         ],
-        bounds: KAFKA_SOURCE_BOUNDS,
+        bounds: KAFKA_INGESTOR_BOUNDS,
     };
 }
 
-impl SourceBody for KafkaTopicSource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Client(&self.client)
+impl IngestorEntityBody for KafkaTopicIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Client(&self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -326,15 +326,15 @@ impl KafkaIngestMode {
     }
 }
 
-connector_sources! {
+connector_ingestors! {
     connector Kafka = "KAFKA";
     /// What a Kafka source reads.
-    pub enum KafkaSource;
+    pub enum KafkaIngestor;
     /// The alterations of the ingestors that read a Kafka entity.
-    pub enum KafkaIngestorAlteration;
+    pub enum KafkaTopicIngestorAlteration;
     /// The entities a Kafka source reads.
-    pub enum KafkaSourceEntity {
-        Topic(KafkaTopicSource) = "TOPIC", "Kafka";
+    pub enum KafkaIngestorEntity {
+        Topic(KafkaTopicIngestor) = "TOPIC", "Kafka";
     }
 }
 
@@ -342,17 +342,17 @@ connector_sources! {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct KafkaTopicSink {
+pub struct KafkaTopicEmitter {
     pub mode: KafkaTopicPublishingMode,
     pub client: ClientName,
     pub topic: KafkaTopicName,
 }
 
-impl SinkEntity for KafkaTopicSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+impl EmitterDeclaration for KafkaTopicEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         // A Kafka record carries its headers as a list, in the order written, repeats included.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
-        reference: SinkReferenceKind::Client(ConnectorKind::Kafka),
+        reference: EmitterReferenceKind::Client(ConnectorKind::Kafka),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
@@ -364,13 +364,13 @@ impl SinkEntity for KafkaTopicSink {
         options: &[],
         envelope: &[],
         properties: &[],
-        bounds: KAFKA_SINK_BOUNDS,
+        bounds: KAFKA_EMITTER_BOUNDS,
     };
 }
 
-impl SinkBody for KafkaTopicSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for KafkaTopicEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::Kafka,
         })
@@ -381,15 +381,15 @@ impl SinkBody for KafkaTopicSink {
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector Kafka = "KAFKA";
-    /// What a Kafka sink writes.
-    pub enum KafkaSink;
+    /// What a Kafka emitter writes.
+    pub enum KafkaEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum KafkaEmitterMode;
-    /// The entities a Kafka sink writes.
-    pub enum KafkaSinkEntity {
-        Topic(KafkaTopicSink, KafkaTopicPublishingMode) = "TOPIC";
+    pub enum KafkaTopicEmitterMode;
+    /// The entities a Kafka emitter writes.
+    pub enum KafkaEmitterEntity {
+        Topic(KafkaTopicEmitter, KafkaTopicPublishingMode) = "TOPIC";
     }
 }
 

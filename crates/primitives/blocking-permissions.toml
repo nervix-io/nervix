@@ -57,7 +57,7 @@ reason = "A node reads its resolver configuration before it builds its executor,
 bound = "The flush returns by the physical deadline the host hands the sink's finish."
 items = ["task::spawn_blocking"]
 owner = "The Kafka sink's final producer-queue drain."
-path = "crates/connectors/kafka/src/lib.rs"
+path = "crates/connectors/kafka/src/topic/mod.rs"
 reason = "librdkafka's flush parks its calling thread until the broker answers. It waits on the network and computes nothing, so it would hold a CPU or storage worker idle for the whole drain."
 
 [[permission]]

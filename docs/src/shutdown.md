@@ -14,7 +14,7 @@ cluster observes it exactly as it observes a crash.
 Nervix is not an exactly-once system, and shutdown does not make it one. The guarantees below stop
 at durable boundaries that are stated explicitly. See [What It Is Not](./what-it-is-not.md) for the
 persistence boundary and [ACK Semantics And Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery)
-for the delivery consequences at each sink.
+for the delivery consequences at each emitter.
 
 ## Stop Requests
 
@@ -392,7 +392,7 @@ While admitted work finishes, the node's relays, processors, emitters, and ackno
 stay alive, and so do the supporting services that work depends on: the domain clock and its
 progress delivery, schedule activation, runtime-state replication and checkpoints, ownership-handoff
 coordination, and the interconnect listener and its handlers. Work admitted before the listeners
-closed can therefore still take execution snapshots, wait on logical deadlines, and reach its sinks.
+closed can therefore still take execution snapshots, wait on logical deadlines, and reach its emitters.
 
 Nervix repeatedly force-flushes ingestor route buffers, processor collections and route buffers,
 message-error routes, reingestors, and emitters, whatever their `FLUSH EACH` cadence, until nothing
@@ -402,7 +402,7 @@ drain, because the force flush does not wait for a logical cadence to come due.
 
 Window processors are the one exception to that release. A force flush purges timed-out aggregate
 state but emits only windows that have met their declared `WIDTH`. A partially filled window is not
-emitted early by a shutdown, so its rows do not reach the sink. A row's acknowledgement completes
+emitted early by a shutdown, so its rows do not reach the emitter. A row's acknowledgement completes
 when the window steps past the row; until then its shares are parked, so the drain does not wait
 for them. The branch's final checkpoint keeps the retained rows for the next task of the branch to
 restore, and teardown ends their shares unacknowledged: a source with external acknowledgements
@@ -528,9 +528,9 @@ A drain that reaches its timeout reports itself abandoned and shutdown continues
 then negatively acknowledges the remaining work. A source with external acknowledgements redelivers
 it after a restart; a source in `MODE NO ACK` loses it.
 
-This is the behavior an unavailable sink produces. An emitter whose sink will not accept records
+This is the behavior an unavailable emitter produces. An emitter whose emitter will not accept records
 holds the drain until the timeout, its source offsets are never committed, and the records are
-redelivered and published after the node restarts and the sink recovers.
+redelivered and published after the node restarts and the emitter recovers.
 
 The log distinguishes the two ways a drain runs out of time:
 
@@ -711,7 +711,7 @@ within the drain and shutdown deadlines.
 ## Connector Contracts
 
 [Connector Crates And The Connector Contract](./connector-contract.md) defines normal source and
-sink ownership and completion points. This section describes what a node's drain can complete
+emitter ownership and completion points. This section describes what a node's drain can complete
 before its shared stop deadline.
 
 Shutdown does not change any connector's delivery contract. It changes only whether a connector
@@ -719,8 +719,8 @@ reaches its completion point before the process ends.
 
 A graceful stop completes two things for its connectors. Each source in an acknowledged mode
 confirms on its transport the positions of every batch its graph acknowledged before the source
-closes, within the drain timeout, and each emitter finishes its sink when it stops, sending what
-the sink's client still holds by the deadline it is given. [Sources](#sources) and [Sinks](#sinks)
+closes, within the drain timeout, and each emitter finishes its emitter when it stops, sending what
+the emitter's client still holds by the deadline it is given. [Sources](#sources) and [Emitters](#emitters)
 give each one's deadline and what is left when it passes, and the
 [connector delivery standard](./connector-contract.md#connector-delivery-standard) states the rules
 both follow.
@@ -743,7 +743,7 @@ waits for the peer's Close within a one-second send-and-reply budget. A failed o
 is reported and the socket is released; the shutdown deadline still bounds the surrounding
 lifecycle. This protocol handshake does not acknowledge payload delivery or add redelivery.
 
-A source acknowledges or commits the work that reached its sinks before its session stops. A batch
+A source acknowledges or commits the work that reached its emitters before its session stops. A batch
 acknowledged through the graph stays outstanding admitted work until its source has confirmed the
 batch's positions on its transport, so the drain waits for that confirmation as it waits for any
 other acknowledgement root, within the drain timeout. What a source's confirmation means is the
@@ -781,14 +781,14 @@ A general failure handled by `ON GENERAL ERROR IGNORE` acknowledges the record, 
 `ON GENERAL ERROR LOG` negatively acknowledges it. During a drain that choice decides whether an
 acknowledged source redelivers the record after the restart.
 
-### Sinks
+### Emitters
 
-An emitter reaches the sink completion point its `MODE` declares, and the drain waits for it. An
+An emitter reaches the emitter completion point its `MODE` declares, and the drain waits for it. An
 emitter whose buffer cannot drain by its configured deadline reports
-`emitter '<name>' did not drain before its configured deadline`. When a sink's finish answers that
-it still holds records at that deadline, an emitter swap reports the sink's own outcome and count;
+`emitter '<name>' did not drain before its configured deadline`. When an emitter's finish answers that
+it still holds records at that deadline, an emitter swap reports the emitter's own outcome and count;
 a finish that does not answer within half the supervisor's response grace reports the stop deadline.
-The sink receives the original deadline, and a failed swap keeps the emitter task running. A
+The emitter receives the original deadline, and a failed swap keeps the emitter task running. A
 batching emitter's drain also writes every batch payload an earlier attempt left unanswered, with
 the bytes and members it was first written with, as an OTEL
 emitter's drain sends every Export request it prepared and did not learn the outcome of, and the
@@ -807,7 +807,7 @@ waits for complete successful final response headers. Each attempt and retry wai
 by the remaining physical drain deadline, even in a paced domain. A request still unanswered at
 that deadline is not marked delivered. Its prepared bytes, selected destination, headers, and
 retry state are volatile and disappear when the process ends. An attached acknowledged source can
-redeliver the record after restart; an unacknowledged endpoint source cannot. A destination that
+redeliver the record after restart; an unacknowledged endpoint ingestor cannot. A destination that
 applied a request whose successful response was lost can receive it again after that redelivery.
 Once the graph drain budget ends, terminal teardown cancels an emitter task waiting in an HTTP
 attempt. It does not wait for that client's full attempt timeout or turn the canceled request into
@@ -815,7 +815,7 @@ a record-specific success or rejection.
 
 A `NO ACK` emitter on Kafka, Pulsar or MQTT QoS 0 reaches its completion point when its client
 takes a record, so the drain can end while the client still holds records it has not sent. Every
-emitter therefore finishes its sink when it stops: the host calls the sink contract's finish hook
+emitter therefore finishes its emitter when it stops: the host calls the emitter contract's finish hook
 once the emitter will publish nothing more, and records what the hook did. An emitter that the
 drain moves to another node finishes as part of that stop, by the stop's deadline. An emitter that
 stops in place finishes at terminal teardown, which ends the emitter task wherever it is and gives
@@ -834,21 +834,21 @@ discards those the client had taken for it but not yet written, and a finish who
 after the client connected again still reports them flushed. MQTT QoS 0 waits within that same
 finish deadline for its client's event loop to write and flush the publishes the client still holds;
 a failed flush or publishes still unflushed when it ends fail its finish, which reports the failure
-or their count. Every other sink
+or their count. Every other emitter
 holds nothing once a publish returns, so the publish itself is the
-completion point. [Finishing a sink](./connector-contract.md#finishing-a-sink) lists what each sink
+completion point. [Finishing an emitter](./connector-contract.md#finishing-an-emitter) lists what each emitter
 holds and does.
 
-A sink that stages what it accepts and publishes it later reaches its completion point at its
-commit instead. After the buffered batches are written into such a sink, the drain calls the sink
+A emitter that stages what it accepts and publishes it later reaches its completion point at its
+commit instead. After the buffered batches are written into such an emitter, the drain calls the emitter
 contract's commit hook and forces it, so the commit runs whatever its commit cadence says and
 without reading the domain clock, which a stopped domain no longer has. Until that commit succeeds
-the sink holds the acknowledgements of every row it staged, and the drain counts those rows as work
+the emitter holds the acknowledgements of every row it staged, and the drain counts those rows as work
 the node still owes. A commit that fails is retried on the
 emitter's declared backoff, reported as the emitter's commit retry, and a shutdown that cuts the
 backoff short fails the drain.
 
-Iceberg is the sink that does this. It commits its staged data through its catalog, forced by the
+Iceberg is the emitter that does this. It commits its staged data through its catalog, forced by the
 drain rather than waiting for the `COMMIT EACH` cadence. Staged rows live as local files that only
 a successful commit removes, so a forced ending leaves them behind: the rows are not in the table,
 and a later run does not reclaim or commit them. An attached source redelivers that work; a
@@ -857,11 +857,11 @@ detached one loses it.
 ### Duplication
 
 A graceful shutdown creates no new duplicate condition, but redelivery after a forced ending or an
-abandoned drain produces exactly the duplicates the source and sink combination already allows. A
-sink that already published successfully can receive a record again after a restart, because
+abandoned drain produces exactly the duplicates the ingestor and emitter combination already allows. A
+emitter that already published successfully can receive a record again after a restart, because
 acknowledgement state is in memory and does not survive the process. See
 [ACK Semantics And Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery) for the
-per-sink duplicate and loss conditions and the idempotency options each sink offers.
+per-emitter duplicate and loss conditions and the idempotency options each emitter offers.
 
 ### Branch Isolation
 
@@ -880,7 +880,7 @@ stops the runtime, consensus, cluster membership, and the interconnect in that o
 releases the node's storage.
 
 Runtime teardown stops one domain at a time. Before it publishes the domain's stop, it gives every
-emitter the deadline by which the emitter finishes its sink once the stop ends its task: the domain
+emitter the deadline by which the emitter finishes its emitter once the stop ends its task: the domain
 drain timeout from the start of runtime teardown, cut short by the shutdown deadline, and the same for
 every domain. It then publishes the domain's stop to its processors,
 emitters, generators, reingestors, and placement tasks at once, and then waits for the domain's
@@ -899,7 +899,7 @@ every generator and reingestor caught in such a call outlasts the grace at the s
 kind owns state that the node persists or replicates, so the waits of one kind run together. Each
 task still has the whole grace to release what its routes buffered, and a domain's generators cost
 its teardown one grace and its reingestors one more, however many of them a stopping peer holds up.
-The other kinds persist or replicate state they own, or drain a sink, as they stop, and are waited
+The other kinds persist or replicate state they own, or drain an emitter, as they stop, and are waited
 for one after another, each with a grace of its own.
 
 Once every domain's tasks have ended, runtime teardown tells the snapshot task of every
@@ -1032,7 +1032,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop; a deduplicator or window branch ended at its stop grace has what it published last written before terminal teardown ends; a materialized relay, and a window whose retained rows exceed one 8 MiB snapshot section, are sealed to quota-owned files and written as segments synchronized before their header | Reopen at the last completed periodic checkpoint |
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
 | Restored backup state: materialized relay rows, WASM guest saves, Kafka domain offsets, branch lifecycle, deduplicator keys and window state | A restore synchronizes a complete chunked namespace and its atomic active-generation pointer before releasing the stopped domain's START gate or resuming its archived lifecycle | Reopens pointer and checkpoints from one complete database view on each assigned owner and replica; a durable pointer alone does not release an incomplete replicated installation gate. A resumed domain retains every restored kind. A normal START continues saved guest state, source positions, branch incarnations, deduplicator keys and windows, and resets materialized rows |
-| External source offsets and sink commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
+| External source offsets and emitter commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens, ACK maps, handoff payloads, gate leases, clock progress | The drain tries to resolve them before its deadline | Volatile; lost |
 | Client producers, their credit and queued batches, producer links | Ended as `shutting down` after the drain, or detached with their sessions | Volatile; lost with the process. Every producer another node forwarded here ends there as `owner lost`: its batches that node never cleared for admission are refused as `producer ended`, and only the cleared ones are of unknown outcome. The node's own sessions end, so their clients report every batch they sent without an outcome as of unknown outcome, and the nodes executing the ingestors detach those producers and finish what they admitted |
 
@@ -1302,8 +1302,8 @@ A source instance that stops before its transport confirmed positions it read re
 them again` at `info`, with the `domain`, the `ingestor`, the `instance` and the count of
 `positions`.
 
-An emitter records what finishing its sink did when it stopped, with the `domain`, the `emitter`,
-the `sink` and the `ending`: `stop` for a stop that drained it, `teardown` for terminal teardown,
+An emitter records what finishing its emitter did when it stopped, with the `domain`, the `emitter`,
+the `emitter` and the `ending`: `stop` for a stop that drained it, `teardown` for terminal teardown,
 and `interaction_stopped` when its relay interaction ended without either:
 `emitter sent the records its transport client held` at `info`, and
 `emitter stopped before its transport client sent every record it held` at `warn` with the
@@ -1345,7 +1345,7 @@ Start from the outcome on each phase record.
   timeout. Read the drain-timeout record for the domain counts, and raise `--shutdown-timeout`
   together with the deployment grace period if the workload legitimately needs longer.
 - **`local graph drain timed out with admitted work outstanding`.** Read the counts. Non-zero
-  publishing emitters or buffered emitter messages mean a sink is not accepting; non-zero
+  publishing emitters or buffered emitter messages mean an emitter is not accepting; non-zero
   outstanding acknowledgements mean an ACK chain has not resolved; non-zero pending `REQUIRED WAIT`
   records are expected and do not hold the drain.
 - **`local graph drain timed out before confirming that no admitted work is still moving`.** A peer
@@ -1398,11 +1398,11 @@ both together.
 
 ## Retained Drain Dependencies
 
-Running source, generator and sink tasks retain their acknowledgement trackers and confirmation
+Running source, generator and emitter tasks retain their acknowledgement trackers and confirmation
 counters. A drain observes those same registrations. Emitter retry state remains publishing work
 even when its buffer is empty. Idle and already-claimed force-flush participants use a retained
 readiness hint; only an available obligation enters the coordinator to claim its generation. A
 released claim becomes available again. Task teardown removes its confirmation/status registration,
-and pooled sink teardown removes its wait registration; cancellation clears a pending borrow's
+and pooled emitter teardown removes its wait registration; cancellation clears a pending borrow's
 wait through its guard. Handoff watches register before reading their retained entity publication,
 and release publishes thaw before waking them.

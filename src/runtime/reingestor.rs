@@ -1266,7 +1266,7 @@ mod tests {
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            source_kind: ModelKind::Reingestor,
+            entity_kind: ModelKind::Reingestor,
             source: named("tenant_partition"),
             root_relay: root_relay.clone(),
             branch: None,
@@ -1424,7 +1424,7 @@ mod tests {
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            source_kind: ModelKind::Reingestor,
+            entity_kind: ModelKind::Reingestor,
             source: named("tenant_partition"),
             root_relay: root_relay.clone(),
             branch: None,
@@ -1572,7 +1572,7 @@ mod tests {
             IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
                     revision: ProcessorPlanRevision::new(),
-                    source_kind: ModelKind::Reingestor,
+                    entity_kind: ModelKind::Reingestor,
                     source: named("tenant_partition"),
                     root_relay: relay.clone(),
                     branch: None,

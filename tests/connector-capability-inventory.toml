@@ -449,7 +449,7 @@ scenarios = [
 capability = "BATCH"
 entity = "OTEL LOGS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
 ]
 
 [[capability]]
@@ -491,7 +491,7 @@ scenarios = [
 capability = "BATCH"
 entity = "OTEL METRICS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
 ]
 
 [[capability]]
@@ -554,7 +554,7 @@ scenarios = [
 capability = "BATCH"
 entity = "OTEL TRACES EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
 ]
 
 [[capability]]
@@ -815,7 +815,7 @@ scenarios = [
 capability = "BATCH"
 entity = "SENTRY EVENT EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "Sentry accepts one event whose extra field preserves every batch member" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "Sentry accepts one event whose extra field preserves every batch member" },
 ]
 
 [[capability]]
@@ -892,7 +892,7 @@ scenarios = [
 capability = "BATCH"
 entity = "SYSLOG COLLECTOR EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "A Syslog TLS receiver sees one batched RFC 5425 frame" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "A Syslog TLS receiver sees one batched RFC 5425 frame" },
 ]
 
 [[capability]]

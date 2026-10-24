@@ -21,7 +21,9 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_execution::{MemoryClass, Reservation};
+#[cfg(test)]
+use nervix_execution::MemoryClass;
+use nervix_execution::Reservation;
 use nervix_primitives::{
     collections::{ConcurrentQueue, PopError, PushError},
     sync::{
@@ -32,6 +34,7 @@ use nervix_primitives::{
 };
 
 use super::{
+    relay_memory_hold::{RelayMemoryHold, RelayMemoryHolding},
     remote_dispatch::{
         REMOTE_ACK_SILENCE_SWEEP_INTERVAL, REMOTE_ACK_SILENCE_TIMEOUT, REMOTE_ACK_SILENT_SWEEPS,
         REMOTE_RELAY_TOTAL_TIMEOUT, RelayAdmissionUpdate, RemoteDispatchError,
@@ -60,6 +63,16 @@ pub(super) struct RemoteDispatchRegistry {
     next_admission: AtomicUsize,
     delivery_capacity: usize,
     executor: Executor,
+}
+
+/// How storing the acknowledgement records of one delivery ended.
+#[derive(Debug)]
+pub(super) enum RecordStorage {
+    /// The records are stored, under one registration for each row that carries an
+    /// acknowledgement.
+    Stored(Vec<Option<u64>>),
+    /// The delivery stopped needing them while it waited for room to store them.
+    Cancelled,
 }
 
 enum CorrelationSlot {
@@ -315,20 +328,20 @@ impl RemoteDispatchRegistry {
             .assured("the fixture registers a nonempty record acknowledgement"))
     }
 
-    pub(super) fn register_acks(
-        &self,
-        receiver: ClusterNodeName,
-        acks: Vec<AckSet>,
-    ) -> error_stack::Result<Vec<Option<u64>>, RemoteDispatchError> {
+    /// The relay memory the records of `acks` take while they wait for `receiver`, or `None` when
+    /// no row carries an acknowledgement to store.
+    fn record_storage_bytes(
+        receiver: &ClusterNodeName,
+        acks: &[AckSet],
+    ) -> error_stack::Result<Option<u64>, RemoteDispatchError> {
         let row_count = u64::try_from(acks.len()).assured("a row allocation length fits in u64");
         if row_count > ROW_POSITIONS {
             return Err(Report::new(
                 RemoteDispatchError::CorrelationIdentityExhausted,
             ));
         }
-        let remaining = acks.iter().filter(|acks| !acks.is_empty()).count();
-        if remaining == 0 {
-            return Ok(vec![None; acks.len()]);
+        if acks.iter().all(AckSet::is_empty) {
+            return Ok(None);
         }
         let bytes_per_row = std::mem::size_of::<Option<PendingRemoteAck>>()
             .checked_add(receiver.as_str().len())
@@ -337,13 +350,65 @@ impl RemoteDispatchRegistry {
             .len()
             .checked_mul(bytes_per_row)
             .assured("a valid relay frame's record owners fit in usize");
+        Ok(Some(
+            u64::try_from(bytes).assured("a record owner allocation fits in u64"),
+        ))
+    }
+
+    /// Stores the records of `acks`, to be resolved by `receiver`, holding the delivery back while
+    /// the relay budget has no room for them.
+    ///
+    /// The wait reads the budget rather than queueing in it, as a receiver's watch charge does, and
+    /// ends without storing anything as soon as `cancelled` resolves. Records larger than the whole
+    /// budget, or still without room at `deadline`, are refused with the budget's refusal beneath
+    /// `CorrelationMemory`.
+    pub(super) async fn store_acks(
+        &self,
+        receiver: ClusterNodeName,
+        acks: Vec<AckSet>,
+        deadline: Instant,
+        cancelled: impl std::future::Future<Output = ()>,
+    ) -> error_stack::Result<RecordStorage, RemoteDispatchError> {
+        let Some(bytes) = Self::record_storage_bytes(&receiver, &acks)? else {
+            return Ok(RecordStorage::Stored(vec![None; acks.len()]));
+        };
+        let holding = RelayMemoryHold::new(bytes, deadline)
+            .charge(&self.executor, cancelled)
+            .await
+            .change_context(RemoteDispatchError::CorrelationMemory)?;
+        let RelayMemoryHolding::Charged(memory) = holding else {
+            return Ok(RecordStorage::Cancelled);
+        };
+        let registrations = self.register_charged_acks(receiver, acks, memory)?;
+        Ok(RecordStorage::Stored(registrations))
+    }
+
+    /// Stores the records of `acks` at once, or refuses them when the relay budget has no room.
+    #[cfg(test)]
+    pub(super) fn register_acks(
+        &self,
+        receiver: ClusterNodeName,
+        acks: Vec<AckSet>,
+    ) -> error_stack::Result<Vec<Option<u64>>, RemoteDispatchError> {
+        let Some(bytes) = Self::record_storage_bytes(&receiver, &acks)? else {
+            return Ok(vec![None; acks.len()]);
+        };
         let memory = self
             .executor
-            .try_reserve(
-                MemoryClass::Relay,
-                u64::try_from(bytes).assured("a record owner allocation fits in u64"),
-            )
+            .try_reserve(MemoryClass::Relay, bytes)
             .change_context(RemoteDispatchError::CorrelationMemory)?;
+        self.register_charged_acks(receiver, acks, memory)
+    }
+
+    /// Registers the records of `acks`, which `memory` was charged for, to be resolved by
+    /// `receiver`.
+    fn register_charged_acks(
+        &self,
+        receiver: ClusterNodeName,
+        acks: Vec<AckSet>,
+        memory: Reservation,
+    ) -> error_stack::Result<Vec<Option<u64>>, RemoteDispatchError> {
+        let remaining = acks.iter().filter(|acks| !acks.is_empty()).count();
         let mut rows = Vec::with_capacity(acks.len());
         let mut registrations = Vec::with_capacity(acks.len());
         for (row, acks) in acks.into_iter().enumerate() {

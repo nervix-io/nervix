@@ -1033,7 +1033,7 @@ Feature: Iceberg emission
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario Outline: Iceberg emitter reports initialization errors instead of a half-initialized sink
+  Scenario Outline: Iceberg emitter reports initialization errors instead of a half-initialized emitter
     Given MQTT is running
     And Iceberg dependencies are running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -1101,7 +1101,7 @@ Feature: Iceberg emission
       """
     And the last command output does not contain
       """
-      Iceberg sink client is not initialized
+      Iceberg emitter client is not initialized
       """
 
     Examples:

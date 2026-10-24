@@ -23,7 +23,7 @@ pub(super) fn consumer_body<'src>(
 ) -> impl Parser<
     'src,
     &'src [Token],
-    ParsedDestination<ClientConsumerSink>,
+    ParsedDestination<ClientConsumerEmitter>,
     extra::Err<ParseError<'src>>,
 > + Clone {
     kw(Identifier::Schema)
@@ -32,7 +32,7 @@ pub(super) fn consumer_body<'src>(
         .then(mode())
         .then(context.construction().or_not())
         .map(|((schema, mode), construction)| ParsedDestination {
-            destination: ClientConsumerSink { schema, mode },
+            destination: ClientConsumerEmitter { schema, mode },
             body: EmitterBody::Client,
             construction,
             batch: None,

@@ -13,7 +13,7 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{NatsIngestMode, NatsQueueGroupName, NatsSubjectName, NatsSubjectSource};
+use nervix_models::{NatsIngestMode, NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName};
 
 use super::delivery::{instance_count, no_ack, push_quiesce_clause};
 use crate::{
@@ -24,7 +24,7 @@ use crate::{
 /// `FROM <client> SUBJECT '<subject>' QUEUE GROUP '<group>' INSTANCES <n> MODE NO ACK ON QUIESCE
 /// BUFFER …|DROP`.
 pub(super) fn subject_body<'src>()
--> impl Parser<'src, &'src [Token], NatsSubjectSource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], NatsSubjectIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Subject))
         .then(external_name::<NatsSubjectName>())
@@ -36,13 +36,15 @@ pub(super) fn subject_body<'src>()
         .then(no_ack().to(NatsIngestMode::NoAck))
         .then(push_quiesce_clause())
         .map(
-            |(((((client, subject), queue_group), instances), mode), quiesce)| NatsSubjectSource {
-                client,
-                subject,
-                queue_group,
-                instances,
-                mode,
-                quiesce,
+            |(((((client, subject), queue_group), instances), mode), quiesce)| {
+                NatsSubjectIngestor {
+                    client,
+                    subject,
+                    queue_group,
+                    instances,
+                    mode,
+                    quiesce,
+                }
             },
         )
         .boxed()

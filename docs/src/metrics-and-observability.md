@@ -50,13 +50,13 @@ Graph metric series use these labels:
 
 For a single-input emitter, sent metrics retain that input relay as `stream`. A multi-input
 emitter's received metrics identify the actual source relay, while its sent metrics aggregate the
-shared sink pipeline with `stream="-"` because one flush may contain work from several sources.
+shared emitter pipeline with `stream="-"` because one flush may contain work from several sources.
 
 An emitter's sent metrics count the records its destination delivered, each once, however many
 attempts it took: a flush that completes after retries counts its delivered records once, and a
 record the destination refused follows `ON MESSAGE ERROR` and is not sent. When a flush fails for
-good, the records its sink delivered before the failure are counted as its other records are routed
-to their error policy. A sink that publishes on its own commit, such as Iceberg, counts what each
+good, the records its emitter delivered before the failure are counted as its other records are routed
+to their error policy. A emitter that publishes on its own commit, such as Iceberg, counts what each
 commit publishes. Sent bytes measure a delivered record's payload as the emitter's buffer measures
 it; an HTTP request's method, target and headers are not payload, and a request without a body
 carries none. See [HTTP inspection and metrics](./emitters.md#http-inspection-and-metrics).
@@ -280,6 +280,13 @@ Relay admission:
   its relay memory has no room for the delivery's acknowledgement watches stays an unresolved
   attempt here, with its relay memory near `nervix_execution_memory_capacity_bytes`, and counts no
   rejection until it is admitted
+- `nervix_interconnect_relay_grant_refusals_total`: relay grants refused, by `direction` and
+  `reason`. `direction="inbound"` counts the grants this node refused other nodes and
+  `direction="outbound"` the refusals this node received for its own deliveries. The capacity
+  reasons, `memory`, `queue_item`, `terminal_outcome` and `channel_busy`, hold the delivery back,
+  and its sender asks again; a count of them that keeps rising on a sender means its deliveries are
+  waiting for the receiver's room, and its sources are held with them. Every other reason fails the
+  delivery at once. See [Held Deliveries](./interconnect.md#held-deliveries)
 - `nervix_interconnect_relay_admissions_total` and
   `nervix_interconnect_relay_admission_wait_seconds_total`: attempts resolved, by `outcome`
   (`admitted`, `rejected`, `cancelled`), and the time they spent between an accepted reservation

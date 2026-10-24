@@ -152,7 +152,7 @@ pub(super) async fn flush_branch_reorderer_output(
         ProcessorOutputDispatchContext {
             branch,
             node_kind,
-            source_kind: ModelKind::Reorderer,
+            entity_kind: ModelKind::Reorderer,
             processor,
             error_policies,
             materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(materialized_state),

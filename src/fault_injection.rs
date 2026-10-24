@@ -27,7 +27,7 @@ use ahash::RandomState;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector_syslog::SyslogListenerFault;
-use nervix_execution::{Executor, MemoryClass, Reservation};
+use nervix_execution::Executor;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
     DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
@@ -54,12 +54,14 @@ mod execution;
 mod handoff_gate_link;
 mod model_publication;
 mod pause;
+mod relay_memory;
 mod relocation_commit;
 mod restarted_voter;
 mod shutdown_handoff;
 mod standalone_transaction;
 #[cfg(test)]
 mod syslog_tests;
+mod transaction_cleanup;
 
 pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
@@ -69,8 +71,9 @@ use handoff_gate_link::HandoffGateLink;
 use model_publication::ModelPublicationRefusal;
 pub use model_publication::ModelPublicationRefusalKind;
 use pause::TestPause;
+use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
-use restarted_voter::StartupVoterGossip;
+use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 pub use standalone_transaction::StandaloneTransactionBoundary;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,10 +126,10 @@ pub struct FaultInjection {
 struct FaultInjectionState {
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
     failed_ingestors: DashMap<String, (), RandomState>,
-    unavailable_sink_clients: DashMap<String, (), RandomState>,
-    /// One-shot, emitter-scoped sink stalls: the next write of the emitter keeps the sink's answers
+    unavailable_emitter_clients: DashMap<String, (), RandomState>,
+    /// One-shot, emitter-scoped emitter stalls: the next write of the emitter keeps the emitter's answers
     /// for this many of its records, and the answers for the rest are lost.
-    stalled_emitter_sinks: DashMap<String, usize, RandomState>,
+    stalled_emitter_connectors: DashMap<String, usize, RandomState>,
     failed_schedule_publications: DashMap<String, (), RandomState>,
     /// One-shot, domain-scoped rejections consumed before any entity gate engages.
     failed_entity_gate_engagements: DashMap<DomainName, (), RandomState>,
@@ -185,6 +188,9 @@ struct FaultInjectionState {
     blocked_gossip_nodes: DashMap<ClusterNodeName, Duration, RandomState>,
     /// Restart regressions retain one relayed heartbeat until the first scheduling pass finishes.
     startup_voter_gossip: DashMap<ClusterNodeName, StartupVoterGossip, RandomState>,
+    /// Whether a restart fixture waits for the restarted cluster's leader to end its startup voter
+    /// observation, and whether one has.
+    startup_observation_end: watch::Sender<StartupObservationEnd>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -204,11 +210,17 @@ struct FaultInjectionState {
     /// assuming it.
     lost_remote_acknowledgements:
         DashMap<RemoteAcknowledgementLink, watch::Sender<RemoteAcknowledgementLoss>, RandomState>,
-    /// Nodes whose relay memory a scenario fills just before they charge the acknowledgement
-    /// watches of the next delivery another node sends them, and the memory each fill holds.
+    /// Nodes whose relay memory a scenario fills, at once or just before their relay work reaches
+    /// an armed point, and the memory each fill holds.
     relay_memory_fills: DashMap<ClusterNodeName, RelayMemoryFill, RandomState>,
+    /// The execution budgets each node's relay work charges, registered as the node joins its
+    /// cluster so a scenario can fill its relay memory at once.
+    relay_memory_owners: DashMap<ClusterNodeName, Executor, RandomState>,
     /// The owner pauses one buffered batch before it acquires a dispatch permit and loads routes.
     owner_relay_fanout_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// The owner waits this long before it fans out each buffered batch of a domain's relays, so
+    /// the rows its sources admitted reach their consumers slowly, as on a loaded node.
+    owner_relay_fanout_delays: DashMap<String, Duration, RandomState>,
     /// A local schedule swap pauses after removing one attached emitter from its relay.
     emitter_swap_after_detach_pauses:
         DashMap<(DomainName, EmitterName), Arc<TestPause>, RandomState>,
@@ -297,19 +309,6 @@ impl std::fmt::Debug for ConsensusProbe {
     }
 }
 
-/// The relay memory a scenario fills on one node as the node charges acknowledgement watches.
-#[derive(Debug)]
-enum RelayMemoryFill {
-    /// The node's next charge of acknowledgement watches first takes all of its free relay memory.
-    Armed,
-    /// The relay memory the fill took, held until the scenario releases it.
-    Holding {
-        // Held for as long as the fill lasts and never read: the charge is the reservation's
-        // existence, not its value.
-        _memory: Reservation,
-    },
-}
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RemoteRelayAdmissionPauseKey {
     domain: String,
@@ -360,6 +359,10 @@ enum HandoffEngagementTransportFailure {
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
+    TransactionCleanup {
+        node: ClusterNodeName,
+        domain: DomainName,
+    },
     StandaloneTransaction {
         node: ClusterNodeName,
         domain: DomainName,
@@ -443,12 +446,13 @@ impl Default for FaultInjection {
     fn default() -> Self {
         let (leadership_transfers, _) = broadcast::channel(16);
         let (syslog_listener_faults, _) = watch::channel(None);
+        let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
             inner: Arc::new(FaultInjectionState {
                 emitter_faults: DashMap::default(),
                 failed_ingestors: DashMap::default(),
-                unavailable_sink_clients: DashMap::default(),
-                stalled_emitter_sinks: DashMap::default(),
+                unavailable_emitter_clients: DashMap::default(),
+                stalled_emitter_connectors: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
                 handoff_engagement_transport_failures: DashMap::default(),
@@ -475,6 +479,7 @@ impl Default for FaultInjection {
                 failed_health_links: DashMap::default(),
                 blocked_gossip_nodes: DashMap::default(),
                 startup_voter_gossip: DashMap::default(),
+                startup_observation_end,
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
@@ -483,7 +488,9 @@ impl Default for FaultInjection {
                 remote_relay_dispatch_pauses: DashMap::default(),
                 lost_remote_acknowledgements: DashMap::default(),
                 relay_memory_fills: DashMap::default(),
+                relay_memory_owners: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),
+                owner_relay_fanout_delays: DashMap::default(),
                 emitter_swap_after_detach_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
@@ -1085,27 +1092,27 @@ impl FaultInjection {
             .remove(&ingestor.to_ascii_lowercase());
     }
 
-    pub fn fail_sink_client_unavailable(&self, emitter: &str) {
+    pub fn fail_emitter_client_unavailable(&self, emitter: &str) {
         self.inner
-            .unavailable_sink_clients
+            .unavailable_emitter_clients
             .insert(emitter.to_ascii_lowercase(), ());
     }
 
-    pub fn clear_sink_client_fault(&self, emitter: &str) {
+    pub fn clear_emitter_client_fault(&self, emitter: &str) {
         self.inner
-            .unavailable_sink_clients
+            .unavailable_emitter_clients
             .remove(&emitter.to_ascii_lowercase());
     }
 
-    /// Makes the sink of `emitter` stall after it resolved `resolved` records of its next write.
+    /// Makes the emitter of `emitter` stall after it resolved `resolved` records of its next write.
     ///
-    /// The sink still writes every record, but the emitter receives only its answers for the first
+    /// The emitter still writes every record, but the emitter receives only its answers for the first
     /// `resolved` records in the order it handed them over, as it does from a broker that stops
     /// answering after it accepted the rest. The write then fails the way an unanswered one does,
     /// so the emitter cannot tell which of the other records landed.
-    pub fn stall_emitter_sink_after_resolving(&self, emitter: &str, resolved: usize) {
+    pub fn stall_emitter_connector_after_resolving(&self, emitter: &str, resolved: usize) {
         self.inner
-            .stalled_emitter_sinks
+            .stalled_emitter_connectors
             .insert(emitter.to_ascii_lowercase(), resolved);
     }
 
@@ -1747,6 +1754,13 @@ impl FaultInjection {
         );
     }
 
+    /// Makes the owner of each of `domain`'s relays wait `delay` before it fans out every batch.
+    pub fn delay_owner_relay_fanout(&self, domain: impl Into<String>, delay: Duration) {
+        self.inner
+            .owner_relay_fanout_delays
+            .insert(domain.into().to_ascii_lowercase(), delay);
+    }
+
     pub async fn wait_for_owner_relay_fanout_pause(&self, domain: &str) {
         let pause = self.owner_relay_fanout_pause(&domain.to_ascii_lowercase());
         pause.wait_until_reached().await;
@@ -2100,31 +2114,31 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "the scenario selects one retained sink unavailability seam",
+            reason = "the scenario selects one retained emitter unavailability seam",
             key = "one test emitter",
             bound = "one keyed presence read with no retained guard"
         )
     )]
-    pub(crate) fn sink_client_is_unavailable(&self, emitter: &EmitterName) -> bool {
+    pub(crate) fn emitter_client_is_unavailable(&self, emitter: &EmitterName) -> bool {
         self.inner
-            .unavailable_sink_clients
+            .unavailable_emitter_clients
             .contains_key(&emitter.as_str().to_ascii_lowercase())
     }
 
-    /// Consumes the sink stall armed for the next write of `emitter`: how many of its records the
-    /// sink resolves before it stalls.
+    /// Consumes the emitter stall armed for the next write of `emitter`: how many of its records the
+    /// emitter resolves before it stalls.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "the scenario consumes its single armed sink-write stall",
+            reason = "the scenario consumes its single armed emitter-write stall",
             key = "one test emitter",
             bound = "one keyed removal; no guard survives the operation"
         )
     )]
-    pub(crate) fn take_emitter_sink_stall(&self, emitter: &EmitterName) -> Option<usize> {
+    pub(crate) fn take_emitter_connector_stall(&self, emitter: &EmitterName) -> Option<usize> {
         self.inner
-            .stalled_emitter_sinks
+            .stalled_emitter_connectors
             .remove(&emitter.as_str().to_ascii_lowercase())
             .map(|(_, resolved)| resolved)
     }
@@ -2528,71 +2542,6 @@ impl FaultInjection {
         pause.wait_until_released().await;
     }
 
-    /// Arms `node_id` to take all of its free relay memory just before it charges the
-    /// acknowledgement watches of the next delivery another node sends it, and to hold that memory
-    /// until the scenario releases it.
-    pub fn fill_relay_memory_before_next_acknowledgement_watches_on(
-        &self,
-        node_id: ClusterNodeName,
-    ) {
-        self.inner
-            .relay_memory_fills
-            .insert(node_id, RelayMemoryFill::Armed);
-    }
-
-    /// Returns the relay memory an armed fill took on `node_id`, and disarms a fill that has not
-    /// taken any yet.
-    pub fn release_relay_memory_fill_on(&self, node_id: &ClusterNodeName) {
-        self.inner.relay_memory_fills.remove(node_id);
-    }
-
-    /// Whether the fill armed on `node_id` holds its relay memory.
-    pub fn relay_memory_fill_holds_on(&self, node_id: &ClusterNodeName) -> bool {
-        let Some(fill) = self.inner.relay_memory_fills.get(node_id) else {
-            return false;
-        };
-        matches!(fill.value(), RelayMemoryFill::Holding { .. })
-    }
-
-    /// Takes all of `node_id`'s free relay memory, once, when a scenario armed the fill.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
-            reason = "the scenario fills a node's relay memory only before the first watches the \
-                      node charges after the fill was armed",
-            key = "one test node's armed relay memory fill",
-            bound = "one keyed entry and one charge of the free room; no guard across await"
-        )
-    )]
-    pub(crate) fn fill_relay_memory_before_acknowledgement_watches_if_armed(
-        &self,
-        node_id: &ClusterNodeName,
-        executor: &Executor,
-    ) {
-        let Some(mut fill) = self.inner.relay_memory_fills.get_mut(node_id) else {
-            return;
-        };
-        if let RelayMemoryFill::Holding { .. } = fill.value() {
-            return;
-        }
-        // The relay work running beside the fill can take memory between the read and the
-        // charge, so the fill charges again what is free then.
-        let reservation = loop {
-            let memory = executor.memory(MemoryClass::Relay);
-            let room = memory
-                .capacity_bytes
-                .checked_sub(memory.reserved_bytes)
-                .assured("a budget never reserves more than its capacity");
-            if let Ok(reservation) = executor.try_reserve(MemoryClass::Relay, room) {
-                break reservation;
-            }
-        };
-        *fill.value_mut() = RelayMemoryFill::Holding {
-            _memory: reservation,
-        };
-    }
-
     /// Whether the terminal record acknowledgement `resolver` is about to return to `registrar` is
     /// lost on the way. Only the first acknowledgement on an armed link is lost.
     #[cfg_attr(
@@ -2654,13 +2603,22 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "one scenario-owned relay fanout pause is claimed once",
+            reason = "a scenario-owned relay fanout delay is read for every batch, and one \
+                      scenario-owned relay fanout pause is claimed once",
             key = "one test domain",
-            bound = "one keyed read; its guard ends before the test-controlled wait"
+            bound = "two keyed reads; each guard ends before its test-controlled wait"
         )
     )]
     pub(crate) async fn pause_owner_relay_fanout_if_armed(&self, domain: &DomainName) {
         let key = domain.as_str().to_ascii_lowercase();
+        let delay = self
+            .inner
+            .owner_relay_fanout_delays
+            .get(&key)
+            .map(|delay| *delay.value());
+        if let Some(delay) = delay {
+            nervix_primitives::time::sleep(delay).await;
+        }
         let Some(pause) = self
             .inner
             .owner_relay_fanout_pauses

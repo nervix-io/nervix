@@ -13,7 +13,7 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{ClientIngestMode, ClientProducerSource};
+use nervix_models::{ClientIngestMode, ClientProducerIngestor};
 
 use super::delivery::suspend_only_quiesce_clause;
 use crate::{
@@ -40,12 +40,12 @@ fn mode<'src>()
 /// through their sessions. Suspension is the only quiesce mode it honors, and it decodes nothing,
 /// so no `DECODE USING` follows.
 pub(super) fn producer_body<'src>()
--> impl Parser<'src, &'src [Token], ClientProducerSource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], ClientProducerIngestor, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Schema)
         .ignore_then(schema_ref())
         .then_ignore(kw(Identifier::Mode))
         .then(mode())
         .then_ignore(suspend_only_quiesce_clause())
-        .map(|(schema, mode)| ClientProducerSource { schema, mode })
+        .map(|(schema, mode)| ClientProducerIngestor { schema, mode })
         .boxed()
 }

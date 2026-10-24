@@ -347,8 +347,14 @@ installation therefore publishes nothing to an attached client.
 The observer reads a tick only while the installation is paced and of that tick's generation. It
 adds the serving node's own logical reading, taken as the tick frame is built: one snapshot of the
 installed generation, read through the same watermarked read that execution uses. The observer
-retains the progress watch's sender while the attachment lives, so removing the domain closes
-neither wait before the lifecycle publishes missing and wakes delivery to send the end frame.
+samples accepted progress before taking that reading. A process pause between the samples can
+therefore pair an earlier tick with a much later serving reading, and transport delay can deliver
+both samples later still. Their difference is not a bound on projection error or tick freshness;
+accepted progress does not bound the independently projected readable time.
+
+The observer retains the progress watch's sender while the attachment lives, so removing the
+domain closes neither wait before the lifecycle publishes missing and wakes delivery to send the
+end frame.
 
 ### Attachments And Their Delivery
 
@@ -638,8 +644,8 @@ misses multiple occurrences, the cadence returns the newest due instant once and
 to the first future boundary. Consumers that need both meanings keep the scheduled due instant
 separate from the fresh execution snapshot taken when work actually runs.
 
-[Connector Crates And The Connector Contract](./connector-contract.md#source-boundary) defines
-the paced source's host and connector responsibilities; this chapter owns the cadence's time
+[Connector Crates And The Connector Contract](./connector-contract.md#ingestor-boundary) defines
+the paced ingestor's host and connector responsibilities; this chapter owns the cadence's time
 mapping and missed-occurrence behavior.
 
 The architecture keeps four time classes distinct:

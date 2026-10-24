@@ -1977,7 +1977,7 @@ impl CreateIngestor {
                 requested: alter.ingestor.clone(),
             }));
         }
-        let stored = self.input.source_kind();
+        let stored = self.input.entity_kind();
         let requested = alter.alteration.kind();
         if stored != requested {
             return Err(Report::new(AlterIngestorError::KindMismatch {
@@ -1998,7 +1998,7 @@ impl CreateIngestor {
         operations: &[AlterTransportIngestorOperation<Source>],
     ) -> error_stack::Result<(), AlterIngestorError>
     where
-        Source: crate::connector::AlteredIngestorSource,
+        Source: crate::connector::AlteredIngestorEntity,
     {
         for operation in operations {
             match operation {
@@ -2023,7 +2023,7 @@ impl CreateIngestor {
         operations: &[AlterIngestorOperation<Source>],
     ) -> error_stack::Result<(), AlterIngestorError>
     where
-        Source: crate::connector::AlteredIngestorSource,
+        Source: crate::connector::AlteredIngestorEntity,
     {
         for operation in operations {
             self.apply_operation(operation)?;
@@ -2036,7 +2036,7 @@ impl CreateIngestor {
         operation: &AlterIngestorOperation<Source>,
     ) -> error_stack::Result<(), AlterIngestorError>
     where
-        Source: crate::connector::AlteredIngestorSource,
+        Source: crate::connector::AlteredIngestorEntity,
     {
         match operation {
             AlterIngestorOperation::SetSource { source } => {
@@ -2114,7 +2114,7 @@ pub struct AlterIngestor {
 
 impl AlterIngestor {
     /// The connector and entity the statement's head names.
-    pub const fn kind(&self) -> crate::IngestSourceKind {
+    pub const fn kind(&self) -> crate::IngestorEntityKind {
         self.alteration.kind()
     }
 }
@@ -2166,8 +2166,8 @@ pub enum AlterIngestorError {
     },
     #[error("the stored ingestor reads {stored}, so ALTER {requested} INGESTOR cannot alter it")]
     KindMismatch {
-        stored: crate::IngestSourceKind,
-        requested: crate::IngestSourceKind,
+        stored: crate::IngestorEntityKind,
+        requested: crate::IngestorEntityKind,
     },
     #[error("route target `{relay}` is not configured")]
     RouteTargetNotFound { relay: RelayName },
@@ -2177,7 +2177,7 @@ pub enum AlterIngestorError {
     CannotDropLastRoute,
     #[error("{kind} ingestors do not support ON QUIESCE {mode}")]
     UnsupportedQuiesceMode {
-        kind: crate::IngestSourceKind,
+        kind: crate::IngestorEntityKind,
         mode: &'static str,
     },
 }
