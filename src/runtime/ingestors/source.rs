@@ -28,7 +28,7 @@ use nervix_connector::{
     SourceAcknowledgementSupport, SourceBatch, SourceBatchAcknowledgement, SourceBatchRequest,
     SourceCapabilities, SourceConnector, SourceError, SourceHost, SourceHostServices,
     SourceIntakeError, SourceIntakeMessage, SourceIntakeResult, SourceMessage, SourcePlan,
-    SourcePoll, SourceResume, next_retry_delay, physical_time::actual_utc_now,
+    SourcePoll, SourceResume, SourceSettlement, next_retry_delay, physical_time::actual_utc_now,
 };
 use nervix_models::{DomainClockPeriod, IngestAcknowledgement, PositionClass};
 use nervix_primitives::sync::CancellationToken;
@@ -45,6 +45,10 @@ use crate::runtime::ingestor_quiesce::{IngestorQuiesceObservation, LiveDeliveryE
 #[path = "source_acknowledgement.rs"]
 mod acknowledgement;
 use acknowledgement::{BatchRoots, RuntimeBatchAcknowledgement};
+
+#[path = "individual_settlement.rs"]
+mod individual_settlement;
+use individual_settlement::IndividualBatch;
 
 #[path = "source_read.rs"]
 mod read;
@@ -1915,6 +1919,14 @@ where
         position_class: policy.position_class,
         retry_after,
     };
+    if let (SourceSettlement::Individual, SourceAckPolicy::Parallel { timeout, .. }) =
+        (C::SETTLEMENT, policy.acknowledgement)
+    {
+        return IndividualBatch::intake(host, messages, timeout)
+            .await
+            .settle(source, host, settlement)
+            .await;
+    }
     let positions = messages
         .iter()
         .map(|message| message.position().clone())

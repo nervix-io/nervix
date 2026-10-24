@@ -2,7 +2,7 @@
 
 use std::num::{NonZeroU16, NonZeroUsize};
 
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckWindow, ClientIngestMode, ClientProducerSource, ClientSourceEntity, CreateIngestor,
     EndpointIngestMode, HttpEndpointSource, HttpRequestIngestMode, HttpRequestSource,
@@ -227,10 +227,7 @@ impl Arbitrary<'_> {
             client: self.name(),
             queue: self.rabbitmq_queue_name(),
             instances: self.positive_u64(),
-            mode: RabbitMqIngestMode::AckSequential {
-                timeout: self.duration(),
-                retry_policy: self.retry_policy(),
-            },
+            mode: self.rabbitmq_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -404,6 +401,28 @@ impl Arbitrary<'_> {
                 retry_policy: self.retry_policy(),
             },
             _ => KafkaIngestMode::NoAck,
+        }
+    }
+
+    fn rabbitmq_mode(&mut self) -> RabbitMqIngestMode {
+        match self.entropy.byte() % 3 {
+            0 => RabbitMqIngestMode::NoAck,
+            1 => RabbitMqIngestMode::AckSequential {
+                timeout: self.duration(),
+                retry_policy: self.retry_policy(),
+            },
+            _ => {
+                let value = self.entropy.boundary_biased(1..=u64::from(u16::MAX));
+                let count =
+                    u16::try_from(value).verified("the sampled range fits AMQP's prefetch field");
+                let max = NonZeroU16::new(count).verified("the sampled range starts at one");
+                RabbitMqIngestMode::AckParallel {
+                    max,
+                    batch_timeout: self.duration(),
+                    timeout: self.duration(),
+                    retry_policy: self.retry_policy(),
+                }
+            }
         }
     }
 

@@ -30,6 +30,7 @@ pub(crate) mod process_cluster_convergence;
 pub(crate) mod process_observation;
 pub(crate) mod process_report;
 pub(crate) mod producer_session;
+pub(crate) mod rabbitmq_queue;
 pub(crate) mod raw_session;
 pub(crate) mod redis_client;
 pub(crate) mod runner_lag;

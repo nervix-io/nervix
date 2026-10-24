@@ -11,7 +11,10 @@
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 
-use std::{collections::VecDeque, future};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    future,
+};
 
 use nervix_connector::{
     IngestMessageHeaders, IngestMetadataRow, SourceBatchAcknowledgementServices, SourceConnector,
@@ -39,6 +42,8 @@ struct SourceLoopObservations {
     intake: Vec<(RecordedIntake, usize)>,
     acknowledged: Vec<Vec<u64>>,
     rejected: Vec<Vec<u64>>,
+    rejection_notice: Option<Arc<Notify>>,
+    unconfirmed_stops: Vec<usize>,
     poll_errors: Vec<String>,
     reported_errors: Vec<String>,
     ack_waits: usize,
@@ -179,7 +184,14 @@ impl BrokerSourceConnector for FakeSource {
     }
 
     async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
-        self.observations.lock().rejected.push(positions.to_vec());
+        let notice = {
+            let mut record = self.observations.lock();
+            record.rejected.push(positions.to_vec());
+            record.rejection_notice.clone()
+        };
+        if let Some(notice) = notice {
+            notice.notify_one();
+        }
         if self.reject_failures_left > 0 {
             self.reject_failures_left -= 1;
             return Err(Report::new(SourceError::Reject { connector: "fake" }));
@@ -198,16 +210,30 @@ impl BrokerSourceConnector for FakeSource {
     }
 }
 
+enum TestAcknowledgementPlan {
+    Outcome(SourceAcknowledgementOutcome),
+    Completion(nervix_primitives::sync::oneshot::Receiver<SourceAcknowledgementOutcome>),
+}
+
 struct ImmediateAcknowledgement {
+    plan: Option<TestAcknowledgementPlan>,
     observations: Arc<Mutex<SourceLoopObservations>>,
 }
 
 #[async_trait]
 impl SourceBatchAcknowledgementServices for ImmediateAcknowledgement {
     async fn wait(&mut self, _timeout: Duration) -> SourceAcknowledgementOutcome {
-        let mut observations = self.observations.lock();
-        observations.ack_waits += 1;
-        observations
+        self.observations.lock().ack_waits += 1;
+        if let Some(plan) = self.plan.take() {
+            return match plan {
+                TestAcknowledgementPlan::Outcome(outcome) => outcome,
+                TestAcknowledgementPlan::Completion(completion) => completion
+                    .await
+                    .assured("the check completes every admitted delivery"),
+            };
+        }
+        self.observations
+            .lock()
             .ack_outcomes
             .pop_front()
             .unwrap_or(SourceAcknowledgementOutcome::Ack)
@@ -215,6 +241,9 @@ impl SourceBatchAcknowledgementServices for ImmediateAcknowledgement {
 }
 
 struct FakeHost {
+    refused_payload: Option<u8>,
+    allow_unconfirmed_stop: bool,
+    acknowledgements: BTreeMap<u8, TestAcknowledgementPlan>,
     observations: Arc<Mutex<SourceLoopObservations>>,
     suspend_intake: bool,
     wake_quiesce: bool,
@@ -226,6 +255,9 @@ struct FakeHost {
 impl FakeHost {
     fn running(observations: Arc<Mutex<SourceLoopObservations>>) -> Self {
         Self {
+            refused_payload: None,
+            allow_unconfirmed_stop: false,
+            acknowledgements: BTreeMap::new(),
             observations,
             suspend_intake: false,
             wake_quiesce: false,
@@ -257,7 +289,21 @@ impl SourceHostServices for FakeHost {
             .lock()
             .intake
             .push((RecordedIntake::Acknowledged, messages.len()));
+        let plan = if self.acknowledgements.is_empty() {
+            None
+        } else {
+            assert_eq!(messages.len(), 1, "each delivery has its own graph outcome");
+            self.acknowledgements.remove(&messages[0].payload[0])
+        };
+        if self.refused_payload.is_some_and(|refused| {
+            messages
+                .first()
+                .is_some_and(|message| message.payload == [refused])
+        }) {
+            return Err(Report::new(SourceIntakeError::Dispatch));
+        }
         Ok(SourceBatchAcknowledgement::new(ImmediateAcknowledgement {
+            plan,
             observations: self.observations.clone(),
         }))
     }
@@ -335,7 +381,11 @@ impl SourceHostServices for FakeHost {
         panic!("a test source whose payloads all fit dropped {payloads} for their size");
     }
     fn record_unconfirmed_stop(&self, positions: usize) {
-        panic!("a test source stopped with {positions} positions waiting on their trees");
+        assert!(
+            self.allow_unconfirmed_stop,
+            "a test source stopped with {positions} positions waiting on their trees"
+        );
+        self.observations.lock().unconfirmed_stops.push(positions);
     }
 }
 
@@ -904,4 +954,367 @@ async fn source_loop_resumes_after_connector_configuration_changes() {
     assert_eq!(observations.unready, 2);
     assert_eq!(observations.intake.len(), 3);
     assert_eq!(observations.acknowledged, vec![vec![0], vec![1], vec![2]]);
+}
+
+#[nervix_primitives::test]
+async fn individual_settlement_confirms_successes_and_requeues_only_the_failed_delivery() {
+    let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+    let mut services = FakeHost::running(observations.clone());
+    services.acknowledgements = BTreeMap::from([
+        (
+            0,
+            TestAcknowledgementPlan::Outcome(SourceAcknowledgementOutcome::Ack),
+        ),
+        (
+            1,
+            TestAcknowledgementPlan::Outcome(SourceAcknowledgementOutcome::NoAck("refused".into())),
+        ),
+        (
+            2,
+            TestAcknowledgementPlan::Outcome(SourceAcknowledgementOutcome::Ack),
+        ),
+    ]);
+    let mut host = SourceHost::new(services);
+    let mut source = empty_source(observations.clone());
+    let batch =
+        IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1)).await;
+    let result = batch
+        .settle(
+            &mut source,
+            &mut host,
+            BatchSettlement {
+                position_class: PositionClass::BrokerRedelivered,
+                retry_after: Duration::from_millis(1),
+            },
+        )
+        .await;
+    assert!(matches!(result, BatchDisposition::Retry));
+    let record = observations.lock();
+    let mut confirmed = record.acknowledged.clone();
+    confirmed.sort();
+    assert_eq!(confirmed, vec![vec![0], vec![2]]);
+    assert_eq!(record.rejected, vec![vec![1]]);
+    assert_eq!(record.intake, vec![(RecordedIntake::Acknowledged, 1); 3]);
+}
+
+#[nervix_primitives::test]
+async fn individual_settlement_retains_each_unsettled_position_once_after_a_transport_failure() {
+    let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+    let mut services = FakeHost::running(observations.clone());
+    services.acknowledgements = BTreeMap::from([
+        (
+            0,
+            TestAcknowledgementPlan::Outcome(SourceAcknowledgementOutcome::Ack),
+        ),
+        (
+            1,
+            TestAcknowledgementPlan::Outcome(SourceAcknowledgementOutcome::NoAck("refused".into())),
+        ),
+        (
+            2,
+            TestAcknowledgementPlan::Outcome(SourceAcknowledgementOutcome::Ack),
+        ),
+    ]);
+    let mut host = SourceHost::new(services);
+    let mut source = empty_source(observations.clone());
+    source.reject_failures_left = 1;
+    let batch =
+        IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1)).await;
+    let result = batch
+        .settle(
+            &mut source,
+            &mut host,
+            BatchSettlement {
+                position_class: PositionClass::BrokerRedelivered,
+                retry_after: Duration::from_millis(1),
+            },
+        )
+        .await;
+    let BatchDisposition::RetryRejection(mut retained) = result else {
+        panic!("the failed rejection retains the unsettled positions for recovery");
+    };
+    let record = observations.lock();
+    assert_eq!(record.rejected, vec![vec![1]]);
+    assert!(retained.contains(&1));
+    retained.extend(record.acknowledged.iter().flatten());
+    retained.sort();
+    assert_eq!(
+        retained,
+        [0, 1, 2],
+        "confirmed and retained positions partition the original batch"
+    );
+}
+
+#[cfg(feature = "shuttle")]
+#[test]
+fn shuttle_individual_settlement_preserves_every_delivery_until_its_own_graph_outcome() {
+    nervix_model_harness::shuttle::check_interleavings(|| {
+        shuttle::future::block_on(async {
+            let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+            let mut services = FakeHost::running(observations.clone());
+            let mut completions = Vec::new();
+            for id in 0..3u8 {
+                let (sender, receiver) = nervix_primitives::sync::oneshot::channel();
+                services
+                    .acknowledgements
+                    .insert(id, TestAcknowledgementPlan::Completion(receiver));
+                completions.push(nervix_primitives::task::spawn(async move {
+                    let outcome = if id == 1 {
+                        SourceAcknowledgementOutcome::NoAck("refused".into())
+                    } else {
+                        SourceAcknowledgementOutcome::Ack
+                    };
+                    assert!(
+                        sender.send(outcome).is_ok(),
+                        "a sibling outcome cannot cancel this delivery's graph wait"
+                    );
+                }));
+            }
+            let mut host = SourceHost::new(services);
+            let mut source = empty_source(observations.clone());
+            let batch = IndividualBatch::intake(
+                &mut host,
+                three_messages().into(),
+                Duration::from_secs(3_600),
+            )
+            .await;
+            let result = batch
+                .settle(
+                    &mut source,
+                    &mut host,
+                    BatchSettlement {
+                        position_class: PositionClass::BrokerRedelivered,
+                        retry_after: Duration::from_millis(1),
+                    },
+                )
+                .await;
+            assert!(matches!(result, BatchDisposition::Retry));
+            for completion in completions {
+                completion
+                    .await
+                    .assured("a panicking modeled completion fails the check");
+            }
+            let record = observations.lock();
+            let mut confirmed = record.acknowledged.clone();
+            confirmed.sort();
+            assert_eq!(confirmed, [vec![0], vec![2]]);
+            assert_eq!(record.rejected, [vec![1]]);
+        });
+    });
+}
+
+#[nervix_primitives::test]
+async fn individual_settlement_confirms_ready_siblings_while_one_graph_wait_remains_pending() {
+    let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+    let (sender, receiver) = nervix_primitives::sync::oneshot::channel();
+    let mut services = FakeHost::running(observations.clone());
+    services.acknowledgements = BTreeMap::from([
+        (
+            0,
+            TestAcknowledgementPlan::Outcome(SourceAcknowledgementOutcome::Ack),
+        ),
+        (1, TestAcknowledgementPlan::Completion(receiver)),
+        (
+            2,
+            TestAcknowledgementPlan::Outcome(SourceAcknowledgementOutcome::Ack),
+        ),
+    ]);
+    let completion = nervix_primitives::task::spawn({
+        let observations = observations.clone();
+        async move {
+            nervix_primitives::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    nervix_primitives::task::consume_budget().await;
+                    if observations.lock().acknowledged.len() == 2 {
+                        break;
+                    }
+                    sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .assured("ready siblings confirm before the pending graph responds");
+            assert!(
+                sender
+                    .send(SourceAcknowledgementOutcome::NoAck("refused".into()))
+                    .is_ok()
+            );
+        }
+    });
+    let mut host = SourceHost::new(services);
+    let mut source = empty_source(observations.clone());
+    let batch =
+        IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(30)).await;
+    let result = batch
+        .settle(
+            &mut source,
+            &mut host,
+            BatchSettlement {
+                position_class: PositionClass::BrokerRedelivered,
+                retry_after: Duration::from_millis(1),
+            },
+        )
+        .await;
+    assert!(matches!(result, BatchDisposition::Retry));
+    completion
+        .await
+        .assured("the completion task's assertion passes");
+    assert_eq!(observations.lock().rejected, [vec![1]]);
+}
+
+async fn individual_transport_recovery_keeps_admitted_graph_work() {
+    let rejection = Arc::new(Notify::new());
+    let observations = Arc::new(Mutex::new(SourceLoopObservations {
+        rejection_notice: Some(rejection.clone()),
+        ..SourceLoopObservations::default()
+    }));
+    let (sender, receiver) = nervix_primitives::sync::oneshot::channel();
+    let mut services = FakeHost::running(observations.clone());
+    services.acknowledgements = BTreeMap::from([
+        (
+            0,
+            TestAcknowledgementPlan::Outcome(SourceAcknowledgementOutcome::Ack),
+        ),
+        (
+            1,
+            TestAcknowledgementPlan::Outcome(SourceAcknowledgementOutcome::NoAck("refused".into())),
+        ),
+        (2, TestAcknowledgementPlan::Completion(receiver)),
+    ]);
+    let completion = nervix_primitives::task::spawn(async move {
+        rejection.notified().await;
+        assert!(
+            sender.send(SourceAcknowledgementOutcome::Ack).is_ok(),
+            "a failed transport must retain the graph wait of every admitted sibling"
+        );
+    });
+    let mut host = SourceHost::new(services);
+    let mut source = empty_source(observations.clone());
+    source.reject_failures_left = 1;
+    let batch =
+        IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(30)).await;
+    let result = batch
+        .settle(
+            &mut source,
+            &mut host,
+            BatchSettlement {
+                position_class: PositionClass::BrokerRedelivered,
+                retry_after: Duration::from_millis(1),
+            },
+        )
+        .await;
+    completion
+        .await
+        .assured("every admitted graph delivery completes before recovery");
+    let BatchDisposition::RetryRejection(mut retained) = result else {
+        panic!("the lost transport retains every unconfirmed position");
+    };
+    assert!(retained.contains(&1));
+    assert!(
+        retained.contains(&2),
+        "the sibling completed after the transport was lost"
+    );
+    let record = observations.lock();
+    retained.extend(record.acknowledged.iter().flatten());
+    retained.sort();
+    assert_eq!(retained, [0, 1, 2]);
+    assert_eq!(
+        record.rejected,
+        [vec![1]],
+        "one failed settlement starts recovery once"
+    );
+}
+
+#[nervix_primitives::test]
+async fn individual_settlement_waits_for_admitted_graph_work_before_recovering_the_transport() {
+    individual_transport_recovery_keeps_admitted_graph_work().await;
+}
+
+#[cfg(feature = "shuttle")]
+#[test]
+fn shuttle_individual_settlement_keeps_admitted_graph_work_until_transport_recovery() {
+    nervix_model_harness::shuttle::check_interleavings(|| {
+        shuttle::future::block_on(individual_transport_recovery_keeps_admitted_graph_work());
+    });
+}
+
+#[nervix_primitives::test]
+async fn individual_settlement_requeues_only_the_delivery_the_host_refused() {
+    let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+    let mut services = FakeHost::running(observations.clone());
+    services.refused_payload = Some(1);
+    let mut host = SourceHost::new(services);
+    let mut source = empty_source(observations.clone());
+    let batch =
+        IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1)).await;
+    let result = batch
+        .settle(
+            &mut source,
+            &mut host,
+            BatchSettlement {
+                position_class: PositionClass::BrokerRedelivered,
+                retry_after: Duration::from_millis(1),
+            },
+        )
+        .await;
+    assert!(matches!(result, BatchDisposition::Retry));
+    let record = observations.lock();
+    let mut confirmed = record.acknowledged.clone();
+    confirmed.sort();
+    assert_eq!(confirmed, [vec![0], vec![2]]);
+    assert_eq!(record.rejected, [vec![1]]);
+    assert_eq!(record.reported_errors.len(), 1);
+}
+
+#[nervix_primitives::test]
+async fn individual_settlement_counts_every_unconfirmed_position_when_shutdown_ends_its_waits() {
+    for transport_failed in [false, true] {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let mut services = FakeHost::running(observations.clone());
+        services.allow_unconfirmed_stop = true;
+        let (middle, last) = if transport_failed {
+            (
+                SourceAcknowledgementOutcome::NoAck("refused".into()),
+                SourceAcknowledgementOutcome::Shutdown,
+            )
+        } else {
+            (
+                SourceAcknowledgementOutcome::Shutdown,
+                SourceAcknowledgementOutcome::Ack,
+            )
+        };
+        services.acknowledgements = BTreeMap::from([
+            (
+                0,
+                TestAcknowledgementPlan::Outcome(SourceAcknowledgementOutcome::Ack),
+            ),
+            (1, TestAcknowledgementPlan::Outcome(middle)),
+            (2, TestAcknowledgementPlan::Outcome(last)),
+        ]);
+        let mut host = SourceHost::new(services);
+        let mut source = empty_source(observations.clone());
+        source.reject_failures_left = usize::from(transport_failed);
+        let batch =
+            IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1))
+                .await;
+        let result = batch
+            .settle(
+                &mut source,
+                &mut host,
+                BatchSettlement {
+                    position_class: PositionClass::BrokerRedelivered,
+                    retry_after: Duration::from_millis(1),
+                },
+            )
+            .await;
+        assert!(matches!(result, BatchDisposition::Shutdown));
+        let record = observations.lock();
+        assert_eq!(record.unconfirmed_stops.len(), 1);
+        assert_eq!(
+            record.acknowledged.iter().map(Vec::len).sum::<usize>() + record.unconfirmed_stops[0],
+            3
+        );
+        if transport_failed {
+            assert_eq!(record.rejected, [vec![1]]);
+        }
+    }
 }

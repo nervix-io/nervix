@@ -18,6 +18,13 @@ differ. Read headers the way the source's model records them, such as lowercase 
 and on a sink that keeps one value per header name write each literal header name once: a repeated
 literal name is refused when the statement is validated.
 
+For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
+`MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
+Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each delivery settles
+on its own graph outcome. Automatic consumption has no prefetch or transport acknowledgement;
+work already accepted by the broker can be lost before the graph completes. Read the RabbitMQ
+Ingestors section for the exact clause order, host admission and recovery limits.
+
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and

@@ -89,6 +89,12 @@ inspectors used by scheduling and the host's partition watch use that same node 
 connector interprets the effective native client deadline and admits its synchronous driver calls;
 the decision layer neither opens a consumer nor selects a worker backend.
 
+RabbitMQ's typed input keeps its complete acknowledgement policy. A parallel maximum is a
+`NonZeroU16` at the vocabulary boundary, so installation cannot truncate AMQP's prefetch field.
+Composition converts the policy once into either an automatic consumer or a manual consumer with
+its exact prefetch count; the connector receives that resolved transport choice without reading
+configuration Models. Automatic consumers use the host's refuse-and-count admission policy.
+
 The tables describe distinct decisions in one revision, not independently selectable runtime
 configurations. Every node, including one placed elsewhere, is planned from the same domain
 schedule. This lets a local owner, its replicas, a remote relay consumer, and a future owner

@@ -322,6 +322,15 @@ pub trait SourceConnector: Send + Sized + 'static {
     }
 }
 
+/// The transport boundary at which a source can settle graph outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceSettlement {
+    /// Positions share a commit or acknowledgement boundary, so the host settles their batch.
+    Batch,
+    /// Every position has its own acknowledgement and rejection, independent of its siblings.
+    Individual,
+}
+
 /// Broker operations the host drives between source lifecycle transitions.
 #[async_trait]
 #[cfg_attr(
@@ -335,6 +344,9 @@ pub trait SourceConnector: Send + Sized + 'static {
 pub trait BrokerSourceConnector: SourceConnector {
     type Message: SourceMessage<Position = Self::Position>;
     type Position: Clone + Debug + Send + Sync + 'static;
+
+    /// Whether one graph outcome settles a batch or only its own position.
+    const SETTLEMENT: SourceSettlement = SourceSettlement::Batch;
 
     /// Reads the next batch, up to `request.max_messages`.
     ///

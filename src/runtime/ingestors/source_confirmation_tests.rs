@@ -450,3 +450,44 @@ async fn a_stop_before_a_batch_resolved_reports_its_positions_unconfirmed() {
     // The unresolved roots ended with the host, which releases what they counted.
     assert_eq!(trackers.domain_outstanding_for_ownership_handoff(), 0);
 }
+
+#[nervix_primitives::test]
+async fn individual_settlement_keeps_each_drain_guard_until_its_transport_confirmation() {
+    let check = ConfirmationCheck::reading([]);
+    let mut source = check.source;
+    let mut host = SourceHost::new(check.host);
+    let messages = (1..=3u64)
+        .map(|position| ConfirmingDelivery {
+            position,
+            payload: vec![u8::try_from(position).assured("the check uses positions below 256")],
+        })
+        .collect();
+    let batch = IndividualBatch::intake(&mut host, messages, Duration::from_secs(1)).await;
+    let result = batch
+        .settle(
+            &mut source,
+            &mut host,
+            BatchSettlement {
+                position_class: PositionClass::BrokerRedelivered,
+                retry_after: Duration::from_millis(1),
+            },
+        )
+        .await;
+    assert!(matches!(result, BatchDisposition::Accepted));
+    assert_eq!(
+        check.record.lock().outstanding_while_acknowledging,
+        (1..=3)
+            .rev()
+            .map(|count| OutstandingRoots {
+                domain: count,
+                ingestor: count
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(check.trackers.domain_outstanding_for_ownership_handoff(), 0);
+    assert_eq!(
+        check.trackers.ingestor_outstanding_for_ownership_handoff(),
+        0
+    );
+    drop(check.shutdown);
+}

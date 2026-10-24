@@ -1728,6 +1728,16 @@ it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
 
+The RabbitMQ fixture publishes its management HTTP port beside the AMQP endpoints. A scenario's
+`RabbitMqQueueProbe` observes its explicitly provisioned queue with the fixture credentials:
+consumer acknowledgement mode and prefetch, unacknowledged deliveries, or total outstanding
+messages. Each observation uses the shared status budget and bounded polling. These are broker
+observations. Missing statistics before the broker's first queue sample mean the observation is
+pending; they never mean zero messages. The `@rabbitmq_consumer_modes` outlines use them on
+one and three nodes to qualify automatic consumption, a four-delivery prefetch window, mixed
+graph outcomes and connection-loss recovery. They join the ordinary and diagnostic selections;
+the stress selection includes their eight examples in its registered total.
+
 MongoDB write-concern scenarios use a separate single-member replica set, reached through a direct
 connection after its primary election completes within the dependency startup budget. A client
 requesting two data-bearing members receives the server's unsatisfied write-concern answer beside

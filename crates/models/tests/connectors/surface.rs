@@ -126,7 +126,11 @@ fn source_surface(kind: IngestSourceKind) -> SourceSurface {
             options: &[("QUEUE GROUP", true), ("INSTANCES", true)],
         },
         IngestSourceKind::RabbitMq(RabbitMqSourceEntity::Queue) => SourceSurface {
-            delivery: &[(IngestDeliveryKind::AckSequential, false)],
+            delivery: &[
+                (IngestDeliveryKind::NoAck, false),
+                (IngestDeliveryKind::AckSequential, false),
+                (IngestDeliveryKind::AckParallel, false),
+            ],
             quiesce: SUSPEND,
             locator: Some(("QUEUE", "rabbitmq_queue")),
             options: &[("INSTANCES", false)],

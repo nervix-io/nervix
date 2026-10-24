@@ -70,8 +70,8 @@ use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, RabbitMqQueueName};
 use nervix_primitives::time::{Instant, sleep, timeout};
 pub use source::{
-    RabbitMqDeliveryHeaders, RabbitMqSource, RabbitMqSourceError, RabbitMqSourceMessage,
-    RabbitMqSourcePlan, RabbitMqSourcePosition,
+    RabbitMqConsumerMode, RabbitMqDeliveryHeaders, RabbitMqSource, RabbitMqSourceError,
+    RabbitMqSourceMessage, RabbitMqSourcePlan, RabbitMqSourcePosition,
 };
 use thiserror::Error;
 

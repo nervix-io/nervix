@@ -1198,7 +1198,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | --- | --- |
 | Reference | RABBITMQ client |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |
-| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
@@ -1206,20 +1206,35 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
-| Buffers | deliveries the broker sends ahead of their acknowledgement: at most 1 delivery; when full, holds back what fills it |
-| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open and consume: `connect_timeout_ms`; 30s when omitted<br>a silent connection: driver default, twice the negotiated heartbeat |
-| Driver limits | A frame above the negotiated frame_max ends the connection. |
+| Buffers | Lapin's existing consumer delivery queue; broker prefetch bounds it in acknowledged modes, but automatic acknowledgements do not apply that bound: unbounded<br>deliveries gathered for one host read: set by 1 under NO ACK and ACK SEQUENTIAL; ACK PARALLEL MAX otherwise, at most 65,535; when full, holds back what fills it |
+| Network waits | gathering further deliveries after the first under ACK PARALLEL; cancellation hands over every delivery already gathered: `BATCH TIMEOUT`<br>connection: name resolution, address attempts, TLS, the AMQP handshake, channel open and consume: `connect_timeout_ms`; 30s when omitted<br>a silent connection: driver default, twice the negotiated heartbeat |
+| Driver limits | Consumer prefetch is 1 under ACK SEQUENTIAL and ACK PARALLEL MAX under ACK PARALLEL, at most 65,535; the broker holds back deliveries beyond that window.<br>NO ACK has no prefetch bound; auto-acknowledged deliveries can accumulate in Lapin's existing consumer queue while the host is not reading.<br>A frame above the negotiated frame_max ends the connection. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-ingest).
 <!-- connector-matrix:ingest-rabbitmq-queue:end -->
 
-Each instance consumes with a prefetch window of one delivery, which it acknowledges once the
-records decoded from it have been acknowledged through the graph. A failed or timed-out graph
-acknowledgement, or a failed transport acknowledgement, makes the instance try to negatively
-acknowledge the delivery with requeue. When that requeue succeeds, RabbitMQ can deliver the message
-again and the instance waits on its declared `RETRY POLICY` cadence before reading again. If the
-requeue fails, the instance suspends and reconnects as described below.
+Choose `MODE NO ACK`, `MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY …`, or
+`MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration> RETRY POLICY …`.
+`DESCRIBE INGESTOR` prints the complete selected mode.
+
+`NO ACK` registers an automatically acknowledging consumer, sends no prefetch request and sends
+no delivery acknowledgements or rejections. RabbitMQ considers a delivery complete when it sends
+it, so connection loss, broker restart or a stopped consumer can lose a delivery the graph has not
+processed. Lapin's existing delivery queue has no bound in this mode; a publisher that outpaces the
+host can grow that queue. A payload the node's extension workers cannot admit is refused and
+counted. Use an acknowledged mode when the broker must retain unprocessed deliveries.
+
+`ACK SEQUENTIAL` uses a prefetch of one. `ACK PARALLEL MAX n` uses a prefetch of `n` per instance,
+where `n` is in `1..=65535`, the range of AMQP's prefetch field. Each read gathers up to that count,
+ending at `BATCH TIMEOUT` after its first delivery. Each delivery keeps its own graph outcome and
+is acknowledged or negatively acknowledged individually; one failed delivery does not requeue
+successful siblings. A failed or timed-out graph acknowledgement, or a failed transport
+acknowledgement, makes the instance try to negatively acknowledge that delivery with requeue.
+After settlement the declared `RETRY POLICY` paces another read if anything was requeued. If a
+transport settlement fails, the instance suspends and reconnects as described below.
+It first keeps the graph waits of deliveries already admitted to their outcomes, so broker replay
+cannot overtake downstream work from that connection.
 
 A payload its codec refuses is consumed and acknowledged, and its decode rejection follows
 `ON GENERAL ERROR`; see [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
@@ -1229,7 +1244,7 @@ consumers on the same queue continue. Queue length, message TTL, overflow, and a
 remain in force. If auto-expiry deletes the queue, resume reports a source error until an operator
 re-provisions it; Nervix never creates it.
 
-A connection that closes while a delivery is still unacknowledged, because the broker restarted,
+A connection that closes while an acknowledged-mode delivery is still unacknowledged, because the broker restarted,
 closed it, or the network dropped it, also makes RabbitMQ requeue that delivery. The acknowledgement
 or the requeue the ingestor still owes it can only be sent on the connection it arrived on, so the
 instance reconnects on its `RETRY POLICY` cadence. Once that reconnect succeeds, it discards the

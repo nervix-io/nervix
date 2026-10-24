@@ -743,6 +743,12 @@ group in `MODE NO ACK` acknowledges nothing: when intake stops, its source commi
 driver delivered since the driver's last commit, and waits for the answer before the consumer
 leaves the group, and a Pulsar subscription in `MODE NO ACK` only queues its acknowledgements.
 
+RabbitMQ `ACK PARALLEL` retains a separate admitted acknowledgement root for each delivery through
+its own transport operation. A failed transport keeps the remaining admitted graph waits owned
+until they finish; shutdown reports the retained and pending positions as unconfirmed. RabbitMQ
+`NO ACK` has no transport confirmation for the drain to await; its already delivered input may be
+lost when the process ends.
+
 Work whose acknowledgement root is still unresolved when the drain ends is negatively acknowledged,
 so the source's own redelivery contract applies. A source instance that stops while it still waits
 on such a batch logs `source instance stopped before its transport confirmed positions it read; the

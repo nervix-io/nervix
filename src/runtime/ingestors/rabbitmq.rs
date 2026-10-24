@@ -15,7 +15,8 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_rabbitmq::{RabbitMqSource, RabbitMqSourcePlan};
+use nervix_connector_rabbitmq::{RabbitMqConsumerMode, RabbitMqSource, RabbitMqSourcePlan};
+use nervix_models::RabbitMqIngestMode;
 
 use super::{
     super::*,
@@ -41,19 +42,29 @@ impl RabbitMqIngestorStartPlan {
         let Some(dns) = runtime.dns() else {
             return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
         };
+        let consumer_mode = match &mode {
+            RabbitMqIngestMode::NoAck => RabbitMqConsumerMode::NoAck,
+            RabbitMqIngestMode::AckSequential { .. } => RabbitMqConsumerMode::Ack {
+                prefetch: std::num::NonZeroU16::MIN,
+            },
+            RabbitMqIngestMode::AckParallel { max, .. } => {
+                RabbitMqConsumerMode::Ack { prefetch: *max }
+            }
+        };
         BrokerSourceStart {
             connector: RabbitMqSourcePlan::new(
                 resolved.entries,
                 dns.clone(),
                 queue,
                 ingestor.name.as_str().to_string(),
+                consumer_mode,
             ),
             instances,
             acknowledgement: mode.acknowledgement(),
             buffered_intake: false,
             flush_each_intake: false,
-            // Every delivery mode of this source is acknowledged: a batch the extension workers
-            // refuse is rejected and delivered again, and no payload is taken in unacknowledged.
+            // Auto-ack deliveries cannot be presented again. Refuse and count a payload when
+            // the extension workers are full rather than holding the transport's read loop.
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "rabbitmq",

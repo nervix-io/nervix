@@ -601,6 +601,15 @@ attaches credentials from the address. A `NO ACK` round trip that runs out of th
 `timeout_ms` fails the write as a publish failure with the elapsed deadline as its typed cause and
 its text leading the report.
 
+RabbitMQ consumption keeps a failed Lapin receive, ACK or NACK as the typed cause beneath
+`RabbitMqSourceError`; the host reports that chain through its ordinary source-failure boundary.
+A requested batch deadline that cannot be represented is `RabbitMqSourceError::BatchDeadline`.
+If a stream failure or invalid deadline follows gathered deliveries, the reader hands those
+deliveries to the host before reporting the deferred failure on its next read. A parallel
+delivery's graph refusal rejects only its own position. A failed transport settlement retains
+the unresolved positions for the broker-redelivery recovery path, without counting positions
+already confirmed or requeued on that connection.
+
 A RabbitMQ publish that ends with the broker closing the sink's channel is classified by the
 broker's own reason, which the sink reads from its connection. A refusal of a message body larger
 than `max_message_size` is a `RabbitMqRecordError`, owned by the RabbitMQ sink, which carries the
