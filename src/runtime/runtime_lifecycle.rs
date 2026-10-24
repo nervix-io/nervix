@@ -776,6 +776,15 @@ impl Runtime {
         for task in execution.tasks {
             Self::await_shutdown_task(task, domain, None, "domain execution").await;
         }
+        // Every branch task of the execution has ended, in time or at a stop grace, so the
+        // snapshot task of each of its deduplicator and window branches is making its last write.
+        // A branch ended at its grace did not wait for that write, so the domain waits for it
+        // here: a stopped domain's checkpoints are what a stopped backup cut, a restart and the
+        // next start read, and they are on disk once its stop completes.
+        self.inner
+            .branch_snapshot_tasks
+            .wait_for_domain(domain)
+            .await;
         let quiesce_keys = self
             .inner
             .node_quiesce_counters

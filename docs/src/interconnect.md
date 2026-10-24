@@ -668,7 +668,12 @@ operation's domain semantics.
    sequence of chunks. The reader rejects early end, extra bytes, and a stalled chunk. Dropping the
    reader cancels the stream and releases its reservations. The producer's opening callback and
    each chunk carry a local `StreamHandlerError` report; an admission, storage, or encoding cause
-   stays beneath that handler context until the response reaches the wire boundary.
+   stays beneath that handler context until the response reaches the wire boundary. A chunk the
+   producer wrote may be larger than the reader's window: while it is being written, each nonzero
+   flow-control grant restarts the five-second write progress bound, as it does for a duplex
+   frame, so a chunk has no total transfer deadline while its reader keeps reading. A reader that
+   grants nothing for the bound, and a producer whose next chunk takes longer than it, reset the
+   stream with the typed transport progress timeout.
 4. **Ordered duplex stream.** Each direction sends length-prefixed, validated frames in order and
    may close independently. Opening the stream is bounded by the operation's declared setup
    deadline. An idle established stream is valid; the owning protocol sets deadlines for answers it
