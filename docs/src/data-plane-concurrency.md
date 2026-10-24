@@ -2326,6 +2326,17 @@ command recipes in [Developing Nervix](./developing-nervix.md).
 
 ### Protocols and their checks
 
+The consensus log chunk owner releases its iterator allocation and Commands reservation in the
+same transition that hands out its final entry. Its Shuttle check races that transition with
+another reader's reservation and leaves the first consumer parked: the other reader and a small
+source control reservation must finish without another poll of the exhausted chunk. This is a
+control-plane memory-lifetime check, with no memory-ordering claim. The real-storage owner tests
+also check that a partially consumed chunk retains its charge, and the public WASM/Kafka restore
+outline checks source readiness and Commands-memory headroom after restoring onto a fresh cluster,
+allowing the retirement reservations that live Kafka consumers retain.
+The semaphore waits are asynchronous and outside Deloxide's tracked-lock detection; the diagnostic
+restore workloads exercise the surrounding storage and restore lifecycle.
+
 The checks below hold the scheduler-visible parts of each protocol to their invariants. Test
 names are given relative to their owning module; the `shuttle` feature selects the modeled build.
 A family of names means each member runs independently through the recipe.
