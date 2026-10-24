@@ -741,6 +741,14 @@ that gives up only after every record's report was served is no failure. A flush
 otherwise, or whose blocking task does not complete, keeps that cause beneath
 `SinkFinishError::Flush`.
 
+A Kafka source classifies an unknown topic from a subscription or topic metadata as
+`KafkaSourceError::MissingTopic`, retaining the driver's typed `KafkaError` as an attachment.
+The named topic is the semantic failure shown in `DESCRIBE INGESTOR` until the operator provisions
+it. Partition watches recognize this variant as an empty topology; other inspection failures keep
+their existing reporting path. A Kafka client's attempt to set `allow.auto.create.topics` is
+`RegistryError::NervixOwnedClientConfigKey`, naming the domain, client and owned key without its
+configured value. The source and both inspectors enforce `false` after pass-through configuration.
+
 A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaSourceError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
 does not answer within thirty seconds is `KafkaSourceError::CommitUnanswered`, and a blocking-pool

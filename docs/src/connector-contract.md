@@ -1795,6 +1795,14 @@ sequenceDiagram
 ## Integration-specific boundaries
 
 - **Kafka source.** The driver inspects topic partitions and reads or commits Kafka offsets.
+  Every consumer it creates, the source's own and both partition inspectors, sets
+  `allow.auto.create.topics` to `false` after the client's pass-through entries, and the registry
+  refuses that key in a Kafka client's `CONFIG`, so neither subscribing nor inspecting ever creates
+  a topic. A topic the broker does not have is the typed missing-topic failure, from the
+  subscription's error or from the topic's metadata, and the host shows it as the ingestor's
+  transient error until the topic is provisioned.
+  Partition inspectors preserve that typed outcome across their admitted control call so their
+  watches observe an empty topology until provisioning, then publish the available partitions.
   Under `OFFSET BY CONSUMER GROUP` in an `ACK` mode, the source commits the latest offset of each
   partition of an acknowledged batch and waits for the coordinator's answer, one round trip per
   batch, which `ACK PARALLEL` amortizes over the batch. A commit the coordinator refuses fails the
