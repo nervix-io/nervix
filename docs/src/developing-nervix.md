@@ -462,12 +462,14 @@ just test-shuttle
 ```
 
 Each check runs in its own process under the exploration it declares, then again under the
-uncontrolled-nondeterminism detector. `crates/model-harness/shuttle-inventory.toml` registers every
-check by package and test name, and the run fails when a registered check is missing, ignored or did
-not complete its exploration, and when a `shuttle_` test is not registered; add a new check to its
-package's list, and rename a renamed one there, in the same change. The command reports how many
-checks it discovered, selected, executed and saw complete. A substring selects a focused check or
-protocol family in every package, and a substring that selects nothing fails:
+uncontrolled-nondeterminism detector. Checks run beside each other, one per CPU the command may use,
+so restrict its CPUs, for example with `taskset -c 0-3 just test-shuttle`, to share a busy machine.
+`crates/model-harness/shuttle-inventory.toml` registers every check by package and test name, and
+the run fails when a registered check is missing, ignored or did not complete its exploration, and
+when a `shuttle_` test is not registered; add a new check to its package's list, and rename a
+renamed one there, in the same change. The command reports how many checks it discovered, selected,
+executed and saw complete. A substring selects a focused check or protocol family in every package,
+and a substring that selects nothing fails:
 
 ```bash
 just test-shuttle force_flush

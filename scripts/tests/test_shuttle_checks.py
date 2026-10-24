@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import threading
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Callable, Mapping, Sequence
+from unittest import mock
 
+from scripts.model_evidence import read_complete
 from scripts.shuttle_checks import (
     COMPLETED,
     FORCED_FAILURE,
@@ -21,6 +25,7 @@ from scripts.shuttle_checks import (
     Inventory,
     Outcome,
     RunnerError,
+    available_cpus,
     listed_tests,
     main,
     parse_inventory,
@@ -183,17 +188,25 @@ def environment_answers(arguments: Sequence[str]) -> Outcome | None:
     return None
 
 
+# How long a test of the runner's concurrency waits for checks that should be running beside each
+# other before it fails rather than hangs. The wait ends as soon as they are all running.
+BESIDE_EACH_OTHER = 30
+
+
 class RunTests(unittest.TestCase):
     def run_gate(
         self,
         respond: Callable[[Sequence[str], Mapping[str, str]], Outcome],
         filter_text: str = "",
+        jobs: int = 1,
+        report: bool = False,
     ) -> tuple[int, str, Path, ScriptedCommands]:
         root = repository(self)
         commands = ScriptedCommands(root, respond)
+        evidence = root / "models.json" if report else None
         out = io.StringIO()
         with redirect_stdout(out), redirect_stderr(out):
-            status = run_checks(commands, inventory(), root / "target", filter_text)
+            status = run_checks(commands, inventory(), root / "target", filter_text, evidence, jobs)
         return status, out.getvalue(), root / "target", commands
 
     @staticmethod
@@ -298,6 +311,124 @@ class RunTests(unittest.TestCase):
         exact = [arguments for arguments, _ in commands.commands if "--exact" in arguments]
         self.assertEqual({arguments[7] for arguments in exact}, {FLUSH})
 
+    def test_checks_run_beside_each_other(self) -> None:
+        # Every check's exploration waits until all three explore at once, so a runner that ran
+        # them in turn would break the barrier.
+        together = threading.Barrier(3, timeout=BESIDE_EACH_OTHER)
+
+        def respond(arguments: Sequence[str], environment: Mapping[str, str]) -> Outcome:
+            answer = self.listings(arguments)
+            if answer is not None:
+                return answer
+            if "SHUTTLE_CHECK_NONDETERMINISM" not in environment:
+                together.wait()
+            return Outcome(0, completed_output())
+
+        status, report, _, _ = self.run_gate(respond, jobs=3)
+        self.assertEqual(status, 0, report)
+        self.assertIn("discovered 3, selected 3, executed 3, completed 3", report)
+
+    def test_no_more_checks_run_at_once_than_the_jobs_allow(self) -> None:
+        lock = threading.Lock()
+        running = 0
+        most = 0
+        # The first two explorations wait for each other, so the peak is reached; the third check
+        # can start only once one of them has ended.
+        pair = threading.Barrier(2, timeout=BESIDE_EACH_OTHER)
+        arrivals = 0
+
+        def respond(arguments: Sequence[str], environment: Mapping[str, str]) -> Outcome:
+            nonlocal running, most, arrivals
+            answer = self.listings(arguments)
+            if answer is not None:
+                return answer
+            with lock:
+                running += 1
+                most = max(most, running)
+                arrivals += 1
+                first_pair = arrivals <= 2
+            if first_pair:
+                pair.wait()
+            with lock:
+                running -= 1
+            return Outcome(0, completed_output())
+
+        status, report, _, _ = self.run_gate(respond, jobs=2)
+        self.assertEqual(status, 0, report)
+        self.assertEqual(most, 2)
+
+    def test_a_checks_nondeterminism_run_never_starts_during_its_exploration(self) -> None:
+        # Both runs of a check persist schedules in its one failure directory, so they must never
+        # overlap. Each exploration stays open for a while; its own nondeterminism run must not
+        # start in that window. A longer window only strengthens the assertion.
+        nondeterminism_started = {
+            test: threading.Event() for test in (WAIT_QUEUE, CANCELLATION, FLUSH)
+        }
+        lock = threading.Lock()
+        overlapping: list[str] = []
+
+        def respond(arguments: Sequence[str], environment: Mapping[str, str]) -> Outcome:
+            answer = self.listings(arguments)
+            if answer is not None:
+                return answer
+            test = arguments[7]
+            if "SHUTTLE_CHECK_NONDETERMINISM" in environment:
+                nondeterminism_started[test].set()
+            elif nondeterminism_started[test].wait(timeout=0.2):
+                with lock:
+                    overlapping.append(test)
+            return Outcome(0, completed_output())
+
+        status, report, _, _ = self.run_gate(respond, jobs=3)
+        self.assertEqual(status, 0, report)
+        self.assertEqual(overlapping, [])
+
+    def test_the_evidence_keeps_the_selection_order_when_checks_end_out_of_order(self) -> None:
+        # The first selected check cannot end first: its exploration holds until the other two
+        # checks have ended their explorations and begun their nondeterminism runs.
+        later_checks_ended = threading.Barrier(3, timeout=BESIDE_EACH_OTHER)
+
+        def respond(arguments: Sequence[str], environment: Mapping[str, str]) -> Outcome:
+            answer = self.listings(arguments)
+            if answer is not None:
+                return answer
+            nondeterminism = "SHUTTLE_CHECK_NONDETERMINISM" in environment
+            if WAIT_QUEUE in arguments and not nondeterminism:
+                later_checks_ended.wait()
+            if WAIT_QUEUE not in arguments and nondeterminism:
+                later_checks_ended.wait()
+            return Outcome(0, completed_output())
+
+        status, report, target, _ = self.run_gate(respond, jobs=3, report=True)
+        self.assertEqual(status, 0, report)
+        evidence = read_complete(target.parent / "models.json", "shuttle", "")
+        self.assertEqual(
+            [check["test"] for check in evidence["checks"]], [WAIT_QUEUE, CANCELLATION, FLUSH]
+        )
+
+    def test_a_failing_check_beside_others_keeps_its_evidence_and_fails_the_run(self) -> None:
+        def respond(arguments: Sequence[str], environment: Mapping[str, str]) -> Outcome:
+            answer = self.listings(arguments)
+            if answer is not None:
+                return answer
+            if CANCELLATION in arguments and "SHUTTLE_CHECK_NONDETERMINISM" not in environment:
+                directory = Path(environment["SHUTTLE_TRACE_DIR"])
+                (directory / "schedule-1").write_text("91021", encoding="utf-8")
+                return Outcome(101, "panicked: deadlock detected\n")
+            return Outcome(0, completed_output())
+
+        status, report, target, _ = self.run_gate(respond, jobs=3)
+        self.assertEqual(status, 1)
+        self.assertIn("discovered 3, selected 3, executed 3, completed 2", report)
+        evidence = target / "shuttle-failures" / REPLAY_CHECK_PACKAGE / CANCELLATION
+        metadata = json.loads((evidence / "exploration.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["schedules"], ["schedule-1"])
+        self.assertFalse((target / "shuttle-failures" / REPLAY_CHECK_PACKAGE / WAIT_QUEUE).exists())
+
+    def test_a_run_needs_at_least_one_job(self) -> None:
+        with self.assertRaisesRegex(RunnerError, "0 is not a positive number of checks"):
+            self.run_gate(lambda arguments, environment: Outcome(0, ""), jobs=0)
+
 
 class ReplayTests(unittest.TestCase):
     def test_a_replay_runs_exactly_the_check_the_schedule_belongs_to(self) -> None:
@@ -383,22 +514,86 @@ class ReplayCheckTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
-    def test_packages_prints_the_inventory_packages(self) -> None:
-        root = repository(self)
+    @staticmethod
+    def registered(root: Path) -> None:
         inventory_path = root / "crates" / "model-harness" / "shuttle-inventory.toml"
         inventory_path.parent.mkdir(parents=True)
         inventory_path.write_text(INVENTORY, encoding="utf-8")
+
+    @staticmethod
+    def explored_together(count: int) -> Callable[[Sequence[str], Mapping[str, str]], Outcome]:
+        """Answers whose explorations each wait until `count` of them explore at once."""
+
+        together = threading.Barrier(count, timeout=BESIDE_EACH_OTHER)
+
+        def respond(arguments: Sequence[str], environment: Mapping[str, str]) -> Outcome:
+            answer = RunTests.listings(arguments)
+            if answer is not None:
+                return answer
+            if "SHUTTLE_CHECK_NONDETERMINISM" not in environment:
+                together.wait()
+            return Outcome(0, completed_output())
+
+        return respond
+
+    def test_packages_prints_the_inventory_packages(self) -> None:
+        root = repository(self)
+        self.registered(root)
         out = io.StringIO()
         with redirect_stdout(out):
             status = main(["--root", str(root), "packages"])
         self.assertEqual(status, 0)
         self.assertEqual(out.getvalue().split(), [REPLAY_CHECK_PACKAGE, "nervix-server"])
 
+    def test_a_run_refuses_a_job_count_below_one(self) -> None:
+        root = repository(self)
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(out):
+            with self.assertRaises(SystemExit) as refused:
+                main(["--root", str(root), "--target-dir", str(root / "target"), "run", "--jobs", "0"])
+        self.assertEqual(refused.exception.code, 2)
+        self.assertIn("0 is not a positive number of checks", out.getvalue())
+
+    def test_a_run_runs_as_many_checks_at_once_as_its_jobs_ask(self) -> None:
+        root = repository(self)
+        self.registered(root)
+        respond = self.explored_together(3)
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(out):
+            status = main(
+                ["--root", str(root), "--target-dir", str(root / "target"), "run", "--jobs", "3"],
+                lambda root: ScriptedCommands(root, respond),
+            )
+        self.assertEqual(status, 0, out.getvalue())
+        self.assertIn("discovered 3, selected 3, executed 3, completed 3", out.getvalue())
+
+    def test_a_run_by_default_runs_one_check_per_cpu_it_may_use(self) -> None:
+        root = repository(self)
+        self.registered(root)
+        respond = self.explored_together(3)
+        out = io.StringIO()
+        affinity = mock.patch.object(os, "sched_getaffinity", lambda pid: {0, 2, 5}, create=True)
+        spy = mock.patch("scripts.shuttle_checks.run_checks", wraps=run_checks)
+        with affinity, spy as checks, redirect_stdout(out), redirect_stderr(out):
+            status = main(
+                ["--root", str(root), "--target-dir", str(root / "target"), "run"],
+                lambda root: ScriptedCommands(root, respond),
+            )
+        self.assertEqual(status, 0, out.getvalue())
+        self.assertIn("discovered 3, selected 3, executed 3, completed 3", out.getvalue())
+        jobs = checks.call_args.args[5]
+        self.assertEqual(jobs, 3)
+
+    def test_without_an_affinity_a_run_counts_the_cpus_or_runs_one_check_at_a_time(self) -> None:
+        with mock.patch.object(os, "sched_getaffinity", None, create=True):
+            with mock.patch.object(os, "cpu_count", lambda: 6):
+                self.assertEqual(available_cpus(), 6)
+            with mock.patch.object(os, "cpu_count", lambda: None):
+                self.assertEqual(available_cpus(), 1)
+
     def test_a_run_needs_a_target_directory(self) -> None:
         root = repository(self)
-        inventory_path = root / "crates" / "model-harness" / "shuttle-inventory.toml"
-        inventory_path.parent.mkdir(parents=True)
-        inventory_path.write_text(INVENTORY, encoding="utf-8")
+        self.registered(root)
         out = io.StringIO()
         with redirect_stdout(out), redirect_stderr(out):
             status = main(["--root", str(root), "run"])
