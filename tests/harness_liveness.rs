@@ -124,6 +124,8 @@ mod unaccepted_address_tests;
     reason = "the scenario binary uses the lifecycle APIs shared by this fixture qualification"
 )]
 mod websocket_peer;
+#[path = "websocket_lifecycle/peer_tests.rs"]
+mod websocket_peer_tests;
 
 mod tests {
     use std::{
