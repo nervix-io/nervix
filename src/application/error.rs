@@ -89,8 +89,6 @@ pub enum AppError {
     OpenRuntimeState,
     #[error("failed to load interconnect tls configuration")]
     LoadInterconnectTls,
-    #[error("failed to load the name resolver configuration")]
-    LoadDnsConfiguration,
     #[error("failed to load gRPC tls configuration")]
     LoadGrpcTls,
     #[error("failed to load web console tls configuration")]
@@ -101,6 +99,10 @@ pub enum AppError {
     RegisterInterconnectRequestHandler,
     #[error("failed to start cluster membership")]
     StartCluster,
+    #[error("the startup preflight refused this node")]
+    Preflight,
+    #[error("this node was refused at join")]
+    JoinRefused,
     #[error("failed to stop cluster membership")]
     ShutdownCluster,
     #[error("failed to close the node's stores")]
@@ -109,6 +111,10 @@ pub enum AppError {
     InvalidMemoryPressureConfig,
     #[error("invalid Raft timings")]
     InvalidRaftTimings,
+    #[error("invalid membership settings")]
+    InvalidMembershipSettings,
+    #[error("invalid capacity settings")]
+    InvalidCapacitySettings,
     #[error("invalid shutdown timeouts")]
     InvalidShutdownTimeouts,
     #[error("failed to read the node settings")]

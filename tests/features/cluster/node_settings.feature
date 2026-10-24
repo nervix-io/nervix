@@ -34,13 +34,13 @@ Feature: Node settings
       | 1            |
       | 3            |
 
-  Scenario Outline: A node given an election timeout that does not exceed its heartbeat refuses to start on a cluster of <cluster_size>
+  Scenario Outline: A node given a heartbeat below the millisecond consensus runs timings at refuses to start on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
     And node "node-<cluster_size>" is stopped
-    And node-<cluster_size> starts with raft-election-timeout-min = 200ms
+    And node-<cluster_size> starts with raft-heartbeat-interval = 500us
     When node "node-<cluster_size>" attempts to start
-    Then node "node-<cluster_size>" refused to start because "raft-election-timeout-min (200ms) must exceed raft-heartbeat-interval (200ms)"
-    Given node-<cluster_size> starts with raft-election-timeout-min = 1s
+    Then node "node-<cluster_size>" refused to start because "raft-heartbeat-interval (500µs) must be at least 1ms, the resolution consensus runs timings at"
+    Given node-<cluster_size> starts with raft-heartbeat-interval = 200ms
     When node "node-<cluster_size>" is started
     Then node "node-<cluster_size>" eventually observes a stable leader
 

@@ -20,7 +20,7 @@ use crate::application::{
 };
 
 /// The headings of the settings areas, in the order help lists them.
-const SETTINGS_HEADINGS: [&str; 8] = [
+const SETTINGS_HEADINGS: [&str; 9] = [
     "Consensus",
     "Membership",
     "Scheduling",
@@ -29,19 +29,20 @@ const SETTINGS_HEADINGS: [&str; 8] = [
     "Memory pressure",
     "Shutdown",
     "Resources",
+    "Capacity",
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 28] = [
+const SETTING_NAMES: [&str; 29] = [
     "raft-heartbeat-interval",
-    "raft-election-timeout-min",
-    "raft-election-timeout-max",
     "raft-snapshot-entry-threshold",
     "raft-snapshot-byte-threshold",
     "raft-covered-log-entries-retained",
     "raft-covered-log-bytes-retained",
     "raft-retained-log-cap",
     "node-unavailability-timeout",
+    "gossip-interval",
+    "clock-skew-tolerance",
     "replica-count",
     "state-snapshot-interval",
     "restore-staging-max-bytes",
@@ -61,6 +62,7 @@ const SETTING_NAMES: [&str; 28] = [
     "resource-max-archive-bytes",
     "resource-max-extracted-bytes",
     "resource-max-file-count",
+    "memory-limit",
 ];
 
 #[test]
@@ -309,28 +311,39 @@ fn a_drain_timeout_above_the_shutdown_timeout_refuses_the_node() {
 }
 
 #[test]
-fn raft_timings_out_of_order_refuse_the_node() {
-    let refused = Application::try_from(test_args(&["--raft-election-timeout-min", "250ms"]))
+fn a_heartbeat_below_one_millisecond_refuses_the_node() {
+    let refused = Application::try_from(test_args(&["--raft-heartbeat-interval", "500us"]))
         .err()
-        .assured("the minimum election timeout equals the default heartbeat");
+        .assured("half a millisecond truncates to no consensus milliseconds");
     assert!(matches!(
         refused.current_context(),
         AppError::InvalidRaftTimings
     ));
     assert_eq!(
         refused.downcast_ref::<RaftTimingError>(),
-        Some(&RaftTimingError::ElectionTimeoutNotAboveHeartbeat {
-            election_timeout_min: Duration::from_millis(250),
-            heartbeat_interval: Duration::from_millis(250),
+        Some(&RaftTimingError::HeartbeatBelowOneMillisecond {
+            heartbeat_interval: Duration::from_micros(500),
         })
     );
+}
 
-    let refused = Application::try_from(test_args(&["--raft-election-timeout-max", "1500ms"]))
+#[test]
+fn election_timeouts_are_six_and_twelve_heartbeats() {
+    let application = Application::try_from(test_args(&["--raft-heartbeat-interval", "200ms"]))
+        .assured("a 200ms heartbeat is a valid heartbeat");
+    let raft = application.settings.raft;
+    assert_eq!(raft.election_timeout_min(), Duration::from_millis(1200));
+    assert_eq!(raft.election_timeout_max(), Duration::from_millis(2400));
+}
+
+#[test]
+fn a_gossip_interval_below_one_millisecond_refuses_the_node() {
+    let refused = Application::try_from(test_args(&["--gossip-interval", "0s"]))
         .err()
-        .assured("the maximum election timeout equals the default minimum");
+        .assured("no gossip interval is no cadence");
     assert!(matches!(
         refused.current_context(),
-        AppError::InvalidRaftTimings
+        AppError::InvalidMembershipSettings
     ));
 }
 

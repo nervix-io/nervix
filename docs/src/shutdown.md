@@ -18,10 +18,16 @@ for the delivery consequences at each emitter.
 
 ## Stop Requests
 
-A node begins shutting down for exactly two reasons:
+A node begins shutting down for exactly three reasons:
 
 - It receives its first `SIGINT` or `SIGTERM`.
 - One of its public listeners stops, whether it failed or returned.
+- It is refused as it joins the cluster: a connection it dials is refused, before any has
+  completed, because the two nodes cannot run together; a live member of the membership it has
+  applied publishes prerequisites it cannot run beside before it is a member itself; or the clock
+  of a peer it completed a handshake with is beyond its tolerance.
+  [Prerequisites At Join](./node-settings.md#prerequisites-at-join) describes each. The refused
+  node requests its own stop; a node that has joined never stops because of a newcomer.
 
 There is no NSPL statement, API call, or cluster command that stops a node. `CORDON NODE`,
 `DRAIN NODE`, `RELOCATE`, and `DROP NODE` move work and change eligibility; none of them ends a
@@ -123,6 +129,8 @@ guarantees the process ends.
 | Shutdown deadline expired | `1` |
 | A public listener, cluster shutdown, or storage release reported an error | `1` |
 | Termination signal handlers could not be registered at startup | `1` |
+| The [startup preflight](./node-settings.md#the-startup-preflight) refused the node before it bound a listener or opened a store | `1` |
+| The node was refused as it joined the cluster, once its shutdown phases have run | `1` |
 | A diagnostic node's deadlock diagnostics could not start | `1` |
 | A diagnostic node reported an active deadlock among its tracked locks and recorded it | `3` |
 | A diagnostic node reported a deadlock it could not record, lost findings, or outlived the budget for recording one | `4` |
@@ -1133,6 +1141,18 @@ bootstrap host for first contact.
 
 This is the fence that prevents crash recovery from reviving an obsolete owner. It is a
 process-start admission proof only: connectivity lost after admission does not revoke execution.
+
+### Checks Before A Node Rejoins
+
+Every start, the first and one after a forced ending alike, passes the
+[startup preflight](./node-settings.md#the-startup-preflight) before the node binds a listener or
+opens a store: its directories prove writable, its memory limit holds its budgets, its quotas fit
+its database volume, and its resolver loads. A refusal exits with status `1` and leaves the node's
+stores as the previous run left them: the preflight creates a directory only when it is absent, and
+removes the probe file it writes. A returning node that starts with peers to reach is then held to
+the cluster's prerequisites as it rejoins. When a connection it dials is refused before any has
+completed, or the clock of a peer it completed a handshake with is beyond its tolerance, it stops
+through the ordinary phases and exits with status `1`, while the incumbents keep running.
 
 ### Whole-Cluster Restart Keeps Ownership
 

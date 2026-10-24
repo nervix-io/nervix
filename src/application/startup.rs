@@ -31,9 +31,10 @@ use crate::{
 
 const CONSENSUS_DATABASE_DIRECTORY: &str = "consensus";
 const CONSENSUS_KEYSPACE_PREFIX: &str = "raft_";
-/// What opening or closing the node's stores is charged. The databases allocate their own caches,
-/// so the charge only admits the storage job that opens or closes them.
-const DATABASE_RESERVATION_BYTES: u64 = 4096;
+/// What a storage job at startup or shutdown is charged when it holds nothing of its own: opening or
+/// closing the node's stores, whose databases allocate their own caches, and the startup
+/// preflight's reads of small kernel files and its probe files. The charge only admits the job.
+pub(in crate::application) const STORAGE_JOB_RESERVATION_BYTES: u64 = 4096;
 
 #[derive(Debug, Error)]
 enum NodeDatabaseOpenError {
@@ -64,7 +65,7 @@ impl ApplicationStartup {
         executor: &Executor,
     ) -> Result<Database, Report<AppError>> {
         let reservation = executor
-            .reserve(MemoryClass::Management, DATABASE_RESERVATION_BYTES)
+            .reserve(MemoryClass::Management, STORAGE_JOB_RESERVATION_BYTES)
             .await
             .change_context(AppError::OpenRegistry)?;
         let opened_path = path.clone();
@@ -175,7 +176,7 @@ impl ApplicationStartup {
         stores: impl FnOnce() + Send + 'static,
     ) -> Result<(), Report<AppError>> {
         let reservation = executor
-            .reserve(MemoryClass::Management, DATABASE_RESERVATION_BYTES)
+            .reserve(MemoryClass::Management, STORAGE_JOB_RESERVATION_BYTES)
             .await
             .change_context(AppError::CloseStores)?;
         executor
@@ -226,12 +227,12 @@ mod tests {
     use nervix_models::ClusterNodeName;
 
     use super::{
-        Application, ApplicationStartup, CONSENSUS_KEYSPACE_PREFIX, DATABASE_RESERVATION_BYTES,
-        NodeIdentity, NodeSettings,
+        Application, ApplicationStartup, CONSENSUS_KEYSPACE_PREFIX, NodeIdentity, NodeSettings,
+        STORAGE_JOB_RESERVATION_BYTES,
     };
     use crate::{
         application::test_fixtures::{test_addr, test_tls_files},
-        cluster::MembershipSettings,
+        cluster::{MembershipSettings, MembershipValues},
     };
 
     /// Closing the node's stores while one of their databases' background workers fails. Shuttle
@@ -443,14 +444,13 @@ mod tests {
             .db_path(db_path.clone())
             .build();
         let settings = NodeSettings {
-            raft: RaftTimings::resolve(
-                Some(Duration::from_millis(100)),
-                Some(Duration::from_millis(300)),
-                Some(Duration::from_millis(600)),
-            )
-            .expect("the test's Raft timings are valid"),
-            membership: MembershipSettings::resolve(Some(Duration::from_secs(1)))
-                .expect("the test's unavailability timeout is valid"),
+            raft: RaftTimings::resolve(Some(Duration::from_millis(50)))
+                .expect("the test's Raft heartbeat is valid"),
+            membership: MembershipSettings::resolve(MembershipValues {
+                node_unavailability_timeout: Some(Duration::from_secs(1)),
+                ..MembershipValues::default()
+            })
+            .expect("the test's membership settings are valid"),
             ..NodeSettings::default()
         };
         let application = Application::builder()
@@ -470,7 +470,7 @@ mod tests {
 
         let executor = Executor::default();
         let reservation = executor
-            .try_reserve(MemoryClass::Management, DATABASE_RESERVATION_BYTES)
+            .try_reserve(MemoryClass::Management, STORAGE_JOB_RESERVATION_BYTES)
             .expect("the test's own executor has management room");
         let (node_keyspaces, consensus_keyspaces) = executor
             .run_storage(StorageClass::Filesystem, reservation, move |_, _| {

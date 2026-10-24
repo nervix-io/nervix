@@ -691,10 +691,11 @@ had not already published.
 Two kinds of deadline meet in every scenario.
 
 A **product deadline** is configuration a node enforces on itself: its shutdown and drain timeouts,
-its command retry validity and transaction idle timeout, its node-unavailability and election
-timeouts. Test clusters start with test values for some of them. A scenario about one of them
-configures it, drives the node to it, and asserts the outcome the owning chapter defines. No harness
-deadline shortens a product deadline while the scenario can still observe it.
+its command retry validity and transaction idle timeout, its node-unavailability timeout and the
+election timeouts its Raft heartbeat derives. Test clusters start with test values for some of
+them. A scenario about one of them configures it, drives the node to it, and asserts the outcome
+the owning chapter defines. No harness deadline shortens a product deadline while the scenario can
+still observe it.
 
 A **harness deadline** bounds how long the harness waits: for a status reply, for a node to become
 ready, for a cluster to stop, for the whole run. Its expiry changes nothing inside a node. It ends a
@@ -1346,9 +1347,26 @@ needs a step of its own.
 A setting the node refuses fails its launch before the node is spawned, with the refusal's whole
 report, and that failure is terminal. A scenario whose subject is the refusal starts the node with
 `When node "<node>" attempts to start`, which records the outcome instead of failing the step, and
-asserts it with `Then node "<node>" refused to start because "<text>"`. The settings of the current
-launch also decide how long a scenario-driven stop of that node may take, so a scenario that names
-a longer shutdown or drain timeout lengthens that bound with it.
+asserts it with `Then node "<node>" refused to start because "<text>"`. A node the startup preflight
+refuses ends the same way, as an application error of its task. The settings of the current launch
+also decide how long a scenario-driven stop of that node may take, so a scenario that names a longer
+shutdown or drain timeout lengthens that bound with it.
+
+Test clusters start with a 166 ms Raft heartbeat, so the election timeouts consensus derives from
+it, 996 ms to 1,992 ms, stay just inside the one and two seconds scenarios size their leader waits
+for. A scenario changes the heartbeat for the whole cluster with
+`Given raft heartbeat interval is configured as "<duration>"` before the cluster starts. Neither a
+test cluster nor a server process names a restore-staging quota of its own, so each node derives
+its quota from the volume that holds its database and passes the startup preflight on a host whose
+volume is smaller than 128 GiB.
+
+A node refused as it joins may already have answered its readiness probe when it stops, so its
+refusal is the ending of its task rather than a failed launch. A scenario whose subject is a join
+starts the node, adding it as a new member when the cluster does not have it yet, with
+`When node "<node>" attempts to join`. The step waits until the node is a voter of the membership
+or its task has ended, and records which. The scenario asserts the ending with
+`Then node "<node>" refused to join because "<text>"`, against the report the node's task ended
+with, or the admission with `Then node "<node>" joined the cluster`.
 
 ### Cluster Construction
 

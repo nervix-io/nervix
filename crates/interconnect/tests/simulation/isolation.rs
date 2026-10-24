@@ -178,6 +178,7 @@ async fn bind_host(
             cluster_id: CLUSTER.to_string(),
             node_id: node(name),
             advertised_host: name.to_string(),
+            join_terms: fixture_join_terms(),
         },
         credentials.bundle(),
         options,

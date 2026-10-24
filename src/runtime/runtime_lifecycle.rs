@@ -71,11 +71,12 @@ impl Runtime {
             executor,
             dns,
             db,
+            restore_staging_max_bytes,
             fault_injection,
             temp_dir,
         } = environment;
         let state_snapshot_interval = settings.state_snapshot_interval();
-        let restore_staging_max_bytes = settings.restore_staging_max_bytes();
+        let restore_staging_max_bytes = restore_staging_max_bytes.as_u64();
         let events = RuntimeEvents::new();
         let (domain_status_changed, _) = watch::channel(0);
         let state_store = db

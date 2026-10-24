@@ -47,7 +47,7 @@ use nervix_interconnect::{
     ControlEnvelope, Envelope, PeerResolver, PeerTarget, RuntimeErrorEvent, TlsConfigBundle,
     Transport, TransportClock, TransportIdentity, TransportOptions,
 };
-use nervix_models::{ClusterNodeName, NodeEndpoint};
+use nervix_models::{ClusterNodeName, NodeEndpoint, TrustRootFingerprint};
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statement_sources};
 use nervix_primitives::{
     runtime::Handle,
@@ -77,7 +77,7 @@ use nervix_server::{
         SchedulingSettings, SettingOverride, ShutdownCoordinator, ShutdownOutcome,
         ShutdownSettings, TransactionBounds, TransactionLimits, init_tracing_to_file,
     },
-    cluster::MembershipSettings,
+    cluster::{MembershipSettings, MembershipValues},
     memory_pressure::{MemoryPressureConfig, MemoryPressureSettings},
     runtime::{
         DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, RuntimeSettings, branch_task_stop_timeout,
@@ -202,9 +202,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const SQS_REGION: &str = "us-east-1";
 const TEST_LOG_DIR: &str = "tests/logs";
 const TEST_LOG_FILE: &str = "tests/logs/scenarios.log";
-const TEST_RAFT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
-const TEST_RAFT_ELECTION_TIMEOUT_MIN: Duration = Duration::from_secs(1);
-const TEST_RAFT_ELECTION_TIMEOUT_MAX: Duration = Duration::from_secs(2);
+/// A sixth of a second, so the election timeouts consensus derives from it stay just inside the one
+/// and two seconds scenarios size their leader waits for.
+const TEST_RAFT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(166);
+/// The cluster every test node claims unless a scenario names another for a node that joins.
+const TEST_CLUSTER_ID: &str = "cucumber";
 const TEST_REPLICA_COUNT: usize = 0;
 const TEST_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) const TEST_AUTH_USERNAME: &str = "default";
@@ -582,6 +584,11 @@ impl std::fmt::Debug for InterconnectTestCa {
 
 impl InterconnectTestCa {
     pub(crate) fn new(root: &TempDir) -> io::Result<Self> {
+        Self::new_in(root.path())
+    }
+
+    /// A fresh authority whose certificate is written into `directory`.
+    fn new_in(directory: &std::path::Path) -> io::Result<Self> {
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.key_usages = vec![
@@ -591,7 +598,7 @@ impl InterconnectTestCa {
         ];
         let key = KeyPair::generate().map_err(io::Error::other)?;
         let certificate = params.self_signed(&key).map_err(io::Error::other)?;
-        let path = root.path().join("interconnect-ca.pem");
+        let path = directory.join("interconnect-ca.pem");
         std::fs::write(&path, certificate.pem())?;
         Ok(Self {
             certificate,
@@ -602,11 +609,12 @@ impl InterconnectTestCa {
 
     fn issue_node(
         &self,
+        cluster_id: &str,
         node_id: &str,
         directory: &std::path::Path,
     ) -> io::Result<(PathBuf, PathBuf)> {
         self.issue_node_with_identity(
-            "cucumber",
+            cluster_id,
             node_id,
             TestCertificateValidity::Current,
             directory,
@@ -748,6 +756,28 @@ pub(crate) struct Cluster {
     /// What every node's name begins with: the n-th node is `<prefix>-<n>`, and the first one
     /// bootstraps the cluster.
     node_name_prefix: String,
+    /// What a scenario named for nodes that are not members yet, applied when each is registered.
+    pending_members: BTreeMap<String, PendingMember>,
+}
+
+/// What a node that is not a member yet brings when it first starts, as a scenario named it.
+#[derive(Debug, Default)]
+struct PendingMember {
+    /// The cluster it claims in its configuration and its certificate, when not the test cluster.
+    cluster_id: Option<String>,
+    /// Whether it trusts a second certificate authority beside the cluster's own.
+    additional_trust_anchor: bool,
+    /// The settings it starts with over the cluster's own.
+    setting_overrides: Vec<SettingOverride>,
+}
+
+/// How a node's attempt to join a running cluster ended.
+#[derive(Debug)]
+pub(crate) enum JoinAttempt {
+    /// The node became a voter of the membership it reports.
+    Admitted,
+    /// The node stopped before it was admitted; the text is how its start or its task ended.
+    Stopped(String),
 }
 
 #[derive(Debug, Clone)]
@@ -756,7 +786,9 @@ pub(crate) struct TestClusterConfig {
     #[cfg(feature = "testing")]
     pub scheduler_mode: Option<SchedulerMode>,
     pub state_snapshot_interval: Duration,
-    pub restore_staging_max_bytes: u64,
+    /// The restore staging quota a scenario gives every node; without one each node derives it
+    /// from its database volume.
+    pub restore_staging_max_bytes: Option<u64>,
     pub transaction_idle_timeout: Duration,
     pub transaction_tombstone_retention: Duration,
     pub command_retry_validity: Duration,
@@ -769,8 +801,7 @@ pub(crate) struct TestClusterConfig {
     pub drain_timeout: Duration,
     pub shutdown_timeout: Duration,
     pub memory_pressure: Option<MemoryPressureConfig>,
-    pub raft_election_timeout_min: Duration,
-    pub raft_election_timeout_max: Duration,
+    pub raft_heartbeat_interval: Duration,
     pub raft_retention: RaftRetentionSettings,
     pub temp_dir: Option<PathBuf>,
     /// Settings a scenario names for one node, applied over the cluster's own when that node
@@ -791,7 +822,7 @@ impl Default for TestClusterConfig {
             #[cfg(feature = "testing")]
             scheduler_mode: None,
             state_snapshot_interval: TEST_STATE_SNAPSHOT_INTERVAL,
-            restore_staging_max_bytes: 128 * 1024 * 1024 * 1024,
+            restore_staging_max_bytes: None,
             transaction_idle_timeout: Duration::from_secs(15 * 60),
             transaction_tombstone_retention: Duration::from_secs(15 * 60),
             command_retry_validity: Duration::from_secs(15 * 60),
@@ -804,8 +835,7 @@ impl Default for TestClusterConfig {
             drain_timeout: DEFAULT_TEST_DRAIN_TIMEOUT,
             shutdown_timeout: DEFAULT_TEST_SHUTDOWN_TIMEOUT,
             memory_pressure: None,
-            raft_election_timeout_min: TEST_RAFT_ELECTION_TIMEOUT_MIN,
-            raft_election_timeout_max: TEST_RAFT_ELECTION_TIMEOUT_MAX,
+            raft_heartbeat_interval: TEST_RAFT_HEARTBEAT_INTERVAL,
             raft_retention: RaftRetentionSettings::default(),
             temp_dir: None,
             node_setting_overrides: BTreeMap::new(),
@@ -822,20 +852,19 @@ impl TestClusterConfig {
     /// for that node applied over them exactly as the server's command line reads them.
     fn node_settings(&self, node_id: &str) -> io::Result<NodeSettings> {
         let settings = NodeSettings {
-            raft: RaftTimings::resolve(
-                Some(TEST_RAFT_HEARTBEAT_INTERVAL),
-                Some(self.raft_election_timeout_min),
-                Some(self.raft_election_timeout_max),
-            )
-            .map_err(|report| io::Error::other(format!("{report:#}")))?,
-            raft_retention: self.raft_retention,
-            membership: MembershipSettings::resolve(Some(TEST_NODE_UNAVAILABILITY_TIMEOUT))
+            raft: RaftTimings::resolve(Some(self.raft_heartbeat_interval))
                 .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            raft_retention: self.raft_retention,
+            membership: MembershipSettings::resolve(MembershipValues {
+                node_unavailability_timeout: Some(TEST_NODE_UNAVAILABILITY_TIMEOUT),
+                ..MembershipValues::default()
+            })
+            .map_err(|report| io::Error::other(format!("{report:#}")))?,
             scheduling: SchedulingSettings::resolve(Some(self.replica_count))
                 .map_err(|report| io::Error::other(format!("{report:#}")))?,
             runtime: RuntimeSettings::resolve(
                 Some(self.state_snapshot_interval),
-                Some(ubyte::ByteUnit::Byte(self.restore_staging_max_bytes)),
+                self.restore_staging_max_bytes.map(ubyte::ByteUnit::Byte),
             )
             .map_err(|report| io::Error::other(format!("{report:#}")))?,
             transactions: TransactionLimits::resolve(TransactionBounds {
@@ -963,6 +992,7 @@ impl Cluster {
             nodes,
             dependencies: config.dependencies,
             node_name_prefix: config.node_name_prefix,
+            pending_members: BTreeMap::new(),
         };
 
         if let Err(error) = cluster.start_nodes_and_wait(node_count).await {
@@ -1060,18 +1090,57 @@ impl Cluster {
         .map_err(io::Error::other)
     }
 
-    /// Names a setting `node_id` starts with from its next launch on, over the cluster's own.
+    /// Names a setting `node_id` starts with from its next launch on, over the cluster's own. A
+    /// node that is not a member yet starts with it when it is registered.
     pub(crate) fn override_node_setting(&mut self, node_id: &str, setting: SettingOverride) {
-        let handle = self
-            .nodes
-            .get_mut(node_id)
-            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let Some(handle) = self.nodes.get_mut(node_id) else {
+            self.pending_member(node_id).setting_overrides.push(setting);
+            return;
+        };
         handle
             .config
             .node_setting_overrides
             .entry(node_id.to_string())
             .or_default()
             .push(setting);
+    }
+
+    /// Makes `node_id`, which is not a member yet, claim `cluster_id` in its configuration and in
+    /// the certificate it presents.
+    pub(crate) fn claim_cluster_for_new_node(&mut self, node_id: &str, cluster_id: &str) {
+        self.pending_member(node_id).cluster_id = Some(cluster_id.to_string());
+    }
+
+    /// Makes `node_id`, which is not a member yet, trust a second certificate authority beside
+    /// the cluster's own, so every certificate it meets still verifies while its trust root
+    /// differs from every member's.
+    pub(crate) fn trust_additional_authority_for_new_node(&mut self, node_id: &str) {
+        self.pending_member(node_id).additional_trust_anchor = true;
+    }
+
+    fn pending_member(&mut self, node_id: &str) -> &mut PendingMember {
+        assert!(
+            !self.nodes.contains_key(node_id),
+            "node '{node_id}' is already a member of the cluster"
+        );
+        self.pending_members.entry(node_id.to_string()).or_default()
+    }
+
+    /// The trust root `node_id` presents, read from its trust bundle the way its transport reads
+    /// it.
+    pub(crate) fn trust_root_of(&self, node_id: &str) -> io::Result<TrustRootFingerprint> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
+        let bundle = TlsConfigBundle::from_pem_files(
+            &handle.spec.interconnect_tls_ca,
+            &handle.spec.interconnect_tls_cert,
+            &handle.spec.interconnect_tls_key,
+            TransportClock::system(),
+        )
+        .map_err(|error| io::Error::other(format!("{error:#}")))?;
+        Ok(bundle.trust_root())
     }
 
     pub(crate) async fn start_node(&mut self, node_id: &str) -> io::Result<()> {
@@ -1159,6 +1228,61 @@ impl Cluster {
     }
 
     pub(crate) async fn add_node(&mut self, node_id: &str) -> io::Result<()> {
+        self.register_new_node(node_id)?;
+        self.start_node(node_id).await?;
+
+        let node_ids = self.node_ids();
+        self.wait_for_any_leader(node_id).await?;
+        let voter_refs = node_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        self.wait_for_voters(node_id, &voter_refs).await?;
+        self.wait_for_consistent_leader_on_all_nodes().await?;
+        self.wait_for_full_interconnect(&node_ids).await
+    }
+
+    /// Starts `node_id`, registering it as a new node that joins through a running member when
+    /// the cluster has none by that name, and waits until the node is a voter of the membership
+    /// it reports or its task has ended. A node that ended reports how, which is how a refused
+    /// join reads.
+    pub(crate) async fn attempt_join(&mut self, node_id: &str) -> io::Result<JoinAttempt> {
+        if !self.nodes.contains_key(node_id) {
+            self.register_new_node(node_id)?;
+        }
+        if let Err(error) = self
+            .start_node_without_waiting_for_raft_catch_up(node_id)
+            .await
+        {
+            return Ok(JoinAttempt::Stopped(format!("{error:#}")));
+        }
+        // A refused node stops through its whole shutdown, and an admitted one waits for the
+        // leader to see its record, so the decision gets a node's whole startup budget.
+        let deadline = PhaseDeadline::after(NODE_STARTUP_BUDGET);
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let handle = self
+                .nodes
+                .get_mut(node_id)
+                .verified("the node was registered before it was started");
+            if let NodeTaskState::Terminal(outcome) = handle.task.inspect().await {
+                return Ok(JoinAttempt::Stopped(outcome.to_string()));
+            }
+            if let Ok(status) = handle.cluster_status(deadline).await
+                && status.is_voter(node_id)
+            {
+                return Ok(JoinAttempt::Admitted);
+            }
+            if deadline.has_passed() {
+                return Err(io::Error::other(format!(
+                    "node '{node_id}' neither became a voter nor stopped within {:?}",
+                    deadline.elapsed()
+                )));
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Adds `node_id` to the nodes the harness owns, joining through a running member, with what
+    /// a scenario named for it before it existed.
+    fn register_new_node(&mut self, node_id: &str) -> io::Result<()> {
         if self.nodes.contains_key(node_id) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -1171,14 +1295,28 @@ impl Cluster {
             .find(|node| node.task.is_running())
             .map(|node| node.spec.interconnect_endpoint())
             .ok_or_else(|| io::Error::other("a running bootstrap node is required"))?;
-        let config = self
+        let mut config = self
             .nodes
             .values()
             .next()
             .expect("an existing cluster has at least one node")
             .config
             .clone();
+        let pending = self.pending_members.remove(node_id).unwrap_or_default();
+        if !pending.setting_overrides.is_empty() {
+            config
+                .node_setting_overrides
+                .entry(node_id.to_string())
+                .or_default()
+                .extend(pending.setting_overrides);
+        }
         let mut spec = NodeSpec::new(&self.roots.storage, &self.interconnect_ca, node_id, false)?;
+        if let Some(cluster_id) = &pending.cluster_id {
+            spec.claim_cluster(&self.interconnect_ca, cluster_id)?;
+        }
+        if pending.additional_trust_anchor {
+            spec.trust_additional_authority(&self.interconnect_ca)?;
+        }
         let index = NodeSpec::index(node_id)?;
         let address = self.peer_addressing.address(node_id, index);
         if let Some(dns) = &self.dns {
@@ -1198,14 +1336,7 @@ impl Cluster {
                 self.roots.clone(),
             ),
         );
-        self.start_node(node_id).await?;
-
-        let node_ids = self.node_ids();
-        self.wait_for_any_leader(node_id).await?;
-        let voter_refs = node_ids.iter().map(String::as_str).collect::<Vec<_>>();
-        self.wait_for_voters(node_id, &voter_refs).await?;
-        self.wait_for_consistent_leader_on_all_nodes().await?;
-        self.wait_for_full_interconnect(&node_ids).await
+        Ok(())
     }
 
     pub(crate) fn syslog_ingestor_addr(
@@ -1398,7 +1529,8 @@ impl Cluster {
         let interconnect_ca = InterconnectTestCa::new(&self.roots.storage)?;
         for (node_id, node) in &mut self.nodes {
             nervix_primitives::task::consume_budget().await;
-            let (certificate, key) = interconnect_ca.issue_node(node_id, &node.spec.base_dir)?;
+            let (certificate, key) =
+                interconnect_ca.issue_node(&node.spec.cluster_id, node_id, &node.spec.base_dir)?;
             node.spec.interconnect_tls_ca = interconnect_ca.path.clone();
             node.spec.interconnect_tls_cert = certificate;
             node.spec.interconnect_tls_key = key;
@@ -1443,7 +1575,7 @@ impl Cluster {
             if let InterconnectCredentialFault::WrongClusterIdentity = fault {
                 "another-cluster"
             } else {
-                "cucumber"
+                TEST_CLUSTER_ID
             };
         let validity = if let InterconnectCredentialFault::ExpiredCertificate = fault {
             TestCertificateValidity::Expired
@@ -1481,6 +1613,7 @@ impl Cluster {
                 cluster_id: certificate_cluster_id.to_string(),
                 node_id: probe_node_id,
                 advertised_host: "localhost".to_string(),
+                join_terms: target.config.node_settings(target_node_id)?.join_terms(),
             },
             tls,
             options,
@@ -3506,7 +3639,7 @@ impl NodeHandle {
             .observability_listen_addr(parse_addr(&self.spec.observability_addr())?)
             .web_console_listen_addr(parse_addr(&self.spec.web_console_addr())?)
             .web_console_advertise_addr(Some(parse_addr(&self.spec.web_console_addr())?.into()))
-            .cluster_id("cucumber".to_string())
+            .cluster_id(self.spec.cluster_id.clone())
             .node_id(node_name(&self.spec.node_id))
             .grpc_advertise_addr(parse_addr(&self.spec.grpc_addr())?.into())
             .grpc_https_advertise_addr(Some(parse_addr(&self.spec.grpc_https_addr())?.into()))
@@ -3897,6 +4030,8 @@ enum NodeShutdownError {
 #[derive(Debug)]
 struct NodeSpec {
     node_id: String,
+    /// The cluster the node claims in its configuration and its certificate.
+    cluster_id: String,
     base_dir: PathBuf,
     interconnect_tls_ca: PathBuf,
     interconnect_tls_cert: PathBuf,
@@ -3956,12 +4091,13 @@ impl NodeSpec {
         let base_dir = root.path().join(node_id);
         std::fs::create_dir_all(&base_dir)?;
         let (interconnect_tls_cert, interconnect_tls_key) =
-            interconnect_ca.issue_node(node_id, &base_dir)?;
+            interconnect_ca.issue_node(TEST_CLUSTER_ID, node_id, &base_dir)?;
         let ports = NodePorts::allocate()?;
         let syslog_ingestor_host = Self::syslog_ingestor_host(node_id)?;
 
         Ok(Self {
             node_id: node_id.to_string(),
+            cluster_id: TEST_CLUSTER_ID.to_string(),
             base_dir,
             interconnect_tls_ca: interconnect_ca.path.clone(),
             interconnect_tls_cert,
@@ -3981,6 +4117,38 @@ impl NodeSpec {
             paced_interconnect: None,
             dns: None,
         })
+    }
+
+    /// Makes this node claim `cluster_id`, with a certificate the cluster's authority issues for
+    /// that cluster.
+    fn claim_cluster(
+        &mut self,
+        interconnect_ca: &InterconnectTestCa,
+        cluster_id: &str,
+    ) -> io::Result<()> {
+        let (certificate, key) =
+            interconnect_ca.issue_node(cluster_id, &self.node_id, &self.base_dir)?;
+        self.cluster_id = cluster_id.to_string();
+        self.interconnect_tls_cert = certificate;
+        self.interconnect_tls_key = key;
+        Ok(())
+    }
+
+    /// Makes this node trust a second, freshly created certificate authority beside the cluster's
+    /// own, through a bundle holding both.
+    fn trust_additional_authority(
+        &mut self,
+        interconnect_ca: &InterconnectTestCa,
+    ) -> io::Result<()> {
+        let directory = self.base_dir.join("additional-authority");
+        std::fs::create_dir_all(&directory)?;
+        let additional = InterconnectTestCa::new_in(&directory)?;
+        let mut bundle = std::fs::read_to_string(&interconnect_ca.path)?;
+        bundle.push_str(&std::fs::read_to_string(&additional.path)?);
+        let bundle_path = self.base_dir.join("interconnect-ca-bundle.pem");
+        std::fs::write(&bundle_path, bundle)?;
+        self.interconnect_tls_ca = bundle_path;
+        Ok(())
     }
 
     /// The `<n>` of a test node id `node-<n>`.
@@ -4658,6 +4826,16 @@ impl ClusterStatus {
             last_applied,
             membership,
             interconnect,
+        }
+    }
+}
+
+impl ClusterStatus {
+    /// Whether the membership this status reports holds `node_id` as a voter.
+    fn is_voter(&self, node_id: &str) -> bool {
+        match self.membership.get(node_id) {
+            Some(role) => role == "voter",
+            None => false,
         }
     }
 }

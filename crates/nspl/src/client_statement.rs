@@ -1350,6 +1350,7 @@ mod tests {
             "CORDON NODE node3;",
             "UNCORDON NODE node3;",
             "DRAIN NODE node3;",
+            "DESCRIBE CLUSTER;",
             "DESCRIBE DOMAIN;",
             "DESCRIBE RELAY orders;",
             "DESCRIBE RELAY orders WHERE (tenant = 'acme');",
