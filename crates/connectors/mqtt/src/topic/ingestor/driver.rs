@@ -3,27 +3,30 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The event loop of one ingestor connection and the task that polls it without pause,
-//!   so the client writes the acknowledgements a ingestor requests and its keep-alive pings while the
+//!   so the client writes the acknowledgements an ingestor requests and its keep-alive pings while the
 //!   host waits on acknowledgement trees; the bounded read-ahead it hands publishes over through;
-//!   the progress it publishes to the ingestor, the count of acknowledgements written to the
-//!   connection and whether it polls; and the report of how the connection ended.
+//!   admission of each decoded publish before read-ahead, compact discard acknowledgements and
+//!   their cancellation-stable confirmation; the progress it publishes to the ingestor, the count
+//!   of acknowledgements written to the connection and whether it polls; and the report of how
+//!   the connection ended.
 //! - **Depends on.** The ingestor's typed errors and positions, `rumqttc`'s event loop, requests
 //!   and events, and the boundary's task, channel, watch and timer primitives.
-//! - **Must not know.** The host, its batches or acknowledgement trees, or why a publish is
-//!   acknowledged.
+//! - **Must not know.** The host, its batches or acknowledgement trees, or the graph's delivery
+//!   decisions.
 //!
 //! # One connection
 //!
-//! The driver is the only owner of the event loop. It hands every publish the loop reads to the
-//! ingestor through the read-ahead, in the order it read them, and once the read-ahead is full it
-//! holds the next publish and polls nothing until the ingestor reads one. Every acknowledgement the
+//! The driver is the only owner of the event loop. It classifies every publish before reading the
+//! next, then hands admitted bytes or a compact discard acknowledgement to the ingestor in packet
+//! order. Once the read-ahead is full it holds the next outcome and polls nothing until the ingestor
+//! reads one. Every acknowledgement the
 //! event loop writes, a `PUBACK`, or a `PUBREC` for a publish at quality of service 2, raises the
 //! count the driver publishes; the loop yields such a write only after it flushed the requests that
 //! carried it to the connection. A failed poll ends the connection: the driver publishes that it
 //! ended, drops the read-ahead, which the ingestor reads empty before it takes the driver's report,
 //! and returns the report as its task's output.
 //!
-//! A ingestor requests an acknowledgement through the client and waits until the published count
+//! An ingestor requests an acknowledgement through the client and waits until the published count
 //! covers every acknowledgement it requested on the connection. It never waits on a driver that
 //! cannot poll before the ingestor reads again: one that ended, and one holding a publish for room
 //! in a read-ahead the ingestor has taken nothing from since the driver published that it waits.
@@ -49,20 +52,24 @@ use std::{future::Future, num::NonZeroUsize, time::Duration};
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use meticulous::OptionExt as _;
+use nervix_models::MQTT_SOURCE_MAXIMUM_PACKET_BYTES;
 use nervix_primitives::{
     sync::{
         mpsc::{self, error::TrySendError},
         watch,
     },
     task::AbortOnDropHandle,
-    time::timeout,
+    time::{Instant, timeout, timeout_at},
 };
 use rumqttc::{
-    AsyncClient, ClientError, ConnectionError, Event, EventLoop, Incoming, Outgoing, Publish, QoS,
+    AsyncClient, ClientError, ConnectionError, Event, EventLoop, Incoming, ManualAck, Outgoing,
+    Publish,
 };
 
 use super::{
-    MqttTopicIngestorError, MqttTopicIngestorPosition, MqttTopicIngestorResult, PublishRead,
+    GatherPublishOutcome, IngestorAcknowledgement, MqttTopicIngestorError,
+    MqttTopicIngestorPosition, MqttTopicIngestorResult, PublishRead, PublishReadOutcome,
+    acknowledgement,
 };
 
 /// The events one connection yields: the client's event loop, and a fake event loop in the checks
@@ -85,7 +92,7 @@ impl ConnectionEvents for EventLoop {
     }
 }
 
-/// Where a ingestor requests the acknowledgement of a publish: the client, which queues it for the
+/// Where an ingestor requests the acknowledgement of a publish: the client, which queues it for the
 /// event loop to write, and a fake client in the checks.
 #[cfg_attr(
     nervix_lint,
@@ -95,15 +102,82 @@ impl ConnectionEvents for EventLoop {
     )
 )]
 pub(super) trait AcknowledgementRequests: Send + Sync + 'static {
-    /// Queues the acknowledgement `publish`'s quality of service asks for: a `PUBACK` at quality
-    /// of service 1, a `PUBREC` at 2. A publish at quality of service 0 asks for none, so a ingestor
-    /// never requests one for it.
-    fn request(&self, publish: &Publish) -> impl Future<Output = Result<(), ClientError>> + Send;
+    /// Queues a prepared acknowledgement without retaining its publish's bytes.
+    fn request(
+        &self,
+        acknowledgement: &ManualAck,
+    ) -> impl Future<Output = Result<(), ClientError>> + Send;
 }
 
 impl AcknowledgementRequests for AsyncClient {
-    async fn request(&self, publish: &Publish) -> Result<(), ClientError> {
-        self.ack(publish).await
+    async fn request(&self, acknowledgement: &ManualAck) -> Result<(), ClientError> {
+        self.manual_ack(acknowledgement.clone()).await
+    }
+}
+
+/// What the driver retains after classifying one decoded publish.
+enum IngestorPacket {
+    Message(Publish),
+    Oversized(Option<ManualAck>),
+}
+
+impl IngestorPacket {
+    fn classify(mut publish: Publish, mode: IngestorAcknowledgement) -> Self {
+        let packet_bytes: u64 = publish.size().arch_into();
+        if packet_bytes > MQTT_SOURCE_MAXIMUM_PACKET_BYTES {
+            let acknowledgement = match mode {
+                IngestorAcknowledgement::OnReceipt => None,
+                IngestorAcknowledgement::Manual { .. } => acknowledgement(&publish),
+            };
+            return Self::Oversized(acknowledgement);
+        }
+        // The decoder slices a shared frame allocation. Independent admitted bytes prevent a
+        // small topic or payload from pinning an oversized neighbouring packet's allocation.
+        publish.topic = publish.topic.to_vec().into();
+        publish.payload = publish.payload.to_vec().into();
+        if let Some(properties) = publish.properties.as_mut()
+            && let Some(data) = properties.correlation_data.as_mut()
+        {
+            *data = data.to_vec().into();
+        }
+        Self::Message(publish)
+    }
+}
+
+/// The original physical bound of a discard acknowledgement, retained across read cancellation.
+#[derive(Clone, Copy)]
+struct AcknowledgementDeadline {
+    at: Instant,
+    keep_alive: Duration,
+}
+
+/// One discard's progress. The connection changes each state before yielding after queue admission
+/// or write confirmation, so cancelling a read never queues its acknowledgement twice.
+#[derive(Clone)]
+enum PendingOversized {
+    Deferred(Option<ManualAck>),
+    Unrequested {
+        acknowledgement: ManualAck,
+        deadline: Option<AcknowledgementDeadline>,
+    },
+    Requested {
+        target: u64,
+        deadline: Option<AcknowledgementDeadline>,
+    },
+}
+
+impl PendingOversized {
+    fn start(acknowledgement: ManualAck, keep_alive: Option<Duration>) -> Self {
+        let deadline = keep_alive.map(|keep_alive| AcknowledgementDeadline {
+            at: Instant::now()
+                .checked_add(keep_alive)
+                .assured("MQTT's sixteen-bit keep-alive seconds fit the monotonic clock range"),
+            keep_alive,
+        });
+        Self::Unrequested {
+            acknowledgement,
+            deadline,
+        }
     }
 }
 
@@ -127,7 +201,7 @@ struct DriverProgress {
     activity: DriverActivity,
 }
 
-/// Why the acknowledgements a ingestor requested stay unwritten until it reads again.
+/// Why the acknowledgements an ingestor requested stay unwritten until it reads again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Unwritable {
     /// The driver holds a publish for room in a read-ahead the ingestor has taken nothing from since.
@@ -146,7 +220,7 @@ enum WriteWait {
 }
 
 impl DriverProgress {
-    /// Why the driver writes nothing until the ingestor reads again, if it does, for a ingestor that
+    /// Why the driver writes nothing until the ingestor reads again, if it does, for an ingestor that
     /// has taken `taken` publishes in all from a read-ahead of `capacity`.
     ///
     /// A driver holding a publish for room the ingestor has made since is about to poll again.
@@ -156,7 +230,7 @@ impl DriverProgress {
             DriverActivity::Ended => return Some(Unwritable::Ended),
             DriverActivity::WaitingForRoom { handed } => handed,
         };
-        // A ingestor that has taken more publishes than the driver had handed over before the hold
+        // An ingestor that has taken more publishes than the driver had handed over before the hold
         // has taken the held one too, which the driver handed over before it published that it
         // polls again.
         let unread = handed.checked_sub(taken)?;
@@ -168,7 +242,7 @@ impl DriverProgress {
     }
 
     /// How a wait for `requested` written acknowledgements ends at this progress, if it ends, for
-    /// a ingestor that has taken `taken` publishes in all from a read-ahead of `capacity`.
+    /// an ingestor that has taken `taken` publishes in all from a read-ahead of `capacity`.
     fn write_wait(&self, requested: u64, taken: u64, capacity: NonZeroUsize) -> Option<WriteWait> {
         if self.written >= requested {
             return Some(WriteWait::Written);
@@ -181,7 +255,8 @@ impl DriverProgress {
 /// The task that owns one connection's event loop.
 struct ConnectionDriver<E> {
     events: E,
-    read_ahead: mpsc::Sender<Publish>,
+    read_ahead: mpsc::Sender<IngestorPacket>,
+    acknowledgement: IngestorAcknowledgement,
     /// How many publishes the driver has handed to the read-ahead.
     handed: u64,
     progress: watch::Sender<DriverProgress>,
@@ -198,7 +273,8 @@ impl<E: ConnectionEvents> ConnectionDriver<E> {
             };
             match event {
                 Event::Incoming(Incoming::Publish(publish)) => {
-                    if let Err(ended) = self.hand_over(publish).await {
+                    let packet = IngestorPacket::classify(publish, self.acknowledgement);
+                    if let Err(ended) = self.hand_over(packet).await {
                         return ended;
                     }
                 }
@@ -217,7 +293,10 @@ impl<E: ConnectionEvents> ConnectionDriver<E> {
 
     /// Hands `publish` to the ingestor. While the read-ahead is full, it holds the publish and polls
     /// nothing.
-    async fn hand_over(&mut self, publish: Publish) -> Result<(), Report<MqttTopicIngestorError>> {
+    async fn hand_over(
+        &mut self,
+        publish: IngestorPacket,
+    ) -> Result<(), Report<MqttTopicIngestorError>> {
         let publish = match self.read_ahead.try_send(publish) {
             Ok(()) => {
                 self.count_handed();
@@ -264,7 +343,8 @@ impl<E: ConnectionEvents> ConnectionDriver<E> {
 /// connection to the broker.
 pub(super) struct MqttConnection<R = AsyncClient> {
     requests: R,
-    read_ahead: mpsc::Receiver<Publish>,
+    read_ahead: mpsc::Receiver<IngestorPacket>,
+    pending_oversized: Option<PendingOversized>,
     /// How many publishes the read-ahead holds.
     read_ahead_capacity: NonZeroUsize,
     /// How many publishes the ingestor has taken from the read-ahead.
@@ -280,15 +360,15 @@ pub(super) struct MqttConnection<R = AsyncClient> {
 }
 
 impl<R: AcknowledgementRequests> MqttConnection<R> {
-    /// Starts the driver of a connection whose subscription `events` already established, with a
-    /// read-ahead of `read_ahead_capacity` publishes, that keeps to `keep_alive`, if the broker
-    /// keeps one.
+    /// Starts the driver of a subscribed connection, with the read-ahead and acknowledgement mode
+    /// its plan declares and the keep-alive its broker keeps, if any.
     pub(super) fn start<E: ConnectionEvents>(
         requests: R,
         events: E,
-        read_ahead_capacity: NonZeroUsize,
+        acknowledgement: IngestorAcknowledgement,
         keep_alive: Option<Duration>,
     ) -> Self {
+        let read_ahead_capacity = acknowledgement.read_ahead();
         let (read_ahead, publishes) = mpsc::channel(read_ahead_capacity.get());
         let (progress, observed) = watch::channel(DriverProgress {
             written: 0,
@@ -297,6 +377,7 @@ impl<R: AcknowledgementRequests> MqttConnection<R> {
         let driver = ConnectionDriver {
             events,
             read_ahead,
+            acknowledgement,
             handed: 0,
             progress,
         };
@@ -304,6 +385,7 @@ impl<R: AcknowledgementRequests> MqttConnection<R> {
         Self {
             requests,
             read_ahead: publishes,
+            pending_oversized: None,
             read_ahead_capacity,
             taken: 0,
             progress: observed,
@@ -352,19 +434,12 @@ impl<R: AcknowledgementRequests> MqttConnection<R> {
     ) -> MqttTopicIngestorResult<()> {
         for position in positions {
             nervix_primitives::task::consume_budget().await;
-            let publish = position.publish();
-            if publish.qos == QoS::AtMostOnce {
+            let Some(acknowledgement) = acknowledgement(position.publish()) else {
                 continue;
-            }
-            let requested = self.requested.checked_add(1).assured(
-                "a connection cannot request 2^64 acknowledgements in the lifetime of a node",
-            );
-            if let Some(unwritable) = self.request(publish).await? {
-                return Err(self.unwritten(unwritable).await);
-            }
-            self.requested = requested;
+            };
+            self.enqueue(&acknowledgement).await?;
         }
-        let wait = self.write_wait().await;
+        let wait = self.write_wait(self.requested).await;
         match wait {
             WriteWait::Written => Ok(()),
             WriteWait::Unwritable(unwritable) => Err(self.unwritten(unwritable).await),
@@ -373,8 +448,7 @@ impl<R: AcknowledgementRequests> MqttConnection<R> {
 
     /// Waits until the event loop has written every acknowledgement requested on the connection,
     /// or the driver cannot poll before the ingestor reads again.
-    async fn write_wait(&mut self) -> WriteWait {
-        let requested = self.requested;
+    async fn write_wait(&mut self, requested: u64) -> WriteWait {
         let taken = self.taken;
         let capacity = self.read_ahead_capacity;
         let waited = self
@@ -390,16 +464,19 @@ impl<R: AcknowledgementRequests> MqttConnection<R> {
         }
     }
 
-    /// Queues the acknowledgement of `publish`, unless the driver cannot poll before the ingestor
+    /// Queues a prepared acknowledgement, unless the driver cannot poll before the ingestor
     /// reads again, which would leave the request where nothing writes it, and returns why.
-    async fn request(&mut self, publish: &Publish) -> MqttTopicIngestorResult<Option<Unwritable>> {
+    async fn request(
+        &mut self,
+        acknowledgement: &ManualAck,
+    ) -> MqttTopicIngestorResult<Option<Unwritable>> {
         let taken = self.taken;
         let capacity = self.read_ahead_capacity;
         let requests = &self.requests;
         let progress = &mut self.progress;
         nervix_primitives::select! {
             biased;
-            requested = requests.request(publish) => match requested {
+            requested = requests.request(acknowledgement) => match requested {
                 Ok(()) => Ok(None),
                 // The client's requests end with the event loop, which only a driver that ended
                 // drops.
@@ -411,6 +488,81 @@ impl<R: AcknowledgementRequests> MqttConnection<R> {
                     Ok(progress) => Ok(progress.unwritable(taken, capacity)),
                     // The driver drops its end only once it ended.
                     Err(_) => Ok(Some(Unwritable::Ended)),
+                }
+            }
+        }
+    }
+
+    /// Advances the shared acknowledgement count in the same poll that admits the request.
+    async fn enqueue(&mut self, acknowledgement: &ManualAck) -> MqttTopicIngestorResult<u64> {
+        let requested = self
+            .requested
+            .checked_add(1)
+            .assured("a connection cannot request 2^64 acknowledgements in the lifetime of a node");
+        if let Some(unwritable) = self.request(acknowledgement).await? {
+            return Err(self.unwritten(unwritable).await);
+        }
+        self.requested = requested;
+        Ok(requested)
+    }
+
+    /// Completes the retained discard, using the same queue, write confirmation and deadline as
+    /// ordinary acknowledgements. Only the state lives across a cancelled read, never its bytes.
+    async fn finish_oversized(&mut self) -> MqttTopicIngestorResult<PublishReadOutcome> {
+        loop {
+            let pending = self
+                .pending_oversized
+                .clone()
+                .verified("a discard is installed before its acknowledgement is driven");
+            match pending {
+                PendingOversized::Deferred(acknowledgement) => {
+                    let Some(acknowledgement) = acknowledgement else {
+                        self.pending_oversized = None;
+                        return Ok(PublishReadOutcome::Oversized);
+                    };
+                    self.pending_oversized =
+                        Some(PendingOversized::start(acknowledgement, self.keep_alive));
+                }
+                PendingOversized::Unrequested {
+                    acknowledgement,
+                    deadline,
+                } => {
+                    let enqueue = self.enqueue(&acknowledgement);
+                    let target = match deadline {
+                        Some(deadline) => match timeout_at(deadline.at, enqueue).await {
+                            Ok(queued) => queued?,
+                            Err(_) => {
+                                return Err(Report::new(
+                                    MqttTopicIngestorError::AcknowledgementDeadline {
+                                        keep_alive: deadline.keep_alive,
+                                    },
+                                ));
+                            }
+                        },
+                        None => enqueue.await?,
+                    };
+                    self.pending_oversized = Some(PendingOversized::Requested { target, deadline });
+                }
+                PendingOversized::Requested { target, deadline } => {
+                    let wait = self.write_wait(target);
+                    let written = match deadline {
+                        Some(deadline) => match timeout_at(deadline.at, wait).await {
+                            Ok(written) => written,
+                            Err(_) => {
+                                return Err(Report::new(
+                                    MqttTopicIngestorError::AcknowledgementDeadline {
+                                        keep_alive: deadline.keep_alive,
+                                    },
+                                ));
+                            }
+                        },
+                        None => wait.await,
+                    };
+                    if let WriteWait::Unwritable(unwritable) = written {
+                        return Err(self.unwritten(unwritable).await);
+                    }
+                    self.pending_oversized = None;
+                    return Ok(PublishReadOutcome::Oversized);
                 }
             }
         }
@@ -444,19 +596,46 @@ impl<R: AcknowledgementRequests> MqttConnection<R> {
             Err(failure) => Report::new(failure).change_context(MqttTopicIngestorError::Driver),
         }
     }
-}
 
-impl<R: AcknowledgementRequests> PublishRead for MqttConnection<R> {
-    async fn next_publish(&mut self) -> MqttTopicIngestorResult<Publish> {
-        let Some(publish) = self.read_ahead.recv().await else {
-            // The driver drops the read-ahead only once it ended, after every publish it read.
+    /// Takes the next classified outcome without advancing a discard's acknowledgement.
+    async fn take_packet(&mut self) -> MqttTopicIngestorResult<IngestorPacket> {
+        let Some(packet) = self.read_ahead.recv().await else {
             return Err(self.ended().await);
         };
         self.taken = self
             .taken
             .checked_add(1)
             .assured("a connection cannot read 2^64 publishes in the lifetime of a node");
-        Ok(publish)
+        Ok(packet)
+    }
+}
+
+impl<R: AcknowledgementRequests> PublishRead for MqttConnection<R> {
+    async fn next_publish(&mut self) -> MqttTopicIngestorResult<PublishReadOutcome> {
+        if self.pending_oversized.is_some() {
+            return self.finish_oversized().await;
+        }
+        match self.take_packet().await? {
+            IngestorPacket::Message(publish) => Ok(PublishReadOutcome::Message(Box::new(publish))),
+            IngestorPacket::Oversized(acknowledgement) => {
+                self.pending_oversized = Some(PendingOversized::Deferred(acknowledgement));
+                self.finish_oversized().await
+            }
+        }
+    }
+
+    async fn gather_publish(&mut self) -> MqttTopicIngestorResult<GatherPublishOutcome> {
+        match self.take_packet().await? {
+            IngestorPacket::Message(publish) => {
+                Ok(GatherPublishOutcome::Message(Box::new(publish)))
+            }
+            IngestorPacket::Oversized(acknowledgement) => {
+                // Return the ordinary prefix before requesting this ACK: MQTT requires ACKs in
+                // receive order. Its physical deadline starts when the following read begins it.
+                self.pending_oversized = Some(PendingOversized::Deferred(acknowledgement));
+                Ok(GatherPublishOutcome::Boundary)
+            }
+        }
     }
 }
 
