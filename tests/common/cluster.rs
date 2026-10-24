@@ -20,7 +20,7 @@ use aws_sdk_sqs::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use error_stack::Report;
 use fjall::Database;
-use futures_util::SinkExt;
+use futures_util::{SinkExt, future::join_all};
 use lapin::{
     BasicProperties, Connection, ConnectionProperties,
     options::{BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
@@ -133,7 +133,7 @@ use super::{
         ClusterDns, FixtureAnswer, InterconnectAddress, PeerAddressing, PublishedNode,
         qualified_name,
     },
-    phase_deadline::PhaseDeadline,
+    phase_deadline::{BeforeDeadline, PhaseDeadline},
     port_pool::{next_ports, release_test_ports},
     raw_session::{TestUpload, send_upload},
     redis_client::{TestRedisClient, publish_burst},
@@ -695,6 +695,10 @@ enum RestartArrangement<'a> {
     RelayedVoter(&'a str),
     /// The first runtime installation this node begins waits until the scenario releases it.
     HeldRuntimeInstallation(&'a str),
+    /// This node runs and gossips as soon as it starts, but the restart counts it ready only once
+    /// the restarted cluster's leader has ended its startup voter observation, as a loaded host can
+    /// keep a live node from reporting ready.
+    ReadyAfterStartupObservation(&'a str),
 }
 
 impl<'a> RestartArrangement<'a> {
@@ -703,7 +707,17 @@ impl<'a> RestartArrangement<'a> {
     fn relayed_voter(self) -> Option<&'a str> {
         match self {
             Self::RelayedVoter(voter) => Some(voter),
-            Self::Unchanged | Self::HeldRuntimeInstallation(_) => None,
+            Self::Unchanged
+            | Self::HeldRuntimeInstallation(_)
+            | Self::ReadyAfterStartupObservation(_) => None,
+        }
+    }
+
+    /// The node the restart counts ready only once the leader's startup voter observation ended.
+    fn ready_after_startup_observation(self) -> Option<&'a str> {
+        match self {
+            Self::ReadyAfterStartupObservation(node) => Some(node),
+            Self::Unchanged | Self::RelayedVoter(_) | Self::HeldRuntimeInstallation(_) => None,
         }
     }
 }
@@ -1583,6 +1597,63 @@ impl Cluster {
             .await
     }
 
+    /// Restarts every node with `node` counted ready only once the restarted cluster's leader has
+    /// ended its startup voter observation, as when a loaded host keeps a node that already runs
+    /// and gossips from reporting ready.
+    pub(crate) async fn restart_with_node_ready_after_startup_observation(
+        &mut self,
+        node: &str,
+    ) -> io::Result<()> {
+        self.restart_arranged(RestartArrangement::ReadyAfterStartupObservation(node))
+            .await
+    }
+
+    /// Starts every node of a restarted cluster at once, as a restart of the whole cluster does,
+    /// and returns once each of them is ready, each inside its own startup budget nested in the
+    /// restart's. Starting each node only once the one before it is ready would hold the last voter
+    /// back by every earlier node's startup, which on a loaded host can outlast the grace a newly
+    /// started leader gives voters it has not yet observed before it fails their work over.
+    async fn start_restarted_nodes_together(
+        &mut self,
+        construction: PhaseDeadline,
+    ) -> io::Result<()> {
+        let mut startups = Vec::with_capacity(self.nodes.len());
+        for handle in self.nodes.values_mut() {
+            startups.push(async move {
+                let node = node_name(&handle.spec.node_id);
+                let budget = construction.nested(NODE_STARTUP_BUDGET);
+                NodeStartup::start(&node, handle, budget, StartupRetryPolicy::Transient)
+                    .await
+                    .map_err(io::Error::other)
+            });
+        }
+        for startup in join_all(startups).await {
+            startup?;
+        }
+        Ok(())
+    }
+
+    /// Waits, inside the restart's budget, until a leader of the restarted cluster has ended its
+    /// startup voter observation.
+    async fn wait_for_startup_voter_observation_end(
+        &self,
+        construction: PhaseDeadline,
+    ) -> io::Result<()> {
+        let ended = construction
+            .bound(
+                self.fault_injection
+                    .wait_for_startup_voter_observation_end(),
+            )
+            .await;
+        match ended {
+            BeforeDeadline::Finished(()) => Ok(()),
+            BeforeDeadline::Passed => Err(io::Error::other(
+                "no leader of the restarted cluster ended its startup voter observation within \
+                 the restart's budget",
+            )),
+        }
+    }
+
     async fn restart_arranged(&mut self, arrangement: RestartArrangement<'_>) -> io::Result<()> {
         let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
         let mut first_error = None;
@@ -1628,24 +1699,33 @@ impl Cluster {
                 self.fault_injection
                     .pause_runtime_installation_on(node_name(node));
             }
+            RestartArrangement::ReadyAfterStartupObservation(_) => {
+                self.fault_injection.await_startup_voter_observation_end();
+            }
         }
-        let voter = arrangement.relayed_voter();
-        self.start_node_within(&bootstrap, construction).await?;
-        for node_id in node_ids.iter().filter(|node_id| **node_id != bootstrap) {
-            if voter.is_some() {
-                // The held heartbeat can keep replication from catching this voter up. Let the
-                // scenario reach and release the observation barrier before waiting for catch-up.
+        if arrangement.relayed_voter().is_some() {
+            // The relayed voter's scenario observes scheduling while the bootstrap node leads, so
+            // that node starts first. The held heartbeat can keep replication from catching the
+            // voter up, so the others start without waiting for catch-up: the scenario reaches and
+            // releases the observation barrier before it waits for that.
+            self.start_node_within(&bootstrap, construction).await?;
+            for node_id in node_ids.iter().filter(|node_id| **node_id != bootstrap) {
                 self.start_node_without_waiting_for_raft_catch_up_within(node_id, construction)
                     .await?;
-            } else {
-                self.start_node_within(node_id, construction).await?;
             }
+            self.wait_for_any_leader(&bootstrap).await?;
+            return self.wait_for_leader(&bootstrap, Some(&bootstrap)).await;
+        }
+        self.start_restarted_nodes_together(construction).await?;
+        if arrangement.ready_after_startup_observation().is_some() {
+            self.wait_for_startup_voter_observation_end(construction)
+                .await?;
+        }
+        for node_id in &node_ids {
+            self.wait_for_node_raft_catch_up(node_id).await?;
         }
 
         self.wait_for_any_leader(&bootstrap).await?;
-        if voter.is_some() {
-            return self.wait_for_leader(&bootstrap, Some(&bootstrap)).await;
-        }
         if node_ids.len() > 1 {
             for node_id in &node_ids {
                 self.wait_for_any_leader(node_id).await?;
