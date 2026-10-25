@@ -410,6 +410,13 @@ impl DomainClockLifecycle {
         self.replace(DomainClockInstallation::Stopped { generation });
     }
 
+    /// The receivers this clock's replacements wake: one for every logical deadline a bound handle
+    /// is waiting for, and one for every observer.
+    #[cfg(test)]
+    pub(in crate::runtime) fn notification_receivers(&self) -> usize {
+        self.inner.changes.receiver_count()
+    }
+
     pub(in crate::runtime) fn mark_missing(&self) {
         self.replace_with_task_state(DomainClockInstallation::Missing, None);
     }
