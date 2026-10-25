@@ -186,6 +186,7 @@ mod tests {
             client_url: None,
             console_url: None,
             interconnect_endpoint: Some(NodeEndpoint::new("127.0.0.1", 33015)),
+            prerequisites: None,
         }
     }
 

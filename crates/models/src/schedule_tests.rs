@@ -3,10 +3,10 @@ use nonzero_ext::nonzero;
 use crate::{
     AckMode, BranchSelection, ClusterNodeName, ClusterSchedule, CreateIngestor, CreateJunction,
     CreateSchema, DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy, GeneralErrorPolicy,
-    HttpEndpointSource, HttpSource, IngestQuiesceMode, IngestSource, KafkaPartitionSchedule, Model,
-    OwnershipStateComponent, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-    ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SyslogIngestMode,
-    SyslogListenerSource, SyslogSource,
+    HttpEndpointIngestor, HttpIngestor, IngestQuiesceMode, IngestorEntity, KafkaPartitionSchedule,
+    Model, OwnershipStateComponent, ParseAsType, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint,
+    SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor,
 };
 
 fn named<N>(raw: &str) -> N
@@ -173,7 +173,7 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
                 },
             )]),
             input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                source: IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+                source: IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
                     endpoint: named("public_http"),
                     mode: EndpointIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::EndpointBuffer {
@@ -207,7 +207,7 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
                 },
             )]),
             input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                source: IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
+                source: IngestorEntity::Syslog(SyslogIngestor::Listener(SyslogListenerIngestor {
                     client: named("syslog_listener"),
                     mode: SyslogIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Suspend,

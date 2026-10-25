@@ -449,7 +449,7 @@ scenarios = [
 capability = "BATCH"
 entity = "OTEL LOGS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
 ]
 
 [[capability]]
@@ -491,7 +491,7 @@ scenarios = [
 capability = "BATCH"
 entity = "OTEL METRICS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
 ]
 
 [[capability]]
@@ -554,7 +554,7 @@ scenarios = [
 capability = "BATCH"
 entity = "OTEL TRACES EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
 ]
 
 [[capability]]
@@ -815,7 +815,7 @@ scenarios = [
 capability = "BATCH"
 entity = "SENTRY EVENT EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "Sentry accepts one event whose extra field preserves every batch member" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "Sentry accepts one event whose extra field preserves every batch member" },
 ]
 
 [[capability]]
@@ -892,7 +892,7 @@ scenarios = [
 capability = "BATCH"
 entity = "SYSLOG COLLECTOR EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "A Syslog TLS receiver sees one batched RFC 5425 frame" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "A Syslog TLS receiver sees one batched RFC 5425 frame" },
 ]
 
 [[capability]]
@@ -959,6 +959,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER idle_timeout_ms"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_connection_bounds.feature", scenario = "A WebSocket connection reports a silent peer through idle_timeout_ms on <cluster_size> nodes" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "WEBSOCKETS ENDPOINT INGESTOR"
 scenarios = [
@@ -1013,4 +1020,34 @@ capability = "MODE ACK"
 entity = "WEBSOCKETS ENDPOINT INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/endpoint_acknowledgement.feature", scenario = "A WebSocket endpoint acknowledges each <result> frame during and after signaling" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ NO ACK consumes automatically without prefetch or pending transport acknowledgements" },
+]
+
+[[capability]]
+capability = "MODE ACK PARALLEL"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must reject them after its connection was lost" },
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must acknowledge them after its connection was lost" },
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another delivery is rejected" },
+]
+
+[[capability]]
+capability = "HEADERS"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
+]
+
+[[capability]]
+capability = "metadata.frame_type"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
 ]

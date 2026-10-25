@@ -36,6 +36,7 @@ mod impact;
 mod infrastructure;
 mod ingestor;
 mod model;
+mod prerequisites;
 mod processor;
 mod remote;
 mod route;
@@ -106,7 +107,7 @@ impl<'bytes> Arbitrary<'bytes> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{EmitSinkKind, IngestSourceKind, PostgresSinkEntity};
+    use nervix_models::{EmitterEntityKind, IngestorEntityKind, PostgresEmitterEntity};
     use strum::IntoEnumIterator as _;
 
     use super::{Arbitrary, Domain, Entropy, ExpressionForm, ModelVariant, StatementVariant};
@@ -134,18 +135,18 @@ mod tests {
     }
 
     #[test]
-    fn every_sink_is_built_as_requested_in_both_domains() {
+    fn every_emitter_is_built_as_requested_in_both_domains() {
         for domain in [Domain::Nspl, Domain::Vocabulary] {
-            for kind in EmitSinkKind::all() {
+            for kind in EmitterEntityKind::all() {
                 for seed in 0..4 {
                     let bytes = seeded_bytes(seed);
                     let mut arbitrary = Arbitrary::new(&bytes, domain);
                     let emitter = arbitrary.create_emitter_to(kind);
-                    assert_eq!(emitter.sink.kind(), kind, "{domain:?}");
+                    assert_eq!(emitter.connector.kind(), kind, "{domain:?}");
                     assert!(
                         kind.capabilities()
                             .publishing_modes
-                            .contains(&emitter.sink.publishing().kind()),
+                            .contains(&emitter.connector.publishing().kind()),
                         "{domain:?} {kind:?}"
                     );
                 }
@@ -156,12 +157,12 @@ mod tests {
     #[test]
     fn every_source_is_built_as_requested_in_both_domains() {
         for domain in [Domain::Nspl, Domain::Vocabulary] {
-            for kind in IngestSourceKind::all() {
+            for kind in IngestorEntityKind::all() {
                 for seed in 0..4 {
                     let bytes = seeded_bytes(seed);
                     let mut arbitrary = Arbitrary::new(&bytes, domain);
                     let ingestor = arbitrary.create_ingestor_from(kind);
-                    assert_eq!(ingestor.input.source_kind(), kind, "{domain:?}");
+                    assert_eq!(ingestor.input.entity_kind(), kind, "{domain:?}");
                     assert!(
                         ingestor.input.supports_quiesce(ingestor.input.quiesce()),
                         "{domain:?} {kind:?}"
@@ -255,17 +256,20 @@ mod tests {
         for seed in 0..=u8::MAX {
             let bytes = seeded_bytes(seed);
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
-            let emitter =
-                arbitrary.create_emitter_to(EmitSinkKind::Postgres(PostgresSinkEntity::Table));
-            let nervix_models::EmitSink::Postgres(nervix_models::PostgresSink::Table(
-                nervix_models::PostgresTableSink {
+            let emitter = arbitrary
+                .create_emitter_to(EmitterEntityKind::Postgres(PostgresEmitterEntity::Table));
+            let nervix_models::EmitterEntity::Postgres(nervix_models::PostgresEmitter::Table(
+                nervix_models::PostgresTableEmitter {
                     values,
                     conflict_action,
                     ..
                 },
-            )) = emitter.sink.as_ref()
+            )) = emitter.connector.as_ref()
             else {
-                panic!("a Postgres sink was requested, found {:?}", emitter.sink);
+                panic!(
+                    "a Postgres emitter was requested, found {:?}",
+                    emitter.connector
+                );
             };
             if let nervix_models::PostgresConflictAction::DoUpdate { target } = conflict_action {
                 assert!(!target.is_empty(), "{values:?}");

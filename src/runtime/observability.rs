@@ -700,12 +700,14 @@ impl Runtime {
             execution.revision.entrypoints.ingestor(ingestor)
             && let IngestorInputPlan::Transport(TransportInputPlan {
                 source:
-                    SourceStartPlan::Kafka(KafkaIngestorStartPlan {
-                        topic,
-                        offsets: KafkaOffsetPlan::Domain(_),
-                        instances,
-                        ..
-                    }),
+                    IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(
+                        KafkaTopicIngestorStartPlan {
+                            topic,
+                            offsets: KafkaOffsetPlan::Domain(_),
+                            instances,
+                            ..
+                        },
+                    )),
                 ..
             }) = &plan.input
             && let Some(node) = execution.revision.nodes.get(&NodeRef::new(

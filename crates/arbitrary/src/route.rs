@@ -28,7 +28,7 @@ pub enum RouteShape {
     /// A construction that filters and invokes but builds no fields, as an emitter sending no
     /// body writes.
     FilterAndInvoke,
-    /// A construction that only filters, as an emitter whose sink maps its own values writes.
+    /// A construction that only filters, as an emitter whose emitter maps its own values writes.
     FilterOnly,
 }
 

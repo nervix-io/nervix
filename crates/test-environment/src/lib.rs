@@ -151,6 +151,7 @@ pub const PULSAR_ADDR: &str = "pulsar_addr";
 pub const PULSAR_TLS_ADDR: &str = "pulsar_tls_addr";
 pub const PULSAR_ADMIN_ADDR: &str = "pulsar_admin_addr";
 pub const RABBITMQ_ADDR: &str = "rabbitmq_addr";
+pub const RABBITMQ_MANAGEMENT_ADDR: &str = "rabbitmq_management_addr";
 pub const RABBITMQ_TLS_ADDR: &str = "rabbitmq_tls_addr";
 pub const REDIS_ADDR: &str = "redis_addr";
 pub const REDIS_TLS_ADDR: &str = "redis_tls_addr";
@@ -535,6 +536,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                 GenericImage::new("rabbitmq", "4.1-management")
                     .with_exposed_port(5672.tcp())
                     .with_exposed_port(5671.tcp())
+                    .with_exposed_port(15672.tcp())
                     .with_wait_for(WaitFor::message_on_either_std("Server startup complete"))
                     .with_env_var("RABBITMQ_DEFAULT_USER", "guest")
                     .with_env_var("RABBITMQ_DEFAULT_PASS", "guest")
@@ -553,6 +555,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             .await?;
         let port = mapped_port(&container, 5672, "RabbitMQ").await?;
         let tls_port = mapped_port(&container, 5671, "RabbitMQ TLS").await?;
+        let management_port = mapped_port(&container, 15672, "RabbitMQ management").await?;
         self.endpoints.insert(
             RABBITMQ_ADDR,
             format!("amqp://guest:guest@127.0.0.1:{port}/%2f"),
@@ -560,6 +563,10 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         self.endpoints.insert(
             RABBITMQ_TLS_ADDR,
             format!("amqps://guest:guest@127.0.0.1:{tls_port}/%2f"),
+        );
+        self.endpoints.insert(
+            RABBITMQ_MANAGEMENT_ADDR,
+            format!("http://127.0.0.1:{management_port}"),
         );
         self.containers.push(RunningContainer::Generic(container));
         Ok(())

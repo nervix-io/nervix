@@ -15,10 +15,11 @@
 
 use nervix_models::{
     BufferBound, BufferCapacity, BufferOverflow, ChoiceRequirement, ClientConfigOwner,
-    ClientDeclaration, ClientPooling, ConnectorKind, DeclaredBounds, EmitSinkCapabilities,
-    EmitSinkKind, EmitterBatchLegality, EmitterBodyForm, HeaderModel, IngestSourceCapabilities,
-    IngestSourceKind, LocatorDeclaration, LocatorName, OmittedDeadline, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, SinkReferenceKind, SourceReferenceKind, WaitBound,
+    ClientDeclaration, ClientPooling, ConnectorKind, DeclaredBounds, EmitterBatchLegality,
+    EmitterBodyForm, EmitterEntityCapabilities, EmitterEntityKind, EmitterReferenceKind,
+    HeaderModel, IngestorEntityCapabilities, IngestorEntityKind, IngestorReferenceKind,
+    LocatorDeclaration, LocatorName, OmittedDeadline, OptionDeclaration, OptionForm,
+    OptionPresence, OptionValue, WaitBound,
 };
 use serde_json::{Value, json};
 use strum::IntoEnumIterator as _;
@@ -31,8 +32,8 @@ use strum::IntoEnumIterator as _;
     )
 )]
 fn main() -> std::io::Result<()> {
-    let ingest: Vec<_> = IngestSourceKind::all().map(ingestor).collect();
-    let emit: Vec<_> = EmitSinkKind::all().map(emitter).collect();
+    let ingest: Vec<_> = IngestorEntityKind::all().map(ingestor).collect();
+    let emit: Vec<_> = EmitterEntityKind::all().map(emitter).collect();
     let mut clients = Vec::new();
     for kind in ConnectorKind::iter() {
         if let Some(declaration) = client(kind) {
@@ -104,8 +105,8 @@ fn requirements(requirements: &[ChoiceRequirement]) -> String {
     format!(" (requires {})", choices.join(" and "))
 }
 
-fn ingestor(kind: IngestSourceKind) -> Value {
-    let IngestSourceCapabilities {
+fn ingestor(kind: IngestorEntityKind) -> Value {
+    let IngestorEntityCapabilities {
         headers,
         metadata,
         executes_on_every_cluster_node,
@@ -119,9 +120,9 @@ fn ingestor(kind: IngestSourceKind) -> Value {
         bounds: declared_bounds,
     } = kind.capabilities();
     let reference = match source_reference {
-        SourceReferenceKind::Client(connector) => format!("{connector} client"),
-        SourceReferenceKind::Endpoint(endpoint) => format!("{endpoint:?} endpoint"),
-        SourceReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
+        IngestorReferenceKind::Client(connector) => format!("{connector} client"),
+        IngestorReferenceKind::Endpoint(endpoint) => format!("{endpoint:?} endpoint"),
+        IngestorReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
     };
     let modes: Vec<_> = delivery
         .iter()
@@ -138,13 +139,13 @@ fn ingestor(kind: IngestSourceKind) -> Value {
         .collect();
     let options: Vec<_> = declared_options.iter().map(option).collect();
     let from = match source_reference {
-        SourceReferenceKind::Schema => "SCHEMA <schema>",
-        SourceReferenceKind::Client(_) => "<client>",
-        SourceReferenceKind::Endpoint(_) => "<endpoint>",
+        IngestorReferenceKind::Schema => "SCHEMA <schema>",
+        IngestorReferenceKind::Client(_) => "<client>",
+        IngestorReferenceKind::Endpoint(_) => "<endpoint>",
     };
     let decode = match source_reference {
-        SourceReferenceKind::Schema => "",
-        SourceReferenceKind::Client(_) | SourceReferenceKind::Endpoint(_) => {
+        IngestorReferenceKind::Schema => "",
+        IngestorReferenceKind::Client(_) | IngestorReferenceKind::Endpoint(_) => {
             "\n  DECODE USING <codec>"
         }
     };
@@ -233,6 +234,9 @@ fn buffer_bound(bound: BufferBound) -> String {
             "when full, immediately refuses the request for its sender to retry"
         }
         BufferOverflow::FailPoll => "when exceeded, fails the poll; the next poll reads again",
+        BufferOverflow::FailRead => {
+            "when exceeded, fails the read and reconnects on the retry policy"
+        }
     };
     format!("{capacity}; {overflow}")
 }
@@ -246,6 +250,7 @@ fn wait_bound(bound: WaitBound) -> String {
                     format!("{} when omitted", humantime::format_duration(default))
                 }
                 OmittedDeadline::Unbounded => "unbounded when omitted".to_owned(),
+                OmittedDeadline::Derived(rule) => format!("when omitted, {rule}"),
             };
             format!("`{}`; {omitted}", key.key())
         }
@@ -269,8 +274,8 @@ fn option_template(options: &[OptionDeclaration]) -> String {
     text
 }
 
-fn emitter(kind: EmitSinkKind) -> Value {
-    let EmitSinkCapabilities {
+fn emitter(kind: EmitterEntityKind) -> Value {
+    let EmitterEntityCapabilities {
         headers,
         reference,
         body,
@@ -284,9 +289,9 @@ fn emitter(kind: EmitSinkKind) -> Value {
         bounds: declared_bounds,
     } = kind.capabilities();
     let reference = match reference {
-        SinkReferenceKind::Client(connector) => format!("{connector} client"),
-        SinkReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
-        SinkReferenceKind::StorageClient(stores) => {
+        EmitterReferenceKind::Client(connector) => format!("{connector} client"),
+        EmitterReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
+        EmitterReferenceKind::StorageClient(stores) => {
             let names: Vec<_> = stores.iter().map(ToString::to_string).collect();
             format!("{} store and catalog clients", names.join(" | "))
         }
@@ -322,12 +327,12 @@ fn emitter(kind: EmitSinkKind) -> Value {
 }
 
 /// Synopses use the current destination grammar; all clauses and choices come from declarations.
-fn emitter_template(kind: EmitSinkKind, body: &str) -> String {
+fn emitter_template(kind: EmitterEntityKind, body: &str) -> String {
     let declared = kind.capabilities();
     let mut destination = match declared.reference {
-        SinkReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
-        SinkReferenceKind::StorageClient(_) => "<storage_client>".to_owned(),
-        SinkReferenceKind::Client(_) => "<client>".to_owned(),
+        EmitterReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
+        EmitterReferenceKind::StorageClient(_) => "<storage_client>".to_owned(),
+        EmitterReferenceKind::Client(_) => "<client>".to_owned(),
     };
     if let Some(locator) = declared.locator {
         destination.push_str(&format!(" {}", locator.example()));

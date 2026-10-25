@@ -2,8 +2,8 @@
 //!
 //! Layer: decisions.
 //!
-//! - **Owns.** The source and sink contracts: the client an ingestor or emitter may use, the
-//!   publishing and mapping rules of each sink, the headers each side supports, the timestamp
+//! - **Owns.** The source and emitter contracts: the client an ingestor or emitter may use, the
+//!   publishing and mapping rules of each emitter, the headers each side supports, the timestamp
 //!   source an ingestor declares, and the hostnames and paths a listener claims.
 //! - **Depends on.** The connector Models and the schema rules.
 //! - **Must not know.** How a connector is instantiated or driven.
@@ -19,14 +19,14 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_jaq::StatefulJaqProgram;
 use nervix_models::{
     Assignment, AssignmentTarget, ClientDeadline, ClientIngestMode, CodecBatchContainer,
-    CreateClientHttp, CreateCodec, CreateEmitter, CreateIngestor, CreateSchema,
-    CreateSignalingProtocol, DomainName, EmitSink, EndpointName, Expression, FieldName,
-    HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
-    HttpRequestSink, HttpSink, IngestTimestampSource, IngestorInput, LiteralHeaderWrite, Model,
-    ModelIndex, ModelName, OtelAggregationTemporality, OtelMappings, OtelMetricKind,
-    OtelMetricsSink, OtelSink, ParseAsType, ProcessorOutput, RelayName, RouteConstruction,
-    SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, SqsQueueSink, SqsSink, VhostName,
-    parse_duration_text,
+    CreateClientHttp, CreateClientKafka, CreateCodec, CreateEmitter, CreateIngestor, CreateSchema,
+    CreateSignalingProtocol, DomainName, EmitterEntity, EndpointName, Expression, FieldName,
+    HttpApplicationHeaders, HttpBodyMode, HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod,
+    HttpOrigin, HttpRequestEmitter, IngestTimestampSource, IngestorInput, LiteralHeaderWrite,
+    Model, ModelIndex, ModelName, OtelAggregationTemporality, OtelEmitter, OtelMappings,
+    OtelMetricKind, OtelMetricsEmitter, ParseAsType, ProcessorOutput, RelayName, RouteConstruction,
+    SchemaField, SchemaName, SignalingWireFormat, SqsEmitter, SqsFifoGroup, SqsQueueEmitter,
+    VhostName, parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -38,7 +38,10 @@ use nervix_vm::{
 };
 
 use crate::registry::{
-    error::{OtelMappingIssue, OtelMappingSection, OtelMappingSignal, RegistryError},
+    error::{
+        ConnectorDeclarationIssue, ConnectorDurationSetting, NervixOwnedConfigKey,
+        OtelMappingIssue, OtelMappingSection, OtelMappingSignal, RegistryError,
+    },
     validation::{
         branching::relay_declared_branch,
         expression::{
@@ -63,6 +66,20 @@ pub(in crate::registry) fn validate_ingestor_source(
     identifier: &ModelName,
     ingestor: &CreateIngestor,
 ) -> Result<(), Report<RegistryError>> {
+    if let Some(nervix_models::IngestorEntity::Websockets(
+        nervix_models::WebsocketsIngestor::Connection(source),
+    )) = ingestor.input.transport_entity()
+        && let Err(report) = nervix_models::WebsocketsUpgradeHeaders::parse(&source.headers)
+    {
+        let issue = report.current_context().clone();
+        return Err(
+            report.change_context(RegistryError::InvalidWebsocketsUpgradeHeaders {
+                domain: domain.clone(),
+                ingestor: identifier.clone(),
+                issue,
+            }),
+        );
+    }
     let invalid = |reason: String| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -103,6 +120,88 @@ pub(in crate::registry) fn validate_ingestor_source(
     }
     if let IngestorInput::Client(source) = &ingestor.input {
         validate_client_ingest_mode(&source.mode, invalid)?;
+    }
+    if let Some(acknowledgement) = ingestor.input.transport_acknowledgement() {
+        validate_transport_delivery(domain, identifier, acknowledgement)?;
+    }
+    Ok(())
+}
+
+impl ConnectorDurationSetting {
+    /// Checks a duration without reading a clock: the shared deadline bound fits every
+    /// monotonic timer Nervix schedules, including the first batch's gather deadline.
+    fn parse(
+        self,
+        value: &str,
+        domain: &DomainName,
+        node: &nervix_models::NodeRef,
+    ) -> error_stack::Result<std::time::Duration, RegistryError> {
+        let invalid = |issue| RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: node.clone(),
+            issue,
+        };
+        let duration = parse_duration_text(value).change_context_lazy(|| {
+            invalid(ConnectorDeclarationIssue::InvalidDuration {
+                setting: self,
+                value: value.to_string(),
+            })
+        })?;
+        if duration.is_zero() && self != Self::BatchTimeout {
+            return Err(Report::new(invalid(
+                ConnectorDeclarationIssue::ZeroDuration { setting: self },
+            )));
+        }
+        if duration > ClientDeadline::LONGEST {
+            return Err(Report::new(invalid(
+                ConnectorDeclarationIssue::UnschedulableDuration { setting: self },
+            )));
+        }
+        Ok(duration)
+    }
+}
+
+/// The acknowledgement view is shared by every transport entity, so no connector-specific
+/// mode table or duration parser is needed at the registry boundary.
+fn validate_transport_delivery(
+    domain: &DomainName,
+    identifier: &ModelName,
+    acknowledgement: nervix_models::IngestAcknowledgement<'_>,
+) -> error_stack::Result<(), RegistryError> {
+    use nervix_models::IngestAcknowledgement;
+
+    let node = nervix_models::NodeRef::new(nervix_models::ModelKind::Ingestor, identifier.clone());
+
+    let retry = match acknowledgement {
+        IngestAcknowledgement::Unacknowledged => return Ok(()),
+        IngestAcknowledgement::Request { timeout, .. } => {
+            ConnectorDurationSetting::AckTimeout.parse(timeout, domain, &node)?;
+            return Ok(());
+        }
+        IngestAcknowledgement::Sequential { timeout, retry } => {
+            ConnectorDurationSetting::AckTimeout.parse(timeout, domain, &node)?;
+            retry
+        }
+        IngestAcknowledgement::Parallel {
+            batch_timeout,
+            timeout,
+            retry,
+            ..
+        } => {
+            ConnectorDurationSetting::BatchTimeout.parse(batch_timeout, domain, &node)?;
+            ConnectorDurationSetting::AckTimeout.parse(timeout, domain, &node)?;
+            retry
+        }
+    };
+    let backoff = ConnectorDurationSetting::RetryBackoff.parse(&retry.backoff, domain, &node)?;
+    let maximum =
+        ConnectorDurationSetting::RetryMaximum.parse(&retry.max_backoff, domain, &node)?;
+    if maximum < backoff {
+        return Err(Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: node.clone(),
+            issue: ConnectorDeclarationIssue::InvertedRetry,
+        }));
     }
     Ok(())
 }
@@ -153,56 +252,26 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         })
     };
 
-    match (emitter.sink.as_ref(), &emitter.body) {
-        (EmitSink::Client(_), nervix_models::EmitterBody::Client) => {}
-        (EmitSink::Client(_), _) => {
-            return Err(invalid(format!(
-                "{} emitter requires native Arrow output",
-                emitter.sink.kind()
-            )));
-        }
-        (_, nervix_models::EmitterBody::Client) => {
-            return Err(invalid(
-                "native CLIENT output requires a CLIENT CONSUMER emitter".to_string(),
-            ));
-        }
-        (
-            EmitSink::Http(_),
-            nervix_models::EmitterBody::Codec { .. } | nervix_models::EmitterBody::WithoutBody,
-        ) => {}
-        (EmitSink::Http(_), nervix_models::EmitterBody::Values) => {
-            return Err(invalid(format!(
-                "{} emitter requires ENCODE USING or WITHOUT BODY",
-                emitter.sink.kind()
-            )));
-        }
-        (_, nervix_models::EmitterBody::Codec { .. }) if emitter.sink.requires_codec() => {}
-        (_, nervix_models::EmitterBody::Values) if !emitter.sink.requires_codec() => {}
-        (_, nervix_models::EmitterBody::WithoutBody) => {
-            return Err(invalid(format!(
-                "WITHOUT BODY is only supported by {} emitters",
-                <nervix_models::HttpRequestSink as nervix_models::EmitterEntityModel>::KIND
-            )));
-        }
-        (_, nervix_models::EmitterBody::Values) => {
-            return Err(invalid(format!(
-                "{} emitter requires ENCODE USING",
-                emitter.sink.transport_label()
-            )));
-        }
-        (_, nervix_models::EmitterBody::Codec { .. }) => {
-            return Err(invalid(format!(
-                "{} emitter does not support ENCODE USING",
-                emitter.sink.transport_label()
-            )));
-        }
+    let expected = emitter.connector.capabilities().body;
+    if !expected.admits(&emitter.body) {
+        return Err(Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: nervix_models::NodeRef::new(
+                nervix_models::ModelKind::Emitter,
+                identifier.clone(),
+            ),
+            issue: ConnectorDeclarationIssue::Body {
+                entity: emitter.connector.kind(),
+                expected,
+            },
+        }));
     }
 
     emitter
         .validate_batch()
         .map_err(|error| invalid(error.current_context().to_string()))?;
 
-    let retry = emitter.sink.publishing().retry_policy();
+    let retry = emitter.connector.publishing().retry_policy();
     let backoff = parse_duration_text(&retry.backoff).map_err(|error| {
         invalid(format!(
             "invalid MODE RETRY POLICY BACKOFF '{}': {error}",
@@ -227,7 +296,7 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         )));
     }
 
-    if let Some(timeout) = emitter.sink.publishing().ack_timeout() {
+    if let Some(timeout) = emitter.connector.publishing().ack_timeout() {
         let timeout = parse_duration_text(timeout)
             .map_err(|error| invalid(format!("invalid MODE ACK TIMEOUT '{timeout}': {error}")))?;
         if timeout.is_zero() {
@@ -237,8 +306,8 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         }
     }
 
-    match emitter.sink.as_ref() {
-        EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+    match emitter.connector.as_ref() {
+        EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
             queue, fifo_group, ..
         })) => {
             let fifo_queue = queue.is_fifo();
@@ -270,38 +339,78 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
                 }
             }
         }
-        EmitSink::Otel(sink) => {
-            validate_otel_mapping_contract(domain, identifier, sink)?;
+        EmitterEntity::Otel(connector) => {
+            validate_otel_mapping_contract(domain, identifier, connector)?;
         }
-        EmitSink::Client(_)
-        | EmitSink::Http(_)
-        | EmitSink::Kafka(_)
-        | EmitSink::Pulsar(_)
-        | EmitSink::RabbitMq(_)
-        | EmitSink::Redis(_)
-        | EmitSink::Mqtt(_)
-        | EmitSink::Nats(_)
-        | EmitSink::ZeroMq(_)
-        | EmitSink::Syslog(_)
-        | EmitSink::Sentry(_)
-        | EmitSink::Iceberg(_)
-        | EmitSink::ClickHouse(_)
-        | EmitSink::Postgres(_)
-        | EmitSink::MySql(_)
-        | EmitSink::MongoDb(_) => {}
+        EmitterEntity::Client(_)
+        | EmitterEntity::Http(_)
+        | EmitterEntity::Kafka(_)
+        | EmitterEntity::Pulsar(_)
+        | EmitterEntity::RabbitMq(_)
+        | EmitterEntity::Redis(_)
+        | EmitterEntity::Mqtt(_)
+        | EmitterEntity::Nats(_)
+        | EmitterEntity::ZeroMq(_)
+        | EmitterEntity::Syslog(_)
+        | EmitterEntity::Sentry(_)
+        | EmitterEntity::Iceberg(_)
+        | EmitterEntity::ClickHouse(_)
+        | EmitterEntity::Postgres(_)
+        | EmitterEntity::MySql(_)
+        | EmitterEntity::MongoDb(_) => {}
     }
 
+    validate_emitter_value_keys(domain, identifier, emitter)?;
     Ok(())
 }
 
-pub(in crate::registry) fn validate_direct_values_sensitivity(
+/// Each declared direct-value body names at least one distinct destination column. Protocol
+/// entities validate their named fields before this common column rule.
+fn validate_emitter_value_keys(
+    domain: &DomainName,
+    identifier: &ModelName,
+    emitter: &CreateEmitter,
+) -> error_stack::Result<(), RegistryError> {
+    if emitter.connector.mapped_value_types().is_none() {
+        return Ok(());
+    }
+    let mappings = emitter.connector.value_mappings();
+    let invalid = |issue| {
+        Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: nervix_models::NodeRef::new(
+                nervix_models::ModelKind::Emitter,
+                identifier.clone(),
+            ),
+            issue,
+        })
+    };
+    if mappings.values.is_empty() {
+        return Err(invalid(ConnectorDeclarationIssue::EmptyValues));
+    }
+    let mut keys = HashSet::default();
+    for mapping in mappings.values {
+        if !keys.insert(&mapping.column) {
+            return Err(invalid(ConnectorDeclarationIssue::DuplicateValue {
+                key: mapping.column.clone(),
+            }));
+        }
+    }
+    Ok(())
+}
+
+pub(in crate::registry) fn validate_direct_value_mappings(
     domain: &DomainName,
     identifier: &ModelName,
     models: &ModelIndex,
     emitter: &CreateEmitter,
     input_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
-    let mappings = emitter.sink.direct_value_mappings().collect::<Vec<_>>();
+    let mappings = emitter
+        .connector
+        .value_mappings()
+        .declared()
+        .collect::<Vec<_>>();
     if mappings.is_empty() {
         return Ok(());
     }
@@ -314,7 +423,7 @@ pub(in crate::registry) fn validate_direct_values_sensitivity(
                 .assured("c followed by decimal digits is a valid generated field name");
             Assignment {
                 target: AssignmentTarget::bare(field),
-                value: mapping.expression.clone(),
+                value: mapping.mapping.expression.clone(),
             }
         })
         .collect();
@@ -357,24 +466,54 @@ pub(in crate::registry) fn validate_direct_values_sensitivity(
             }),
         }
     }?;
+    let invalid = |issue| {
+        Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: nervix_models::NodeRef::new(
+                nervix_models::ModelKind::Emitter,
+                identifier.clone(),
+            ),
+            issue,
+        })
+    };
+    let types = emitter.connector.mapped_value_types().ok_or_else(|| {
+        invalid(ConnectorDeclarationIssue::MissingMappedValueContract {
+            entity: emitter.connector.kind(),
+        })
+    })?;
     for (index, field) in inferred.iter().enumerate() {
-        if !field.sensitive {
-            continue;
-        }
         let mapping = mappings
             .get(index)
             .assured("one unique generated field is inferred for each VALUES mapping");
-        return Err(Report::new(RegistryError::SensitiveEmitterValue {
-            domain: domain.clone(),
-            emitter: identifier.clone(),
-            sink: emitter.sink.transport_label(),
-            target: mapping.column.clone(),
-        }));
+        let expected = types
+            .value_type(mapping.section, &mapping.mapping.column)
+            .ok_or_else(|| {
+                invalid(ConnectorDeclarationIssue::UnsupportedMappedKey {
+                    section: mapping.section,
+                    key: mapping.mapping.column.clone(),
+                })
+            })?;
+        if !expected.admits(&field.data_type) {
+            return Err(invalid(ConnectorDeclarationIssue::MappedType {
+                section: mapping.section,
+                key: mapping.mapping.column.clone(),
+                expected,
+                actual: field.data_type.clone(),
+            }));
+        }
+        if field.sensitive {
+            return Err(Report::new(RegistryError::SensitiveEmitterValue {
+                domain: domain.clone(),
+                emitter: identifier.clone(),
+                connector: emitter.connector.transport_label(),
+                target: mapping.mapping.column.clone(),
+            }));
+        }
     }
     Ok(())
 }
 
-/// Checks that the codec a batching emitter encodes through has a container its sink can publish
+/// Checks that the codec a batching emitter encodes through has a container its emitter can publish
 /// one batch in.
 pub(in crate::registry) fn validate_emitter_batch_container(
     domain: &DomainName,
@@ -400,11 +539,11 @@ pub(in crate::registry) fn validate_emitter_batch_container(
             codec.name.as_str()
         )));
     }
-    if emitter.sink.requires_batch_transformation() && container.transformation().is_none() {
+    if emitter.connector.requires_batch_transformation() && container.transformation().is_none() {
         return Err(invalid(format!(
             "a batching {} emitter requires codec '{}' to declare an ON EMITTING BATCH \
              transformation, because one envelope carries at most one event",
-            emitter.sink.transport_label(),
+            emitter.connector.transport_label(),
             codec.name.as_str()
         )));
     }
@@ -414,77 +553,44 @@ pub(in crate::registry) fn validate_emitter_batch_container(
 fn validate_otel_mapping_contract(
     domain: &DomainName,
     identifier: &ModelName,
-    sink: &OtelSink,
+    connector: &OtelEmitter,
 ) -> error_stack::Result<(), RegistryError> {
     /// The `VALUES` contract one OTEL signal imposes: what it may name, what it must name, and
     /// whether delta temporality adds `start_time` to the required keys.
     struct SignalContract {
         signal: OtelMappingSignal,
-        allowed: &'static [&'static str],
         required: &'static [&'static str],
         delta: bool,
     }
 
     let SignalContract {
         signal,
-        allowed,
         required,
         delta,
-    } = match sink {
-        OtelSink::Logs(_) => SignalContract {
+    } = match connector {
+        OtelEmitter::Logs(_) => SignalContract {
             signal: OtelMappingSignal::Logs,
-            allowed: &[
-                "time",
-                "severity_text",
-                "severity_number",
-                "body",
-                "trace_id",
-                "span_id",
-            ],
             required: &["time", "body"],
             delta: false,
         },
-        OtelSink::Traces(_) => SignalContract {
+        OtelEmitter::Traces(_) => SignalContract {
             signal: OtelMappingSignal::Traces,
-            allowed: &[
-                "trace_id",
-                "span_id",
-                "parent_span_id",
-                "name",
-                "kind",
-                "start_time",
-                "end_time",
-                "status_code",
-                "status_message",
-            ],
             required: &["trace_id", "span_id", "name", "start_time", "end_time"],
             delta: false,
         },
-        OtelSink::Metrics(OtelMetricsSink { metric, .. }) => match metric.kind {
+        OtelEmitter::Metrics(OtelMetricsEmitter { metric, .. }) => match metric.kind {
             OtelMetricKind::Gauge => SignalContract {
                 signal: OtelMappingSignal::MetricGauge,
-                allowed: &["time", "start_time", "value"],
                 required: &["time", "value"],
                 delta: false,
             },
             OtelMetricKind::Sum { temporality, .. } => SignalContract {
                 signal: OtelMappingSignal::MetricSum,
-                allowed: &["time", "start_time", "value"],
                 required: &["time", "value"],
                 delta: temporality == OtelAggregationTemporality::Delta,
             },
             OtelMetricKind::Histogram { temporality } => SignalContract {
                 signal: OtelMappingSignal::MetricHistogram,
-                allowed: &[
-                    "time",
-                    "start_time",
-                    "count",
-                    "sum",
-                    "bucket_counts",
-                    "explicit_bounds",
-                    "min",
-                    "max",
-                ],
                 required: &["time", "count", "bucket_counts", "explicit_bounds"],
                 delta: temporality == OtelAggregationTemporality::Delta,
             },
@@ -504,10 +610,15 @@ fn validate_otel_mapping_contract(
         attributes,
         resource,
         scope: _,
-    } = sink.mappings();
+    } = connector.mappings();
+    let types = nervix_models::EmitterEntityBody::mapped_value_types(connector)
+        .verified("every OTEL signal declares its mapped field types");
     let mut value_keys = HashSet::default();
     for mapping in values {
-        if !allowed.contains(&mapping.column.as_str()) {
+        if types
+            .value_type(nervix_models::MappedValueSection::Values, &mapping.column)
+            .is_none()
+        {
             return Err(invalid(OtelMappingIssue::UnsupportedValue {
                 signal,
                 key: mapping.column.clone(),
@@ -558,10 +669,10 @@ pub(in crate::registry) fn validate_sqs_fifo_group_expression(
     emitter: &CreateEmitter,
     input_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
-    let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+    let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
         fifo_group: Some(SqsFifoGroup::Expression(expression)),
         ..
-    })) = emitter.sink.as_ref()
+    })) = emitter.connector.as_ref()
     else {
         return Ok(());
     };
@@ -672,8 +783,8 @@ pub(in crate::registry) fn validate_http_request_expressions(
     input_schema: &CreateSchema,
     payload_schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
-    let EmitSink::Http(HttpSink::Request(HttpRequestSink { method, path, .. })) =
-        emitter.sink.as_ref()
+    let EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter { method, path, .. })) =
+        emitter.connector.as_ref()
     else {
         return Ok(());
     };
@@ -784,6 +895,27 @@ pub(in crate::registry) fn validate_http_request_expressions(
     Ok(())
 }
 
+/// Refuses a Kafka client whose CONFIG sets a key Nervix decides for every Kafka consumer. The
+/// key is matched without regard to ASCII case, so no spelling of it reaches the driver.
+pub(in crate::registry) fn validate_kafka_client(
+    domain: &DomainName,
+    identifier: &ModelName,
+    client: &CreateClientKafka,
+) -> Result<(), Report<RegistryError>> {
+    for entry in &client.config {
+        for key in NervixOwnedConfigKey::KAFKA {
+            if entry.key.eq_ignore_ascii_case(key.as_ref()) {
+                return Err(Report::new(RegistryError::NervixOwnedClientConfigKey {
+                    domain: domain.clone(),
+                    client: identifier.clone(),
+                    key,
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The origin accepted by an HTTP emitter, once its client has an explicit, usable request timeout
 /// and complete TLS identity settings. The returned URL is safe to use as the base for
 /// request-target validation; its credentials, path, query and fragment have been ruled out.
@@ -811,7 +943,7 @@ pub(in crate::registry) fn validate_http_emitter_client(
     let origin = HttpOrigin::parse(endpoint)
         .map_err(|_| invalid("HTTP client endpoint must be an http or https origin"))?;
 
-    let kind = <nervix_models::HttpRequestSink as nervix_models::EmitterEntityModel>::KIND;
+    let kind = <nervix_models::HttpRequestEmitter as nervix_models::EmitterEntityModel>::KIND;
     let timeout = entry("timeout_ms")
         .ok_or_else(|| invalid(&format!("{kind} emitter client requires timeout_ms")))?;
     ClientDeadline::parse(timeout).change_context(RegistryError::InvalidModel {
@@ -840,8 +972,8 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
         value: HttpHeaderValue,
     }
 
-    let EmitSink::Http(HttpSink::Request(HttpRequestSink { method, path, .. })) =
-        emitter.sink.as_ref()
+    let EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter { method, path, .. })) =
+        emitter.connector.as_ref()
     else {
         return Ok(());
     };
@@ -1183,7 +1315,7 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
         readonly_binding_for_internal_schema("input", input_schema),
         writable_binding_for_internal_schema("output", output_schema),
     ];
-    let metadata_scope = ingestor.input.source_kind().capabilities().metadata;
+    let metadata_scope = ingestor.input.entity_kind().capabilities().metadata;
     if let Some(metadata_schema) = metadata_scope.arrow_schema() {
         bindings.push(CompileBinding::readonly(
             "metadata",
@@ -1236,21 +1368,21 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
     Ok(output_schema.clone())
 }
 
-fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
-    sink.capabilities().writes_headers()
+fn emitter_entity_supports_headers(connector: &EmitterEntity) -> bool {
+    connector.capabilities().writes_headers()
 }
 
-/// Refuses an emitter whose sink keeps one value per header name and whose `INVOKE` clause writes
+/// Refuses an emitter whose connector keeps one value per header name and whose `INVOKE` clause writes
 /// one literal name twice: on every record the later write would replace the earlier one, so the
-/// earlier write could never reach a message. Names compare as the sink's header model records
-/// them, and a name an expression computes is left to the sink at run time.
+/// earlier write could never reach a message. Names compare as the emitter's header model records
+/// them, and a name an expression computes is left to the emitter at run time.
 fn refuse_replaced_header_writes(
     domain: &DomainName,
     identifier: &ModelName,
     emitter: &CreateEmitter,
     program: &SpannedNode<Program>,
 ) -> Result<(), Report<RegistryError>> {
-    let Some(model) = emitter.sink.capabilities().headers else {
+    let Some(model) = emitter.connector.capabilities().headers else {
         return Ok(());
     };
     let mut writes = Vec::new();
@@ -1275,7 +1407,7 @@ fn refuse_replaced_header_writes(
     Err(Report::new(RegistryError::ReplacedHeaderWrite {
         domain: domain.clone(),
         emitter: identifier.clone(),
-        sink: emitter.sink.kind(),
+        connector: emitter.connector.kind(),
         header: model.names.recorded(replaced.later.name).into_owned(),
         earlier: replaced.earlier.position,
         later: replaced.later.position,
@@ -1338,13 +1470,13 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
         .invoke
         .iter()
         .any(|invocation| invocation.inner.function == FunctionName::WriteHeader);
-    if invokes_write_header && !emit_sink_supports_headers(&emitter.sink) {
+    if invokes_write_header && !emitter_entity_supports_headers(&emitter.connector) {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "{} emitters do not support write_header",
-                emitter.sink.transport_label()
+                emitter.connector.transport_label()
             ),
         }));
     }
@@ -1380,8 +1512,8 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
         "emitter route",
     )?);
     body_bindings.extend(lookup_hash_map_bindings(lookup_fields));
-    let output_sensitivity = match (emitter.sink.as_ref(), codec_route) {
-        (EmitSink::Http(_) | EmitSink::Client(_), true) => SchemaSensitivity::default(),
+    let output_sensitivity = match (emitter.connector.as_ref(), codec_route) {
+        (EmitterEntity::Http(_) | EmitterEntity::Client(_), true) => SchemaSensitivity::default(),
         _ => schema_sensitivity_for_internal_schema(output_schema),
     };
     {

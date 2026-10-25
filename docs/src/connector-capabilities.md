@@ -125,9 +125,9 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | written |  |
-| Buffers | each incoming packet, whose bound every CONNECT advertises as its Maximum Packet Size: at most 10240 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>publishes the connection reads ahead of the host: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |  |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>an acknowledgement's PUBACKs written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |  |
-| Driver limits | A packet above the advertised Maximum Packet Size that a broker sends anyway ends the connection with DISCONNECT Packet too large. |  |
+| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>admitted publishes or compact discard acknowledgements the connection reads ahead of the host: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |  |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |  |
+| Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### NATS SUBJECT ingest
@@ -157,7 +157,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`: options, modes. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names. |
 | Reference | RABBITMQ client |  |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |  |
-| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
@@ -165,9 +165,9 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | written |  |
-| Buffers | deliveries the broker sends ahead of their acknowledgement: at most 1 delivery; when full, holds back what fills it |  |
-| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open and consume: `connect_timeout_ms`; 30s when omitted<br>a silent connection: driver default, twice the negotiated heartbeat |  |
-| Driver limits | A frame above the negotiated frame_max ends the connection. |  |
+| Buffers | Lapin's existing consumer delivery queue; broker prefetch bounds it in acknowledged modes, but automatic acknowledgements do not apply that bound: unbounded<br>deliveries gathered for one host read: set by 1 under NO ACK and ACK SEQUENTIAL; ACK PARALLEL MAX otherwise, at most 65,535; when full, holds back what fills it |  |
+| Network waits | gathering further deliveries after the first under ACK PARALLEL; cancellation hands over every delivery already gathered: `BATCH TIMEOUT`<br>connection: name resolution, address attempts, TLS, the AMQP handshake, channel open and consume: `connect_timeout_ms`; 30s when omitted<br>a silent connection: driver default, twice the negotiated heartbeat |  |
+| Driver limits | Consumer prefetch is 1 under ACK SEQUENTIAL and ACK PARALLEL MAX under ACK PARALLEL, at most 65,535; the broker holds back deliveries beyond that window.<br>NO ACK has no prefetch bound; auto-acknowledged deliveries can accumulate in Lapin's existing consumer queue while the host is not reading.<br>A frame above the negotiated frame_max ends the connection. |  |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
 
 ### REDIS PUBSUB ingest
@@ -258,17 +258,17 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Reference | WEBSOCKETS client |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
-| Options in statement order | No entity-specific options. |  |
-| Headers | Not offered: A frame carries its payload; handshake headers are not a per-frame header map. |  |
+| Options in statement order | `HEADERS { 'authorization' = 'Bearer token' }` (composed clause); optional; omitted when unset |  |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
-| Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |  |
+| Metadata | metadata.frame_type: STRING OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | frames that arrive while the signaling handshake runs: unbounded |  |
-| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded<br>close: fixed 1s |  |
-| Driver limits | A message above 64 MiB or a frame above 16 MiB ends the connection. |  |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
+| Buffers | accepted signaling frames retained for source reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |  |
+| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |  |
+| Driver limits | None declared. |  |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |
 
 ### WEBSOCKETS ENDPOINT ingest
 

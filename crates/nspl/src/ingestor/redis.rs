@@ -13,7 +13,7 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{RedisChannelName, RedisPubSubIngestMode, RedisPubSubSource};
+use nervix_models::{RedisChannelName, RedisPubSubIngestMode, RedisPubSubIngestor};
 
 use super::delivery::{no_ack, push_quiesce_clause};
 use crate::{
@@ -23,14 +23,14 @@ use crate::{
 
 /// `FROM <client> CHANNEL '<channel>' MODE NO ACK ON QUIESCE BUFFER …|DROP`.
 pub(super) fn pubsub_body<'src>()
--> impl Parser<'src, &'src [Token], RedisPubSubSource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], RedisPubSubIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Channel))
         .then(external_name::<RedisChannelName>())
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(RedisPubSubIngestMode::NoAck))
         .then(push_quiesce_clause())
-        .map(|(((client, channel), mode), quiesce)| RedisPubSubSource {
+        .map(|(((client, channel), mode), quiesce)| RedisPubSubIngestor {
             client,
             channel,
             mode,

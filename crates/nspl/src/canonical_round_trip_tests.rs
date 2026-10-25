@@ -17,8 +17,9 @@
 
 use nervix_arbitrary::{Arbitrary, Domain, ModelVariant, StatementVariant};
 use nervix_models::{
-    CreateStatement, CreateSubscription, DeleteSubscription, DescribeBackup, EmitSinkKind,
-    Expression, IngestSourceKind, InspectionFormat, Model, Statement, SubscriptionDeliveryBehavior,
+    CreateStatement, CreateSubscription, DeleteSubscription, DescribeBackup, EmitterEntityKind,
+    Expression, IngestorEntityKind, InspectionFormat, Model, Statement,
+    SubscriptionDeliveryBehavior,
 };
 use strum::IntoEnumIterator as _;
 
@@ -254,8 +255,9 @@ fn postgres_update_corpus_keeps_a_mapped_column_to_update() {
         let Model::Emitter(emitter) = arbitrary.model() else {
             panic!("current emitter seed");
         };
-        let nervix_models::EmitSink::Postgres(nervix_models::PostgresSink::Table(destination)) =
-            emitter.sink.as_ref()
+        let nervix_models::EmitterEntity::Postgres(nervix_models::PostgresEmitter::Table(
+            destination,
+        )) = emitter.connector.as_ref()
         else {
             panic!("current Postgres destination");
         };
@@ -318,13 +320,13 @@ fn every_model_family_round_trips_canonically() {
 }
 
 #[test]
-fn every_emitter_sink_round_trips_canonically() {
-    for kind in EmitSinkKind::all() {
+fn every_emitter_connector_round_trips_canonically() {
+    for kind in EmitterEntityKind::all() {
         for seed in 0..16 {
             let bytes = sweep_bytes(seed);
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
             let emitter = arbitrary.create_emitter_to(kind);
-            assert_eq!(emitter.sink.kind(), kind);
+            assert_eq!(emitter.connector.kind(), kind);
             let model = Model::Emitter(emitter);
             let statement = Statement::Create(CreateStatement::new(Box::new(model), false));
             assert_statement_round_trips(&ClientStatement::Server(statement));
@@ -334,12 +336,12 @@ fn every_emitter_sink_round_trips_canonically() {
 
 #[test]
 fn every_ingestor_source_round_trips_canonically() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         for seed in 0..16 {
             let bytes = sweep_bytes(seed);
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
             let ingestor = arbitrary.create_ingestor_from(kind);
-            assert_eq!(ingestor.input.source_kind(), kind);
+            assert_eq!(ingestor.input.entity_kind(), kind);
             let model = Model::Ingestor(ingestor);
             let statement = Statement::Create(CreateStatement::new(Box::new(model), false));
             assert_statement_round_trips(&ClientStatement::Server(statement));

@@ -567,7 +567,7 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | host isolation | `simulated_hosts_keep_their_own_names_sockets_and_clocks` | 43, 7053 | 15 s / 20,000 / 60 s | Once both report that they listen, two hosts listening on one port are each reached at their own address, a name no host holds fails as not existing without time passing, and a ten-second wait completes only on the simulated clock |
 | bounded CPU worker | `bounded_cpu_job_runs_on_the_simulated_scheduler` | 1–12 | 1 s / 200 / 3 s | Every CPU and memory class runs its job on the scheduler thread, and every queue and reservation returns to zero |
 | typed Arrow exchange | `transport::production_transport_exchanges_typed_arrow_batch_and_state_frames_over_simulated_tcp` | 49 | 30 s / 50,000 / 90 s | After a listener rebind, production TLS, HTTP/2, typed envelopes, and Arrow IPC carry a typed request, a relay payload and generation-qualified state frames |
-| materialized state owner replacement | `transport::materialized::materialized_branch_state_transfers_reconnect_to_the_replacement_owner` | 51, 53 | 180 s / 200,000 / 120 s | Two branch placements describe and stream a 3 MiB Arrow payload at revision 1, then a partition after the first received frame interrupts another fetch. After repair and serving transport replacement, both branches transfer at revision 2. The client verifies exact length and digest at both revisions. This exercises the transport and typed checkpoint envelope; server installation, disk durability and whole-cluster recovery are covered separately. |
+| materialized state owner replacement | `transport::materialized::materialized_branch_state_transfers_reconnect_to_the_replacement_owner` | 51, 53 | 180 s / 200,000 / 120 s | Two branch placements describe and stream a 3 MiB Arrow payload at revision 1, then a partition after the first received frame interrupts another fetch. The partition drops what the first owner still had in flight under the bulk receive window, and the simulated TCP never resends it, so the bulk connection stays half-open after repair; like the description request, a revision-2 fetch that meets the replaced owner's reset on it is retried on a fresh connection. After repair and serving transport replacement, both branches transfer at revision 2. The client verifies exact length and digest at both revisions. This exercises the transport and typed checkpoint envelope; server installation, disk durability and whole-cluster recovery are covered separately. |
 | multiple authenticated peers preserve remote failure classes | `transport::multiple_peers_keep_remote_failure_classes_and_reject_invalid_authentication` | 57 | 30 s / 50,000 / 90 s | One client resolves and exchanges typed Arrow responses with two peers, each peer's rejected, unavailable, not-ready, and failed outcomes arrive as their own remote failure classes naming their subject, and a dial under a DNS identity the certificate does not name is rejected |
 | partition before connect | `transport::network_disruption_respects_deadlines_and_repairs_authenticated_service` | 61 | 85 s / 100,000 / 90 s | Setup fails and liveness times out through twelve seconds of partition; repair restores authenticated service |
 | one-way partition before connect | The same | 62 | 85 s / 100,000 / 90 s | The same, with only server-to-client messages dropped |
@@ -587,6 +587,8 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | backup owner restart during transfer | `transport::backup::restart_during_backup_transfer_discards_the_process_stage` | 102 | 320 s / 400,000 / 90 s | An incomplete section cannot finish after owner restart, and the replacement process has no prior capture stage |
 | backup inventory partition and held link | `transport::backup::backup_inventory_is_bounded_across_a_partition_and_a_held_link` | 104 | 85 s / 100,000 / 90 s | An inventory request across a partition, and another across a held link, each fails at the request's five-second deadline; after repair and after release the capture owner lists its complete six-section stage unchanged, from its single capture |
 | stalled peer isolation | `transport::isolation::stalled_peer_cannot_consume_unrelated_capacity_or_leak_reservations` | 91–93 | 120 s / 120,000 / 120 s | A stalled peer holds only its own connection's slots, unrelated work progresses, and every reservation is released |
+| join refusal across a partition | `transport::prerequisites::a_joiner_beyond_the_heartbeat_bound_is_refused_once_a_partition_heals` | 111 | 30 s / 50,000 / 90 s | A joiner whose heartbeat is beyond the bound stays joining for three seconds of partition, is refused by its member naming the heartbeat and both values once the partition heals, and counts the refusal under its own reason; the member's own join is untouched, and a compatible latecomer joins through it |
+| rolling heartbeat change | `transport::prerequisites::a_rolling_heartbeat_change_joins_within_the_bound_and_is_refused_beyond_it` | 113 | 30 s / 50,000 / 90 s | Three hosts join; one crashes and restarts with a heartbeat within the bound and rejoins; another crashes and restarts with one beyond the bound and is refused by the first peer it reaches, while the two others stay joined and connected |
 
 The simulation target also holds 26 runner and driver checks, such as the supervision, bound, clock,
 entropy, and trace checks and the fresh-process record and replay checks, and two ignored scenarios
@@ -682,9 +684,11 @@ Key transitions assert exact values. The stalled peer holds all 32 shared manage
 connection while liveness, cancellation, and discovery still use the reserved streams, and one more
 shared operation waits until its own deadline. A burst fills the one bulk worker and its eight-job
 queue, the two submissions beyond them are refused without a charge, and control work is admitted in
-the same pass. Unread streams stop at one HTTP/2 window each and release their admission and memory
-at the five-second progress deadline. The held relay reserves its exact body, largest decoded batch,
-and scratch, plus its retained grant metadata, until cancellation and release of the borrowed intake.
+the same pass. Unread 2 MiB resource streams stop at one bulk receive window each, which the stalled
+peer backs with one `bulk_window` reservation per stream. They release their admission and memory at
+the five-second progress deadline, and the stalled peer returns every window once its streams end.
+The held relay reserves its exact body, largest decoded batch, and scratch, plus its retained grant
+metadata, until cancellation and release of the borrowed intake.
 
 The fixture then holds the stalled link. The hub's own liveness deadline ends its probe to the
 stalled peer while the healthy peer keeps exchanging every traffic class. Removing the stalled peer
@@ -694,6 +698,27 @@ connections the hub opened to it at once, together with the handlers still waiti
 releasing the link closes the hub's inbound connections from the torn-down peer. The [Traffic And
 Resource Isolation](./interconnect.md#traffic-and-resource-isolation) contract is what these values
 check.
+
+### Join Refusal And Rolling Timing Changes
+
+The prerequisite cases bind each host's transport with its own join terms and judge the handshake
+the production transport performs: the record each hello and acceptance carries, the refusal an
+acceptor answers with, and the join progress outbound connections move. The partition case dials a
+member across a partition for three simulated seconds: no handshake completes, so the joiner is still
+joining and has counted no prerequisite refusal. Once the link is repaired, the member answers the
+next hello with a refusal, and the joiner's progress becomes that refusal, seen from the joiner, with
+the heartbeat and both values. The member never dials anyone, and refusing the joiner leaves its own
+progress where it was; a latecomer within the bound then joins through the same member.
+
+The rolling case starts three hosts with one heartbeat and lets each join. The control then crashes
+one host and bounces it, and its new run carries a heartbeat within the bound of both others, as a
+rolling restart does, and rejoins. Once it has, the control crashes and bounces another host, whose
+new run carries a heartbeat beyond the bound of both, and whichever peer its first connection
+reaches refuses it, naming that peer's heartbeat. After each restart the hosts that kept running
+dial the restarted one from fresh targets, as gossip does once it sees a node's new run. They stay
+joined to each other and connected, and count the refusals of their own dials to the refused host. These cases
+cover the transport's judgment and join progress; the server's stop on a refusal, the membership's
+admission rule and the clock-skew probe are covered by the Cucumber prerequisites feature.
 
 ## Simulated Restart And Real Process Crash
 

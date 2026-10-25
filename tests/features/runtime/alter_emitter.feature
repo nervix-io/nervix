@@ -13,31 +13,31 @@ Feature: Altering emitters
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE ZEROMQ CLIENT sink_a CONFIG {
+      CREATE ZEROMQ CLIENT emitter_a CONFIG {
         'addr' = 'tcp://127.0.0.1:63001',
         'bind' = 'false'
       };
-      CREATE ZEROMQ CLIENT sink_b CONFIG {
+      CREATE ZEROMQ CLIENT emitter_b CONFIG {
         'addr' = 'tcp://127.0.0.1:63002',
         'bind' = 'false'
       };
-      CREATE ZEROMQ PUSH EMITTER event_sink FROM outgoing
-        TO sink_a MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
+      CREATE ZEROMQ PUSH EMITTER event_emitter FROM outgoing
+        TO emitter_a MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH EACH 30s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
-      ALTER ZEROMQ PUSH EMITTER event_sink
-        SET TO sink_b MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec,
+      ALTER ZEROMQ PUSH EMITTER event_emitter
+        SET TO emitter_b MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec,
         SET COLLECT FOR 10ms MAX BATCH SIZE 512KiB,
         SET DETACHED,
         SET FLUSH IMMEDIATE;
-      SHOW CREATE EMITTER event_sink;
+      SHOW CREATE EMITTER event_emitter;
       """
     Then the last command output contains
       """
-      CREATE DETACHED ZEROMQ PUSH EMITTER event_sink
+      CREATE DETACHED ZEROMQ PUSH EMITTER event_emitter
         FROM outgoing COLLECT FOR 10ms MAX BATCH SIZE 512KiB
-        TO sink_b
+        TO emitter_b
           MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING event_codec
         INHERIT ALL
@@ -73,12 +73,12 @@ Feature: Altering emitters
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ZEROMQ CLIENT sink CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ZEROMQ PUSH EMITTER event_sink FROM outgoing
-        TO sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
+      CREATE ZEROMQ PUSH EMITTER event_emitter FROM outgoing
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH EACH 30s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -90,7 +90,7 @@ Feature: Altering emitters
     Then the observed broker does not receive a payload within "300ms"
     When these NSPL commands are executed on the leader node
       """
-      ALTER ZEROMQ PUSH EMITTER event_sink SET FLUSH IMMEDIATE;
+      ALTER ZEROMQ PUSH EMITTER event_emitter SET FLUSH IMMEDIATE;
       """
     Then the last command output contains
       """
@@ -129,16 +129,16 @@ Feature: Altering emitters
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ZEROMQ CLIENT sink_a CONFIG {
+      CREATE ZEROMQ CLIENT emitter_a CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ZEROMQ CLIENT sink_b CONFIG {
+      CREATE ZEROMQ CLIENT emitter_b CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ZEROMQ PUSH EMITTER event_sink FROM outgoing
-        TO sink_a MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
+      CREATE ZEROMQ PUSH EMITTER event_emitter FROM outgoing
+        TO emitter_a MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -153,7 +153,7 @@ Feature: Altering emitters
       """
     When these NSPL commands are executed on the leader node
       """
-      ALTER ZEROMQ PUSH EMITTER event_sink SET CLIENT sink_b, SET DETACHED;
+      ALTER ZEROMQ PUSH EMITTER event_emitter SET CLIENT emitter_b, SET DETACHED;
       """
     Then the last command output contains
       """
@@ -198,16 +198,16 @@ Feature: Altering emitters
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         TO replacement INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ZEROMQ CLIENT sink_a CONFIG {
+      CREATE ZEROMQ CLIENT emitter_a CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ZEROMQ CLIENT sink_b CONFIG {
+      CREATE ZEROMQ CLIENT emitter_b CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE ZEROMQ PUSH EMITTER event_sink FROM outgoing
-        TO sink_a MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
+      CREATE ZEROMQ PUSH EMITTER event_emitter FROM outgoing
+        TO emitter_a MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -222,10 +222,10 @@ Feature: Altering emitters
       """
     When these NSPL commands are executed on the leader node
       """
-      ALTER ZEROMQ PUSH EMITTER event_sink
+      ALTER ZEROMQ PUSH EMITTER event_emitter
         ADD FROM replacement,
         DROP FROM outgoing,
-        SET CLIENT sink_b,
+        SET CLIENT emitter_b,
         SET DETACHED;
       """
     Then the last command output contains

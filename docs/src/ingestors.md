@@ -133,6 +133,12 @@ Every source body declares its delivery mode with `MODE`, polled and listener so
 
 Each entity accepts only the modes it can honor, and completion offers only those:
 
+`CREATE` and `ALTER` validate the complete delivery policy before accepting it. Durations must be
+readable and fit the schedulable deadline bound of 9,223,372,036,854,775,807 nanoseconds. ACK timeouts
+and both retry durations must be positive, and `RETRY POLICY MAX` must be at least `BACKOFF`.
+`BATCH TIMEOUT 0s` is allowed and gathers available messages without waiting. A refused alteration
+keeps the ingestor's accepted policy.
+
 | Entity | `MODE` forms |
 | --- | --- |
 | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `NO ACK`, `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |
@@ -268,7 +274,7 @@ including endpoint ingestors, which serve on every node, and ingestors whose sch
 move. It also ignores `ON QUIESCE`. Already admitted payloads continue through their routes, route
 buffers are force-flushed whatever their `FLUSH EACH` cadence, and Nervix waits for their ACK roots
 to resolve before the source session stops, so offsets, acknowledgements, and deletes complete for
-work that reached its sinks. A root still unresolved when the drain timeout passes is negatively
+work that reached its emitters. A root still unresolved when the drain timeout passes is negatively
 acknowledged, and the source's redelivery contract applies. A raw quiesce buffer is outside runtime
 graph work, so a shutdown discards what it retained instead of replaying it. See
 [Planned Ownership Handoffs And Failover](control-plane.md#planned-ownership-handoffs-and-failover)
@@ -363,7 +369,7 @@ is full, what happens to a payload depends on whether its sender can present it 
   `Retry-After` and closes an established WebSocket with 1013, so the sender sends it again.
 - A payload that `BUFFER` retained waits for a place when its buffer drains; see
   [Quiesce Modes](#quiesce-modes).
-- A paced source has already moved past its poll, so the poll waits for a place. Waiting delays the
+- A paced ingestor has already moved past its poll, so the poll waits for a place. Waiting delays the
   next poll, and the domain cadence coalesces the occurrences it missed into one poll at the newest
   due instant.
 - A source read in `MODE NO ACK` cannot present a payload again either. The payload waits for a
@@ -504,6 +510,7 @@ The `name` argument can be any expression that returns `STRING`. Both functions 
 
 - `HTTP ENDPOINT` and `HTTP REQUEST` expose HTTP headers with UTF-8 values
 - `WEBSOCKETS ENDPOINT` exposes UTF-8 headers from the opening HTTP upgrade request
+- `WEBSOCKETS CONNECTION` exposes printable ASCII headers from its opening HTTP upgrade response
 - `KAFKA TOPIC` exposes Kafka record headers
 - `NATS SUBJECT` exposes message headers
 - `PULSAR TOPIC` exposes message properties
@@ -523,9 +530,10 @@ Each of these sources declares a [header model](./connector-contract.md#header-m
 | `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `SQS QUEUE` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
+| `WEBSOCKETS CONNECTION` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `WEBSOCKETS ENDPOINT` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 
-`CLIENT PRODUCER`, `MQTT TOPIC`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` carry no transport headers and refuse `read_header` and `read_headers`.
+`CLIENT PRODUCER`, `MQTT TOPIC`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SYSLOG LISTENER` carry no transport headers and refuse `read_header` and `read_headers`.
 <!-- connector-matrix:ingest-headers:end -->
 
 `read_headers` returns a name's values in the order its model keeps them, at most one of them where
@@ -567,7 +575,7 @@ CREATE [IF NOT EXISTS] <kind> CLIENT <name>
 
 Transport-specific schemes and keys:
 
-- `KAFKA`: pass-through to librdkafka. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
+- `KAFKA`: pass-through to librdkafka, except `allow.auto.create.topics`, which `CREATE KAFKA CLIENT` refuses. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
 - `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file` and `tls_key_file`, and the client requires `timeout_ms`; see [Prometheus](#prometheus) for every key it declares.
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
@@ -771,13 +779,13 @@ One batch is one source acknowledgement unit. It has exactly one terminal outcom
 | Outcome | Meaning | Cause |
 | --- | --- | --- |
 | not admitted | No row entered the graph. | `invalid batch: <defect>`, `suspended`, `busy`, `draining`, `producer ended`, `credit exceeded` |
-| completed | Every route and acknowledging sink its rows reached confirmed them under the graph's rules. | — |
+| completed | Every route and acknowledging emitter its rows reached confirmed them under the graph's rules. | — |
 | processing failed | The batch was admitted and its acknowledgement failed. Some of its effects may have happened. | `ack_timeout`, `rejected` |
 | unknown outcome | The batch may have been admitted and processed, but no terminal result can be established. | `interrupted`, `owner_lost`; a client whose session ended adds `session_lost` |
 
 Transport receipt is never an outcome. A batch completes under the normal acknowledgement rules: a
 row a filter drops is resolved; a detached boundary resolves where it detaches; and an
-acknowledging sink resolves its rows at its own success boundary, such as the complete response
+acknowledging emitter resolves its rows at its own success boundary, such as the complete response
 headers of an HTTP emitter. The defects of an invalid batch are `malformed`, `unexpected message`,
 `compressed`, `schema mismatch`, `not one batch`, `too many rows`, `too large`, and `invalid data`.
 
@@ -1001,6 +1009,12 @@ Kafka client configuration is passed through to librdkafka. Nervix does not over
 `auto.offset.reset`; set it explicitly, for example to `earliest`, when a new consumer group must
 read records that may already exist.
 
+A Kafka ingestor never creates the topic it reads. Every consumer Nervix runs for it sets
+`allow.auto.create.topics` to `false`, whatever the broker allows, and `CREATE KAFKA CLIENT` refuses a
+Kafka client whose `CONFIG` sets that key. Provision the topic before the ingestor starts. Until it
+exists, `DESCRIBE INGESTOR` reports `transient error: Kafka topic '<topic>' does not exist`, and the
+ingestor starts reading once the topic is created.
+
 In an ACK mode, Nervix commits a Kafka position only after its downstream acknowledgement
 completes. If downstream work rejects a record, the ingestor seeks back to it. A consumer-group
 rebalance can move the record's partition to another group member while its batch is in flight.
@@ -1198,7 +1212,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | --- | --- |
 | Reference | RABBITMQ client |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |
-| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
@@ -1206,20 +1220,41 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
-| Buffers | deliveries the broker sends ahead of their acknowledgement: at most 1 delivery; when full, holds back what fills it |
-| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open and consume: `connect_timeout_ms`; 30s when omitted<br>a silent connection: driver default, twice the negotiated heartbeat |
-| Driver limits | A frame above the negotiated frame_max ends the connection. |
+| Buffers | Lapin's existing consumer delivery queue; broker prefetch bounds it in acknowledged modes, but automatic acknowledgements do not apply that bound: unbounded<br>deliveries gathered for one host read: set by 1 under NO ACK and ACK SEQUENTIAL; ACK PARALLEL MAX otherwise, at most 65,535; when full, holds back what fills it |
+| Network waits | gathering further deliveries after the first under ACK PARALLEL; cancellation hands over every delivery already gathered: `BATCH TIMEOUT`<br>connection: name resolution, address attempts, TLS, the AMQP handshake, channel open and consume: `connect_timeout_ms`; 30s when omitted<br>a silent connection: driver default, twice the negotiated heartbeat |
+| Driver limits | Consumer prefetch is 1 under ACK SEQUENTIAL and ACK PARALLEL MAX under ACK PARALLEL, at most 65,535; the broker holds back deliveries beyond that window.<br>NO ACK has no prefetch bound; auto-acknowledged deliveries can accumulate in Lapin's existing consumer queue while the host is not reading.<br>A frame above the negotiated frame_max ends the connection. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-ingest).
 <!-- connector-matrix:ingest-rabbitmq-queue:end -->
 
-Each instance consumes with a prefetch window of one delivery, which it acknowledges once the
-records decoded from it have been acknowledged through the graph. A failed or timed-out graph
-acknowledgement, or a failed transport acknowledgement, makes the instance try to negatively
-acknowledge the delivery with requeue. When that requeue succeeds, RabbitMQ can deliver the message
-again and the instance waits on its declared `RETRY POLICY` cadence before reading again. If the
-requeue fails, the instance suspends and reconnects as described below.
+`QUEUE` names an existing queue and preserves its spelling, including letter case and Unicode.
+Its string literal must contain 1 to 255 UTF-8 bytes, the AMQP short-string limit; a multibyte
+character contributes every byte to that limit. `SHOW CREATE INGESTOR` retains the exact queue
+name and the configured acknowledgement, retry and instance policies.
+
+
+Choose `MODE NO ACK`, `MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY …`, or
+`MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration> RETRY POLICY …`.
+`DESCRIBE INGESTOR` prints the complete selected mode.
+
+`NO ACK` registers an automatically acknowledging consumer, sends no prefetch request and sends
+no delivery acknowledgements or rejections. RabbitMQ considers a delivery complete when it sends
+it, so connection loss, broker restart or a stopped consumer can lose a delivery the graph has not
+processed. Lapin's existing delivery queue has no bound in this mode; a publisher that outpaces the
+host can grow that queue. A payload the node's extension workers cannot admit is refused and
+counted. Use an acknowledged mode when the broker must retain unprocessed deliveries.
+
+`ACK SEQUENTIAL` uses a prefetch of one. `ACK PARALLEL MAX n` uses a prefetch of `n` per instance,
+where `n` is in `1..=65535`, the range of AMQP's prefetch field. Each read gathers up to that count,
+ending at `BATCH TIMEOUT` after its first delivery. Each delivery keeps its own graph outcome and
+is acknowledged or negatively acknowledged individually; one failed delivery does not requeue
+successful siblings. A failed or timed-out graph acknowledgement, or a failed transport
+acknowledgement, makes the instance try to negatively acknowledge that delivery with requeue.
+After settlement the declared `RETRY POLICY` paces another read if anything was requeued. If a
+transport settlement fails, the instance suspends and reconnects as described below.
+It first keeps the graph waits of deliveries already admitted to their outcomes, so broker replay
+cannot overtake downstream work from that connection.
 
 A payload its codec refuses is consumed and acknowledged, and its decode rejection follows
 `ON GENERAL ERROR`; see [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
@@ -1229,7 +1264,7 @@ consumers on the same queue continue. Queue length, message TTL, overflow, and a
 remain in force. If auto-expiry deletes the queue, resume reports a source error until an operator
 re-provisions it; Nervix never creates it.
 
-A connection that closes while a delivery is still unacknowledged, because the broker restarted,
+A connection that closes while an acknowledged-mode delivery is still unacknowledged, because the broker restarted,
 closed it, or the network dropped it, also makes RabbitMQ requeue that delivery. The acknowledgement
 or the requeue the ingestor still owes it can only be sent on the connection it arrived on, so the
 instance reconnects on its `RETRY POLICY` cadence. Once that reconnect succeeds, it discards the
@@ -1346,9 +1381,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
-| Buffers | each incoming packet, whose bound every CONNECT advertises as its Maximum Packet Size: at most 10240 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>publishes the connection reads ahead of the host: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>an acknowledgement's PUBACKs written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
-| Driver limits | A packet above the advertised Maximum Packet Size that a broker sends anyway ends the connection with DISCONNECT Packet too large. |
+| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>admitted publishes or compact discard acknowledgements the connection reads ahead of the host: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
+| Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-ingest).
@@ -1356,6 +1391,18 @@ See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#m
 
 The topic filter is a string literal; see [External Names](#external-names) for the levels and
 wildcards it may hold.
+
+Connections use the driver's 60-second keep-alive unless the broker supplies a Server Keep Alive
+in `CONNACK`. Plexus exposes no client setting for this interval. A broker-supplied zero disables
+the keep-alive and the acknowledgement-write deadline derived from it; it does not make a silent
+connection fail within a fixed time.
+
+`SESSION CLEAN` starts a fresh broker session on every connection and retains no session after
+disconnect. `SESSION PERSISTENT` resumes the broker session for the same client identity and
+requests the maximum Session Expiry Interval (`0xFFFFFFFF`). The broker's accepted expiry,
+offline-queue limits and eviction policy still govern retention. Plexus exposes no session-expiry
+setting. Nervix keeps delivery attempts and acknowledgements in memory; a persistent broker
+session does not persist that local state.
 
 Delivery constraints:
 
@@ -1369,9 +1416,8 @@ Delivery constraints:
   Maximum: 65 under `ACK SEQUENTIAL`, and `MAX` plus 64 under `ACK PARALLEL`, at most MQTT's
   65,535, so the broker sends no further QoS 1 publish while that many wait on their
   acknowledgements, and a batch above 65,535 gathers at most 65,535 of them before its
-  `BATCH TIMEOUT` ends it. The 64 leave the window room to fill around publishes the broker
-  discards above the ingestor's packet bound, which a broker such as EMQX keeps counting against
-  the Receive Maximum
+  `BATCH TIMEOUT` ends it. The extra capacity lets the connection keep reading while the ingestor
+  holds a batch
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages
 
 In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for
@@ -1386,18 +1432,27 @@ batch's acknowledgement fails and the ingestor reconnects, and the broker delive
 unacknowledged QoS 1 publishes again. See
 [MQTT source connections](connector-contract.md#mqtt-source-connections).
 
-Every connection an MQTT ingestor opens advertises the incoming packet bound the table above
-declares as the Maximum Packet Size of its `CONNECT`. MQTT 5 requires the broker to discard a larger
-publish for this subscriber instead of sending it, so the publish never reaches the ingestor and a
-persistent session never presents it again; the broker's own metrics, not Nervix's, show that
-discard. A broker that sends a larger packet anyway is answered with a `DISCONNECT` whose reason is
-Packet too large, and the ingestor reports the packet's size and the bound as its transient error
-and an error event before it reconnects.
+Every MQTT connection advertises the full protocol framing limit of 268,435,460 bytes in its
+`CONNECT`. Nervix separately admits complete publishes of at most 10 KiB, including their topic,
+properties and framing, so the payload must leave room for that overhead. It drops larger
+publishes locally, acknowledges them when their QoS
+requires it, then counts them in `nervix_ingestor_oversized_payloads_total`, visible in
+`DESCRIBE INGESTOR`. They never reach the codec and do not count as decode rejections. Releasing
+their broker inflight slots lets a persistent session continue delivering ordinary messages even
+after many oversized publishes. Raw framing may therefore use substantially more memory than an
+admitted publish; the two bounds are declared separately above.
+
+Cancellation retains any discard acknowledgement and its original keep-alive deadline for the
+next read. An ordinary partial batch ahead of a discard is returned and acknowledged first,
+preserving MQTT acknowledgement order. The following read starts the discard acknowledgement's
+deadline and reports its size exactly once after that acknowledgement has been written.
 
 Without a `client_id` in the client configuration, one instance connects as
 `<domain>~<ingestor>`. Multiple instances connect as `<domain>~<ingestor>~<instance>`, with
 zero-based instance indices. An explicit identity shared by multiple instances must contain
-`{{instance}}`. Identities remain stable across node ownership changes.
+`{{instance}}`. An explicit identity replaces the whole default, including its domain prefix:
+choose identities unique to each live connection on the same broker, across domains too.
+Identities remain stable across node ownership changes.
 
 `DROP INGESTOR` releases the broker sessions, including after `STOP`. Nervix stops the source,
 opens a clean cleanup connection for each distinct identity, sends `UNSUBSCRIBE` for its filter,
@@ -1949,6 +2004,7 @@ The referenced resource bundle must contain:
 ```plexus,ignore
 CREATE WEBSOCKETS CONNECTION INGESTOR <name>
   FROM <client>
+  [HEADERS { 'authorization' = 'Bearer token' }]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1963,26 +2019,70 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | WEBSOCKETS client |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | No entity-specific options. |
-| Headers | Not offered: A frame carries its payload; handshake headers are not a per-frame header map. |
+| Options in statement order | `HEADERS { 'authorization' = 'Bearer token' }` (composed clause); optional; omitted when unset |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |
+| Metadata | metadata.frame_type: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | frames that arrive while the signaling handshake runs: unbounded |
-| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded<br>close: fixed 1s |
-| Driver limits | A message above 64 MiB or a frame above 16 MiB ends the connection. |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
+| Buffers | accepted signaling frames retained for source reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
+| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |
+| Driver limits | None declared. |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
 See the [WEBSOCKETS CONNECTION capability and mirror reference](connector-capabilities.md#websockets-connection-ingest).
 <!-- connector-matrix:ingest-websockets-connection:end -->
 
 This opens an outbound WebSocket connection through a `WEBSOCKETS CLIENT` and decodes text or
-binary frames.
+binary frames. Its optional `HEADERS { 'authorization' = 'Bearer token' }` clause follows `FROM
+<client>` and takes literal string names and values. Names are case-insensitive; repeated names,
+protocol-owned fields (`Host`, hop-by-hop framing fields and `Sec-WebSocket-*`), malformed values,
+more than 128 fields, or more than 32 KiB of field name/value bytes are refused before activation.
+
+Each data frame exposes `metadata.frame_type` as `text` or `binary`. `read_header` and
+`read_headers` read the opening response's printable ASCII header values, including repeated values in their
+transport order. These values belong to the frame's exact connection: accepted signaling frames
+and quiesce-buffered frames retain that snapshot across suspension, reconnection and replay.
+Headers are not copied into every frame and are not propagated to a relay unless mapped explicitly.
+The connection is ingest-only; it declares no emitter envelope or `BATCH` clause.
+
+The client's Nervix-owned `CONFIG` is strict and matches keys without regard to ASCII case:
+
+| Key | Contract |
+| --- | --- |
+| `endpoint` | Required `ws://` or `wss://` URL with a host and without a fragment. |
+| `connect_timeout_ms` | Positive whole milliseconds for DNS, TCP, TLS and upgrade together; omitted means 30000. |
+| `ping_interval_ms` | Positive whole milliseconds between client pings after signaling completes; omitted means only answering peer pings. |
+| `idle_timeout_ms` | Positive whole milliseconds without an inbound frame before reconnecting. When omitted, three configured ping intervals apply, or 30000 without configured pings. |
+| `handshake_buffer_capacity` | Accepted signaling messages retained before readiness: 1–65535, default 16. A full queue backpressures the connection within the signaling `TIMEOUT`. |
+| `max_message_size` | Positive whole bytes per incoming message, including fragmented messages: at most 4294967295, default 67108864 (64 MiB). |
+| `max_frame_size` | Positive whole bytes per incoming frame: at most 4294967295, default 16777216 (16 MiB). |
+| `tls_ca_file` | Optional CA file for `wss://`. |
+| `tls_cert_file`, `tls_key_file` | Optional client identity files, supplied together for `wss://`. |
+
+Durations obey the shared schedulable physical-duration bound. Unknown or repeated keys are
+refused. TLS file keys are refused with `ws://`. Resource mounts and
+configuration templates keep their shared client contract; rendered values are checked again when
+opening the source. A ping write has a one-second physical budget and a failure triggers recovery.
+
+An explicit idle timeout overrides the ping-derived value. Every received frame, including a
+ping or pong, refreshes activity. Sending a client ping or cancelling a read leaves the inactivity
+deadline in place. The idle deadline is physical time and a silent connection is closed and retried
+on the reconnect policy. Choose a bound that permits the peer's expected idle periods or keepalive
+cadence. Three ping intervals must fit the shared schedulable bound when they supply the deadline.
+
+Accepted signaling data stays in one bounded handoff until the handshake completes. The source
+then delivers those messages in order before reading new socket frames. In addition to the queue,
+one accepted frame can wait for room, and the transport can assemble a message within its declared
+message and frame limits. If a full handoff prevents signaling from completing, the signaling
+`TIMEOUT` fails that connection and clears its undelivered handshake data before retrying. An
+oversized incoming frame or message also ends the connection with a transient read failure;
+reconnection supplies no durable replay guarantee.
+
 For `ws` and `wss`, each initial connection and resume resolves the URL host through the node's
-asynchronous resolver. It tries the returned addresses in order within one 30-second budget for
-DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
+asynchronous resolver. It tries the returned addresses in order within the configured
+`connect_timeout_ms` budget for DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
 header, TLS server name, path and query; custom TLS roots and client identity remain in effect.
 An expired DNS answer is refreshed on a new attempt, while a healthy connection stays open.
 Resolution, connection and read failures are transient source failures. A peer Close records its

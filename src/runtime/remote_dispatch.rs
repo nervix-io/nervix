@@ -22,11 +22,17 @@
 )]
 
 use error_stack::ResultExt as _;
+use nervix_interconnect::{RelayGrantRefusal, TransportError};
 
 use super::{
+    relay_send_attempts::{
+        GrantCapacityRefusals, RelaySendAttempts, RelaySendFailure, RelaySendStep,
+    },
+    remote_ack_owner::RecordStorage,
     remote_ack_watch_charge::{RemoteAckWatchCharge, RemoteAckWatchHold},
     *,
 };
+use crate::runtime_schema::batch_payload_bytes;
 
 pub(super) const REMOTE_RELAY_INSTANTIATION_WAIT: Duration = Duration::from_secs(5);
 
@@ -94,6 +100,11 @@ pub(super) enum RemoteDispatchError {
     },
     #[error("node '{target}' rejected relay admission")]
     AdmissionRejected { target: ClusterNodeName },
+    #[error("node '{target}' refused the relay grant: {refusal}")]
+    GrantRefused {
+        target: ClusterNodeName,
+        refusal: RelayGrantRefusal,
+    },
     #[error("relay admission response channel from node '{target}' closed")]
     AdmissionResponseClosed { target: ClusterNodeName },
     #[error("timed out after {timeout:?} waiting for node '{target}' to admit a relay batch")]
@@ -226,6 +237,8 @@ pub(super) struct RemoteDispatcher {
     /// The same registry the attaching runtime holds, so an acknowledgement this dispatcher sent
     /// a correlation id for resolves against the entry the runtime is waiting on.
     pub(super) registry: Arc<RemoteDispatchRegistry>,
+    /// The same fault seams the attaching runtime holds.
+    pub(super) fault_injection: ConfiguredFaultInjection,
 }
 
 /// An outbound delivery retains every registration until admission, or resolves its held shares
@@ -239,6 +252,14 @@ pub(super) struct PendingRemoteAckDelivery {
 enum PendingRemoteAckDeliveryState {
     Registering,
     Admitted,
+}
+
+/// How storing the acknowledgement records of an outbound delivery ended.
+pub(super) enum RemoteAckStorage {
+    /// The records are stored and travel with the delivery under these registrations.
+    Stored(PendingRemoteAckDelivery),
+    /// The delivery's channel ended while it waited for room to store them.
+    Cancelled,
 }
 
 impl PendingRemoteAckDelivery {
@@ -322,21 +343,47 @@ impl RemoteDispatcher {
         Ok(self.registration(id))
     }
 
-    pub(super) fn register_pending_acks(
+    /// The instant a delivery starting now must be admitted by: one bound covers storing its
+    /// records, holding its grant and waiting for its admission.
+    pub(super) fn delivery_deadline() -> Instant {
+        Instant::now()
+            .checked_add(REMOTE_RELAY_TOTAL_TIMEOUT)
+            .assured("the fixed relay admission bound fits the monotonic clock")
+    }
+
+    /// Stores the records of `acks` to be resolved by `receiver`, the node the returned
+    /// registrations are sent to, holding the delivery back while this node's relay budget has no
+    /// room for them, until `deadline` or until `cancelled` resolves.
+    pub(super) async fn store_pending_acks(
         &self,
         receiver: &ClusterNodeName,
         acks: Vec<AckSet>,
-    ) -> error_stack::Result<PendingRemoteAckDelivery, RemoteDispatchError> {
-        let ids = self.registry.register_acks(receiver.clone(), acks)?;
+        deadline: Instant,
+        cancelled: impl std::future::Future<Output = ()>,
+    ) -> error_stack::Result<RemoteAckStorage, RemoteDispatchError> {
+        if acks.iter().any(|acks| !acks.is_empty()) {
+            self.fault_injection
+                .fill_relay_memory_before_record_storage_if_armed(
+                    self.local_node_id(),
+                    &self.executor,
+                );
+        }
+        let storage = self
+            .registry
+            .store_acks(receiver.clone(), acks, deadline, cancelled)
+            .await?;
+        let RecordStorage::Stored(ids) = storage else {
+            return Ok(RemoteAckStorage::Cancelled);
+        };
         let registrations = ids
             .into_iter()
             .map(|id| id.map(|id| self.registration(id)))
             .collect();
-        Ok(PendingRemoteAckDelivery {
+        Ok(RemoteAckStorage::Stored(PendingRemoteAckDelivery {
             registry: self.registry.clone(),
             registrations,
             state: PendingRemoteAckDeliveryState::Registering,
-        })
+        }))
     }
 
     pub(super) fn forwarded_ack(acks: &AckSet) -> AckSet {
@@ -397,6 +444,8 @@ impl RemoteDispatcher {
         node_id: &ClusterNodeName,
         mut payload: RelayPayload,
         branch_channel: &RelayOutboundSlot,
+        deadline: Instant,
+        capacity_refusals: GrantCapacityRefusals,
     ) -> error_stack::Result<(), RemoteDispatchError> {
         if branch_channel.cancellation().is_cancelled() {
             return Err(Report::new(RemoteDispatchError::BranchEvicted {
@@ -410,7 +459,7 @@ impl RemoteDispatcher {
             .relay_cancellation_guard(node_id.clone(), delivery);
         let (registration, admission) = self.register_pending_relay_admission()?;
         payload.admission = Some(registration.clone());
-        let dispatch = self.dispatch(node_id, Envelope::RelayPayload(payload));
+        let dispatch = self.dispatch_relay_payload(node_id, payload, deadline, capacity_refusals);
         tokio::pin!(dispatch);
         let dispatch_result = nervix_primitives::select! {
             biased;
@@ -436,7 +485,8 @@ impl RemoteDispatcher {
                 }
             };
         }
-        let admission = Self::await_relay_admission(node_id, admission, Self::DISPATCH_TIMEOUT);
+        let admission =
+            Self::await_relay_admission(node_id, admission, Self::DISPATCH_TIMEOUT, deadline);
         tokio::pin!(admission);
         let result = nervix_primitives::select! {
             biased;
@@ -568,10 +618,8 @@ impl RemoteDispatcher {
         node_id: &ClusterNodeName,
         mut admission: watch::Receiver<RelayAdmissionUpdate>,
         inactivity_timeout: Duration,
+        total_deadline: Instant,
     ) -> error_stack::Result<(), RemoteDispatchError> {
-        let total_deadline = Instant::now()
-            .checked_add(REMOTE_RELAY_TOTAL_TIMEOUT)
-            .assured("the fixed relay total timeout fits the monotonic clock");
         loop {
             nervix_primitives::task::consume_budget().await;
             let inactivity_deadline = Instant::now()
@@ -679,6 +727,8 @@ impl RemoteDispatcher {
                 },
             };
             let delivery = outbound_slot.next_delivery();
+            // A session subscription never holds the relay owner's fan-out longer than the
+            // dispatch bound, so a grant refused for capacity is retried only within it.
             if let Err(error) = self
                 .dispatch_admitted_relay_payload(
                     node_id,
@@ -694,6 +744,8 @@ impl RemoteDispatcher {
                         admission: None,
                     },
                     &outbound_slot,
+                    Self::delivery_deadline(),
+                    GrantCapacityRefusals::GiveUp,
                 )
                 .await
             {
@@ -704,6 +756,50 @@ impl RemoteDispatcher {
                     error = %format_args!("{error:#}"),
                     "failed to dispatch remote subscription payload"
                 );
+            }
+        }
+    }
+
+    /// Sends `payload` to `node_id`, holding the delivery back, under
+    /// [`GrantCapacityRefusals::Hold`], while the receiver refuses its grant for capacity.
+    ///
+    /// [`RelaySendAttempts`] decides after every failed attempt whether and when to send again:
+    /// a capacity refusal is the receiver answering, so it does not count toward the stall bound,
+    /// and a held delivery asks again until it is granted or `deadline` passes. A permanent refusal
+    /// ends the delivery at once.
+    async fn dispatch_relay_payload(
+        &self,
+        node_id: &ClusterNodeName,
+        payload: RelayPayload,
+        deadline: Instant,
+        capacity_refusals: GrantCapacityRefusals,
+    ) -> error_stack::Result<(), RemoteDispatchError> {
+        let mut attempts = RelaySendAttempts::new(Instant::now(), deadline, capacity_refusals);
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let sent = nervix_primitives::time::timeout_at(
+                attempts.attempt_deadline(),
+                self.interconnect
+                    .send(node_id, Envelope::RelayPayload(payload.clone())),
+            )
+            .await;
+            let error = match sent {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(error)) => error,
+                Err(_) => {
+                    let end = attempts.after_attempt_deadline(Instant::now());
+                    return Err(Report::new(end.dispatch_error(node_id)));
+                }
+            };
+            let failure = match error.current_context() {
+                TransportError::RelayGrantRefused(refusal) => RelaySendFailure::Refused(*refusal),
+                _ => RelaySendFailure::Transport,
+            };
+            match attempts.after_failure(failure, Instant::now()) {
+                RelaySendStep::RetryAt(retry_at) => sleep_until(retry_at).await,
+                RelaySendStep::End(end) => {
+                    return Err(error.change_context(end.dispatch_error(node_id)));
+                }
             }
         }
     }
@@ -806,16 +902,27 @@ impl Runtime {
 
     /// Publishes how this node reaches its cluster, and with it the node's identity, once the node
     /// has joined the cluster. `interconnect` is the transport bound under this node's name.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a node attaches its remote dispatcher once, as it joins its cluster"
+        )
+    )]
     pub(crate) fn attach_remote_dispatcher(
         &self,
         cluster: Arc<cluster::ClusterHandle>,
         interconnect: Transport,
     ) {
+        self.inner
+            .fault_injection
+            .register_relay_memory_owner(interconnect.node_id(), &self.inner.executor);
         let dispatcher = RemoteDispatcher {
             cluster,
             interconnect,
             executor: self.inner.executor.clone(),
             registry: self.inner.remote_dispatch.clone(),
+            fault_injection: self.inner.fault_injection.clone(),
         };
         self.inner
             .remote_dispatcher
@@ -1000,6 +1107,11 @@ impl Runtime {
 
     /// The rows `remote` carries, decoded against `schema` and checked against the metadata and
     /// acknowledgement sidecars that travel with them, and the branch they belong to.
+    ///
+    /// The grant the body arrived under charged room to decode it. Once it is decoded, the body's
+    /// charge keeps the body and the decoded columns, which the runtime holds until it has taken
+    /// the batch in, and returns the decode room they did not need, so a delivery waiting for its
+    /// relay's buffer holds no more relay memory than its data.
     async fn decode_remote_rows(
         &self,
         schema: &CompiledSchema,
@@ -1009,6 +1121,9 @@ impl Runtime {
             .decode_arrow_body(self.executor(), remote.batch_ipc.clone())
             .await
             .change_context(RemoteRelayDecodeError::Body)?;
+        remote
+            .batch_ipc
+            .keep_charge_for(batch_payload_bytes(batch.batch()));
         let rows = batch.batch().num_rows();
         if remote.metadata.len() != rows {
             return Err(Report::new(RemoteRelayDecodeError::MetadataCount {
@@ -1730,9 +1845,18 @@ mod tests {
     async fn a_cancelled_remote_delivery_resolves_its_records_and_returns_its_owner() {
         let (runtime, dispatcher) = joined_runtime().await;
         let (acks, completion) = AckSet::root();
-        let delivery = dispatcher
-            .register_pending_acks(&receiving_node(), vec![acks])
+        let storage = dispatcher
+            .store_pending_acks(
+                &receiving_node(),
+                vec![acks],
+                RemoteDispatcher::delivery_deadline(),
+                std::future::pending(),
+            )
+            .await
             .assured("the fixture delivery fits");
+        let RemoteAckStorage::Stored(delivery) = storage else {
+            panic!("an uncancelled delivery with room stores its records");
+        };
         let registration = delivery.registrations()[0]
             .clone()
             .assured("the fixture row has an acknowledgement");
@@ -1972,6 +2096,7 @@ mod tests {
             &ClusterNodeName::parse("relay-owner").expect("valid name"),
             admission_rx,
             Duration::from_millis(200),
+            RemoteDispatcher::delivery_deadline(),
         )
         .await
         .expect("alive progress should preserve the relay admission wait");
@@ -2125,10 +2250,14 @@ mod tests {
             "branch is draining".to_string(),
         ));
 
-        let error =
-            RemoteDispatcher::await_relay_admission(&target, admission_rx, Duration::from_secs(1))
-                .await
-                .expect_err("a rejected relay admission must fail dispatch");
+        let error = RemoteDispatcher::await_relay_admission(
+            &target,
+            admission_rx,
+            Duration::from_secs(1),
+            RemoteDispatcher::delivery_deadline(),
+        )
+        .await
+        .expect_err("a rejected relay admission must fail dispatch");
 
         assert!(matches!(
             error.current_context(),
@@ -2144,10 +2273,14 @@ mod tests {
         let (admission_tx, admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
         drop(admission_tx);
 
-        let error =
-            RemoteDispatcher::await_relay_admission(&target, admission_rx, Duration::from_secs(1))
-                .await
-                .expect_err("a closed relay admission response must fail dispatch");
+        let error = RemoteDispatcher::await_relay_admission(
+            &target,
+            admission_rx,
+            Duration::from_secs(1),
+            RemoteDispatcher::delivery_deadline(),
+        )
+        .await
+        .expect_err("a closed relay admission response must fail dispatch");
 
         assert!(matches!(
             error.current_context(),
@@ -2166,6 +2299,7 @@ mod tests {
             &target,
             admission_rx,
             REMOTE_RELAY_TOTAL_TIMEOUT + Duration::from_secs(1),
+            RemoteDispatcher::delivery_deadline(),
         )
         .await
         .expect_err("relay admission must stop at its total deadline");

@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The MQTT client Model, the topic source and sink Models with their session,
+//! - **Owns.** The MQTT client Model, the topic source and emitter Models with their session,
 //!   quality-of-service and delivery modes, the topic filter a source subscribes to with the rules
 //!   MQTT holds it to, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The MQTT driver, its configuration keys, or how a topic filter is
 //!   subscribed or published to.
 
@@ -26,16 +26,17 @@ use super::{
         WaitBound,
     },
     configured_client::configured_client,
-    entity_union::{connector_sinks, connector_sources},
+    entity_union::{connector_emitters, connector_ingestors},
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
     AcknowledgementConfirmation, ChoiceRequirement, ClientName, ConnectorKind, DeclaredDelivery,
-    DeclaredQuiesce, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
-    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, PositionClass,
-    RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
-    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    DeclaredQuiesce, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
+    EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
+    EmitterReferenceKind, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, PositionClass, RetryPolicy,
 };
 
 configured_client!(Mqtt: unpooled, config Nervix, CreateClientMqtt => MqttConfigEntry);
@@ -94,7 +95,7 @@ const BROKER_KEPT_SESSION: &[ChoiceRequirement] = &[
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct MqttTopicSource {
+pub struct MqttTopicIngestor {
     pub client: ClientName,
     pub topic: MqttTopicFilter,
     pub instances: NonZeroU64,
@@ -102,41 +103,77 @@ pub struct MqttTopicSource {
     pub quiesce: IngestQuiesceMode,
 }
 
-/// The largest packet an MQTT TOPIC ingestor's client receives, in bytes, which every `CONNECT` it
-/// sends advertises as its Maximum Packet Size, so MQTT 5 obliges the broker to discard a larger
-/// publish for this subscriber instead of sending it.
-///
-/// A policy input: the ten KiB the driver applied, unannounced, before Nervix declared the bound,
-/// so declaring it refuses nothing an ingestor received before.
+/// The largest publish an MQTT TOPIC ingestor admits, including its MQTT packet headers.
+/// Larger publishes are acknowledged and counted as oversized before decoding their payloads.
 pub const MQTT_SOURCE_MAXIMUM_PACKET_BYTES: u64 = 10 * 1024;
+
+/// MQTT's largest packet: a 28-bit Remaining Length plus the five-byte fixed header.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "MQTT 5 encodes Remaining Length in at most four seven-bit groups and its fixed \
+                  header in at most five bytes"
+    )
+)]
+pub const MQTT_MAXIMUM_PACKET_BYTES: u64 = (1 << 28) + 4;
 
 /// The largest value MQTT's Four Byte Integer, which carries the Maximum Packet Size, can hold.
 const MQTT_FOUR_BYTE_INTEGER_MAX: u64 = 0xFFFF_FFFF;
 
 const _: () = assert!(
     MQTT_SOURCE_MAXIMUM_PACKET_BYTES > 0
-        && MQTT_SOURCE_MAXIMUM_PACKET_BYTES <= MQTT_FOUR_BYTE_INTEGER_MAX,
+        && MQTT_SOURCE_MAXIMUM_PACKET_BYTES <= MQTT_MAXIMUM_PACKET_BYTES
+        && MQTT_MAXIMUM_PACKET_BYTES <= MQTT_FOUR_BYTE_INTEGER_MAX,
     "MQTT forbids a Maximum Packet Size of zero, and carries it as a Four Byte Integer"
 );
 
 /// What the connector of a MQTT TOPIC ingestor holds and how long it waits.
-const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
-            holds: "each incoming packet, whose bound every CONNECT advertises as its Maximum \
-                    Packet Size",
+            holds: "each raw MQTT frame, whose protocol bound every CONNECT advertises as its \
+                    Maximum Packet Size; one packet is decoded before admission",
             bound: BufferBound::Bounded {
-                capacity: BufferCapacity::Bytes(MQTT_SOURCE_MAXIMUM_PACKET_BYTES),
+                capacity: BufferCapacity::Bytes(MQTT_MAXIMUM_PACKET_BYTES),
                 overflow: BufferOverflow::PeerDiscards,
             },
         },
         DeclaredBuffer {
-            holds: "publishes the connection reads ahead of the host",
+            holds: "each admitted publish including its packet headers, copied out of raw framing",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Bytes(MQTT_SOURCE_MAXIMUM_PACKET_BYTES),
+                overflow: BufferOverflow::DropAndCount,
+            },
+        },
+        DeclaredBuffer {
+            holds: "admitted publishes or compact discard acknowledgements the connection reads \
+                    ahead of the host",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Setting(
                     "the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under \
                      ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK",
                 ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "the next classified packet outcome held for room in read-ahead",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 1,
+                    unit: "outcome",
+                },
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "a deferred or in-progress size rejection retained across reads",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 1,
+                    unit: "discard",
+                },
                 overflow: BufferOverflow::Backpressure,
             },
         },
@@ -158,7 +195,7 @@ const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Unbounded,
         },
         DeclaredWait {
-            wait: "an acknowledgement's PUBACKs written to the connection",
+            wait: "ordinary and oversized-discard acknowledgements written to the connection",
             bound: WaitBound::Driver("one keep-alive interval of 60 s, or the broker's"),
         },
         DeclaredWait {
@@ -167,13 +204,14 @@ const MQTT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
     ],
     driver_limits: &[
-        "A packet above the advertised Maximum Packet Size that a broker sends anyway ends the \
-         connection with DISCONNECT Packet too large.",
+        "A publish above the admission bound is acknowledged before it is counted as oversized; \
+         its topic, payload and properties never enter read-ahead. The raw framing bound is \
+         MQTT's protocol maximum, separate from the admission bound.",
     ],
 };
 
 /// What the connector of a MQTT TOPIC emitter holds and how long it waits.
-const MQTT_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+const MQTT_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "publishes queued for the driver",
         bound: BufferBound::Bounded {
@@ -198,12 +236,12 @@ const MQTT_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["Packets above the broker's maximum packet size are rejected."],
 };
 
-impl SourceEntity for MqttTopicSource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
+impl IngestorDeclaration for MqttTopicIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         headers: None,
-        metadata: SourceMetadataScope::Headers,
+        metadata: IngestorMetadataScope::Headers,
         executes_on_every_cluster_node: false,
-        reference: SourceReferenceKind::Client(ConnectorKind::Mqtt),
+        reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
         position_class: PositionClass::BrokerRedelivered,
         acknowledgement_confirmation: AcknowledgementConfirmation::Written,
         delivery: &[
@@ -259,13 +297,13 @@ impl SourceEntity for MqttTopicSource {
                 ]),
             },
         ],
-        bounds: MQTT_SOURCE_BOUNDS,
+        bounds: MQTT_INGESTOR_BOUNDS,
     };
 }
 
-impl SourceBody for MqttTopicSource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Client(&self.client)
+impl IngestorEntityBody for MqttTopicIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Client(&self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -431,15 +469,15 @@ impl MqttIngestMode {
     }
 }
 
-connector_sources! {
+connector_ingestors! {
     connector Mqtt = "MQTT";
     /// What an MQTT source reads.
-    pub enum MqttSource;
+    pub enum MqttIngestor;
     /// The alterations of the ingestors that read an MQTT entity.
-    pub enum MqttIngestorAlteration;
+    pub enum MqttTopicIngestorAlteration;
     /// The entities an MQTT source reads.
-    pub enum MqttSourceEntity {
-        Topic(MqttTopicSource) = "TOPIC", "MQTT";
+    pub enum MqttIngestorEntity {
+        Topic(MqttTopicIngestor) = "TOPIC", "MQTT";
     }
 }
 
@@ -447,16 +485,16 @@ connector_sources! {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct MqttTopicSink {
+pub struct MqttTopicEmitter {
     pub mode: MqttTopicPublishingMode,
     pub client: ClientName,
     pub topic: MqttTopicName,
 }
 
-impl SinkEntity for MqttTopicSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+impl EmitterDeclaration for MqttTopicEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         headers: None,
-        reference: SinkReferenceKind::Client(ConnectorKind::Mqtt),
+        reference: EmitterReferenceKind::Client(ConnectorKind::Mqtt),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
@@ -468,13 +506,13 @@ impl SinkEntity for MqttTopicSink {
         options: &[],
         envelope: &[],
         properties: &[],
-        bounds: MQTT_SINK_BOUNDS,
+        bounds: MQTT_EMITTER_BOUNDS,
     };
 }
 
-impl SinkBody for MqttTopicSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for MqttTopicEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::Mqtt,
         })
@@ -485,15 +523,15 @@ impl SinkBody for MqttTopicSink {
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector Mqtt = "MQTT";
-    /// What an MQTT sink writes.
-    pub enum MqttSink;
+    /// What an MQTT emitter writes.
+    pub enum MqttEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
-    pub enum MqttEmitterMode;
-    /// The entities an MQTT sink writes.
-    pub enum MqttSinkEntity {
-        Topic(MqttTopicSink, MqttTopicPublishingMode) = "TOPIC";
+    pub enum MqttTopicEmitterMode;
+    /// The entities an MQTT emitter writes.
+    pub enum MqttEmitterEntity {
+        Topic(MqttTopicEmitter, MqttTopicPublishingMode) = "TOPIC";
     }
 }
 

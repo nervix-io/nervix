@@ -97,14 +97,14 @@ impl ConsoleCallEnd {
 
     /// Ends the connection as this end calls for: it completes a close the client began, sends
     /// nothing on a failed connection, and otherwise closes with the code that says why.
-    async fn finish<S, E>(self, sink: &mut S)
+    async fn finish<S, E>(self, connector: &mut S)
     where
         S: Sink<Message, Error = E> + Unpin,
         E: Display,
     {
         let frame = match self {
             Self::Closed => {
-                if let Err(error) = sink.close().await {
+                if let Err(error) = connector.close().await {
                     debug!(error = %error, "a console connection failed while it closed");
                 }
                 return;
@@ -116,7 +116,7 @@ impl ConsoleCallEnd {
                 reason: "the node is shutting down".into(),
             },
         };
-        close(sink, frame).await;
+        close(connector, frame).await;
     }
 }
 
@@ -145,13 +145,13 @@ impl SessionServiceImpl {
         E: Display + Send + 'static,
     {
         let codec = ServerBackupDownloadWebSocketCodec::new(limits);
-        let (mut sink, mut messages) = connection.split();
+        let (mut connector, mut messages) = connection.split();
         let request = loop {
             nervix_primitives::task::consume_budget().await;
             let message = nervix_primitives::select! {
                 biased;
                 _ = self.inner.admission_shutdown.cancelled() => {
-                    ConsoleCallEnd::ShuttingDown.finish(&mut sink).await;
+                    ConsoleCallEnd::ShuttingDown.finish(&mut connector).await;
                     return;
                 }
                 message = messages.next() => message,
@@ -163,7 +163,7 @@ impl SessionServiceImpl {
                 Some(Ok(frame)) => break frame,
                 None => {}
                 Some(Err(end)) => {
-                    end.finish(&mut sink).await;
+                    end.finish(&mut connector).await;
                     return;
                 }
             }
@@ -176,16 +176,16 @@ impl SessionServiceImpl {
                     code: CLOSE_INTERNAL_ERROR,
                     reason: "the download's answer does not fit a frame".to_string(),
                 };
-                close(&mut sink, close_frame(Some(violation))).await;
+                close(&mut connector, close_frame(Some(violation))).await;
                 return;
             }
         };
         let ended = self
-            .send_download_frames(&codec, &mut sink, &mut messages, frames)
+            .send_download_frames(&codec, &mut connector, &mut messages, frames)
             .await;
         match ended {
-            Some(end) => end.finish(&mut sink).await,
-            None => close(&mut sink, close_frame(None)).await,
+            Some(end) => end.finish(&mut connector).await,
+            None => close(&mut connector, close_frame(None)).await,
         }
     }
 
@@ -194,7 +194,7 @@ impl SessionServiceImpl {
     async fn send_download_frames<S, M, E>(
         &self,
         codec: &ServerBackupDownloadWebSocketCodec,
-        sink: &mut S,
+        connector: &mut S,
         messages: &mut M,
         mut frames: DownloadFrameStream,
     ) -> Option<ConsoleCallEnd>
@@ -224,7 +224,7 @@ impl SessionServiceImpl {
                         _ = self.inner.admission_shutdown.cancelled() => {
                             return Some(ConsoleCallEnd::ShuttingDown);
                         }
-                        sent = sink.send(Message::Binary(payload)) => sent,
+                        sent = connector.send(Message::Binary(payload)) => sent,
                     };
                     if let Err(error) = sent {
                         debug!(error = %error, "a console download stopped taking frames");
@@ -265,7 +265,7 @@ impl SessionServiceImpl {
         E: Display + Send + 'static,
     {
         let codec = ServerRestoreWebSocketCodec::new(limits);
-        let (mut sink, messages) = connection.split();
+        let (mut connector, messages) = connection.split();
         let reader = codec.clone();
         // A connection that ends without a close message ended abnormally.
         let frames = messages
@@ -284,7 +284,7 @@ impl SessionServiceImpl {
         let reply = match answered {
             Ok(reply) => reply,
             Err(end) => {
-                end.finish(&mut sink).await;
+                end.finish(&mut connector).await;
                 return;
             }
         };
@@ -296,7 +296,7 @@ impl SessionServiceImpl {
                     code: CLOSE_INTERNAL_ERROR,
                     reason: "the restore's reply does not fit a frame".to_string(),
                 };
-                close(&mut sink, close_frame(Some(violation))).await;
+                close(&mut connector, close_frame(Some(violation))).await;
                 return;
             }
         };
@@ -304,23 +304,23 @@ impl SessionServiceImpl {
         let sent = nervix_primitives::select! {
             biased;
             _ = self.inner.admission_shutdown.cancelled() => return,
-            sent = sink.send(Message::Binary(payload)) => sent,
+            sent = connector.send(Message::Binary(payload)) => sent,
         };
         if let Err(error) = sent {
             debug!(error = %error, "a console restore's connection closed before its reply");
             return;
         }
-        close(&mut sink, close_frame(None)).await;
+        close(&mut connector, close_frame(None)).await;
     }
 }
 
 /// Closes a console connection with `frame`.
-async fn close<S, E>(sink: &mut S, frame: CloseFrame<'static>)
+async fn close<S, E>(connector: &mut S, frame: CloseFrame<'static>)
 where
     S: Sink<Message, Error = E> + Unpin,
     E: Display,
 {
-    if let Err(error) = sink.send(Message::Close(Some(frame))).await {
+    if let Err(error) = connector.send(Message::Close(Some(frame))).await {
         debug!(error = %error, "a console connection closed before its close frame");
     }
 }

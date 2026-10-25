@@ -24,19 +24,20 @@ use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AckWindow, ClientConfigEntry, ClientEndpointContract, ClientName, ClientProducerPolicy,
-    ClientProducerSource, ClientResourceMount, ClusterNodeName, CodecName, CreateIngestor,
-    CreateSchema, DomainName, EndpointIngestMode, EndpointName, FlushPolicy, GeneralErrorPolicy,
-    HttpEndpointSource, HttpRequestSource, HttpSource, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSource, IngestSourceKind, IngestTimestampSource, IngestorInput, IngestorName,
-    KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource, MessageErrorOperation, Model,
-    ModelName, MqttIngestMode, MqttSource, MqttTopicSource, NatsSource, NatsSubjectSource,
-    PrometheusSource, PulsarIngestMode, PulsarSource, PulsarSubscriptionOwnership,
-    PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSource, RabbitMqSource, RedisPubSubSource,
-    RedisSource, ResolvedBranching, ScheduledNode, SchemaField, SchemaName, SignalingProtocolName,
-    SqsIngestMode, SqsQueueSource, SqsSource, SyslogListenerSource, SyslogSource,
-    WebsocketsConnectionSource, WebsocketsEndpointSource, WebsocketsSource, ZeroMqPullSource,
-    ZeroMqSource, parse_duration_text,
+    AckWindow, ClientConfigEntry, ClientEndpointContract, ClientName, ClientProducerIngestor,
+    ClientProducerPolicy, ClientResourceMount, ClusterNodeName, CodecName, CreateClientWebsockets,
+    CreateIngestor, CreateSchema, DomainName, EndpointIngestMode, EndpointName, FlushPolicy,
+    GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestor,
+    IngestAcknowledgement, IngestQuiesceMode, IngestTimestampSource, IngestorEntity,
+    IngestorEntityKind, IngestorInput, IngestorName, KafkaIngestMode, KafkaIngestor,
+    KafkaOffsetMode, KafkaTopicIngestor, MessageErrorOperation, Model, ModelName, MqttIngestMode,
+    MqttIngestor, MqttTopicIngestor, NatsIngestor, NatsSubjectIngestor, PrometheusIngestor,
+    PulsarIngestMode, PulsarIngestor, PulsarSubscriptionOwnership, PulsarTopicIngestor,
+    RabbitMqIngestMode, RabbitMqIngestor, RabbitMqQueueIngestor, RedisIngestor,
+    RedisPubSubIngestor, ResolvedBranching, ScheduledNode, SchemaField, SchemaName,
+    SignalingProtocolName, SqsIngestMode, SqsIngestor, SqsQueueIngestor, SyslogIngestor,
+    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestor, ZeroMqIngestor, ZeroMqPullIngestor, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 
@@ -49,9 +50,9 @@ use super::{
 };
 use crate::runtime_schema::CompiledSchema;
 
-/// The input an ingestor declares, asked for its source class and the quiesce modes it honors.
+/// The input an ingestor declares, asked for its entity kind and the quiesce modes it honors.
 ///
-/// Both come from the source vocabulary, which is the one declaration of what a source carries
+/// Both come from the entity vocabulary, which is the one declaration of what an input carries
 /// and which quiesce modes it supports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeclaredIngestorInput {
@@ -59,10 +60,10 @@ pub(crate) struct DeclaredIngestorInput {
 }
 
 impl DeclaredIngestorInput {
-    /// The source class of the input, which decides whether its messages carry headers and
+    /// The entity kind of the input, which decides whether its messages carry headers and
     /// which metadata they expose to the ingestor's programs.
-    pub(crate) fn source_kind(&self) -> IngestSourceKind {
-        self.input.source_kind()
+    pub(crate) fn entity_kind(&self) -> IngestorEntityKind {
+        self.input.entity_kind()
     }
 
     pub(crate) fn quiesce_mode(&self) -> &IngestQuiesceMode {
@@ -92,7 +93,7 @@ pub(crate) struct IngestorSpec {
 impl IngestorSpec {
     /// Whether the ingestor's programs may read the transport headers of its messages.
     pub(crate) fn reads_headers(&self) -> bool {
-        self.declared_input.source_kind().reads_headers()
+        self.declared_input.entity_kind().reads_headers()
     }
 }
 
@@ -113,7 +114,7 @@ impl IngestorClientSpec {
         config: &[ClientConfigEntry],
     ) -> Result<Self, Report<EntrypointPlanError>> {
         if expected != resolved {
-            return Err(Report::new(EntrypointPlanError::SourceIdentityMismatch {
+            return Err(Report::new(EntrypointPlanError::InputIdentityMismatch {
                 ingestor: ingestor.clone(),
                 expected: ModelName::from(expected),
                 resolved: ModelName::from(resolved),
@@ -136,7 +137,7 @@ macro_rules! client_plan {
     };
 }
 
-client_plan!(HttpIngestorStartPlan {
+client_plan!(HttpRequestIngestorStartPlan {
     every: nervix_models::DomainClockPeriod,
 });
 
@@ -149,6 +150,17 @@ pub(crate) enum KafkaOffsetPlan {
     Domain(KafkaDomainOffsetPlacement),
 }
 
+impl KafkaOffsetPlan {
+    fn decide(mode: &KafkaOffsetMode, primary_node: Option<&ClusterNodeName>) -> Self {
+        match mode {
+            KafkaOffsetMode::ConsumerGroup(group) => Self::ConsumerGroup(group.clone()),
+            KafkaOffsetMode::Domain => Self::Domain(KafkaDomainOffsetPlacement {
+                primary_node: primary_node.cloned(),
+            }),
+        }
+    }
+}
+
 /// The cluster node that originates a Kafka ingestor's domain offsets. An ingestor planned without
 /// a placement, as a graph is before the cluster schedules it, has no originating node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,30 +168,30 @@ pub(crate) struct KafkaDomainOffsetPlacement {
     pub(crate) primary_node: Option<ClusterNodeName>,
 }
 
-client_plan!(KafkaIngestorStartPlan {
+client_plan!(KafkaTopicIngestorStartPlan {
     topic: nervix_models::KafkaTopicName,
     offsets: KafkaOffsetPlan,
     instances: NonZeroU64,
     mode: KafkaIngestMode,
 });
-client_plan!(PulsarIngestorStartPlan {
+client_plan!(PulsarTopicIngestorStartPlan {
     topic: nervix_models::PulsarTopicName,
     subscription: nervix_models::PulsarSubscription,
     instances: NonZeroU64,
     mode: PulsarIngestMode,
 });
-client_plan!(MqttIngestorStartPlan {
+client_plan!(MqttTopicIngestorStartPlan {
     topic: nervix_models::MqttTopicFilter,
     instances: NonZeroU64,
     mode: MqttIngestMode,
 });
-client_plan!(NatsIngestorStartPlan {
+client_plan!(NatsSubjectIngestorStartPlan {
     subject: nervix_models::NatsSubjectName,
     queue_group: nervix_models::NatsQueueGroupName,
     instances: NonZeroU64,
     mode: nervix_models::NatsIngestMode,
 });
-client_plan!(RabbitMqIngestorStartPlan {
+client_plan!(RabbitMqQueueIngestorStartPlan {
     queue: nervix_models::RabbitMqQueueName,
     instances: NonZeroU64,
     mode: RabbitMqIngestMode,
@@ -188,32 +200,33 @@ client_plan!(RedisPubSubIngestorStartPlan {
     channel: nervix_models::RedisChannelName,
     mode: nervix_models::RedisPubSubIngestMode,
 });
-client_plan!(PrometheusIngestorStartPlan {
+client_plan!(PrometheusQueryIngestorStartPlan {
     query: String,
     max_body_size: nervix_models::PayloadSizeLimit,
     every: nervix_models::DomainClockPeriod,
 });
-client_plan!(ZeroMqIngestorStartPlan {
+client_plan!(ZeroMqPullIngestorStartPlan {
     mode: nervix_models::ZeroMqIngestMode,
 });
-client_plan!(SqsIngestorStartPlan {
+client_plan!(SqsQueueIngestorStartPlan {
     queue: nervix_models::SqsQueueName,
     instances: NonZeroU64,
     mode: SqsIngestMode,
 });
-client_plan!(WebsocketsIngestorStartPlan {
+client_plan!(WebsocketsConnectionIngestorStartPlan {
+    headers: nervix_models::WebsocketsUpgradeHeaders,
     mode: nervix_models::WebsocketsIngestMode,
     signaling_protocol: Option<SignalingProtocolName>,
 });
-client_plan!(SyslogIngestorStartPlan {});
+client_plan!(SyslogListenerIngestorStartPlan {});
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EndpointIngestorStartPlan {
+pub(crate) struct EndpointIntakeStartPlan {
     pub(crate) endpoint: EndpointName,
     pub(crate) mode: EndpointRequestPlan,
 }
 
-impl EndpointIngestorStartPlan {
+impl EndpointIntakeStartPlan {
     fn decide(
         ingestor: &IngestorName,
         expected: &EndpointName,
@@ -222,7 +235,7 @@ impl EndpointIngestorStartPlan {
         quiesce: &IngestQuiesceMode,
     ) -> Result<Self, Report<EntrypointPlanError>> {
         if expected != &resolved.name {
-            return Err(Report::new(EntrypointPlanError::SourceIdentityMismatch {
+            return Err(Report::new(EntrypointPlanError::InputIdentityMismatch {
                 ingestor: ingestor.clone(),
                 expected: ModelName::from(expected),
                 resolved: ModelName::from(&resolved.name),
@@ -330,7 +343,7 @@ pub(crate) enum IngestorInputPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TransportInputPlan {
     pub(crate) codec: CodecName,
-    pub(crate) source: SourceStartPlan,
+    pub(crate) source: IngestorConnectorPlan,
 }
 
 /// A client source: the schema every submitted batch matches, the policy its producers submit
@@ -370,19 +383,93 @@ impl PartialEq for ClientIngestorStartPlan {
 
 /// The plan of one ingestor's source, which the composition root maps to the connector that runs
 /// it.
+/// The topic entity planned for Kafka execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SourceStartPlan {
+pub(crate) enum KafkaIngestorStartPlan {
+    Topic(KafkaTopicIngestorStartPlan),
+}
+
+/// The topic entity planned for Pulsar execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PulsarIngestorStartPlan {
+    Topic(PulsarTopicIngestorStartPlan),
+}
+
+/// The queue entity planned for RabbitMq execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RabbitMqIngestorStartPlan {
+    Queue(RabbitMqQueueIngestorStartPlan),
+}
+
+/// The pubsub entity planned for Redis execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RedisIngestorStartPlan {
+    PubSub(RedisPubSubIngestorStartPlan),
+}
+
+/// The topic entity planned for Mqtt execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MqttIngestorStartPlan {
+    Topic(MqttTopicIngestorStartPlan),
+}
+
+/// The subject entity planned for Nats execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NatsIngestorStartPlan {
+    Subject(NatsSubjectIngestorStartPlan),
+}
+
+/// The pull entity planned for ZeroMq execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ZeroMqIngestorStartPlan {
+    Pull(ZeroMqPullIngestorStartPlan),
+}
+
+/// The queue entity planned for Sqs execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SqsIngestorStartPlan {
+    Queue(SqsQueueIngestorStartPlan),
+}
+
+/// The query entity planned for Prometheus execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrometheusIngestorStartPlan {
+    Query(PrometheusQueryIngestorStartPlan),
+}
+
+/// The listener entity planned for Syslog execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SyslogIngestorStartPlan {
+    Listener(SyslogListenerIngestorStartPlan),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HttpEndpointIngestorStartPlan(pub(crate) EndpointIntakeStartPlan);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WebsocketsEndpointIngestorStartPlan(pub(crate) EndpointIntakeStartPlan);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HttpIngestorStartPlan {
+    Request(HttpRequestIngestorStartPlan),
+    Endpoint(HttpEndpointIngestorStartPlan),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WebsocketsIngestorStartPlan {
+    Connection(WebsocketsConnectionIngestorStartPlan),
+    Endpoint(WebsocketsEndpointIngestorStartPlan),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IngestorConnectorPlan {
     Http(HttpIngestorStartPlan),
     Kafka(KafkaIngestorStartPlan),
     Pulsar(PulsarIngestorStartPlan),
     Mqtt(MqttIngestorStartPlan),
     Nats(NatsIngestorStartPlan),
     RabbitMq(RabbitMqIngestorStartPlan),
-    RedisPubSub(RedisPubSubIngestorStartPlan),
+    Redis(RedisIngestorStartPlan),
     Prometheus(PrometheusIngestorStartPlan),
     ZeroMq(ZeroMqIngestorStartPlan),
     Sqs(SqsIngestorStartPlan),
-    Endpoint(EndpointIngestorStartPlan),
     Websockets(WebsocketsIngestorStartPlan),
     Syslog(SyslogIngestorStartPlan),
 }
@@ -392,44 +479,48 @@ impl IngestorStartPlan {
     /// Routes and codecs do not identify the MQTT session, so changing them alone retains it.
     /// A changed owned Pulsar source needs a resolved subscription comparison at composition;
     /// an absent replacement removes the owned subscription after its source tasks stop.
-    pub(crate) fn requires_source_retirement(&self, replacement: Option<&Self>) -> bool {
+    pub(crate) fn requires_entity_retirement(&self, replacement: Option<&Self>) -> bool {
         let IngestorInputPlan::Transport(input) = &self.input else {
             return false;
         };
         match &input.source {
-            SourceStartPlan::Mqtt(source) => {
+            IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) => {
                 if let Some(replacement) = replacement
                     && let IngestorInputPlan::Transport(input) = &replacement.input
-                    && let SourceStartPlan::Mqtt(replacement) = &input.source
+                    && let IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(replacement)) =
+                        &input.source
                 {
                     return source != replacement;
                 }
                 true
             }
-            SourceStartPlan::Pulsar(source) => {
+            IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(source)) => {
                 let owned = source.subscription.ownership == PulsarSubscriptionOwnership::Ingestor;
                 if !owned {
                     return false;
                 }
                 if let Some(replacement) = replacement
                     && let IngestorInputPlan::Transport(input) = &replacement.input
-                    && let SourceStartPlan::Pulsar(replacement) = &input.source
+                    && let IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(
+                        replacement,
+                    )) = &input.source
                 {
                     return source != replacement;
                 }
                 true
             }
-            SourceStartPlan::Http(_)
-            | SourceStartPlan::Kafka(_)
-            | SourceStartPlan::Nats(_)
-            | SourceStartPlan::RabbitMq(_)
-            | SourceStartPlan::RedisPubSub(_)
-            | SourceStartPlan::Prometheus(_)
-            | SourceStartPlan::ZeroMq(_)
-            | SourceStartPlan::Sqs(_)
-            | SourceStartPlan::Endpoint(_)
-            | SourceStartPlan::Websockets(_)
-            | SourceStartPlan::Syslog(_) => false,
+            IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(_))
+            | IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(_))
+            | IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(_))
+            | IngestorConnectorPlan::RabbitMq(RabbitMqIngestorStartPlan::Queue(_))
+            | IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(_))
+            | IngestorConnectorPlan::Prometheus(PrometheusIngestorStartPlan::Query(_))
+            | IngestorConnectorPlan::ZeroMq(ZeroMqIngestorStartPlan::Pull(_))
+            | IngestorConnectorPlan::Sqs(SqsIngestorStartPlan::Queue(_))
+            | IngestorConnectorPlan::Http(HttpIngestorStartPlan::Endpoint(_))
+            | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Endpoint(_))
+            | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Connection(_))
+            | IngestorConnectorPlan::Syslog(SyslogIngestorStartPlan::Listener(_)) => false,
         }
     }
 
@@ -485,21 +576,44 @@ impl IngestorStartPlan {
             return None;
         };
         let acknowledgement = match &transport.source {
-            SourceStartPlan::Kafka(plan) => plan.mode.acknowledgement(),
-            SourceStartPlan::Pulsar(plan) => plan.mode.acknowledgement(),
-            SourceStartPlan::Mqtt(plan) => plan.mode.acknowledgement(),
-            SourceStartPlan::Nats(plan) => plan.mode.acknowledgement(),
-            SourceStartPlan::RabbitMq(plan) => plan.mode.acknowledgement(),
-            SourceStartPlan::RedisPubSub(plan) => plan.mode.acknowledgement(),
-            SourceStartPlan::ZeroMq(plan) => plan.mode.acknowledgement(),
-            SourceStartPlan::Sqs(plan) => plan.mode.acknowledgement(),
+            IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(plan)) => {
+                plan.mode.acknowledgement()
+            }
+            IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(plan)) => {
+                plan.mode.acknowledgement()
+            }
+            IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(plan)) => {
+                plan.mode.acknowledgement()
+            }
+            IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(plan)) => {
+                plan.mode.acknowledgement()
+            }
+            IngestorConnectorPlan::RabbitMq(RabbitMqIngestorStartPlan::Queue(plan)) => {
+                plan.mode.acknowledgement()
+            }
+            IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(plan)) => {
+                plan.mode.acknowledgement()
+            }
+            IngestorConnectorPlan::ZeroMq(ZeroMqIngestorStartPlan::Pull(plan)) => {
+                plan.mode.acknowledgement()
+            }
+            IngestorConnectorPlan::Sqs(SqsIngestorStartPlan::Queue(plan)) => {
+                plan.mode.acknowledgement()
+            }
             // Endpoint windows and durations are already typed and belong to request intake,
             // which never runs the broker acknowledgement loop.
-            SourceStartPlan::Endpoint(_) => return None,
-            SourceStartPlan::Websockets(plan) => plan.mode.acknowledgement(),
-            SourceStartPlan::Http(_)
-            | SourceStartPlan::Prometheus(_)
-            | SourceStartPlan::Syslog(_) => IngestAcknowledgement::Unacknowledged,
+            IngestorConnectorPlan::Http(HttpIngestorStartPlan::Endpoint(_))
+            | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Endpoint(_)) => {
+                return None;
+            }
+            IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Connection(plan)) => {
+                plan.mode.acknowledgement()
+            }
+            IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(_))
+            | IngestorConnectorPlan::Prometheus(PrometheusIngestorStartPlan::Query(_))
+            | IngestorConnectorPlan::Syslog(SyslogIngestorStartPlan::Listener(_)) => {
+                IngestAcknowledgement::Unacknowledged
+            }
         };
         Some(acknowledgement)
     }
@@ -510,10 +624,12 @@ impl IngestorStartPlan {
         matches!(
             &self.input,
             IngestorInputPlan::Transport(TransportInputPlan {
-                source: SourceStartPlan::Kafka(KafkaIngestorStartPlan {
-                    offsets: KafkaOffsetPlan::Domain(_),
-                    ..
-                }),
+                source: IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(
+                    KafkaTopicIngestorStartPlan {
+                        offsets: KafkaOffsetPlan::Domain(_),
+                        ..
+                    }
+                )),
                 ..
             })
         )
@@ -535,7 +651,7 @@ impl IngestorInputPlan {
     ) -> Result<DecidedInput, Report<EntrypointPlanError>> {
         match &ingestor.input {
             IngestorInput::Transport(transport) => {
-                let source = SourceStartPlan::decide(
+                let source = IngestorConnectorPlan::decide(
                     &ingestor.name,
                     &transport.source,
                     source_model,
@@ -571,18 +687,18 @@ impl IngestorInputPlan {
 impl ClientIngestorStartPlan {
     fn decide(
         ingestor: &CreateIngestor,
-        client: &ClientProducerSource,
+        client: &ClientProducerIngestor,
         source_model: &Model,
         activation: &DomainActivationPlan,
     ) -> Result<Self, Report<EntrypointPlanError>> {
         let Model::Schema(schema_model) = source_model else {
-            return Err(Report::new(EntrypointPlanError::SourceKindMismatch {
+            return Err(Report::new(EntrypointPlanError::InputKindMismatch {
                 ingestor: ingestor.name.clone(),
                 resolved: source_model.kind(),
             }));
         };
         if schema_model.name != client.schema {
-            return Err(Report::new(EntrypointPlanError::SourceIdentityMismatch {
+            return Err(Report::new(EntrypointPlanError::InputIdentityMismatch {
                 ingestor: ingestor.name.clone(),
                 expected: ModelName::from(&client.schema),
                 resolved: ModelName::from(&schema_model.name),
@@ -690,33 +806,59 @@ fn client_endpoint_contract(
     ))
 }
 
-impl SourceStartPlan {
+impl WebsocketsConnectionIngestorStartPlan {
     fn decide(
         name: &IngestorName,
-        source: &IngestSource,
+        source: &WebsocketsConnectionIngestor,
+        client: &CreateClientWebsockets,
+    ) -> Result<Self, Report<EntrypointPlanError>> {
+        Ok(Self {
+            headers: nervix_models::WebsocketsUpgradeHeaders::parse(&source.headers)
+                .change_context(EntrypointPlanError::InvalidWebsocketsUpgradeHeaders {
+                    ingestor: name.clone(),
+                })?,
+            client: IngestorClientSpec::resolved(
+                name,
+                &source.client,
+                &client.name,
+                client.mount.as_ref(),
+                &client.config,
+            )?,
+            mode: source.mode.clone(),
+            signaling_protocol: client.signaling_protocol.clone(),
+        })
+    }
+}
+
+impl IngestorConnectorPlan {
+    fn decide(
+        name: &IngestorName,
+        source: &IngestorEntity,
         source_model: &Model,
         scheduled: &ScheduledNode,
     ) -> Result<Self, Report<EntrypointPlanError>> {
         match (source, source_model) {
             (
-                IngestSource::Http(HttpSource::Request(HttpRequestSource {
+                IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
                     client: expected,
                     every,
                     ..
                 })),
                 Model::ClientHttp(resolved),
-            ) => Ok(Self::Http(HttpIngestorStartPlan {
-                client: IngestorClientSpec::resolved(
-                    name,
-                    expected,
-                    &resolved.name,
-                    resolved.mount.as_ref(),
-                    &resolved.config,
-                )?,
-                every: *every,
-            })),
+            ) => Ok(Self::Http(HttpIngestorStartPlan::Request(
+                HttpRequestIngestorStartPlan {
+                    client: IngestorClientSpec::resolved(
+                        name,
+                        expected,
+                        &resolved.name,
+                        resolved.mount.as_ref(),
+                        &resolved.config,
+                    )?,
+                    every: *every,
+                },
+            ))),
             (
-                IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+                IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                     client: expected,
                     topic,
                     offset_mode,
@@ -726,32 +868,25 @@ impl SourceStartPlan {
                 })),
                 Model::ClientKafka(resolved),
             ) => {
-                let offsets = match offset_mode {
-                    KafkaOffsetMode::ConsumerGroup(group) => {
-                        KafkaOffsetPlan::ConsumerGroup(group.clone())
-                    }
-                    KafkaOffsetMode::Domain => {
-                        KafkaOffsetPlan::Domain(KafkaDomainOffsetPlacement {
-                            primary_node: scheduled.primary_node.clone(),
-                        })
-                    }
-                };
-                Ok(Self::Kafka(KafkaIngestorStartPlan {
-                    client: IngestorClientSpec::resolved(
-                        name,
-                        expected,
-                        &resolved.name,
-                        resolved.mount.as_ref(),
-                        &resolved.config,
-                    )?,
-                    topic: topic.clone(),
-                    offsets,
-                    instances: *instances,
-                    mode: mode.clone(),
-                }))
+                let offsets = KafkaOffsetPlan::decide(offset_mode, scheduled.primary_node.as_ref());
+                Ok(Self::Kafka(KafkaIngestorStartPlan::Topic(
+                    KafkaTopicIngestorStartPlan {
+                        client: IngestorClientSpec::resolved(
+                            name,
+                            expected,
+                            &resolved.name,
+                            resolved.mount.as_ref(),
+                            &resolved.config,
+                        )?,
+                        topic: topic.clone(),
+                        offsets,
+                        instances: *instances,
+                        mode: mode.clone(),
+                    },
+                )))
             }
             (
-                IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
+                IngestorEntity::Pulsar(PulsarIngestor::Topic(PulsarTopicIngestor {
                     client: expected,
                     topic,
                     subscription,
@@ -760,21 +895,23 @@ impl SourceStartPlan {
                     ..
                 })),
                 Model::ClientPulsar(resolved),
-            ) => Ok(Self::Pulsar(PulsarIngestorStartPlan {
-                client: IngestorClientSpec::resolved(
-                    name,
-                    expected,
-                    &resolved.name,
-                    resolved.mount.as_ref(),
-                    &resolved.config,
-                )?,
-                topic: topic.clone(),
-                subscription: subscription.clone(),
-                instances: *instances,
-                mode: mode.clone(),
-            })),
+            ) => Ok(Self::Pulsar(PulsarIngestorStartPlan::Topic(
+                PulsarTopicIngestorStartPlan {
+                    client: IngestorClientSpec::resolved(
+                        name,
+                        expected,
+                        &resolved.name,
+                        resolved.mount.as_ref(),
+                        &resolved.config,
+                    )?,
+                    topic: topic.clone(),
+                    subscription: subscription.clone(),
+                    instances: *instances,
+                    mode: mode.clone(),
+                },
+            ))),
             (
-                IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
+                IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
                     client: expected,
                     topic,
                     instances,
@@ -782,20 +919,22 @@ impl SourceStartPlan {
                     ..
                 })),
                 Model::ClientMqtt(resolved),
-            ) => Ok(Self::Mqtt(MqttIngestorStartPlan {
-                client: IngestorClientSpec::resolved(
-                    name,
-                    expected,
-                    &resolved.name,
-                    resolved.mount.as_ref(),
-                    &resolved.config,
-                )?,
-                topic: topic.clone(),
-                instances: *instances,
-                mode: mode.clone(),
-            })),
+            ) => Ok(Self::Mqtt(MqttIngestorStartPlan::Topic(
+                MqttTopicIngestorStartPlan {
+                    client: IngestorClientSpec::resolved(
+                        name,
+                        expected,
+                        &resolved.name,
+                        resolved.mount.as_ref(),
+                        &resolved.config,
+                    )?,
+                    topic: topic.clone(),
+                    instances: *instances,
+                    mode: mode.clone(),
+                },
+            ))),
             (
-                IngestSource::Nats(NatsSource::Subject(NatsSubjectSource {
+                IngestorEntity::Nats(NatsIngestor::Subject(NatsSubjectIngestor {
                     client: expected,
                     subject,
                     queue_group,
@@ -804,21 +943,23 @@ impl SourceStartPlan {
                     ..
                 })),
                 Model::ClientNats(resolved),
-            ) => Ok(Self::Nats(NatsIngestorStartPlan {
-                client: IngestorClientSpec::resolved(
-                    name,
-                    expected,
-                    &resolved.name,
-                    resolved.mount.as_ref(),
-                    &resolved.config,
-                )?,
-                subject: subject.clone(),
-                queue_group: queue_group.clone(),
-                instances: *instances,
-                mode: mode.clone(),
-            })),
+            ) => Ok(Self::Nats(NatsIngestorStartPlan::Subject(
+                NatsSubjectIngestorStartPlan {
+                    client: IngestorClientSpec::resolved(
+                        name,
+                        expected,
+                        &resolved.name,
+                        resolved.mount.as_ref(),
+                        &resolved.config,
+                    )?,
+                    subject: subject.clone(),
+                    queue_group: queue_group.clone(),
+                    instances: *instances,
+                    mode: mode.clone(),
+                },
+            ))),
             (
-                IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
+                IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(RabbitMqQueueIngestor {
                     client: expected,
                     queue,
                     instances,
@@ -826,71 +967,79 @@ impl SourceStartPlan {
                     ..
                 })),
                 Model::ClientRabbitMq(resolved),
-            ) => Ok(Self::RabbitMq(RabbitMqIngestorStartPlan {
-                client: IngestorClientSpec::resolved(
-                    name,
-                    expected,
-                    &resolved.name,
-                    resolved.mount.as_ref(),
-                    &resolved.config,
-                )?,
-                queue: queue.clone(),
-                instances: *instances,
-                mode: mode.clone(),
-            })),
+            ) => Ok(Self::RabbitMq(RabbitMqIngestorStartPlan::Queue(
+                RabbitMqQueueIngestorStartPlan {
+                    client: IngestorClientSpec::resolved(
+                        name,
+                        expected,
+                        &resolved.name,
+                        resolved.mount.as_ref(),
+                        &resolved.config,
+                    )?,
+                    queue: queue.clone(),
+                    instances: *instances,
+                    mode: mode.clone(),
+                },
+            ))),
             (
-                IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
+                IngestorEntity::Redis(RedisIngestor::PubSub(RedisPubSubIngestor {
                     client: expected,
                     channel,
                     mode,
                     ..
                 })),
                 Model::ClientRedis(resolved),
-            ) => Ok(Self::RedisPubSub(RedisPubSubIngestorStartPlan {
-                client: IngestorClientSpec::resolved(
-                    name,
-                    expected,
-                    &resolved.name,
-                    resolved.mount.as_ref(),
-                    &resolved.config,
-                )?,
-                channel: channel.clone(),
-                mode: mode.clone(),
-            })),
+            ) => Ok(Self::Redis(RedisIngestorStartPlan::PubSub(
+                RedisPubSubIngestorStartPlan {
+                    client: IngestorClientSpec::resolved(
+                        name,
+                        expected,
+                        &resolved.name,
+                        resolved.mount.as_ref(),
+                        &resolved.config,
+                    )?,
+                    channel: channel.clone(),
+                    mode: mode.clone(),
+                },
+            ))),
             (
-                IngestSource::Prometheus(PrometheusSource::Query(source)),
+                IngestorEntity::Prometheus(PrometheusIngestor::Query(source)),
                 Model::ClientPrometheus(resolved),
-            ) => Ok(Self::Prometheus(PrometheusIngestorStartPlan {
-                client: IngestorClientSpec::resolved(
-                    name,
-                    &source.client,
-                    &resolved.name,
-                    resolved.mount.as_ref(),
-                    &resolved.config,
-                )?,
-                query: source.query.clone(),
-                max_body_size: source.max_body_size_in_effect(),
-                every: source.every,
-            })),
+            ) => Ok(Self::Prometheus(PrometheusIngestorStartPlan::Query(
+                PrometheusQueryIngestorStartPlan {
+                    client: IngestorClientSpec::resolved(
+                        name,
+                        &source.client,
+                        &resolved.name,
+                        resolved.mount.as_ref(),
+                        &resolved.config,
+                    )?,
+                    query: source.query.clone(),
+                    max_body_size: source.max_body_size_in_effect(),
+                    every: source.every,
+                },
+            ))),
             (
-                IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
+                IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(ZeroMqPullIngestor {
                     client: expected,
                     mode,
                     ..
                 })),
                 Model::ClientZeroMq(resolved),
-            ) => Ok(Self::ZeroMq(ZeroMqIngestorStartPlan {
-                client: IngestorClientSpec::resolved(
-                    name,
-                    expected,
-                    &resolved.name,
-                    resolved.mount.as_ref(),
-                    &resolved.config,
-                )?,
-                mode: mode.clone(),
-            })),
+            ) => Ok(Self::ZeroMq(ZeroMqIngestorStartPlan::Pull(
+                ZeroMqPullIngestorStartPlan {
+                    client: IngestorClientSpec::resolved(
+                        name,
+                        expected,
+                        &resolved.name,
+                        resolved.mount.as_ref(),
+                        &resolved.config,
+                    )?,
+                    mode: mode.clone(),
+                },
+            ))),
             (
-                IngestSource::Sqs(SqsSource::Queue(SqsQueueSource {
+                IngestorEntity::Sqs(SqsIngestor::Queue(SqsQueueIngestor {
                     client: expected,
                     queue,
                     instances,
@@ -898,71 +1047,76 @@ impl SourceStartPlan {
                     ..
                 })),
                 Model::ClientSqs(resolved),
-            ) => Ok(Self::Sqs(SqsIngestorStartPlan {
-                client: IngestorClientSpec::resolved(
-                    name,
-                    expected,
-                    &resolved.name,
-                    resolved.mount.as_ref(),
-                    &resolved.config,
-                )?,
-                queue: queue.clone(),
-                instances: *instances,
-                mode: mode.clone(),
-            })),
+            ) => Ok(Self::Sqs(SqsIngestorStartPlan::Queue(
+                SqsQueueIngestorStartPlan {
+                    client: IngestorClientSpec::resolved(
+                        name,
+                        expected,
+                        &resolved.name,
+                        resolved.mount.as_ref(),
+                        &resolved.config,
+                    )?,
+                    queue: queue.clone(),
+                    instances: *instances,
+                    mode: mode.clone(),
+                },
+            ))),
             (
-                IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
-                    endpoint: expected,
-                    mode,
-                    quiesce,
-                    ..
-                }))
-                | IngestSource::Websockets(WebsocketsSource::Endpoint(WebsocketsEndpointSource {
+                IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
                     endpoint: expected,
                     mode,
                     quiesce,
                     ..
                 })),
                 Model::Endpoint(resolved),
-            ) => Ok(Self::Endpoint(EndpointIngestorStartPlan::decide(
-                name, expected, resolved, mode, quiesce,
-            )?)),
+            ) => {
+                let intake =
+                    EndpointIntakeStartPlan::decide(name, expected, resolved, mode, quiesce)?;
+                Ok(Self::Http(HttpIngestorStartPlan::Endpoint(
+                    HttpEndpointIngestorStartPlan(intake),
+                )))
+            }
             (
-                IngestSource::Websockets(WebsocketsSource::Connection(
-                    WebsocketsConnectionSource {
-                        client: expected,
+                IngestorEntity::Websockets(WebsocketsIngestor::Endpoint(
+                    WebsocketsEndpointIngestor {
+                        endpoint: expected,
                         mode,
+                        quiesce,
                         ..
                     },
                 )),
-                Model::ClientWebsockets(resolved),
-            ) => Ok(Self::Websockets(WebsocketsIngestorStartPlan {
-                client: IngestorClientSpec::resolved(
-                    name,
-                    expected,
-                    &resolved.name,
-                    resolved.mount.as_ref(),
-                    &resolved.config,
-                )?,
-                mode: mode.clone(),
-                signaling_protocol: resolved.signaling_protocol.clone(),
-            })),
+                Model::Endpoint(resolved),
+            ) => {
+                let intake =
+                    EndpointIntakeStartPlan::decide(name, expected, resolved, mode, quiesce)?;
+                Ok(Self::Websockets(WebsocketsIngestorStartPlan::Endpoint(
+                    WebsocketsEndpointIngestorStartPlan(intake),
+                )))
+            }
             (
-                IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
+                IngestorEntity::Websockets(WebsocketsIngestor::Connection(source)),
+                Model::ClientWebsockets(resolved),
+            ) => Ok(Self::Websockets(WebsocketsIngestorStartPlan::Connection(
+                WebsocketsConnectionIngestorStartPlan::decide(name, source, resolved)?,
+            ))),
+            (
+                IngestorEntity::Syslog(SyslogIngestor::Listener(SyslogListenerIngestor {
                     client: expected,
                     ..
                 })),
                 Model::ClientSyslog(resolved),
-            ) => Ok(Self::Syslog(SyslogIngestorStartPlan {
-                client: IngestorClientSpec::resolved(
-                    name,
-                    expected,
-                    &resolved.name,
-                    resolved.mount.as_ref(),
-                    &resolved.config,
-                )?,
-            })),
-            _ => Err(Report::new(EntrypointPlanError::SourceKindMismatch {
+            ) => Ok(Self::Syslog(SyslogIngestorStartPlan::Listener(
+                SyslogListenerIngestorStartPlan {
+                    client: IngestorClientSpec::resolved(
+                        name,
+                        expected,
+                        &resolved.name,
+                        resolved.mount.as_ref(),
+                        &resolved.config,
+                    )?,
+                },
+            ))),
+            _ => Err(Report::new(EntrypointPlanError::InputKindMismatch {
                 ingestor: name.clone(),
                 resolved: source_model.kind(),
             })),
@@ -978,7 +1132,7 @@ mod tests {
         CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
         CreateClientSqs, CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq,
         CreateEndpoint, EndpointType, FlushPolicy, GeneralErrorPolicy, IngestorName, MqttQos,
-        MqttSession, NodeRef, OutputBranch, ProcessorOutputs, PrometheusQuerySource,
+        MqttSession, NodeRef, OutputBranch, ProcessorOutputs, PrometheusQueryIngestor,
     };
     use nonzero_ext::nonzero;
     use rstest::rstest;
@@ -998,7 +1152,7 @@ mod tests {
         ClientPoolBounds::new(1, nonzero!(4u32)).assured("one does not exceed four")
     }
 
-    fn ingestor_model(source: IngestSource) -> Model {
+    fn ingestor_model(source: IngestorEntity) -> Model {
         Model::Ingestor(CreateIngestor {
             name: named("source"),
             output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
@@ -1016,7 +1170,7 @@ mod tests {
 
     /// The domain one ingestor reads from `source_model` in: its schema, codec, relay and the
     /// VHOST an endpoint source publishes on.
-    fn domain_models(source: IngestSource, source_model: Model) -> Vec<Model> {
+    fn domain_models(source: IngestorEntity, source_model: Model) -> Vec<Model> {
         vec![
             schema("payload"),
             wire_schema("event_wire"),
@@ -1075,16 +1229,16 @@ mod tests {
 
     /// One source statement, the model it resolves to, and the source plan and header access they
     /// decide.
-    struct SourceCase {
-        source: IngestSource,
+    struct IngestorCase {
+        source: IngestorEntity,
         source_model: Model,
-        plan: SourceStartPlan,
+        plan: IngestorConnectorPlan,
         reads_headers: bool,
     }
 
-    fn http_case() -> SourceCase {
-        SourceCase {
-            source: IngestSource::Http(HttpSource::Request(HttpRequestSource {
+    fn http_case() -> IngestorCase {
+        IngestorCase {
+            source: IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
                 client: named("upstream"),
                 every: cadence(),
                 mode: nervix_models::HttpRequestIngestMode::NoAck,
@@ -1095,17 +1249,19 @@ mod tests {
                 mount: None,
                 config: Vec::new(),
             }),
-            plan: SourceStartPlan::Http(HttpIngestorStartPlan {
-                client: client(),
-                every: cadence(),
-            }),
+            plan: IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(
+                HttpRequestIngestorStartPlan {
+                    client: client(),
+                    every: cadence(),
+                },
+            )),
             reads_headers: true,
         }
     }
 
-    fn kafka_case() -> SourceCase {
-        SourceCase {
-            source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+    fn kafka_case() -> IngestorCase {
+        IngestorCase {
+            source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                 client: named("upstream"),
                 topic: named("events"),
                 offset_mode: KafkaOffsetMode::ConsumerGroup(named("nervix")),
@@ -1118,20 +1274,22 @@ mod tests {
                 mount: None,
                 config: Vec::new(),
             }),
-            plan: SourceStartPlan::Kafka(KafkaIngestorStartPlan {
-                client: client(),
-                topic: named("events"),
-                offsets: KafkaOffsetPlan::ConsumerGroup(named("nervix")),
-                instances: nonzero!(1u64),
-                mode: KafkaIngestMode::NoAck,
-            }),
+            plan: IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(
+                KafkaTopicIngestorStartPlan {
+                    client: client(),
+                    topic: named("events"),
+                    offsets: KafkaOffsetPlan::ConsumerGroup(named("nervix")),
+                    instances: nonzero!(1u64),
+                    mode: KafkaIngestMode::NoAck,
+                },
+            )),
             reads_headers: true,
         }
     }
 
-    fn pulsar_case() -> SourceCase {
-        SourceCase {
-            source: IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
+    fn pulsar_case() -> IngestorCase {
+        IngestorCase {
+            source: IngestorEntity::Pulsar(PulsarIngestor::Topic(PulsarTopicIngestor {
                 client: named("upstream"),
                 topic: named("events"),
                 subscription: pulsar_subscription(),
@@ -1144,13 +1302,15 @@ mod tests {
                 mount: None,
                 config: Vec::new(),
             }),
-            plan: SourceStartPlan::Pulsar(PulsarIngestorStartPlan {
-                client: client(),
-                topic: named("events"),
-                subscription: pulsar_subscription(),
-                instances: nonzero!(1u64),
-                mode: PulsarIngestMode::NoAck,
-            }),
+            plan: IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(
+                PulsarTopicIngestorStartPlan {
+                    client: client(),
+                    topic: named("events"),
+                    subscription: pulsar_subscription(),
+                    instances: nonzero!(1u64),
+                    mode: PulsarIngestMode::NoAck,
+                },
+            )),
             reads_headers: true,
         }
     }
@@ -1162,9 +1322,9 @@ mod tests {
         }
     }
 
-    fn mqtt_case() -> SourceCase {
-        SourceCase {
-            source: IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
+    fn mqtt_case() -> IngestorCase {
+        IngestorCase {
+            source: IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
                 client: named("upstream"),
                 topic: nervix_models::MqttTopicFilter::parse("events/#")
                     .expect("valid topic filter"),
@@ -1177,20 +1337,22 @@ mod tests {
                 mount: None,
                 config: Vec::new(),
             }),
-            plan: SourceStartPlan::Mqtt(MqttIngestorStartPlan {
-                client: client(),
-                topic: nervix_models::MqttTopicFilter::parse("events/#")
-                    .expect("valid topic filter"),
-                instances: nonzero!(1u64),
-                mode: mqtt_mode(),
-            }),
+            plan: IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(
+                MqttTopicIngestorStartPlan {
+                    client: client(),
+                    topic: nervix_models::MqttTopicFilter::parse("events/#")
+                        .expect("valid topic filter"),
+                    instances: nonzero!(1u64),
+                    mode: mqtt_mode(),
+                },
+            )),
             reads_headers: false,
         }
     }
 
-    fn nats_case() -> SourceCase {
-        SourceCase {
-            source: IngestSource::Nats(NatsSource::Subject(NatsSubjectSource {
+    fn nats_case() -> IngestorCase {
+        IngestorCase {
+            source: IngestorEntity::Nats(NatsIngestor::Subject(NatsSubjectIngestor {
                 client: named("upstream"),
                 subject: named("events"),
                 queue_group: named("nervix"),
@@ -1203,13 +1365,15 @@ mod tests {
                 mount: None,
                 config: Vec::new(),
             }),
-            plan: SourceStartPlan::Nats(NatsIngestorStartPlan {
-                client: client(),
-                subject: named("events"),
-                queue_group: named("nervix"),
-                instances: nonzero!(1u64),
-                mode: nervix_models::NatsIngestMode::NoAck,
-            }),
+            plan: IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(
+                NatsSubjectIngestorStartPlan {
+                    client: client(),
+                    subject: named("events"),
+                    queue_group: named("nervix"),
+                    instances: nonzero!(1u64),
+                    mode: nervix_models::NatsIngestMode::NoAck,
+                },
+            )),
             reads_headers: true,
         }
     }
@@ -1221,9 +1385,9 @@ mod tests {
         }
     }
 
-    fn rabbitmq_case() -> SourceCase {
-        SourceCase {
-            source: IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
+    fn rabbitmq_case() -> IngestorCase {
+        IngestorCase {
+            source: IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(RabbitMqQueueIngestor {
                 client: named("upstream"),
                 queue: named("events"),
                 instances: nonzero!(1u64),
@@ -1235,19 +1399,21 @@ mod tests {
                 mount: None,
                 config: Vec::new(),
             }),
-            plan: SourceStartPlan::RabbitMq(RabbitMqIngestorStartPlan {
-                client: client(),
-                queue: named("events"),
-                instances: nonzero!(1u64),
-                mode: rabbitmq_mode(),
-            }),
+            plan: IngestorConnectorPlan::RabbitMq(RabbitMqIngestorStartPlan::Queue(
+                RabbitMqQueueIngestorStartPlan {
+                    client: client(),
+                    queue: named("events"),
+                    instances: nonzero!(1u64),
+                    mode: rabbitmq_mode(),
+                },
+            )),
             reads_headers: true,
         }
     }
 
-    fn redis_pubsub_case() -> SourceCase {
-        SourceCase {
-            source: IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
+    fn redis_pubsub_case() -> IngestorCase {
+        IngestorCase {
+            source: IngestorEntity::Redis(RedisIngestor::PubSub(RedisPubSubIngestor {
                 client: named("upstream"),
                 channel: named("events"),
                 mode: nervix_models::RedisPubSubIngestMode::NoAck,
@@ -1259,43 +1425,49 @@ mod tests {
                 mount: None,
                 config: Vec::new(),
             }),
-            plan: SourceStartPlan::RedisPubSub(RedisPubSubIngestorStartPlan {
-                client: client(),
-                channel: named("events"),
-                mode: nervix_models::RedisPubSubIngestMode::NoAck,
-            }),
+            plan: IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(
+                RedisPubSubIngestorStartPlan {
+                    client: client(),
+                    channel: named("events"),
+                    mode: nervix_models::RedisPubSubIngestMode::NoAck,
+                },
+            )),
             reads_headers: false,
         }
     }
 
-    fn prometheus_case() -> SourceCase {
-        SourceCase {
-            source: IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
-                client: named("upstream"),
-                query: "up".to_string(),
-                max_body_size: None,
-                every: cadence(),
-                mode: nervix_models::PrometheusIngestMode::NoAck,
-                quiesce: IngestQuiesceMode::Suspend,
-            })),
+    fn prometheus_case() -> IngestorCase {
+        IngestorCase {
+            source: IngestorEntity::Prometheus(PrometheusIngestor::Query(
+                PrometheusQueryIngestor {
+                    client: named("upstream"),
+                    query: "up".to_string(),
+                    max_body_size: None,
+                    every: cadence(),
+                    mode: nervix_models::PrometheusIngestMode::NoAck,
+                    quiesce: IngestQuiesceMode::Suspend,
+                },
+            )),
             source_model: Model::ClientPrometheus(CreateClientPrometheus {
                 name: named("upstream"),
                 mount: None,
                 config: Vec::new(),
             }),
-            plan: SourceStartPlan::Prometheus(PrometheusIngestorStartPlan {
-                client: client(),
-                query: "up".to_string(),
-                max_body_size: nervix_models::PROMETHEUS_DEFAULT_MAX_BODY_SIZE,
-                every: cadence(),
-            }),
+            plan: IngestorConnectorPlan::Prometheus(PrometheusIngestorStartPlan::Query(
+                PrometheusQueryIngestorStartPlan {
+                    client: client(),
+                    query: "up".to_string(),
+                    max_body_size: nervix_models::PROMETHEUS_DEFAULT_MAX_BODY_SIZE,
+                    every: cadence(),
+                },
+            )),
             reads_headers: false,
         }
     }
 
-    fn zeromq_case() -> SourceCase {
-        SourceCase {
-            source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
+    fn zeromq_case() -> IngestorCase {
+        IngestorCase {
+            source: IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(ZeroMqPullIngestor {
                 client: named("upstream"),
                 mode: nervix_models::ZeroMqIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
@@ -1305,10 +1477,12 @@ mod tests {
                 mount: None,
                 config: Vec::new(),
             }),
-            plan: SourceStartPlan::ZeroMq(ZeroMqIngestorStartPlan {
-                client: client(),
-                mode: nervix_models::ZeroMqIngestMode::NoAck,
-            }),
+            plan: IngestorConnectorPlan::ZeroMq(ZeroMqIngestorStartPlan::Pull(
+                ZeroMqPullIngestorStartPlan {
+                    client: client(),
+                    mode: nervix_models::ZeroMqIngestMode::NoAck,
+                },
+            )),
             reads_headers: false,
         }
     }
@@ -1320,9 +1494,9 @@ mod tests {
         }
     }
 
-    fn sqs_case() -> SourceCase {
-        SourceCase {
-            source: IngestSource::Sqs(SqsSource::Queue(SqsQueueSource {
+    fn sqs_case() -> IngestorCase {
+        IngestorCase {
+            source: IngestorEntity::Sqs(SqsIngestor::Queue(SqsQueueIngestor {
                 client: named("upstream"),
                 queue: named("events"),
                 instances: nonzero!(1u64),
@@ -1334,19 +1508,21 @@ mod tests {
                 mount: None,
                 config: Vec::new(),
             }),
-            plan: SourceStartPlan::Sqs(SqsIngestorStartPlan {
-                client: client(),
-                queue: named("events"),
-                instances: nonzero!(1u64),
-                mode: sqs_mode(),
-            }),
+            plan: IngestorConnectorPlan::Sqs(SqsIngestorStartPlan::Queue(
+                SqsQueueIngestorStartPlan {
+                    client: client(),
+                    queue: named("events"),
+                    instances: nonzero!(1u64),
+                    mode: sqs_mode(),
+                },
+            )),
             reads_headers: true,
         }
     }
 
-    fn endpoint_case() -> SourceCase {
-        SourceCase {
-            source: IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+    fn endpoint_case() -> IngestorCase {
+        IngestorCase {
+            source: IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
                 endpoint: named("upstream"),
                 mode: nervix_models::EndpointIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
@@ -1360,19 +1536,22 @@ mod tests {
                 endpoint_type: EndpointType::Http,
                 signaling_protocol: None,
             }),
-            plan: SourceStartPlan::Endpoint(EndpointIngestorStartPlan {
-                endpoint: named("upstream"),
-                mode: EndpointRequestPlan::NoAck,
-            }),
+            plan: IngestorConnectorPlan::Http(HttpIngestorStartPlan::Endpoint(
+                HttpEndpointIngestorStartPlan(EndpointIntakeStartPlan {
+                    endpoint: named("upstream"),
+                    mode: EndpointRequestPlan::NoAck,
+                }),
+            )),
             reads_headers: true,
         }
     }
 
-    fn websockets_case() -> SourceCase {
-        SourceCase {
-            source: IngestSource::Websockets(WebsocketsSource::Connection(
-                WebsocketsConnectionSource {
+    fn websockets_case() -> IngestorCase {
+        IngestorCase {
+            source: IngestorEntity::Websockets(WebsocketsIngestor::Connection(
+                WebsocketsConnectionIngestor {
                     client: named("upstream"),
+                    headers: Vec::new(),
                     mode: nervix_models::WebsocketsIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Drop,
                 },
@@ -1383,18 +1562,21 @@ mod tests {
                 signaling_protocol: None,
                 config: Vec::new(),
             }),
-            plan: SourceStartPlan::Websockets(WebsocketsIngestorStartPlan {
-                client: client(),
-                mode: nervix_models::WebsocketsIngestMode::NoAck,
-                signaling_protocol: None,
-            }),
-            reads_headers: false,
+            plan: IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Connection(
+                WebsocketsConnectionIngestorStartPlan {
+                    headers: nervix_models::WebsocketsUpgradeHeaders::default(),
+                    client: client(),
+                    mode: nervix_models::WebsocketsIngestMode::NoAck,
+                    signaling_protocol: None,
+                },
+            )),
+            reads_headers: true,
         }
     }
 
-    fn syslog_case() -> SourceCase {
-        SourceCase {
-            source: IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
+    fn syslog_case() -> IngestorCase {
+        IngestorCase {
+            source: IngestorEntity::Syslog(SyslogIngestor::Listener(SyslogListenerIngestor {
                 client: named("upstream"),
                 mode: nervix_models::SyslogIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
@@ -1404,7 +1586,9 @@ mod tests {
                 mount: None,
                 config: Vec::new(),
             }),
-            plan: SourceStartPlan::Syslog(SyslogIngestorStartPlan { client: client() }),
+            plan: IngestorConnectorPlan::Syslog(SyslogIngestorStartPlan::Listener(
+                SyslogListenerIngestorStartPlan { client: client() },
+            )),
             reads_headers: false,
         }
     }
@@ -1423,8 +1607,8 @@ mod tests {
     #[case::endpoint(endpoint_case())]
     #[case::websockets(websockets_case())]
     #[case::syslog(syslog_case())]
-    fn decides_the_source_plan_of_each_source_kind(#[case] case: SourceCase) {
-        let SourceCase {
+    fn decides_the_source_plan_of_each_source_kind(#[case] case: IngestorCase) {
+        let IngestorCase {
             source,
             source_model,
             plan: expected_plan,
@@ -1441,7 +1625,7 @@ mod tests {
         assert_eq!(transport.codec, named("json"));
         assert_eq!(plan.ingestor.name, named("source"));
         assert_eq!(plan.ingestor.routes[0].relay, named("events"));
-        assert_eq!(plan.ingestor.declared_input.source_kind(), declared.kind());
+        assert_eq!(plan.ingestor.declared_input.entity_kind(), declared.kind());
         assert_eq!(plan.ingestor.reads_headers(), reads_headers);
         assert_eq!(
             plan.ingestor.declared_input.quiesce_mode(),
@@ -1523,7 +1707,7 @@ mod tests {
     #[test]
     fn an_acknowledged_websocket_endpoint_requires_its_declared_wire_protocol() {
         let source =
-            IngestSource::Websockets(WebsocketsSource::Endpoint(WebsocketsEndpointSource {
+            IngestorEntity::Websockets(WebsocketsIngestor::Endpoint(WebsocketsEndpointIngestor {
                 endpoint: named("upstream"),
                 mode: EndpointIngestMode::Ack {
                     max: nonzero!(8u16),
@@ -1548,7 +1732,7 @@ mod tests {
 
     #[test]
     fn plans_kafka_domain_offsets_for_the_scheduled_primary() {
-        let source = IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+        let source = IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
             client: named("upstream"),
             topic: named("events"),
             offset_mode: KafkaOffsetMode::Domain,
@@ -1577,7 +1761,7 @@ mod tests {
         });
         assert!(matches!(
             &transport_plan(plan).source,
-            SourceStartPlan::Kafka(source) if source.offsets == domain_offsets
+            IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(source)) if source.offsets == domain_offsets
         ));
         assert!(plan.keeps_domain_offsets());
     }
@@ -1588,27 +1772,28 @@ mod tests {
         let plans = planned_entrypoints(domain_models(case.source, case.source_model))
             .assured("a matching source and ingestor produce a plan");
         let previous = start_plan(&plans);
-        assert!(previous.requires_source_retirement(None));
-        assert!(!previous.requires_source_retirement(Some(previous)));
+        assert!(previous.requires_entity_retirement(None));
+        assert!(!previous.requires_entity_retirement(Some(previous)));
 
         let mut input = transport_plan(previous).clone();
         input.codec = named("alternate_json");
         let mut replacement = previous.clone();
         replacement.input = IngestorInputPlan::Transport(input.clone());
-        assert!(!previous.requires_source_retirement(Some(&replacement)));
+        assert!(!previous.requires_entity_retirement(Some(&replacement)));
 
-        let SourceStartPlan::Mqtt(source) = &mut input.source else {
+        let IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) = &mut input.source
+        else {
             panic!("the MQTT fixture produces a typed MQTT source");
         };
         source.topic = nervix_models::MqttTopicFilter::parse("replacement/#")
             .assured("the replacement topic filter is valid");
         replacement.input = IngestorInputPlan::Transport(input.clone());
-        assert!(previous.requires_source_retirement(Some(&replacement)));
+        assert!(previous.requires_entity_retirement(Some(&replacement)));
 
         input.source = http_case().plan;
         replacement.input = IngestorInputPlan::Transport(input);
-        assert!(previous.requires_source_retirement(Some(&replacement)));
-        assert!(!replacement.requires_source_retirement(None));
+        assert!(previous.requires_entity_retirement(Some(&replacement)));
+        assert!(!replacement.requires_entity_retirement(None));
     }
 
     #[test]
@@ -1617,38 +1802,42 @@ mod tests {
         let plans = planned_entrypoints(domain_models(case.source, case.source_model))
             .assured("a matching source and ingestor produce a plan");
         let owned = start_plan(&plans);
-        assert!(owned.requires_source_retirement(None));
-        assert!(!owned.requires_source_retirement(Some(owned)));
+        assert!(owned.requires_entity_retirement(None));
+        assert!(!owned.requires_entity_retirement(Some(owned)));
 
         // Codec and route changes do not change the source that reads the subscription.
         let mut replacement = owned.clone();
         let mut input = transport_plan(owned).clone();
         input.codec = named("alternate_json");
         replacement.input = IngestorInputPlan::Transport(input);
-        assert!(!owned.requires_source_retirement(Some(&replacement)));
+        assert!(!owned.requires_entity_retirement(Some(&replacement)));
 
         // Changed sources require the composition root to compare their resolved subscriptions.
         let mut input = transport_plan(owned).clone();
-        let SourceStartPlan::Pulsar(source) = &mut input.source else {
+        let IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(source)) =
+            &mut input.source
+        else {
             panic!("the Pulsar fixture produces a typed Pulsar source");
         };
         source.subscription.name = named("replacement");
         let mut replacement = owned.clone();
         replacement.input = IngestorInputPlan::Transport(input.clone());
-        assert!(owned.requires_source_retirement(Some(&replacement)));
+        assert!(owned.requires_entity_retirement(Some(&replacement)));
         input.source = http_case().plan;
         replacement.input = IngestorInputPlan::Transport(input);
-        assert!(owned.requires_source_retirement(Some(&replacement)));
+        assert!(owned.requires_entity_retirement(Some(&replacement)));
 
         // A provisioned subscription is the operator's, so even a drop keeps it.
         let mut provisioned = owned.clone();
         let mut input = transport_plan(owned).clone();
-        let SourceStartPlan::Pulsar(source) = &mut input.source else {
+        let IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(source)) =
+            &mut input.source
+        else {
             panic!("the Pulsar fixture produces a typed Pulsar source");
         };
         source.subscription.ownership = PulsarSubscriptionOwnership::Provisioned;
         provisioned.input = IngestorInputPlan::Transport(input);
-        assert!(!provisioned.requires_source_retirement(None));
+        assert!(!provisioned.requires_entity_retirement(None));
     }
 
     #[test]
@@ -1693,10 +1882,10 @@ mod tests {
         })
     )]
     fn rejects_a_resolved_source_with_the_wrong_identity(
-        #[case] case: SourceCase,
+        #[case] case: IngestorCase,
         #[case] different: Model,
     ) {
-        let error = SourceStartPlan::decide(
+        let error = IngestorConnectorPlan::decide(
             &named("source"),
             &case.source,
             &different,
@@ -1709,7 +1898,7 @@ mod tests {
 
         assert_eq!(
             error.current_context(),
-            &EntrypointPlanError::SourceIdentityMismatch {
+            &EntrypointPlanError::InputIdentityMismatch {
                 ingestor: named("source"),
                 expected: named("upstream"),
                 resolved: named("different"),
@@ -1725,7 +1914,7 @@ mod tests {
             output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
                 .with_flush_policy(FlushPolicy::Immediate)
                 .with_branch(OutputBranch::Unbranched),
-            input: nervix_models::IngestorInput::Client(nervix_models::ClientProducerSource {
+            input: nervix_models::IngestorInput::Client(nervix_models::ClientProducerIngestor {
                 schema: named("payload"),
                 mode: nervix_models::ClientIngestMode {
                     window: AckWindow::Parallel {
@@ -1831,7 +2020,7 @@ mod tests {
 
         assert_eq!(
             error.current_context(),
-            &EntrypointPlanError::SourceKindMismatch {
+            &EntrypointPlanError::InputKindMismatch {
                 ingestor: named("source"),
                 resolved: nervix_models::ModelKind::Client,
             }
@@ -1847,7 +2036,7 @@ mod tests {
 
         assert_eq!(
             error.current_context(),
-            &EntrypointPlanError::MissingSource {
+            &EntrypointPlanError::MissingReference {
                 ingestor: named("source"),
                 kind: nervix_models::ModelKind::Client,
                 reference: named("upstream"),

@@ -672,7 +672,8 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         | Statement::DescribeUdf(_)
         | Statement::DescribePlacement(_)
         | Statement::DescribeRelocation(_)
-        | Statement::DescribeTransaction(_) => "DESCRIBE",
+        | Statement::DescribeTransaction(_)
+        | Statement::DescribeCluster(_) => "DESCRIBE",
         _ => "statement",
     }
 }
@@ -2512,6 +2513,14 @@ impl SessionServiceImpl {
                 TransactionState::Committing(_) => {}
                 TransactionState::Finished(_) => {
                     self.inner.transaction_bindings.remove(&transaction.id);
+                    #[cfg(feature = "testing")]
+                    self.inner
+                        .runtime
+                        .pause_transaction_cleanup_if_armed(
+                            self.inner.consensus.local_node_id(),
+                            &transaction.domain,
+                        )
+                        .await;
                 }
                 TransactionState::Open(_) => {}
             }
