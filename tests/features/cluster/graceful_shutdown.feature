@@ -8,7 +8,7 @@ Feature: Graceful shutdown
     And runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA drain_event ( id I64 );
@@ -30,7 +30,7 @@ Feature: Graceful shutdown
     And node "node-2" is stopped
     Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
     And node "node-1" eventually reports status containing "raft.cordoned_nodes: (none)"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -47,7 +47,7 @@ Feature: Graceful shutdown
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     When leadership is transferred to node "node-1"
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA bystander_event ( id I64 );
@@ -66,7 +66,7 @@ Feature: Graceful shutdown
     When node "node-3" is gracefully stopped
     Then the last shutdown of node "node-3" reports its drain-support phase "Completed"
     And the link from node "node-1" to node "node-2" lost no ownership handoff gate engagement request
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -82,7 +82,7 @@ Feature: Graceful shutdown
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     When leadership is transferred to node "node-1"
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA bystander_event ( id I64 );
@@ -106,7 +106,7 @@ Feature: Graceful shutdown
     Then the last shutdown of node "node-3" reports its drain-support phase "Completed"
     And node "node-2" reaches its runtime preparation pause
     When runtime preparation on node "node-2" is released
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -124,13 +124,13 @@ Feature: Graceful shutdown
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     When leadership is transferred to node "node-2"
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CORDON NODE node-2;
       """
     And node "node-2" is gracefully stopped
     And node "node-2" is started
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -148,7 +148,7 @@ Feature: Graceful shutdown
     And a 3 node nervix cluster is started
     And Kafka topic "shutdown_handoff_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "shutdown_handoff_out_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -208,7 +208,7 @@ Feature: Graceful shutdown
       """
     And within "30s" Kafka consumer group "shutdown_handoff_group_{{test_id}}" next offset for topic "shutdown_handoff_in_{{test_id}}" partition 0 is "at least 3"
     And the observed broker does not receive a payload within "2s"
-    When these NSPL commands are executed on node "node-2"
+    When these Plexus commands are executed on node "node-2"
       """
       SHOW CLUSTER STATUS;
       """
@@ -232,7 +232,7 @@ Feature: Graceful shutdown
     And a 3 node nervix cluster is started
     And Kafka topic "shutdown_flush_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "shutdown_flush_out_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -290,7 +290,7 @@ Feature: Graceful shutdown
     And drain timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA cordon_event ( id I64 );
@@ -301,7 +301,7 @@ Feature: Graceful shutdown
       START;
       """
     When leadership is transferred to node "<leader>"
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE JUNCTION cordon_route ONTO NODE node-2 IGNORE PREFERENCES;
       """
@@ -325,12 +325,12 @@ Feature: Graceful shutdown
     And the production sticky scheduler is configured
     And only the bootstrap node is given the default user's password
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     When leadership is transferred to node "node-1"
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction ( tenant STRING, transaction_id STRING, amount I64 );
       CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
@@ -359,7 +359,7 @@ Feature: Graceful shutdown
         TO deduped INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION deduped_seen TO deduped;
       """
@@ -371,11 +371,11 @@ Feature: Graceful shutdown
       """
       "transaction_id":"txn-warmup"
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       RELOCATE DEDUPLICATOR dedup_txns ONTO NODE node-2 IGNORE PREFERENCES;
       """
-    And these NSPL commands are executed on the active session
+    And these Plexus commands are executed on the active session
       """
       SHOW CLUSTER STATUS;
       """
@@ -393,7 +393,7 @@ Feature: Graceful shutdown
       """
     When node "node-2" is gracefully stopped
     Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       SHOW CLUSTER STATUS;
       """
@@ -425,7 +425,7 @@ Feature: Graceful shutdown
     And drain timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA shutdown_event ( id I64 );
@@ -435,7 +435,7 @@ Feature: Graceful shutdown
         TO shutdown_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -445,7 +445,7 @@ Feature: Graceful shutdown
     Given ownership handoff for domain "{{domain}}" pauses after preparation
     When node "{{terminating_owner}}" begins stopping
     Then node "{{drain_leader}}" eventually reports status containing "terminating: true"
-    When these NSPL commands are attempted on node "{{drain_leader}}"
+    When these Plexus commands are attempted on node "{{drain_leader}}"
       """
       DESCRIBE RELOCATION JUNCTION shutdown_route
         ONTO NODE {{terminating_owner}} FOLLOW PREFERENCES;
@@ -457,7 +457,7 @@ Feature: Graceful shutdown
       """
     When node "{{terminating_owner}}" is stopped
     And node "{{terminating_owner}}" is started
-    And these NSPL commands are executed on node "{{drain_leader}}"
+    And these Plexus commands are executed on node "{{drain_leader}}"
       """
       DESCRIBE RELOCATION JUNCTION shutdown_route
         ONTO NODE {{terminating_owner}} FOLLOW PREFERENCES;
@@ -473,7 +473,7 @@ Feature: Graceful shutdown
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -510,13 +510,13 @@ Feature: Graceful shutdown
       SHOW CLUSTER STATUS;
       """
     Then node "node-1" eventually reports status containing "kind=ingestor name=shutdown_ack_source owner=- replicas=node"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
     Then the first replica for scheduled "ingestor" "shutdown_ack_source" in the last cluster status is saved as placeholder "shutdown_ack_source_owner"
     And a node other than placeholder "shutdown_ack_source_owner" is saved as placeholder "shutdown_ack_downstream_owner"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE JUNCTION shutdown_ack_route
         ONTO NODE {{shutdown_ack_downstream_owner}} IGNORE PREFERENCES;
@@ -542,12 +542,12 @@ Feature: Graceful shutdown
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "30s"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA held_event ( sequence I64, tenant STRING );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer, tenant string );
@@ -607,13 +607,13 @@ Feature: Graceful shutdown
     And graceful shutdown drain is enabled
     And drain timeout is configured as "30s"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "held_shutdown_out_{{test_id}}" exists with 1 partitions
     And Kafka topic "held_shutdown_out_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA held_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );
@@ -683,7 +683,7 @@ Feature: Graceful shutdown
     And a 3 node nervix cluster is started
     And Kafka topic "shutdown_orders_{{test_id}}" exists with 1 partitions
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -735,7 +735,7 @@ Feature: Graceful shutdown
         ON GENERAL ERROR LOG;
       START;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION shutdown_orders_admitted TO shutdown_orders;
       """
@@ -778,7 +778,7 @@ Feature: Graceful shutdown
     And Kafka topic "shutdown_confirm_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "shutdown_confirm_out_{{test_id}}" is observed
     And the transport of ingestor "confirm_source" takes "10s" to confirm its acknowledgements
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA confirm_event ( event_id I64 );
@@ -828,7 +828,7 @@ Feature: Graceful shutdown
     And Kafka topic "shutdown_confirm_handoff_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "shutdown_confirm_handoff_out_{{test_id}}" is observed
     And the transport of ingestor "handoff_confirm_source" takes "10s" to confirm its acknowledgements
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -886,7 +886,7 @@ Feature: Graceful shutdown
     And mock Kafka topic "refused_stop_out_{{test_id}}" is observed
     # After a group's last member leaves, the mock coordinator answers the next join only once
     # the leaving member's session timeout has nearly passed, so the client keeps it short.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA refused_stop_event ( event_id I64 );
@@ -925,7 +925,7 @@ Feature: Graceful shutdown
       {"event_id":1}
       {"event_id":1}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE INGESTOR refused_stop_source;
       """
@@ -952,7 +952,7 @@ Feature: Graceful shutdown
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -995,7 +995,7 @@ Feature: Graceful shutdown
       START;
       UNCORDON NODE node-2;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE JUNCTION handoff_route ONTO NODE node-2 IGNORE PREFERENCES;
       """
@@ -1027,7 +1027,7 @@ Feature: Graceful shutdown
     And a 3 node nervix cluster is started
     And Kafka topic "shutdown_everyone_{{test_id}}" exists with 1 partitions
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -1073,7 +1073,7 @@ Feature: Graceful shutdown
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION everyone_admitted TO everyone_ingested;
       """
@@ -1106,7 +1106,7 @@ Feature: Graceful shutdown
     And a 3 node nervix cluster is started
     And node "node-1" eventually reports leader "node-1"
     And Kafka topic "terminating_peer_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -1131,7 +1131,7 @@ Feature: Graceful shutdown
       START;
       UNCORDON NODE node-2;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION peer_seen TO peer_records;
       """
@@ -1159,7 +1159,7 @@ Feature: Graceful shutdown
     And gossip exchanges involving node "node-2" are restored
     And consensus connectivity for node "node-3" is restored
     And the cluster is restarted
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -1167,7 +1167,7 @@ Feature: Graceful shutdown
       """
       - domain={{domain}} kind=ingestor name=peer_source owner=node-1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restarted_peer_seen TO peer_records;
       """
@@ -1187,7 +1187,7 @@ Feature: Graceful shutdown
     And a 3 node nervix cluster is started
     And node "node-1" eventually reports leader "node-1"
     And Kafka topic "unactivated_handoff_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -1213,7 +1213,7 @@ Feature: Graceful shutdown
       START;
       UNCORDON NODE node-2;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION unactivated_seen TO unactivated_records;
       """
@@ -1226,7 +1226,7 @@ Feature: Graceful shutdown
       {"event_id":1}
       """
     Given ownership handoff for domain "{{domain}}" pauses before activation
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       RELOCATE INGESTOR unactivated_source ONTO NODE node-2 IGNORE PREFERENCES;
       """
@@ -1236,10 +1236,10 @@ Feature: Graceful shutdown
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
     When the ownership handoff activation pause for domain "{{domain}}" is released
-    Then the background NSPL execution fails with "ownership state activation did not complete"
+    Then the background Plexus execution fails with "ownership state activation did not complete"
     When node "node-1" is stopped
     And node "node-1" is started
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -1247,7 +1247,7 @@ Feature: Graceful shutdown
       """
       - domain={{domain}} kind=ingestor name=unactivated_source owner=node-2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restarted_unactivated_seen TO unactivated_records;
       """
@@ -1284,11 +1284,11 @@ Feature: Graceful shutdown
     And drain timeout is configured as "30s"
     And a 1 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA tenant_amount ( amount I64, tenant STRING );
       CREATE SCHEMA tenant_total ( tenant STRING, total I64 );
@@ -1363,11 +1363,11 @@ Feature: Graceful shutdown
     And a 1 node nervix cluster is started
     And Kafka topic "shutdown_waiting_{{test_id}}" exists with 1 partitions
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA wait_event ( id I64, source STRING );
       CREATE WIRE JSON SCHEMA wait_event_wire MODE STRICT ( id integer, source string );
@@ -1455,11 +1455,11 @@ Feature: Graceful shutdown
     And a 1 node nervix cluster is started
     And Kafka topic "shutdown_stalled_{{test_id}}" exists with 1 partitions
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA stalled_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA stalled_event_wire MODE STRICT ( event_id integer );
@@ -1522,7 +1522,7 @@ Feature: Graceful shutdown
     And drain timeout is configured as "1ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
 
@@ -1586,19 +1586,19 @@ Feature: Graceful shutdown
     And drain timeout is configured as "5s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Given client "owner" is connected to node "node-1"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       CREATE SCHEMA deadline_record (value STRING);
       """
     Then client "owner" transaction id is saved as placeholder "transaction_id"
     Given transaction commit on node "node-1" pauses after 1 statement
-    When client "owner" begins executing these NSPL commands in the background
+    When client "owner" begins executing these Plexus commands in the background
       """
       COMMIT;
       """
@@ -1617,12 +1617,12 @@ Feature: Graceful shutdown
     And drain timeout is configured as "5s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Given command admission on node "node-1" pauses before proposal
-    When this NSPL command request begins executing in the background on the leader node
+    When this Plexus command request begins executing in the background on the leader node
       """
       CREATE SCHEMA held_admission_event ( id I64 );
       """
@@ -1634,7 +1634,7 @@ Feature: Graceful shutdown
     When the command admission pause on node "node-1" is released
     And node "node-1" is started
     Then node "node-1" eventually observes a stable leader
-    When this NSPL command request is executed on the leader node
+    When this Plexus command request is executed on the leader node
       """
       SHOW CREATE SCHEMA held_admission_event;
       """

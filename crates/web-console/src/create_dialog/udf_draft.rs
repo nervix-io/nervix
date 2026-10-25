@@ -146,7 +146,7 @@ pub(super) enum UdfDraftError {
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{CreateStatement, Model, ParseAsType, Statement};
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
     use super::{UdfArgumentDraft, UdfDraft, UdfDraftError};
 
@@ -180,7 +180,7 @@ mod tests {
         assert_eq!(udf.code, code);
         assert!(udf.has_valid_code_hash());
         let statement = Statement::Create(CreateStatement::new(Box::new(Model::Udf(udf)), false));
-        let source = statement.to_canonical_nspl().assured("UDF renders");
+        let source = statement.to_canonical_plexus().assured("UDF renders");
         assert!(source.contains("$roto_1$"));
         assert!(source.contains("VOLATILE"));
         assert_eq!(

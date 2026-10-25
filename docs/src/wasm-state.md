@@ -1,5 +1,7 @@
 # WASM State And Recovery
 
+*Plexus, the Nervix graph definition language.*
+
 A WASM processor runs one guest instance per concrete branch, and each guest keeps computation state
 that Nervix makes durable. The host checkpoints that state at the end of every guest callback,
 confirms it with the processor's replicas, restores it into every instance it recreates, and
@@ -20,14 +22,14 @@ module and state-generation identity into node-local WASM preparation and recove
 This chapter describes the architecture. [WASM Processor Guests](./wasm-processor-guests.md) owns
 the guest ABI and the user-facing account of checkpoints, resets, and failure diagnostics, the [Rust
 WASM Guest SDK](./wasm-guest-sdk.md) owns the Rust guest surface, and [Runtime
-Nodes](./processors.md#wasm-processor) owns the NSPL statements.
+Nodes](./processors.md#wasm-processor) owns the Plexus statements.
 
 ## Ownership By Layer
 
 | Layer | Owner | What it owns |
 | --- | --- | --- |
 | Vocabulary | WASM state models | The guest-state generation of every branch, a reset's scope, phase, and reason, the recovery attempts refused lifetimes have spent, and the typed state inspection. The processor's entry in the committed domain schedule carries all of them. |
-| Language | NSPL | `ON REJECTED STATE`, `RESET WASM PROCESSOR ... STATE`, and `DESCRIBE WASM PROCESSOR`, lowered into Models. |
+| Language | Plexus | `ON REJECTED STATE`, `RESET WASM PROCESSOR ... STATE`, and `DESCRIBE WASM PROCESSOR`, lowered into Models. |
 | Engines and infrastructure | The WASM host | Compiling a pinned module, instantiating a branch store, the fuel and memory limits of every guest operation, the domain snapshot each operation reads, and answering a guest's reset request. |
 | Engines and infrastructure | The guest SDK | The guest side of the ABI: the snapshot envelope, strict restore verdicts, and keeping its own execution state out of every save. |
 | Engines and infrastructure | The runtime state store | Writing a checkpoint under its placement, and the durability barrier that synchronizes the node's storage for every writer waiting on it. |
@@ -37,7 +39,7 @@ Nodes](./processors.md#wasm-processor) owns the NSPL statements.
 | Data plane | The processor supervisor | Fencing the scope of an unfinished reset, and preparing, aborting, and committing a reset on the owner. |
 | Control plane | The reset coordinator on the leader | Validating a reset, gating its scope, preparing it, and publishing it through its `Publishing` and `Ready` phases. |
 | Control plane | The recovery coordinator on the leader | Deciding whether a refused lifetime still has its one recovery attempt, recording the decision, and driving the reset it admits. |
-| Edges | The session service and clients | Admitting an NSPL reset as a transaction step, and returning the typed state inspection beside the text of `DESCRIBE WASM PROCESSOR`. |
+| Edges | The session service and clients | Admitting a Plexus reset as a transaction step, and returning the typed state inspection beside the text of `DESCRIBE WASM PROCESSOR`. |
 
 During normal execution, guest bytes stay in the data plane and state store. A backup is an
 explicit control-plane export of durable checkpoints to an archive; restore installs those bytes
@@ -574,7 +576,7 @@ See [Execution-Time Snapshots](./domain-clock.md#execution-time-snapshots).
 A failure before `Publishing` reports an ordinary reset failure, and the previous lifetime stays
 usable. A failure after it reports that the reset was committed but its new lifetime is not usable.
 Retrying the same request reference resumes the missing initial checkpoints and `Ready` publication
-without advancing the generation again. An NSPL reset completes only at `Ready`; its transaction
+without advancing the generation again. A Plexus reset completes only at `Ready`; its transaction
 step is recovered with its original execution reference after a leader change, a lost reply returns
 the retained outcome, and an expired reference cannot start another reset. See [Coordinated WASM
 Reset Publications](./consensus-storage-and-replication.md#coordinated-wasm-reset-publications),

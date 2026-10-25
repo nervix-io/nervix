@@ -1561,7 +1561,7 @@ mod tests {
     use super::*;
 
     fn expression(raw: &str) -> Expression {
-        nervix_nspl::parse_expression(raw).expect("valid semantic expression")
+        nervix_plexus::parse_expression(raw).expect("valid semantic expression")
     }
 
     fn value_mapping(column: &str, raw: &str) -> ClickHouseValueMapping {

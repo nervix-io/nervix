@@ -2,11 +2,11 @@ Feature: Runtime persistence
   Scenario Outline: Persisted rules are reapplied after a full cluster restart
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -38,7 +38,7 @@ Feature: Runtime persistence
         START;
       """
     When the cluster is restarted
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR http_notifications;
       """
@@ -72,11 +72,11 @@ Feature: Runtime persistence
   Scenario Outline: Persisted ingestors and reingestors run their planned routes after a full cluster restart
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading ( tenant STRING, sensor STRING, value I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sensor string, value integer );
@@ -112,7 +112,7 @@ Feature: Runtime persistence
       """
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION sensor_readings_subscription TO sensor_readings;
       """
@@ -144,11 +144,11 @@ Feature: Runtime persistence
 
   Scenario Outline: Persisted models reload from the on-disk tables a node flushed them into
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading ( tenant STRING, sensor STRING, value I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sensor string, value integer );
@@ -184,7 +184,7 @@ Feature: Runtime persistence
       """
     When the cluster is restarted from state its nodes moved into on-disk tables
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE REINGESTOR sensor_partition;
       """
@@ -192,7 +192,7 @@ Feature: Runtime persistence
       """
       CREATE ATTACHED REINGESTOR sensor_partition
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION sensor_readings_subscription TO sensor_readings;
       """

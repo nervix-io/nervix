@@ -1,12 +1,12 @@
 Feature: Named session subscriptions
   Scenario Outline: Named subscriptions span domains and unsubscribe by name
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE UNPACED DOMAIN secondary_{{test_id}};
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       CREATE SCHEMA event ( value STRING );
       CREATE RELAY events SCHEMA event UNBRANCHED;
@@ -18,7 +18,7 @@ Feature: Named session subscriptions
       created subscription 'primary_events' in domain '{{domain}}'
       """
     When the active session targets domain "secondary_{{test_id}}"
-    And these NSPL commands are executed on the active session
+    And these Plexus commands are executed on the active session
       """
       CREATE SCHEMA event ( value STRING );
       CREATE RELAY events SCHEMA event UNBRANCHED;
@@ -29,7 +29,7 @@ Feature: Named session subscriptions
       """
       created subscription 'secondary_events' in domain 'secondary_{{test_id}}'
       """
-    When these NSPL commands fail on the active session
+    When these Plexus commands fail on the active session
       """
       CREATE SUBSCRIPTION primary_events TO events;
       """
@@ -37,7 +37,7 @@ Feature: Named session subscriptions
       """
       session subscription 'primary_events' already exists
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       DELETE SUBSCRIPTION primary_events;
       """
@@ -45,7 +45,7 @@ Feature: Named session subscriptions
       """
       deleted subscription 'primary_events' from domain '{{domain}}'
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       CREATE SUBSCRIPTION primary_events TO events;
       """
@@ -61,11 +61,11 @@ Feature: Named session subscriptions
 
   Scenario Outline: Subscription requests naming a relay or a subscription that does not exist are refused
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail on the active session
+    When these Plexus commands fail on the active session
       """
       CREATE SUBSCRIPTION ghost_events TO ghost_relay;
       """
@@ -73,7 +73,7 @@ Feature: Named session subscriptions
       """
       stream 'ghost_relay' does not exist in domain '{{domain}}'
       """
-    When these NSPL commands fail on the active session
+    When these Plexus commands fail on the active session
       """
       DELETE SUBSCRIPTION ghost_events;
       """
@@ -89,14 +89,14 @@ Feature: Named session subscriptions
 
   Scenario Outline: Subscription names are local to each session
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( value STRING );
       CREATE RELAY events SCHEMA event UNBRANCHED;
       START;
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       CREATE SUBSCRIPTION events_view TO events;
       """
@@ -104,7 +104,7 @@ Feature: Named session subscriptions
       """
       created subscription 'events_view' in domain '{{domain}}'
       """
-    When a new session executes these NSPL commands
+    When a new session executes these Plexus commands
       """
       CREATE SUBSCRIPTION events_view TO events;
       """

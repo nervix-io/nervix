@@ -10,7 +10,7 @@ independently — building directly on [Branched Processing](./quickstart-branch
 Window routes are set-only: every output field is an aggregate expression, so the output relay
 needs its own summary schema (the order schema cannot be reused unless every field is aggregated):
 
-```nspl
+```plexus
 BEGIN;
 
 CREATE SCHEMA order_window (
@@ -29,7 +29,7 @@ CREATE RELAY order_windows SCHEMA order_window BRANCHED BY by_customer;
 Windows use `WIDTH` and `STEP` instead of `FLUSH`. Each bound can count messages, elapse a
 duration, or combine both — a combined bound closes the window when **either** condition is met:
 
-```nspl
+```plexus
 CREATE WINDOW PROCESSOR customer_order_window
   FROM orders_by_customer
   WIDTH 3 MESSAGES 30s DURATION

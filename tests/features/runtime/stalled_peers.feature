@@ -8,11 +8,11 @@ Feature: Stalled peers
   Scenario Outline: A Redis subscription whose server never answers is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "redis_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -47,11 +47,11 @@ Feature: Stalled peers
   Scenario Outline: A Redis emitter whose server never answers is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "redis_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -98,11 +98,11 @@ Feature: Stalled peers
   Scenario Outline: A RabbitMQ ingestor whose broker never answers its TLS handshake is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "rabbitmq_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -136,11 +136,11 @@ Feature: Stalled peers
   Scenario Outline: A RabbitMQ emitter whose broker never answers its TLS handshake is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "rabbitmq_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -173,11 +173,11 @@ Feature: Stalled peers
   Scenario Outline: A RabbitMQ ingestor whose broker never answers its AMQP handshake is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "rabbitmq_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -211,11 +211,11 @@ Feature: Stalled peers
   Scenario Outline: A RabbitMQ emitter whose broker never answers its AMQP handshake is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "rabbitmq_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -249,12 +249,12 @@ Feature: Stalled peers
     Given RabbitMQ is running
     And a stallable RabbitMQ endpoint is configured
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And RabbitMQ queue "stalled_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -323,11 +323,11 @@ Feature: Stalled peers
   Scenario Outline: A Syslog collector whose server never answers its TLS handshake is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "syslog_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
@@ -360,11 +360,11 @@ Feature: Stalled peers
     # One frame larger than both TCP buffers between the collector and a server that reads
     # nothing keeps the collector's write waiting.
     And a repeated text placeholder "bulk_message" of 8000000 bytes is prepared
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
       CREATE WIRE JSON SCHEMA syslog_event_wire MODE STRICT (
@@ -411,11 +411,11 @@ Feature: Stalled peers
   Scenario Outline: A WebSocket connection whose server never answers its upgrade is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "websocket_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -448,11 +448,11 @@ Feature: Stalled peers
   Scenario Outline: An HTTP polling ingestor whose server never answers is reported within timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "http_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -486,11 +486,11 @@ Feature: Stalled peers
   Scenario Outline: A Prometheus ingestor whose server never answers is reported within timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "prometheus_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA sample (value F64);
       CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (value number);
@@ -523,11 +523,11 @@ Feature: Stalled peers
   Scenario Outline: A Sentry emitter whose server never answers is reported within timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "sentry_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA error_event (message STRING, level STRING);
       CREATE WIRE JSON SCHEMA error_event_wire MODE STRICT (message string, level string);
@@ -571,11 +571,11 @@ Feature: Stalled peers
   Scenario Outline: An OTEL <signal> emitter whose collector never answers over <protocol> is reported within timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "otel_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA event (seq I64, body STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer, body string);
@@ -626,11 +626,11 @@ Feature: Stalled peers
   Scenario Outline: A ClickHouse emitter whose server never answers is reported within timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "clickhouse_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -676,12 +676,12 @@ Feature: Stalled peers
     Given SQS is running
     And a <cluster_size> node nervix cluster is started
     And a stallable endpoint "sqs_peer" stands in front of "sqs_endpoint"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And SQS queue "stalled_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -735,11 +735,11 @@ Feature: Stalled peers
   Scenario Outline: A ZeroMQ emitter whose peer never answers its handshake is reported within connect_timeout_ms
     Given a <cluster_size> node nervix cluster is started
     And a silent endpoint "zeromq_peer" is listening
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -775,11 +775,11 @@ Feature: Stalled peers
     # One message larger than the TCP buffers between the emitter and a peer that reads nothing
     # keeps the emitter's send waiting.
     And a repeated text placeholder "bulk_message" of 8000000 bytes is prepared
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64, message STRING);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, message string);

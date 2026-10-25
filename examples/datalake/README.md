@@ -16,14 +16,14 @@ distance anomalies are sent to Redis Pub/Sub. Connected sessions, device
 locations, matched disconnects, one-sided disconnects, security events, and
 distance alerts are also written to Iceberg on S3.
 
-Build the Rust WASM guest before executing `datalake.nspl`:
+Build the Rust WASM guest before executing `datalake.plexus`:
 
 ```bash
 just wasm-datalake-geo-guest
 ```
 
 The build target downloads the DB-IP City Lite MMDB archive if it is not already
-present. Then run `examples/datalake/datalake.nspl` from the repository root so
+present. Then run `examples/datalake/datalake.plexus` from the repository root so
 resource upload paths resolve correctly.
 
 `docker compose up` runs the RustFS bucket initializer and the datalake Iceberg

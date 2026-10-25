@@ -7,7 +7,7 @@
 //!   with fixed-width integer operations.
 //! - **Depends on.** Arrow binary, string and primitive columns, the standard library's address
 //!   parsers and formatters, and the VM's row errors.
-//! - **Must not know.** NSPL syntax, routes, schemas or connectors. It never resolves a name or
+//! - **Must not know.** Plexus syntax, routes, schemas or connectors. It never resolves a name or
 //!   reaches the network.
 
 #![cfg_attr(

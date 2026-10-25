@@ -2558,7 +2558,7 @@ mod tests {
                 vec![named("source_b"), named("source_a")],
                 vec![ProcessorInputWhere {
                     relay: named("source_b"),
-                    where_clause: nervix_nspl::parse_expression("input.seq > 0")
+                    where_clause: nervix_plexus::parse_expression("input.seq > 0")
                         .expect("the source predicate is valid"),
                 }],
             ),

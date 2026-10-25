@@ -57,7 +57,7 @@ table Fingerprint {
   bytes: [ubyte] (required);
 }
 
-/// A byte range of the NSPL source text a request carried. Offsets are UTF-8 byte offsets on
+/// A byte range of the Plexus source text a request carried. Offsets are UTF-8 byte offsets on
 /// character boundaries of that text, and `start` is not after `end`.
 struct SourceSpan {
   start: uint;
@@ -133,7 +133,7 @@ table NodeRef {
   name: string (required);
 }
 
-/// The semantic question a structured control asks without manufacturing partial NSPL.
+/// The semantic question a structured control asks without manufacturing partial Plexus.
 enum ChoiceTarget : ubyte {
   DomainPace,
   PlacementPolicy,
@@ -1410,7 +1410,7 @@ table RestoreReport {
 // Client requests
 // ---------------------------------------------------------------------------------------------
 
-/// Executes NSPL statements.
+/// Executes Plexus statements.
 table CommandRequest {
   query: string (required);
   /// The selected domain. Absent when none is selected.
@@ -1424,7 +1424,7 @@ table CommandRequest {
   expected_preview: TransactionPreviewIdentity;
 }
 
-/// Asks for completions of NSPL source at a cursor.
+/// Asks for completions of Plexus source at a cursor.
 table SuggestRequest {
   input: string (required);
   /// A UTF-8 byte offset into input, on a character boundary.
@@ -2653,7 +2653,7 @@ table RestoreStart {
   request_id: ulong;
   /// The durable identity of the restore across retries, reconnects and leader changes.
   execution_reference: string (required);
-  /// One RESTORE statement, as NSPL.
+  /// One RESTORE statement, as Plexus.
   statement: string (required);
   /// The archive's exact size. Non-zero.
   total_bytes: ulong;

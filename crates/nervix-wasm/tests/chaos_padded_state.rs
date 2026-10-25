@@ -74,7 +74,7 @@ async fn compiled_guest() -> CompiledWasmProcessor {
         .assured("the generated padded guest compiles")
 }
 
-/// The limits `fixtures/restore-state.nspl` grants the guest.
+/// The limits `fixtures/restore-state.plexus` grants the guest.
 fn limits() -> WasmProcessorLimits {
     WasmProcessorLimits {
         max_fuel: nonzero!(1_000_000_000u64),

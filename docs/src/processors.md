@@ -1,5 +1,7 @@
 # Processors
 
+*Plexus, the Nervix graph definition language.*
+
 Processors consume relay records and create one or more route-local outputs. Relay names identify
 graph edges; expressions use language-defined scopes instead of relay-qualified fields.
 
@@ -11,7 +13,7 @@ exact named branch, or all be unbranched.
 
 Relay inputs may optionally collect incoming Arrow batches before node execution:
 
-```nspl,ignore
+```plexus,ignore
 FROM <relay> [WHERE <expr>], ...
 COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]
 ```
@@ -36,13 +38,13 @@ bound to the source relay, concrete branch, domain, and `START` generation.
 
 Branch-preserving processors declare one node-wide contract:
 
-```nspl,ignore
+```plexus,ignore
 BRANCHED BY <branch>
 ```
 
 or:
 
-```nspl,ignore
+```plexus,ignore
 UNBRANCHED
 ```
 
@@ -64,7 +66,7 @@ Processing order is:
 
 A transforming route starts empty and may use `INHERIT` and ordered `SET`:
 
-```nspl,ignore
+```plexus,ignore
 TO projected_notifications
   INHERIT tenant, user_id, amount
   SET amount = amount + 1,
@@ -88,7 +90,7 @@ finalize as typed nulls. Generated inferencer and WASM values are immutable read
 visible independently to every route. They never initialize route outputs automatically.
 
 Every flush-based processor route declares `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or
-`FLUSH IMMEDIATE`. The [NSPL Overview](nspl-overview.md) defines the system-owned 100 µs minimum
+`FLUSH IMMEDIATE`. The [Plexus Overview](plexus-overview.md) defines the system-owned 100 µs minimum
 batching window and its forced-flush exceptions. `FLUSH EACH` is domain-logical, while the Immediate
 minimum is physical; both start on the empty-to-buffered transition and remain independent for
 each concrete branch. A route using `ON MESSAGE ERROR SEND TO` buffers its error records
@@ -101,7 +103,7 @@ For mechanism selection, including differently keyed data, see
 
 Normal processors declare ordered node-wide dependencies after their branch declaration:
 
-```nspl,ignore
+```plexus,ignore
 USING MATERIALIZED STATE profiles REQUIRED WAIT
 USING MATERIALIZED STATE rules REQUIRED SKIP
 USING MATERIALIZED STATE preferences DEFAULT {
@@ -130,7 +132,7 @@ expressions cannot contain field reads, side effects, or nondeterministic calls.
 
 Junctions perform transforming fan-out:
 
-```nspl
+```plexus
 CREATE JUNCTION route_notifications
   FROM notifications WHERE input.active
   FILTER WHERE input.amount > 0
@@ -156,7 +158,7 @@ metrics exist.
 `ALTER JUNCTION` accepts comma-separated operations and applies them in written order. Input,
 materialized-dependency, and route order are preserved:
 
-```nspl
+```plexus
 ALTER JUNCTION route_notifications
   ADD FROM priority_notifications WHERE input.active,
   SET COLLECT FOR 25ms MAX BATCH SIZE 1MiB,
@@ -205,7 +207,7 @@ backpressure until the gate is released.
 
 Deduplication expressions are structured and evaluated in source order:
 
-```nspl
+```plexus
 CREATE DEDUPLICATOR unique_notifications
   FROM notifications
   FILTER WHERE input.active
@@ -225,7 +227,7 @@ Deduplication state is branch-local. Duplicate details are logged at `debug` or 
 
 `ALTER DEDUPLICATOR` applies comma-separated operations in written order:
 
-```nspl
+```plexus
 ALTER DEDUPLICATOR unique_notifications
   SET DEDUPLICATE ON input.tenant, input.external_id,
   SET MAX TIME 30m,
@@ -255,7 +257,7 @@ each key expires `MAX TIME` after its archived first sighting.
 
 ## Reorderer
 
-```nspl
+```plexus
 CREATE REORDERER ordered_notifications
   FROM notifications
   BY input.occurred_at, input.sequence
@@ -274,7 +276,7 @@ Ordering buffers and maximum-time release are independent per concrete branch.
 `ALTER REORDERER` uses the same ordered common processor operations, plus `SET BY` and
 `SET MAX TIME`:
 
-```nspl
+```plexus
 ALTER REORDERER ordered_notifications
   SET BY input.priority, input.occurred_at, input.sequence,
   SET MAX TIME 10s,
@@ -297,7 +299,7 @@ pause.
 Windows are set-only. Aggregates appear directly in route `SET`; there is no `AGGREGATE` clause.
 `input.field` is valid only inside aggregate arguments, and aggregates cannot be nested:
 
-```nspl
+```plexus
 CREATE WINDOW PROCESSOR latency_windows
   FROM latencies
   FILTER WHERE input.latency >= 0
@@ -384,7 +386,7 @@ Inferencers keep the explicit tensor mapping surface. `INPUTS` expressions may r
 construction cannot. Routes read immutable generated model fields, declared materialized state,
 and the branch:
 
-```nspl
+```plexus
 CREATE INFERENCER score_events
   FROM features
   USING RESOURCE scoring VERSION 1
@@ -413,7 +415,7 @@ model; see [Versioning](resources.md#versioning).
 
 WASM routes are also set-only and execute only when the guest returns actual output data:
 
-```nspl
+```plexus
 CREATE WASM PROCESSOR normalize_events
   FROM events
   USING RESOURCE normalizer VERSION 1
@@ -468,12 +470,12 @@ outcome in either format. See
 [Checkpoints And Acknowledgements](wasm-processor-guests.md#checkpoints-and-acknowledgements) and
 [WASM State And Recovery](wasm-state.md).
 
-### Reset guest state from NSPL
+### Reset guest state from Plexus
 
 `RESET WASM PROCESSOR <processor> STATE IN DOMAIN <domain> FOR <scope>;` replaces the selected
 guest-state lifetime of an existing, running processor. The scope is mandatory:
 
-```nspl
+```plexus
 RESET WASM PROCESSOR normalize_events STATE IN DOMAIN sales FOR UNBRANCHED;
 RESET WASM PROCESSOR normalize_events STATE IN DOMAIN sales FOR ALL BRANCHES;
 RESET WASM PROCESSOR normalize_events STATE IN DOMAIN sales FOR BRANCH VALUES { tenant = 'acme' };
@@ -494,7 +496,7 @@ the retained outcome without creating another generation. A fresh command is a n
 
 Correlators use explicit sides and have no default input scope:
 
-```nspl
+```plexus
 CREATE CORRELATOR correlate_orders
   LEFT FROM orders WHERE left.active
   COLLECT FOR 10ms
@@ -522,7 +524,7 @@ Correlations occur only within one concrete branch.
 Reingestors are branch-boundary transforming nodes. Each route preserves the incoming exact branch,
 constructs another branch, or becomes unbranched:
 
-```nspl
+```plexus
 CREATE REINGESTOR repartition_events
   FROM events
   USING MATERIALIZED STATE profiles REQUIRED WAIT
@@ -547,7 +549,7 @@ branch execution receives the completed Arrow batch and does not apply a second 
 `ALTER REINGESTOR` applies the shared input, collection, filter, attachment, materialized-state,
 and route operations in written order:
 
-```nspl
+```plexus
 ALTER REINGESTOR repartition_events
   ADD FROM priority_events WHERE input.active,
   SET COLLECT FOR 25ms MAX BATCH SIZE 1MiB,
@@ -576,7 +578,7 @@ domain nodes continue to run.
 
 Generators run from a materialized relay on a domain-clock cadence. Their routes are set-only:
 
-```nspl
+```plexus
 CREATE GENERATOR synth_notifications
   USING MATERIALIZED STATE notifications
   EACH 100ms
@@ -599,7 +601,7 @@ execution snapshot taken after the materialized-state read.
 `SET BRANCHED BY <branch>`, `SET UNBRANCHED`, and the ordered `ADD ROUTE`, `DROP ROUTE`, and
 `REPLACE ROUTE` operations:
 
-```nspl
+```plexus
 ALTER GENERATOR synth_notifications
   SET EACH 250ms,
   REPLACE ROUTE TO generated_notifications
@@ -626,7 +628,7 @@ message-error model; this section defines the route behavior and available expre
 `ON MESSAGE ERROR` terminates each route. `SEND TO` constructs an error relay record with ordered
 `SET` assignments:
 
-```nspl,ignore
+```plexus,ignore
 ON MESSAGE ERROR SEND TO processing_errors
 SET error_reference = error.reference,
     error_code = error.code,

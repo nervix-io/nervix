@@ -161,46 +161,46 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_expression_roundtrip_minimal_parentheses/corpus"
+corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_expression_roundtrip_minimal_parentheses/corpus"
 domain_version = 5
 features = []
-id = "nspl-expression"
+id = "plexus-expression"
 invariant = "A generated current expression of every form renders to text that a statement and every standalone expression reader read back as the complete structured expression."
 manifest = "Cargo.toml"
 max_input_bytes = 512
-package = "nervix-nspl"
+package = "nervix-plexus"
 random_iterations = 256
-source = "crates/nspl/src/canonical_round_trip_tests.rs"
+source = "crates/plexus/src/canonical_round_trip_tests.rs"
 test = "canonical_round_trip_tests::bolero_expression_roundtrip_minimal_parentheses"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_nspl/corpus"
+corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus"
 domain_version = 15
 features = []
-id = "nspl-model"
+id = "plexus-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
-package = "nervix-nspl"
+package = "nervix-plexus"
 random_iterations = 256
-source = "crates/nspl/src/canonical_round_trip_tests.rs"
-test = "canonical_round_trip_tests::bolero_model_roundtrip_canonical_nspl"
+source = "crates/plexus/src/canonical_round_trip_tests.rs"
+test = "canonical_round_trip_tests::bolero_model_roundtrip_canonical_plexus"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/nspl/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
+corpus = "crates/plexus/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
 domain_version = 16
 features = []
-id = "nspl-archive-model"
+id = "plexus-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
-package = "nervix-nspl"
+package = "nervix-plexus"
 random_iterations = 128
-source = "crates/nspl/src/backup/mod.rs"
+source = "crates/plexus/src/backup/mod.rs"
 test = "backup::tests::bolero_models_exported_through_an_archive_reparse_to_themselves"
 test_target = "lib"
 
@@ -386,76 +386,76 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_nspl/corpus"
+corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
 domain_version = 14
 features = []
-id = "nspl-statement"
+id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
-package = "nervix-nspl"
+package = "nervix-plexus"
 random_iterations = 256
-source = "crates/nspl/src/canonical_round_trip_tests.rs"
-test = "canonical_round_trip_tests::bolero_statement_roundtrip_canonical_nspl"
+source = "crates/plexus/src/canonical_round_trip_tests.rs"
+test = "canonical_round_trip_tests::bolero_statement_roundtrip_canonical_plexus"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_expression_text_reads_alike_at_every_entry_point/corpus"
+corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_expression_text_reads_alike_at_every_entry_point/corpus"
 domain_version = 3
 features = []
-id = "nspl-expression-text"
+id = "plexus-expression-text"
 invariant = "Edited expression text reads as the same expression through a statement and every standalone expression reader, or none of them reads it as one."
 manifest = "Cargo.toml"
 max_input_bytes = 512
-package = "nervix-nspl"
+package = "nervix-plexus"
 random_iterations = 256
-source = "crates/nspl/src/canonical_round_trip_tests.rs"
+source = "crates/plexus/src/canonical_round_trip_tests.rs"
 test = "canonical_round_trip_tests::bolero_expression_text_reads_alike_at_every_entry_point"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
+corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
 domain_version = 14
 features = []
-id = "nspl-statement-text"
+id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
-package = "nervix-nspl"
+package = "nervix-plexus"
 random_iterations = 256
-source = "crates/nspl/src/canonical_round_trip_tests.rs"
+source = "crates/plexus/src/canonical_round_trip_tests.rs"
 test = "canonical_round_trip_tests::bolero_statement_text_is_canonical_or_rejected"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
+corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
 domain_version = 14
 features = []
-id = "nspl-format-document"
+id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
-package = "nervix-nspl-format"
+package = "nervix-plexus-format"
 random_iterations = 256
-source = "crates/nspl-format/src/format_round_trip_tests.rs"
+source = "crates/plexus-format/src/format_round_trip_tests.rs"
 test = "format_round_trip_tests::bolero_formatted_documents_keep_their_statements"
 test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
+corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
 domain_version = 13
 features = []
-id = "nspl-format-text"
+id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
-package = "nervix-nspl-format"
+package = "nervix-plexus-format"
 random_iterations = 256
-source = "crates/nspl-format/src/format_round_trip_tests.rs"
+source = "crates/plexus-format/src/format_round_trip_tests.rs"
 test = "format_round_trip_tests::bolero_formatter_text_is_formatted_or_rejected"
 test_target = "lib"
 

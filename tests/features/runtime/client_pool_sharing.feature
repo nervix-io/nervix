@@ -7,14 +7,14 @@ Feature: Shared database client pools
   Background:
     Given Postgres is running
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
 
   Scenario: Emitters sharing a client stay within its declared maximum
     Given Postgres table "shared_pool_out_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer, action string );
@@ -64,7 +64,7 @@ Feature: Shared database client pools
   @retained_task_handles
   Scenario: A borrower waiting on a full pool reports the wait and recovers
     Given Postgres table "contended_pool_out_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer, action string );
@@ -116,7 +116,7 @@ Feature: Shared database client pools
   @retained_task_handles
   Scenario: A pool outlives one user and closes with the last
     Given Postgres table "retired_pool_out_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer, action string );
@@ -151,14 +151,14 @@ Feature: Shared database client pools
       """
     And Postgres eventually reports at least 1 connections for application "nervix_retired_{{test_id}}"
     And Postgres never reports more than 2 connections for application "nervix_retired_{{test_id}}"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       BEGIN;
       DROP EMITTER writer_two;
       COMMIT;
       """
     Then Postgres eventually reports at least 1 connections for application "nervix_retired_{{test_id}}"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       BEGIN;
       DROP EMITTER writer_one;

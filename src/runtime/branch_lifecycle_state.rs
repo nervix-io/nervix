@@ -8,7 +8,7 @@
 //! - **Depends on.** Runtime-state snapshots, the branch lifecycle codec, typed branch keys, the
 //!   branch checkpoint catalog, the primitive publication and synchronization boundary and
 //!   checkpoint replication.
-//! - **Must not know.** Branch tasks, schedules, how a checkpoint is persisted or fetched, or NSPL.
+//! - **Must not know.** Branch tasks, schedules, how a checkpoint is persisted or fetched, or Plexus.
 
 #![cfg_attr(
     nervix_lint,

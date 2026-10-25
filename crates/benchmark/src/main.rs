@@ -937,7 +937,7 @@ async fn execute_run(
             implementation: resolved.implementation.clone(),
         })?;
     let rendered_path = match implementation {
-        Implementation::Nervix(_) => resolved.run_directory.join("graph.nspl"),
+        Implementation::Nervix(_) => resolved.run_directory.join("graph.plexus"),
         Implementation::Container(container) => resolved.run_directory.join(
             container
                 .config_path
@@ -949,7 +949,7 @@ async fn execute_run(
         path: rendered_path,
     })?;
     if let Some(after_start) = &after_start {
-        let path = resolved.run_directory.join("after-start.nspl");
+        let path = resolved.run_directory.join("after-start.plexus");
         fs::write(&path, after_start).change_context(BenchmarkCliError::WriteFile { path })?;
     }
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plexus"
+  short_description: "Configure Nervix with valid Plexus"
+  default_prompt: "Use $plexus to design a complete Nervix configuration for my streaming requirements."

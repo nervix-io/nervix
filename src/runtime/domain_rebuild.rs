@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Binding a domain's relay surfaces, programs and tasks during rebuild and recovery.
 //! - **Depends on.** Typed registry plans, runtime capabilities and installed resources.
-//! - **Must not know.** NSPL parsing, transaction decisions or connector internals.
+//! - **Must not know.** Plexus parsing, transaction decisions or connector internals.
 
 #![cfg_attr(
     nervix_lint,

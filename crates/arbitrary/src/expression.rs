@@ -177,7 +177,7 @@ impl Arbitrary<'_> {
                 arguments: self.expression_list(below, 0),
             },
             ExpressionForm::Array => {
-                let minimum = self.non_empty_in_nspl();
+                let minimum = self.non_empty_in_plexus();
                 Expression::Array(self.expression_list(below, minimum))
             }
             ExpressionForm::If => Expression::If {
@@ -191,7 +191,7 @@ impl Arbitrary<'_> {
                 } else {
                     None
                 };
-                let minimum = self.non_empty_in_nspl();
+                let minimum = self.non_empty_in_plexus();
                 let count = self.list_length(minimum);
                 let mut branches = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -278,17 +278,17 @@ impl Arbitrary<'_> {
             .verified("the extra count is at most the bound minus the minimum")
     }
 
-    /// One in NSPL, which spells no empty array and no `CASE` without a `WHEN`; zero otherwise.
-    fn non_empty_in_nspl(&self) -> usize {
+    /// One in Plexus, which spells no empty array and no `CASE` without a `WHEN`; zero otherwise.
+    fn non_empty_in_plexus(&self) -> usize {
         match self.domain {
-            Domain::Nspl => 1,
+            Domain::Plexus => 1,
             Domain::Vocabulary => 0,
         }
     }
 
     /// A literal of any type.
     ///
-    /// In NSPL a number literal is never negative, because `-5` is the negation of `5`, and a float
+    /// In Plexus a number literal is never negative, because `-5` is the negation of `5`, and a float
     /// is finite; a negative value is built as a negation around a literal instead. The vocabulary
     /// holds any `i64` and any `f64` bit pattern, NaN payloads and negative zero included.
     pub fn literal(&mut self) -> Literal {
@@ -303,7 +303,7 @@ impl Arbitrary<'_> {
 
     fn integer_literal(&mut self) -> i64 {
         match self.domain {
-            Domain::Nspl => {
+            Domain::Plexus => {
                 let maximum = u64::try_from(i64::MAX).assured("i64::MAX is positive");
                 let value = self.entropy.boundary_biased(0..=maximum);
                 i64::try_from(value).verified("the range above ends at i64::MAX")
@@ -327,7 +327,7 @@ impl Arbitrary<'_> {
         };
         match self.domain {
             Domain::Vocabulary => Float64Literal::new(value),
-            Domain::Nspl => Float64Literal::new(Self::spellable_float(value)),
+            Domain::Plexus => Float64Literal::new(Self::spellable_float(value)),
         }
     }
 
@@ -378,10 +378,10 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// A type a conversion names. NSPL converts only to scalar types; the vocabulary holds any.
+    /// A type a conversion names. Plexus converts only to scalar types; the vocabulary holds any.
     pub fn conversion_type(&mut self) -> ParseAsType {
         match self.domain {
-            Domain::Nspl => self.entropy.pick(SCALAR_TYPES),
+            Domain::Plexus => self.entropy.pick(SCALAR_TYPES),
             Domain::Vocabulary => self.declared_type(),
         }
     }
@@ -414,11 +414,11 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// The longest fixed-length array a declared type holds. NSPL reads a length only up to
+    /// The longest fixed-length array a declared type holds. Plexus reads a length only up to
     /// `i32::MAX`, the longest fixed-size list Arrow carries; the vocabulary holds any `u32`.
     fn longest_array(&self) -> u32 {
         match self.domain {
-            Domain::Nspl => u32::try_from(i32::MAX).assured("i32::MAX is positive"),
+            Domain::Plexus => u32::try_from(i32::MAX).assured("i32::MAX is positive"),
             Domain::Vocabulary => u32::MAX,
         }
     }

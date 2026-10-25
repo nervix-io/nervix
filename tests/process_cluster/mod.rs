@@ -7,7 +7,7 @@
 //!   database, connecting a named client to one member, and reading `DESCRIBE INGESTOR` through
 //!   the running leader.
 //! - **Depends on.** The real-process cluster fixture, the scenario's placeholders, its named
-//!   clients and its NSPL statement splitting.
+//!   clients and its Plexus statement splitting.
 //! - **Must not know.** How the server reacts to a fault; scenarios observe that through the
 //!   public surfaces these steps reach.
 
@@ -175,13 +175,13 @@ async fn given_third_server_process_node_is_saved(
     );
 }
 
-#[when("these NSPL commands are executed on the server process cluster")]
-async fn when_nspl_commands_are_executed_on_server_process_cluster(
+#[when("these Plexus commands are executed on the server process cluster")]
+async fn when_plexus_commands_are_executed_on_server_process_cluster(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
     let commands = expand_placeholders(world, docstring(step));
-    for statement in nspl_statements(&commands) {
+    for statement in plexus_statements(&commands) {
         nervix_primitives::task::consume_budget().await;
         let output = world
             .process_cluster()

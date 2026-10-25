@@ -10,7 +10,7 @@ Feature: Web console visual hash map and Roto UDF creation
         "lookup.jsonl": "{\"id\":\"one\",\"value\":42}\n"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE visual_lookup_bundle;
@@ -65,7 +65,7 @@ Feature: Web console visual hash map and Roto UDF creation
         "good.jsonl": "{\"id\":\"one\",\"value\":42}\n"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE visual_lookup_bundle;
@@ -104,7 +104,7 @@ Feature: Web console visual hash map and Roto UDF creation
   Scenario Outline: A tested Roto UDF is usable immediately after visual creation
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_udf_input (value I64);
@@ -153,7 +153,7 @@ Feature: Web console visual hash map and Roto UDF creation
     Then selector ".suggestions" contains "visual_add_one"
     When selector ".prompt-row input" is filled with "CREATE JUNCTION visual_udf_apply FROM visual_udf_inputs UNBRANCHED TO visual_udf_outputs SET result = co"
     Then selector ".suggestions" contains "coalesce"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE JUNCTION visual_udf_apply FROM visual_udf_inputs UNBRANCHED TO visual_udf_outputs SET result = udf::visual_add_one(input.value) FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION visual_udf_sub TO visual_udf_outputs;
@@ -177,7 +177,7 @@ Feature: Web console visual hash map and Roto UDF creation
   Scenario: A rejected Roto test leaves its source and typed signature editable
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -210,7 +210,7 @@ Feature: Web console visual hash map and Roto UDF creation
   Scenario: A resource without a completed version cannot be selected for a hash map
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE empty_bundle;
@@ -232,7 +232,7 @@ Feature: Web console visual hash map and Roto UDF creation
   Scenario: The UDF declaration must exactly match its Roto entry signature
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -265,7 +265,7 @@ Feature: Web console visual hash map and Roto UDF creation
   Scenario: Changing a hash map draft's domain invalidates selected resource and codec references
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE UNPACED DOMAIN {{domain}}_other;
@@ -311,7 +311,7 @@ Feature: Web console visual hash map and Roto UDF creation
         "lookup.jsonl": "{\"id\":\"one\",\"value\":42}\n"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE tx_bundle;
