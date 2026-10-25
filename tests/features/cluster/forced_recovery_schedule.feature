@@ -8,7 +8,7 @@ Feature: Forced recovery during destination startup
     And a 3 node nervix cluster is started
     And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
     And a non-node-1-owned branched state-counting WASM reset graph is running
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CORDON NODE node-1;
       SHOW CLUSTER STATUS;
@@ -35,7 +35,7 @@ Feature: Forced recovery during destination startup
       """
       transition_from={{former_owner}} state_recovery=unverified
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION recovered_events TO counted_events;
       """

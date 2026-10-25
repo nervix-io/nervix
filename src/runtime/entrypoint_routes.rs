@@ -8,7 +8,7 @@
 //!   bound route gives its records their branch key.
 //! - **Depends on.** Decision-layer entrypoint plans, the installed domain surfaces, the VM
 //!   bindings and the runtime planner that parses route cadences.
-//! - **Must not know.** NSPL text, the schedule, registry validation, or placement. Flush and
+//! - **Must not know.** Plexus text, the schedule, registry validation, or placement. Flush and
 //!   input-collection cadences and materialized-state dependencies still arrive as their declared
 //!   Model values, which the decisions layer does not yet type.
 

@@ -780,10 +780,10 @@ fn client_endpoint_contract(
         hasher.update(part.as_bytes());
     };
     add(&contract_ingestor
-        .to_canonical_nspl()
+        .to_canonical_plexus()
         .change_context_lazy(unrenderable)?);
     add(&schema
-        .to_canonical_nspl()
+        .to_canonical_plexus()
         .change_context_lazy(unrenderable)?);
     for route in ingestor.output_routes.outputs() {
         add(route.relay.as_str());
@@ -795,7 +795,7 @@ fn client_endpoint_contract(
             Some(ResolvedBranching::Branched { branch, schema }) => {
                 add(branch.as_str());
                 add(&schema
-                    .to_canonical_nspl()
+                    .to_canonical_plexus()
                     .change_context_lazy(unrenderable)?);
             }
             Some(ResolvedBranching::Unbranched) | None => add("UNBRANCHED"),

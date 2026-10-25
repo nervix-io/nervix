@@ -46,7 +46,7 @@ use nervix_models::{
     Backup, BackupCapture, BackupResources, BackupScope, CommandExecutionReference, DescribeBackup,
     DomainName, DomainPace, InspectionFormat,
 };
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statements};
 use serde_json::{Value, json};
 
 use super::{ClientError, expand_user_path};
@@ -411,7 +411,7 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
                 .prepare_backup_with_reference(&backup, &reference)
                 .await
         }
-        None => client.prepare_execution(backup.to_canonical_nspl()).await,
+        None => client.prepare_execution(backup.to_canonical_plexus()).await,
     };
     let outcome = match client.execute_prepared(&execution).await {
         Ok(outcome) => outcome,

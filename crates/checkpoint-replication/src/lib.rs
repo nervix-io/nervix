@@ -10,7 +10,7 @@
 //!   missing a report; and waking a replica's synchronization when its owner announces.
 //! - **Depends on.** Cluster node names and the primitive synchronization boundary.
 //! - **Must not know.** Runtime-state placements, what a checkpoint holds, how it is announced,
-//!   fetched, installed or persisted, schedules, the interconnect, or NSPL.
+//!   fetched, installed or persisted, schedules, the interconnect, or Plexus.
 
 #![cfg_attr(
     nervix_lint,

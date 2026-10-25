@@ -74,11 +74,11 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -130,11 +130,11 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 200ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -171,7 +171,7 @@ Feature: Kafka ingestor domain pacing
       {"user_id":42}
       """
     Then the relay subscription does not receive a payload within "500ms"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -190,11 +190,11 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -249,11 +249,11 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 200ms SKEW 100000h;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -293,7 +293,7 @@ Feature: Kafka ingestor domain pacing
       {"user_id":42,"occurred_at":"2026-04-07T00:00:00Z"}
       """
     Then the relay subscription does not receive a payload within "500ms"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -312,11 +312,11 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "1h"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -358,7 +358,7 @@ Feature: Kafka ingestor domain pacing
       "user_id":42
       """
     When the cluster is restarted
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
@@ -386,13 +386,13 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
     And Kafka topic "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -445,7 +445,7 @@ Feature: Kafka ingestor domain pacing
       """
       "user_id":42
       """
-    When this NSPL command request is executed on the leader node
+    When this Plexus command request is executed on the leader node
       """
       BEGIN;
       ALTER WIRE JSON SCHEMA notification_wire ADD FIELD note string OPTIONAL;
@@ -481,11 +481,11 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -526,11 +526,11 @@ Feature: Kafka ingestor domain pacing
       """
       "user_id":42
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START AT NOW;
       """
@@ -558,12 +558,12 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -613,7 +613,7 @@ Feature: Kafka ingestor domain pacing
       """
       {"user_id":43}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE INGESTOR kafka_notifications;
       """
@@ -640,12 +640,12 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_{{test_id}}" exists with 2 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -695,7 +695,7 @@ Feature: Kafka ingestor domain pacing
       """
       kafka observed partitions: 0
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE INGESTOR kafka_notifications;
       """
@@ -725,11 +725,11 @@ Feature: Kafka ingestor domain pacing
   Scenario Outline: Stopped unpaced domains do not ingest until explicitly started
     Given Kafka is running
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -766,7 +766,7 @@ Feature: Kafka ingestor domain pacing
       {"user_id":42}
       """
     Then the relay subscription does not receive a payload within "1s"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """

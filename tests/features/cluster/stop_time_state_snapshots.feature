@@ -10,11 +10,11 @@ Feature: State snapshots written while a node stops
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading ( value I64 );
       CREATE SCHEMA reading_summary ( samples I64, total I64 );
@@ -51,7 +51,7 @@ Feature: State snapshots written while a node stops
     When bulk execution on every node is occupied for "15s"
     And the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restarted_reading_summaries_subscription TO reading_summaries;
       """

@@ -3,7 +3,7 @@
 //! Layer: vocabulary.
 //! - **Owns.** The requested resource version and exact/all usage selection.
 //! - **Depends on.** Resource names, Model references and resource-version vocabulary.
-//! - **Must not know.** NSPL parsing, resource catalogs, transaction planning or runtime changes.
+//! - **Must not know.** Plexus parsing, resource catalogs, transaction planning or runtime changes.
 
 #![cfg_attr(
     nervix_lint,

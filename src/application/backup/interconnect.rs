@@ -792,7 +792,7 @@ mod tests {
             assert_eq!(section_kind(section_content(kind)), Some(kind));
         }
         assert_eq!(
-            section_kind(SectionContent::Nspl),
+            section_kind(SectionContent::Plexus),
             None,
             "configuration never travels as captured runtime state"
         );

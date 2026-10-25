@@ -24,7 +24,7 @@ Lower the high-value threshold from `1000` to `500`. Route changes go through
 [`ALTER JUNCTION`](processors.md#altering-junctions); `REPLACE ROUTE` requires the **complete**
 route body, not a diff:
 
-```nspl
+```plexus
 ALTER JUNCTION route_orders
   REPLACE ROUTE TO high_value_orders
     INHERIT ALL
@@ -44,7 +44,7 @@ order and watch it reach `high_value_out`, which the old threshold would have dr
 Relay capacity is equally uneventful ([Altering Relays](relay.md#altering-relays), capacity
 semantics under [Capacity](relay.md#capacity)):
 
-```nspl
+```plexus
 ALTER RELAY orders SET CAPACITY 8;
 ```
 
@@ -54,7 +54,7 @@ Payments gain a `method`. A codec requires its wire schema to exactly match the 
 so both must change in **one transaction** — the registry validates the complete candidate graph
 before anything applies ([Altering Schemas](schemas-and-codecs.md#altering-schemas)):
 
-```nspl
+```plexus
 BEGIN;
 
 ALTER WIRE JSON SCHEMA payment_wire

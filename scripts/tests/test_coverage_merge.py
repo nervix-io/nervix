@@ -398,26 +398,26 @@ class IntegrityTests(unittest.TestCase):
 
     def test_a_native_report_without_a_complete_ordinary_completion_record_fails(self) -> None:
         def failed(directory: Path) -> None:
-            self.workspace.collection(directory, "nspl-completion-walk", "ordinary", self.records, verdict="failed")
+            self.workspace.collection(directory, "plexus-completion-walk", "ordinary", self.records, verdict="failed")
 
         def unrecorded(directory: Path) -> None:
-            attempt = self.workspace.collection(directory, "nspl-completion-walk", "ordinary", self.records)
+            attempt = self.workspace.collection(directory, "plexus-completion-walk", "ordinary", self.records)
             (attempt / "completion.json").unlink()
 
         def reportless(directory: Path) -> None:
-            self.workspace.collection(directory, "nspl-completion-walk", "ordinary", None)
+            self.workspace.collection(directory, "plexus-completion-walk", "ordinary", None)
 
         def malformed(directory: Path) -> None:
-            attempt = self.workspace.collection(directory, "nspl-completion-walk", "ordinary", self.records)
+            attempt = self.workspace.collection(directory, "plexus-completion-walk", "ordinary", self.records)
             (attempt / "completion.json").write_text(json.dumps({"verdict": "complete"}))
 
         def repeated(directory: Path) -> None:
             self.workspace.collection(directory, "bench-smoke", "ordinary", self.records, attempt="github-1-2")
 
         for corrupt, reason in (
-            (failed, r"ordinary collection of nspl-completion-walk is failed, not complete; rerun just coverage-native-extras nspl-completion-walk"),
+            (failed, r"ordinary collection of plexus-completion-walk is failed, not complete; rerun just coverage-native-extras plexus-completion-walk"),
             (unrecorded, r"lcov.info is a native report without a completion record beside it"),
-            (reportless, r"complete ordinary collection of nspl-completion-walk holds no lcov.info"),
+            (reportless, r"complete ordinary collection of plexus-completion-walk holds no lcov.info"),
             (malformed, r"completion.json is not a native coverage completion record"),
             (repeated, r"bench-smoke has more than one ordinary collection"),
         ):

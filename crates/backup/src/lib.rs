@@ -1,7 +1,7 @@
 //! The public Nervix backup archive.
 //!
 //! An archive is one tar file written manifest first, so it can be read as a stream without
-//! seeking. Every section it holds is canonical NSPL text, the original bytes of a resource version,
+//! seeking. Every section it holds is canonical Plexus text, the original bytes of a resource version,
 //! or a record this crate owns, encoded with rkyv behind a header of its own: a magic, a record kind
 //! and a format version, checked before bytecheck validates a single field of the payload. The
 //! manifest names every section with its length and BLAKE3 digest, so a reader verifies each section

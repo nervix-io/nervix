@@ -333,7 +333,7 @@ struct FixtureCommand {
 impl FixtureCommand {
     fn new(source: &str) -> Self {
         let reference = test_execution_reference();
-        let statement = nervix_nspl::server_statement::parse_server_statement(source)
+        let statement = nervix_plexus::server_statement::parse_server_statement(source)
             .assured("the fixture statement is valid Plexus");
         Self {
             transaction_id: format!("command.{}", reference.as_str()),

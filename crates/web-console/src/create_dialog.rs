@@ -25,12 +25,12 @@ use nervix_client_wire::{
     ChoiceValue, DomainPaceChoice,
 };
 use nervix_models::{
-    CanonicalNsplError, CreateDomain, CreateResource, CreateStatement, CreateSubscription,
+    CanonicalPlexusError, CreateDomain, CreateResource, CreateStatement, CreateSubscription,
     CreateUser, DomainClockPeriod, DomainClockSkew, DomainConfig, DomainName, DomainPace, Model,
     ModelKind, ModelName, PlacementPolicy, RelayName, RequestedResourceVersion, ResourceName,
     Statement, SubscriptionName, UserName,
 };
-use nervix_nspl::client_statement::ClientStatement;
+use nervix_plexus::client_statement::ClientStatement;
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
 use wasm_bindgen::JsCast as _;
@@ -632,8 +632,8 @@ impl DomainDraft {
             self.if_not_exists,
         ));
         let query = statement
-            .to_canonical_nspl()
-            .change_context(CreateDraftError::CanonicalNspl)?;
+            .to_canonical_plexus()
+            .change_context(CreateDraftError::CanonicalPlexus)?;
         Ok(CreateSubmission {
             kind: CreateKind::Domain,
             presentation: query.clone(),
@@ -680,12 +680,12 @@ impl UserDraft {
         Ok(CreateSubmission {
             kind: CreateKind::User,
             presentation: presentation_statement
-                .to_canonical_nspl()
-                .change_context(CreateDraftError::CanonicalNspl)?,
+                .to_canonical_plexus()
+                .change_context(CreateDraftError::CanonicalPlexus)?,
             dispatch: CreateDispatch::Command(CommandDispatch {
                 query: statement
-                    .to_canonical_nspl()
-                    .change_context(CreateDraftError::CanonicalNspl)?,
+                    .to_canonical_plexus()
+                    .change_context(CreateDraftError::CanonicalPlexus)?,
                 domain: None,
                 resource: None,
                 created_domain: None,
@@ -716,8 +716,8 @@ impl ResourceDraft {
             self.if_not_exists,
         ));
         let query = statement
-            .to_canonical_nspl()
-            .change_context(CreateDraftError::CanonicalNspl)?;
+            .to_canonical_plexus()
+            .change_context(CreateDraftError::CanonicalPlexus)?;
         Ok(CreateSubmission {
             kind: CreateKind::Resource,
             presentation: query.clone(),
@@ -775,8 +775,8 @@ enum CreateDraftError {
     Ingestor(#[from] IngestorDraftError),
     #[error("{0}")]
     Processor(#[from] ProcessorDraftError),
-    #[error("Canonical NSPL could not be rendered")]
-    CanonicalNspl,
+    #[error("Canonical Plexus could not be rendered")]
+    CanonicalPlexus,
 }
 
 /// Carries a draft's own error as the create dialog's, keeping the draft's report beneath it.
@@ -826,9 +826,9 @@ impl SubscriptionDispatch {
     pub(crate) fn new(
         domain: DomainName,
         subscription: CreateSubscription,
-    ) -> error_stack::Result<Self, CanonicalNsplError> {
+    ) -> error_stack::Result<Self, CanonicalPlexusError> {
         let statement =
-            ClientStatement::CreateSubscription(subscription.clone()).to_canonical_nspl()?;
+            ClientStatement::CreateSubscription(subscription.clone()).to_canonical_plexus()?;
         Ok(Self {
             domain,
             subscription,
@@ -873,14 +873,14 @@ impl CreateSubmission {
     ) -> error_stack::Result<Self, CreateDraftError> {
         let statement = Statement::Create(CreateStatement::new(Box::new(model), if_not_exists));
         let query = statement
-            .to_canonical_nspl()
-            .change_context(CreateDraftError::CanonicalNspl)?;
+            .to_canonical_plexus()
+            .change_context(CreateDraftError::CanonicalPlexus)?;
         let presentation = Statement::Create(CreateStatement::new(
             Box::new(presentation_model),
             if_not_exists,
         ))
-        .to_canonical_nspl()
-        .change_context(CreateDraftError::CanonicalNspl)?;
+        .to_canonical_plexus()
+        .change_context(CreateDraftError::CanonicalPlexus)?;
         Ok(Self {
             kind,
             presentation,
@@ -1758,7 +1758,7 @@ impl CreateSignals {
                     .build()
                     .map_err(draft_error)?;
                 let dispatch = SubscriptionDispatch::new(scope, subscription)
-                    .change_context(CreateDraftError::CanonicalNspl)?;
+                    .change_context(CreateDraftError::CanonicalPlexus)?;
                 Ok(CreateSubmission {
                     kind,
                     presentation: dispatch.statement.clone(),
@@ -2397,7 +2397,7 @@ pub(crate) fn CreateDialog(
                         </Show>
 
                         <div class="create-preview-block">
-                            <span>"Canonical NSPL preview"</span>
+                            <span>"Canonical Plexus preview"</span>
                             <code class="create-preview">{move || {
                                 let _revision = signals.revision.get();
                                 match signals.submission() {

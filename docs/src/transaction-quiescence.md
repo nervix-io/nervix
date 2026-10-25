@@ -1,5 +1,7 @@
 # Transaction Quiescence And Impact Inspection
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix plans the effect of a transaction before it changes the running graph. One typed impact
 report explains what each accepted operation contributes, what each atomic execution step requires,
 and what the transaction requires as a whole. The same report follows the transaction through
@@ -7,7 +9,7 @@ commit, application, failure, and retained inspection. A planned pause and a pau
 are separate facts.
 
 This chapter owns impact planning, scoped quiescence, actual engagement reporting, inspection, and
-retention. [Control Plane](./control-plane.md#replicated-nspl-transactions) owns the broader
+retention. [Control Plane](./control-plane.md#replicated-plexus-transactions) owns the broader
 transaction lifecycle and registry mutation rules; [Command Completion](./command-completion.md#transactions)
 owns when a command is usable and acknowledged. [Domain Clock](./domain-clock.md),
 [Cluster Interconnect](./interconnect.md), [Consensus Storage And Replication](./consensus-storage-and-replication.md),
@@ -169,7 +171,7 @@ revision; it does not change the committed step's impact report.
 | Reset one concrete branch of a WASM processor, then change an unrelated deduplicator key across its declared branch. | These are separate `ENTITY_PAUSE` steps. The reset retains selected-key coverage while the model step covers every key of its own branch; the transaction summary unions their two subgraphs without broadening the reset to all branches. |
 | `STOP`, change a schema, `START`, then change that schema again. | Four boundaries: stop, a stopped-domain dynamic model step, start, and a running-domain model step requiring `DOMAIN_PAUSE`. The summary is domain-wide even though the earlier schema step needed no pause. |
 
-The qualification scenarios in `tests/features/runtime/nspl_transactions.feature` and the
+The qualification scenarios in `tests/features/runtime/plexus_transactions.feature` and the
 planner checks in `src/registry/transaction/tests.rs` exercise the first, second, and lifecycle
 patterns. The scoped topology and shared-gate checks also exercise branch and relation identity.
 
@@ -343,11 +345,11 @@ response memory and rendering time in proportion to the accepted operations and 
 The multi-mebibyte replay, restart, and response evidence is recorded in
 `tests/transaction-quiesce-qualification-ledger.md`.
 
-## Inspection Through NSPL And Clients
+## Inspection Through Plexus And Clients
 
 The public form is:
 
-```nspl,ignore
+```plexus,ignore
 DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <positive-number> ] [ FORMAT TEXT | JSON ];
 ```
 
@@ -378,7 +380,7 @@ older position, or a stale-commit refusal cannot replace that basis. Request cor
 prevents delayed or out-of-order responses from updating the wrong waiter. Reconnect and leader
 redirect recover the same admitted command by execution reference; a side-effect-free inspection
 can instead be read again. [Rust Client Library](./client-library.md#inspecting-a-transaction),
-[Command Line Client](./client-tools-cli.md), and [NSPL Overview](./nspl-overview.md) own usage;
+[Command Line Client](./client-tools-cli.md), and [Plexus Overview](./plexus-overview.md) own usage;
 [Client Session Protocol](./client-session-protocol.md) owns client reconnection, correlated
 response handling, and the exact recovery of transaction requests.
 

@@ -1,11 +1,11 @@
 Feature: JAQ native codec
   Scenario: JAQ codecs reject a transformation without an explicit direction
     Given a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -21,11 +21,11 @@ Feature: JAQ native codec
   Scenario Outline: HTTP endpoint ingestor decodes JAQ native payload formats
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -80,12 +80,12 @@ Feature: JAQ native codec
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -158,11 +158,11 @@ Feature: JAQ native codec
   Scenario Outline: Ingestor rejects emitting-only JAQ native codec
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "codec 'xml_notification_codec' cannot be used for decoding because it does not declare an ON INGESTION transformation"
+    When these Plexus commands fail with "codec 'xml_notification_codec' cannot be used for decoding because it does not declare an ON INGESTION transformation"
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -204,11 +204,11 @@ Feature: JAQ native codec
     Given Kafka is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "codec 'json_notification_codec' cannot be used for encoding because it does not declare an ON EMITTING transformation"
+    When these Plexus commands fail with "codec 'json_notification_codec' cannot be used for encoding because it does not declare an ON EMITTING transformation"
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -244,12 +244,12 @@ Feature: JAQ native codec
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "readings_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading ( sensor I64, level F64, levels <levels_type> );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( sensor integer, level number, levels array );

@@ -31,7 +31,7 @@ use nervix_models::{
     Restore, Statement, SubscriptionName, TransactionInspectionTarget, TransactionOperationNumber,
     TransactionPosition, TransactionPreviewIdentity, TransactionStatus, UploadResource,
 };
-use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
+use nervix_plexus::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
     sync::{Arc, Mutex, StdArc as SharedClientArc},
     time::{Instant, sleep},
@@ -431,7 +431,7 @@ impl Client {
     ) -> ExecutionHandle {
         let mut execution = self
             .prepare_execution_with_route(
-                backup.to_canonical_nspl(),
+                backup.to_canonical_plexus(),
                 StatementRoute::Backup(backup.clone()),
             )
             .await;
@@ -440,7 +440,7 @@ impl Client {
     }
 
     fn route(query: &str) -> StatementRoute {
-        match nervix_nspl::client_statement::parse_client_statement_sources(query) {
+        match nervix_plexus::client_statement::parse_client_statement_sources(query) {
             Ok(statements) => StatementRoute::of(query, statements),
             Err(_) => StatementRoute::Command,
         }
@@ -1226,7 +1226,7 @@ impl Client {
         &self,
         name: &str,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
-        self.execute(nervix_nspl::subscribe::delete_subscription_query(name))
+        self.execute(nervix_plexus::subscribe::delete_subscription_query(name))
             .await
     }
 

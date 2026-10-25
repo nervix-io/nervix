@@ -124,15 +124,15 @@ test("versioned Markdown is served without HTML fallback", async () => {
   const bucket = new FakeBucket(
     new Map([
       [
-        "v1.2.3/markdown/nspl-overview.md",
-        new FakeObject("# NSPL Overview\n", "text/markdown; charset=utf-8"),
+        "v1.2.3/markdown/plexus-overview.md",
+        new FakeObject("# Plexus Overview\n", "text/markdown; charset=utf-8"),
       ],
     ]),
   );
 
   const response = await worker.fetch(
     new Request(
-      "https://docs.nervix.io/v1.2.3/markdown/nspl-overview.md",
+      "https://docs.nervix.io/v1.2.3/markdown/plexus-overview.md",
     ),
     { DOCS_BUCKET: bucket },
   );
@@ -142,5 +142,5 @@ test("versioned Markdown is served without HTML fallback", async () => {
     response.headers.get("content-type"),
     "text/markdown; charset=utf-8",
   );
-  assert.equal(await response.text(), "# NSPL Overview\n");
+  assert.equal(await response.text(), "# Plexus Overview\n");
 });

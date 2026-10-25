@@ -1,5 +1,7 @@
 # JAQ codec unfolding
 
+*Plexus, the Nervix graph definition language.*
+
 Status: implemented. This document defines the current contract for decoding one payload through a
 JAQ-backed codec into a stream of messages.
 
@@ -23,7 +25,7 @@ The contract applies to every JAQ-backed codec: the JAQ-native formats `JSON`, `
 `SYSLOG` codec keep their one-payload-one-message contract; an array payload remains a decode failure
 for them.
 
-Nothing in NSPL changes. `CREATE CODEC` keeps its grammar, `SHOW CREATE CODEC` renders the same
+Nothing in Plexus changes. `CREATE CODEC` keeps its grammar, `SHOW CREATE CODEC` renders the same
 definition, and persisted Models keep their shape. A codec whose program yields exactly one object
 per payload behaves as it did before, apart from the diagnostic wording described under "Failure
 semantics". The only definitions whose outcome changes are the ones that previously failed.
@@ -230,8 +232,8 @@ The externally observable differences from the release before this contract are:
 
 The public documentation statements that change are the `ON INGESTION` semantics of Schemas And
 Codecs, the output wording of the JAQ Transformations quickstart, the 1,024-message group bound in
-Ingestors, Domains And Time, and the NSPL Overview, the line-per-entry description in Lookups, the
-codec rules of the NSPL skill, and the HTTP Ingestion quickstart's "each POST body is one record",
+Ingestors, Domains And Time, and the Plexus Overview, the line-per-entry description in Lookups, the
+codec rules of the Plexus skill, and the HTTP Ingestion quickstart's "each POST body is one record",
 which remains true for its schemaful codec and is qualified for JAQ-backed codecs.
 
 ## Acceptance criteria

@@ -147,7 +147,7 @@ mod tests {
         CodecName, CreateStatement, FieldName, Model, ModelKind, NodeRef, RequestedResourceVersion,
         ResourceName, Statement,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
     use super::{HashMapDraft, HashMapDraftError};
 
@@ -178,7 +178,7 @@ mod tests {
         draft.select_key(FieldName::parse("id").assured("valid field"));
         let model = Model::Lookup(draft.build().assured("complete lookup"));
         let statement = Statement::Create(CreateStatement::new(Box::new(model), false));
-        let source = statement.to_canonical_nspl().assured("lookup renders");
+        let source = statement.to_canonical_plexus().assured("lookup renders");
         assert!(source.contains("VERSION LATEST"));
         assert_eq!(
             parse_client_statement(&source).assured("lookup parses"),

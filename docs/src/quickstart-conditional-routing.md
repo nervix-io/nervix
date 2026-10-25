@@ -13,7 +13,7 @@ Everything here is additive. The domain keeps running while you apply it — a t
 Construction is exact-typed, so a record with an extra `tier` field is a different schema, with
 its own wire schema and codec for emission — the same pattern as the first pipeline:
 
-```nspl
+```plexus
 BEGIN;
 
 CREATE SCHEMA order_tiered (
@@ -50,7 +50,7 @@ independent contract: its own construction, its own `WHERE` filter over the fina
 own flush policy. See [Junction](processors.md#junction) and
 [The Working Message](working-message.md) for the `input`/`output` scopes used below.
 
-```nspl
+```plexus
 CREATE JUNCTION route_orders
   FROM orders
   UNBRANCHED
@@ -80,7 +80,7 @@ CREATE JUNCTION route_orders
 
 ## Emit The High-Value Stream
 
-```nspl
+```plexus
 CREATE REDIS PUBSUB EMITTER redis_high_value
   FROM high_value_orders
   TO redis_local CHANNEL 'high_value_out'

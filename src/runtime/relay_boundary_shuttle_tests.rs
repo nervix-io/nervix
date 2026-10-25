@@ -3,7 +3,7 @@
 //! Layer: test harness.
 //! - **Owns.** The owner-side ACK and consumer-delivery invariant across a relay dispatch fence.
 //! - **Depends on.** The production relay boundary, dispatch gate, ACK tree, and Shuttle runner.
-//! - **Must not know.** NSPL, placement policy, or connector internals.
+//! - **Must not know.** Plexus, placement policy, or connector internals.
 
 #![cfg_attr(
     nervix_lint,

@@ -42,12 +42,12 @@ def render_llms(context: dict[str, Any]) -> str:
         missing = ", ".join(missing_paths)
         raise ValueError(f"output.llms.include references missing chapters: {missing}")
 
-    title = llms_config.get("title", "Nervix NSPL Documentation")
+    title = llms_config.get("title", "Nervix Plexus Documentation")
     version = llms_config.get("version")
     if version:
         title = f"{title} ({version})"
     description = llms_config.get(
-        "description", "Public NSPL configuration reference for Nervix."
+        "description", "Public Plexus configuration reference for Nervix."
     )
 
     lines = [
@@ -57,7 +57,7 @@ def render_llms(context: dict[str, Any]) -> str:
         "",
         "Every link below belongs to this immutable documentation version.",
         "",
-        "## Public NSPL Reference",
+        "## Public Plexus Reference",
         "",
     ]
     for path in included_paths:

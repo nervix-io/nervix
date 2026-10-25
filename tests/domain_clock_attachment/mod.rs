@@ -522,7 +522,7 @@ async fn then_clock_session_receives_no_frame(
 
 #[when(
     expr = "the clock session sends request {string} attaching the clock of domain {string} and \
-            then request {string} with this NSPL command"
+            then request {string} with this Plexus command"
 )]
 async fn when_clock_session_attaches_and_commands(
     world: &mut ScenarioWorld,
@@ -549,7 +549,7 @@ async fn when_clock_session_attaches_and_commands(
 
 #[when(
     expr = "the clock session sends request {string} detaching the clock of domain {string} and \
-            then request {string} with this NSPL command"
+            then request {string} with this Plexus command"
 )]
 async fn when_clock_session_detaches_and_commands(
     world: &mut ScenarioWorld,
@@ -594,7 +594,7 @@ async fn when_clock_session_sends_detach(world: &mut ScenarioWorld, name: String
     world.clock_session_requests.insert(name, request_id);
 }
 
-#[when("the clock session executes this NSPL command")]
+#[when("the clock session executes this Plexus command")]
 async fn when_clock_session_executes(world: &mut ScenarioWorld, #[step] step: &Step) {
     let query = expand_placeholders(world, docstring(step));
     let outcome = clock_session(world)

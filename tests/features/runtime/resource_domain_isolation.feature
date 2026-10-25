@@ -15,7 +15,7 @@ Feature: Domain-owned resources
         "extra.txt": "beta-only\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE UNPACED DOMAIN {{domain}}_beta;
@@ -27,7 +27,7 @@ Feature: Domain-owned resources
     When client "alpha" selects domain "{{domain}}"
     And client "beta" selects domain "{{domain}}_beta"
     And client "empty" selects domain "{{domain}}_empty"
-    And client "alpha" executes these NSPL commands
+    And client "alpha" executes these Plexus commands
       """
       CREATE RESOURCE shared_name;
       UPLOAD RESOURCE shared_name VERSION '{{alpha_dir}}';
@@ -36,7 +36,7 @@ Feature: Domain-owned resources
       """
       uploaded resource version 1
       """
-    When client "beta" executes these NSPL commands
+    When client "beta" executes these Plexus commands
       """
       CREATE RESOURCE shared_name;
       UPLOAD RESOURCE shared_name VERSION '{{beta_dir}}';
@@ -46,7 +46,7 @@ Feature: Domain-owned resources
       """
       uploaded resource version 2
       """
-    When client "alpha" executes these NSPL commands
+    When client "alpha" executes these Plexus commands
       """
       DESCRIBE RESOURCE shared_name;
       """
@@ -58,7 +58,7 @@ Feature: Domain-owned resources
       """
       versions: 1,2
       """
-    When client "beta" executes these NSPL commands
+    When client "beta" executes these Plexus commands
       """
       DESCRIBE RESOURCE shared_name;
       """
@@ -66,7 +66,7 @@ Feature: Domain-owned resources
       """
       versions: 1,2
       """
-    When client "alpha" executes these NSPL commands
+    When client "alpha" executes these Plexus commands
       """
       DESCRIBE RESOURCE shared_name VERSION 1;
       """
@@ -78,7 +78,7 @@ Feature: Domain-owned resources
       """
       path=extra.txt
       """
-    When client "beta" executes these NSPL commands
+    When client "beta" executes these Plexus commands
       """
       DESCRIBE RESOURCE shared_name VERSION 1;
       """
@@ -90,7 +90,7 @@ Feature: Domain-owned resources
       """
       path=extra.txt
       """
-    When client "empty" fails to execute these NSPL commands
+    When client "empty" fails to execute these Plexus commands
       """
       DESCRIBE RESOURCE shared_name;
       """
@@ -119,7 +119,7 @@ Feature: Domain-owned resources
         "beta.jsonl": "{\"key\":\"k1\",\"label\":\"beta-label\"}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE UNPACED DOMAIN {{domain}}_beta;
@@ -128,17 +128,17 @@ Feature: Domain-owned resources
     And client "beta" is connected to the leader node
     When client "alpha" selects domain "{{domain}}"
     And client "beta" selects domain "{{domain}}_beta"
-    And client "alpha" executes these NSPL commands
+    And client "alpha" executes these Plexus commands
       """
       CREATE RESOURCE lookup_bundle;
       UPLOAD RESOURCE lookup_bundle VERSION '{{alpha_lookup_dir}}';
       """
-    And client "beta" executes these NSPL commands
+    And client "beta" executes these Plexus commands
       """
       CREATE RESOURCE lookup_bundle;
       UPLOAD RESOURCE lookup_bundle VERSION '{{beta_lookup_dir}}';
       """
-    And client "alpha" executes these NSPL commands
+    And client "alpha" executes these Plexus commands
       """
       CREATE SCHEMA lookup_entry (
         key STRING,
@@ -157,7 +157,7 @@ Feature: Domain-owned resources
         PATH 'alpha.jsonl'
         DECODE USING lookup_entry_codec;
       """
-    And client "beta" executes these NSPL commands
+    And client "beta" executes these Plexus commands
       """
       CREATE SCHEMA lookup_entry (
         key STRING,
@@ -171,7 +171,7 @@ Feature: Domain-owned resources
         FROM WIRE JSON SCHEMA lookup_entry_wire
         TO SCHEMA lookup_entry;
       """
-    And client "beta" fails to execute these NSPL commands
+    And client "beta" fails to execute these Plexus commands
       """
       CREATE HASH MAP entries_by_key
         KEY key
@@ -187,7 +187,7 @@ Feature: Domain-owned resources
       """
       is unavailable
       """
-    When client "beta" executes these NSPL commands
+    When client "beta" executes these Plexus commands
       """
       CREATE HASH MAP entries_by_key
         KEY key
@@ -195,7 +195,7 @@ Feature: Domain-owned resources
         PATH 'beta.jsonl'
         DECODE USING lookup_entry_codec;
       """
-    And client "alpha" fails to execute these NSPL commands
+    And client "alpha" fails to execute these Plexus commands
       """
       CREATE HASH MAP entries_by_beta_key
         KEY key

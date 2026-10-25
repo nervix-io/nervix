@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Resolving local or remote materialized rows and reporting dependency-read failures.
 //! - **Depends on.** Prepared materialized plans, runtime row carriers, state placement and exchange.
-//! - **Must not know.** Models, NSPL parsing or archive restore policy.
+//! - **Must not know.** Models, Plexus parsing or archive restore policy.
 
 #![cfg_attr(
     nervix_lint,
@@ -1417,7 +1417,7 @@ mod tests {
                 },
                 Assignment {
                     target: AssignmentTarget::bare(named("evaluated_at")),
-                    value: nervix_nspl::parse_expression("now()")
+                    value: nervix_plexus::parse_expression("now()")
                         .expect("NOW is a valid materialized default expression"),
                 },
             ]),

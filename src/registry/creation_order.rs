@@ -220,14 +220,14 @@ mod tests {
     #[test]
     fn runnable_examples_order_their_models_by_dependency_then_rank() {
         for (name, source) in [
-            ("iot", include_str!("../../examples/iot/iot.nspl")),
+            ("iot", include_str!("../../examples/iot/iot.plexus")),
             (
                 "nats_factory_windows",
-                include_str!("../../examples/nats-factory-windows/nats_factory_windows.nspl"),
+                include_str!("../../examples/nats-factory-windows/nats_factory_windows.plexus"),
             ),
             (
                 "datalake",
-                include_str!("../../examples/datalake/datalake.nspl"),
+                include_str!("../../examples/datalake/datalake.plexus"),
             ),
         ] {
             let (domain, models) = example_graph_models(name, source);

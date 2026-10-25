@@ -4,7 +4,7 @@ Feature: Interconnect health coordination
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" eventually reports leader "node-1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA quorum_event ( id I64 );
@@ -31,7 +31,7 @@ Feature: Interconnect health coordination
     And within "30s" node "node-1" reports no scheduled work on "node-3"
     And node "node-3" reaches its runtime preparation pause
     And node "node-2" sees node "node-3" live
-    And within "30s" these NSPL commands complete on node "node-2"
+    And within "30s" these Plexus commands complete on node "node-2"
       """
       CREATE RELAY quorum_canary SCHEMA quorum_event UNBRANCHED;
       CREATE USER quorum_admin WITH PASSWORD 'created-password';
@@ -45,7 +45,7 @@ Feature: Interconnect health coordination
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" eventually reports leader "node-1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA partition_event ( id I64 );
@@ -78,7 +78,7 @@ Feature: Interconnect health coordination
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" eventually reports leader "node-1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA stop_event ( id I64 );

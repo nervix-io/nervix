@@ -55,7 +55,7 @@ async fn start_session_ingestor(
         ),
     );
     let leader = current_leader_node(world).await;
-    execute_nspl_commands_on_node(world, &leader, &commands)
+    execute_plexus_commands_on_node(world, &leader, &commands)
         .await
         .assured("the public MQTT session graph is valid");
     world
@@ -162,5 +162,5 @@ async fn session_present(world: &ScenarioWorld, client_id: &str) -> bool {
 
 #[when("these Plexus statements are executed")]
 async fn when_plexus_statements(world: &mut ScenarioWorld, #[step] step: &Step) {
-    when_these_nspl_commands_are_executed(world, step).await;
+    when_these_plexus_commands_are_executed(world, step).await;
 }

@@ -6,7 +6,7 @@
 //!   reached its boundary, and the branch's transition when it does not.
 //! - **Depends on.** Replicated WASM guest state, the runtime's checkpoint stages, the processor's
 //!   error policies and reporting, and acknowledgement sets.
-//! - **Must not know.** NSPL parsing, placement policy, connector clients, or how stable storage
+//! - **Must not know.** Plexus parsing, placement policy, connector clients, or how stable storage
 //!   and replicas are reached.
 
 #![cfg_attr(

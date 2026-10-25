@@ -116,7 +116,7 @@ left behind.
 | `NERVIX_TEST_CONCURRENCY_FACTOR=2 just test-scenarios` with `tests/features/runtime/harness_induced_failure.feature` present | Failed as induced, exit status 101 reporting `3 step(s) failed`, after 1,676s: 182 features, 1,753 scenarios, 19,623 steps. The induced scenario failed its assertion on all three attempts about 14s into each; every attempt published body complete, teardown started, teardown diagnostics with all three nodes' status text, stopping and finished, the last within 0.32s of the body's end. 1,750 scenario identities passed, 1,722 on the first attempt, 23 on the second and 8 on the third; the two example rows of `NATS emitter drains a wide columnar batch in order without duplicates` timed out their 90s, 32,768-message drain on all three attempts on this loaded machine, which is a throughput assertion rather than a harness outcome. 3,926 startups: median 1.94s, 99th percentile 4.14s, slowest 21.4s; the eight failed attempts were all listen-address or interconnect bind failures, classified transient, relaunched on fresh ports and ready on the next attempt. 1,756 cleanups: median 0.10s, six that reached the 60s budget with a node still running, each recorded with that node and the scenarios live beside it. |
 | `NERVIX_TEST_CONCURRENCY_FACTOR=2 just test-scenarios` | Failed on this machine, exit status 101 reporting `3 step(s) failed`, after 1,490s: 181 features, 1,752 scenarios and 19,746 steps at 48 concurrent scenarios. 1,749 scenario identities passed, 1,719 on the first attempt, 22 on the second and 11 on the third. Three did not pass on any attempt: the three-node row of `NATS emitter drains a wide columnar batch in order without duplicates`, `NATS emitter honors its flush deadline during sustained input collection` and `Postgres poison isolation delivers healthy rows and routes only the rejected record`, each a throughput or deadline assertion on a shared workstation whose load average stayed above 10 for the whole run; all three passed in the healthy `tests` job of 22 September 2026. 3,937 startups: median 1.90s, 99th percentile 4.27s, slowest 20.7s; the one failed attempt was an HTTPS listen-address bind failure, relaunched on fresh ports and ready on its second attempt. 1,760 cleanups: median 0.10s, 99th percentile 10.5s, four that reached the 60s budget with a node still running, all of WASM scenarios whose setup had failed with `not-a-leader` and which passed when retried. |
 | `just test-scenarios --input 'tests/features/runtime/\{nats_emission,postgres_emission\}.feature' --retry 0` | Pass: the two features whose scenarios failed under load, 26 scenarios and 306 steps, in 43s with retries disabled; 56 startups, the slowest 3.2s, and no cleanup that reached its budget. |
-| `just validate` | Pass in 13m35s: formatting, all-target Clippy with warnings denied, protocol lint, web console build, skill publication checks, documented NSPL parsing, clock-boundary and Shuttle-dependency checks. |
+| `just validate` | Pass in 13m35s: formatting, all-target Clippy with warnings denied, protocol lint, web console build, skill publication checks, documented Plexus parsing, clock-boundary and Shuttle-dependency checks. |
 | `just ratchet` | Pass: every tracked architecture-debt count at its baseline. |
 
 The induced-failure feature was:
@@ -126,11 +126,11 @@ Feature: Harness qualification induced failure
 
   Scenario: A deliberate assertion fails while other scenarios are active
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """

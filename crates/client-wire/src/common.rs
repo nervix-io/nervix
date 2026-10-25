@@ -65,7 +65,7 @@ pub enum WireValueError {
     AppliedOperationsExceedAccepted { applied: usize, accepted: usize },
 }
 
-/// A byte range of the NSPL source text a request carried.
+/// A byte range of the Plexus source text a request carried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceSpan {
     start: u32,

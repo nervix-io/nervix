@@ -255,7 +255,7 @@ html.sidebar-visible #mdbook-menu-bar {
     border-radius: 999px;
     color: var(--nervix-cyan);
     background: rgba(8, 48, 68, 0.48);
-    content: "NSPL RUNTIME ENGINE";
+    content: "Plexus RUNTIME ENGINE";
     font-family: var(--mono-font);
     font-size: 1.18rem;
     font-weight: 700;

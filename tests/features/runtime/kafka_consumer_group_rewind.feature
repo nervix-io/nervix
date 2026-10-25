@@ -10,14 +10,14 @@ Feature: Kafka consumer-group rewinds across a rebalance
   Scenario Outline: A rejected record is delivered again after its partition moves away and returns
     Given Kafka is running
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "rewind_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "rewind_out_{{test_id}}" exists with 1 partitions
     And Kafka topic "rewind_out_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA rewind_event ( event_id STRING );
       CREATE WIRE JSON SCHEMA rewind_wire MODE STRICT ( event_id string );

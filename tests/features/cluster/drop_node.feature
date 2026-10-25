@@ -9,7 +9,7 @@ Feature: Drop node
     And node "node-1" eventually reports status containing "raft member 'node-3' is not currently visible in gossip"
     And node "node-1" eventually reports status containing "raft member 'node-3' is marked unavailable"
     And node "node-2" eventually reports status containing "raft member 'node-3' is marked unavailable"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DROP NODE node-3;
       """
@@ -17,7 +17,7 @@ Feature: Drop node
 
   Scenario: A live node cannot be removed from cluster membership
     Given a 3 node nervix cluster is started
-    When these NSPL commands fail through the client on node "node-1" with "cannot drop live node 'node-2'"
+    When these Plexus commands fail through the client on node "node-1" with "cannot drop live node 'node-2'"
       """
       DROP NODE node-2;
       """
