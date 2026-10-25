@@ -1542,8 +1542,8 @@ jobs:
         with:
           label: plexus-completion-walk
 
-      - name: NSPL completion walk
-        run: just coverage-native-extras nspl-completion-walk
+      - name: Plexus completion walk
+        run: just coverage-native-extras plexus-completion-walk
 
       - name: Runner diagnostics before Plexus connector declaration export
         uses: ./.github/actions/runner-diagnostics

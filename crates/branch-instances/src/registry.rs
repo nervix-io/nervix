@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Branch instance identity, incarnation assignment, activity order, and eviction.
 //! - **Depends on.** Typed branch keys, domain timestamps, and branch-owned runtime handles.
-//! - **Must not know.** NSPL parsing, control-plane transactions, connector protocols, or
+//! - **Must not know.** Plexus parsing, control-plane transactions, connector protocols, or
 //!   persisted payloads.
 
 #![cfg_attr(

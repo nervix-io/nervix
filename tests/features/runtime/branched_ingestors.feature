@@ -4,11 +4,11 @@ Feature: Ingestor branch consistency
     And MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "must use its exact declared branch"
+    When these Plexus commands fail with "must use its exact declared branch"
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -82,11 +82,11 @@ Feature: Ingestor branch consistency
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "must use its exact declared branch"
+    When these Plexus commands fail with "must use its exact declared branch"
       """
       CREATE SCHEMA notification (
         tenant STRING,

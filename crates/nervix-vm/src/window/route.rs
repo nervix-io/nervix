@@ -159,7 +159,7 @@ pub enum WindowRouteCompileError {
     UnknownDemand { demand: usize },
     #[error(
         "{} yields {output:?} but its argument evaluates to {argument:?}",
-        .function.nspl_name()
+        .function.plexus_name()
     )]
     InvocationType {
         function: WindowAggregateFunction,
@@ -542,8 +542,8 @@ mod tests {
         input: &StdArc<Schema>,
         output: &StdArc<Schema>,
     ) -> Result<CompiledWindowRoute, Report<WindowRouteCompileError>> {
-        let construction = nervix_nspl::parse_route_construction(&format!("SET {assignments}"))
-            .expect("every route construction in these tests is valid NSPL");
+        let construction = nervix_plexus::parse_route_construction(&format!("SET {assignments}"))
+            .expect("every route construction in these tests is valid Plexus");
         let program = lower_window_assignments(&construction)
             .expect("every route construction in these tests lowers");
         CompiledWindowRoute::compile(

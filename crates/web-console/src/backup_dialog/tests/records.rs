@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::CommandDisposition;
 use nervix_models::{CommandExecutionReference, DomainName, Statement};
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
 use super::{
     ARCHIVE, console_handles, dialog_signals, domain, outcome, reference, summary, terminal_texts,

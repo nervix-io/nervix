@@ -3,18 +3,18 @@ Feature: Altering relays
   Scenario Outline: Changing a running relay schema uses domain pause
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event_v1 ( seq I64 );
       CREATE SCHEMA event_v2 ( seq I64, note STRING OPTIONAL );
       CREATE RELAY events SCHEMA event_v1 UNBRANCHED;
       START;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER RELAY events SET SCHEMA event_v2;
       """
@@ -22,7 +22,7 @@ Feature: Altering relays
       """
       quiesce level: DOMAIN_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE RELAY events;
       """
@@ -40,11 +40,11 @@ Feature: Altering relays
   Scenario Outline: Full ALTER RELAY applies operations in order and SHOW CREATE renders the result
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event_v1 ( seq I64 );
       CREATE SCHEMA event_v2 ( tenant STRING, seq I64 );

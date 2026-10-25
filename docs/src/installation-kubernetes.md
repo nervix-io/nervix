@@ -2,9 +2,9 @@
 
 The [Nervix Kubernetes Operator](https://github.com/nervix-io/nervix-k8s-operator) watches
 namespaced `NervixCluster` resources across a Kubernetes cluster. For each resource, it creates the
-services, StatefulSet, and one persistent volume claim per Nervix node. It also coordinates
-one-time initialization of the `default` user before scaling the StatefulSet to the requested
-replica count.
+services, StatefulSet, one persistent volume claim per Nervix node, and the certificates its nodes
+authenticate each other with. It also coordinates one-time initialization of the `default` user
+before scaling the StatefulSet to the requested replica count.
 
 ## Prerequisites
 
@@ -81,7 +81,8 @@ spec:
 Each node checks its volume and its memory before it starts, and refuses to start when they cannot
 hold its configuration: its volume must be at least as large as each resource quota, 16 GiB for
 extracted resources by default, and its memory limit must hold its execution budgets, 2.27 GiB. The
-example therefore sets the pod's memory limit above the operator's 2 GiB default.
+example spells out the operator's defaults, a 20 GiB volume and a 3 GiB memory limit, which meet
+both checks. With a smaller volume or memory limit, every pod exits with the refusal.
 [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) gives the rules.
 
 Apply it and watch the cluster become ready:
@@ -99,6 +100,20 @@ kubectl --namespace nervix get pods,services,persistentvolumeclaims
 
 One operator can manage multiple Nervix clusters. Create each cluster as a separate
 `NervixCluster`, usually in a separate namespace or with a distinct name in the same namespace.
+
+## Interconnect Certificates
+
+Nodes authenticate all node-to-node traffic with mutual TLS, as
+[Peer Identity And Authentication](interconnect.md#peer-identity-and-authentication) describes. The
+operator generates a certificate authority for each `NervixCluster` and keeps it in the
+`<name>-interconnect-ca` Secret, which only the operator reads. It issues every node a certificate
+signed by that authority into the `<name>-interconnect-tls` Secret, which the pods mount, and issues
+a node's certificate again 30 days before it expires. Nodes reload changed certificates without a
+restart.
+
+Deleting the `<name>-interconnect-ca` Secret makes the operator generate a new authority and issue
+every node a new certificate. Until every node has reloaded its credentials, nodes that trust
+different authorities refuse each other's connections.
 
 ## Enable Local Access
 

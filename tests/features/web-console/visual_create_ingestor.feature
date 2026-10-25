@@ -4,7 +4,7 @@ Feature: Web console visual ingestor creation
   Scenario Outline: A visually created endpoint ingestor delivers to its selected relay
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_ingest_event (message STRING);
@@ -41,7 +41,7 @@ Feature: Web console visual ingestor creation
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION visual_ingest_subscription TO visual_ingest_relay;
       START;
@@ -64,7 +64,7 @@ Feature: Web console visual ingestor creation
   Scenario: An incomplete ingestor stays editable and reports the missing source
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -83,7 +83,7 @@ Feature: Web console visual ingestor creation
   Scenario: Changing the ingestor draft domain invalidates its selected source and codec
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE UNPACED DOMAIN {{domain}}_other;
@@ -121,7 +121,7 @@ Feature: Web console visual ingestor creation
   Scenario: An ingestor selects a codec staged earlier in its transaction
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_tx_event (message STRING);
@@ -178,7 +178,7 @@ Feature: Web console visual ingestor creation
   Scenario: An ingestor draft submits after the console follows a new leader
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_reconnect_event (message STRING);
@@ -228,7 +228,7 @@ Feature: Web console visual ingestor creation
   Scenario: A visual route constructs a branch and leaks one selected sensitive field explicitly
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_branch_input (tenant STRING, secret STRING SENSITIVE);
@@ -286,7 +286,7 @@ Feature: Web console visual ingestor creation
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION visual_branch_subscription TO visual_branch_relay;
       START;
@@ -305,7 +305,7 @@ Feature: Web console visual ingestor creation
     Given the HTTP mock server is running
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_http_event (user_id I64, payload STRING);
@@ -345,7 +345,7 @@ Feature: Web console visual ingestor creation
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION visual_http_subscription TO visual_http_relay;
       START;

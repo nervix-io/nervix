@@ -1553,30 +1553,30 @@ mod tests {
 
     #[test]
     fn runnable_example_graphs_validate() {
-        assert_example_graph_validates("iot", include_str!("../../examples/iot/iot.nspl"));
+        assert_example_graph_validates("iot", include_str!("../../examples/iot/iot.plexus"));
         assert_example_graph_validates(
             "nats_factory_windows",
-            include_str!("../../examples/nats-factory-windows/nats_factory_windows.nspl"),
+            include_str!("../../examples/nats-factory-windows/nats_factory_windows.plexus"),
         );
         assert_example_graph_validates(
             "datalake",
-            include_str!("../../examples/datalake/datalake.nspl"),
+            include_str!("../../examples/datalake/datalake.plexus"),
         );
         assert_example_graph_validates(
             "wasm_dual",
-            include_str!("../../examples/wasm-processors/wasm-dual.nspl"),
+            include_str!("../../examples/wasm-processors/wasm-dual.plexus"),
         );
         assert_example_graph_validates(
             "binance_websocket",
-            include_str!("../../examples/binance-websocket/binance_websocket.nspl"),
+            include_str!("../../examples/binance-websocket/binance_websocket.plexus"),
         );
         assert_example_graph_validates(
             "onnx_batched",
-            include_str!("../../examples/onnx-inference/batched.nspl"),
+            include_str!("../../examples/onnx-inference/batched.plexus"),
         );
         assert_example_graph_validates(
             "onnx_per_message",
-            include_str!("../../examples/onnx-inference/per-message.nspl"),
+            include_str!("../../examples/onnx-inference/per-message.plexus"),
         );
     }
 
@@ -2068,7 +2068,7 @@ mod tests {
                 &[RegistryMutation::AlterJunction(AlterJunction {
                     junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::SetFilterWhere {
-                        where_clause: nervix_nspl::parse_expression("input.value != ''")
+                        where_clause: nervix_plexus::parse_expression("input.value != ''")
                             .expect("valid expression"),
                     }],
                 })],

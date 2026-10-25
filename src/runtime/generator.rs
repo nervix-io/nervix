@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Generator task cadence, materialized-state projection and route output.
 //! - **Depends on.** Validated generator plans, bound domain clocks and Arrow construction.
-//! - **Must not know.** NSPL parsing, connector transports or placement selection.
+//! - **Must not know.** Plexus parsing, connector transports or placement selection.
 
 #![cfg_attr(
     nervix_lint,

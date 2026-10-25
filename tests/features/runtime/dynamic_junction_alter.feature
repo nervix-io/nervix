@@ -3,11 +3,11 @@ Feature: Dynamically applying junction ALTER operations
   Scenario Outline: A dynamic junction filter change preserves the running path
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -34,7 +34,7 @@ Feature: Dynamically applying junction ALTER operations
       """
       "seq":1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER JUNCTION route_events SET FILTER WHERE input.seq % 2 != 0;
       """
@@ -65,11 +65,11 @@ Feature: Dynamically applying junction ALTER operations
   Scenario Outline: A dynamic route construction change is used by the next message
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA input_event ( seq I64 );
       CREATE SCHEMA output_event ( seq I64, label STRING );
@@ -98,7 +98,7 @@ Feature: Dynamically applying junction ALTER operations
       """
       "label":"old","seq":1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER JUNCTION route_events
         REPLACE ROUTE TO outgoing SET seq = input.seq, label = 'new'
@@ -126,11 +126,11 @@ Feature: Dynamically applying junction ALTER operations
   Scenario Outline: Changing a route flush policy preserves and releases buffered output
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -154,7 +154,7 @@ Feature: Dynamically applying junction ALTER operations
       {"seq":1}
       """
     Then the relay subscription does not receive a payload within "300ms"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER JUNCTION route_events
         REPLACE ROUTE TO outgoing INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -177,11 +177,11 @@ Feature: Dynamically applying junction ALTER operations
   Scenario Outline: A dynamic junction revision reaches existing and newly appearing branches
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA input_event ( tenant STRING, seq I64 );
       CREATE SCHEMA output_event ( tenant STRING, seq I64, label STRING );
@@ -212,7 +212,7 @@ Feature: Dynamically applying junction ALTER operations
       """
       "label":"before","seq":1,"tenant":"existing"
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER JUNCTION route_events
         REPLACE ROUTE TO outgoing

@@ -4,7 +4,7 @@
 //! - **Owns.** Exclusive branch records and immutable row and membership publications,
 //!   assignment-fenced installation, exact branch-generation capture and sealed artifact retention.
 //! - **Depends on.** Typed placements, assignment fences, Arrow row views, codecs and admission.
-//! - **Must not know.** Models, NSPL text, archive layouts or consensus restore policies.
+//! - **Must not know.** Models, Plexus text, archive layouts or consensus restore policies.
 
 #![cfg_attr(
     nervix_lint,

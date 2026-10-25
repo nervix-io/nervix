@@ -5,11 +5,11 @@ Feature: Syslog name resolution
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the observed Syslog UDP endpoint is published under fixture DNS
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (
         facility U8,
@@ -65,12 +65,12 @@ Feature: Syslog name resolution
     And the Syslog endpoint "{{syslog_emit_addr}}" is forwarded as "syslog.nervix.test" from fixture addresses "127.0.5.2"
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     When the DNS fixture answers "syslog.nervix.test" with "<dns_answer>"
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
@@ -129,11 +129,11 @@ Feature: Syslog name resolution
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the observed Syslog UDP endpoint is published under fixture DNS
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
@@ -187,19 +187,19 @@ Feature: Syslog name resolution
     And the observed Syslog UDP endpoint is published under fixture DNS
     And the DNS fixture answers "syslog.nervix.test" with addresses "127.0.5.9,127.0.0.1"
     And node "node-1" has TLS resource directory "syslog_tls_dir" for hosts "syslog.nervix.test"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE syslog_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE syslog_tls VERSION "{{syslog_tls_dir}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;

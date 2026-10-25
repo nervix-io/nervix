@@ -32,7 +32,7 @@ async fn given_pulsar_domain_graph(world: &mut ScenarioWorld, addr: String) {
         ),
     );
     let leader = current_leader_node(world).await;
-    execute_nspl_commands_on_node(world, &leader, &commands)
+    execute_plexus_commands_on_node(world, &leader, &commands)
         .await
         .assured("the public Pulsar graph is valid");
 }
@@ -66,7 +66,7 @@ async fn pulsar_ingestor_reads_subscription(
         ),
     );
     let leader = current_leader_node(world).await;
-    execute_nspl_commands_on_node(world, &leader, &commands)
+    execute_plexus_commands_on_node(world, &leader, &commands)
         .await
         .assured("the public Pulsar ingestor is valid");
 }

@@ -8,7 +8,7 @@
 //!   scripted answers their calls take, the calls they captured, the faults they observed, and the
 //!   bounded stop that ends all of them.
 //! - **Depends on.** Tokio, the `h2` server, and gRPC's length-prefixed message framing.
-//! - **Must not know.** Scenario state, nodes, NSPL, or what the messages it captures mean.
+//! - **Must not know.** Scenario state, nodes, Plexus, or what the messages it captures mean.
 //!
 //! # Scripted answers
 //!

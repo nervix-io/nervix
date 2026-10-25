@@ -414,7 +414,7 @@ impl<'a> Values<'a> {
             ));
             sections.push(Section::new(
                 SectionPath::domain_models(&domain),
-                SectionContent::Nspl,
+                SectionContent::Plexus,
                 models.as_bytes().to_vec(),
             ));
             let mut versions = Vec::new();
@@ -497,7 +497,7 @@ impl<'a> Values<'a> {
         };
         let manifest = BackupManifest {
             producer_version: self.0.string(),
-            language_version: nervix_models::NSPL_LANGUAGE_VERSION.into(),
+            language_version: nervix_models::PLEXUS_LANGUAGE_VERSION.into(),
             cluster_id: self.0.string(),
             captured_at: self.timestamp(),
             scope,

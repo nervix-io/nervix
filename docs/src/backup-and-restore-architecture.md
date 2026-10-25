@@ -1,5 +1,7 @@
 # Backup And Restore Architecture
 
+*Plexus, the Nervix graph definition language.*
+
 A backup copies a whole cluster, or one domain, into one archive file on the machine of the client
 that ran it. A restore recreates what an archive holds in a fresh cluster, in the cluster it came
 from, or under a new domain name. This chapter defines how both work end to end: which layer owns

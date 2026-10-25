@@ -2,8 +2,8 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The digest of one window processor model's canonical NSPL.
-//! - **Depends on.** Canonical NSPL rendering and BLAKE3.
+//! - **Owns.** The digest of one window processor model's canonical Plexus.
+//! - **Depends on.** Canonical Plexus rendering and BLAKE3.
 //! - **Must not know.** How a window keeps, archives or restores its state.
 
 #![cfg_attr(
@@ -13,9 +13,9 @@
 
 use std::fmt;
 
-use crate::{CanonicalNsplError, CreateWindowProcessor};
+use crate::{CanonicalPlexusError, CreateWindowProcessor};
 
-/// The BLAKE3 digest of a window processor model's canonical NSPL.
+/// The BLAKE3 digest of a window processor model's canonical Plexus.
 ///
 /// A window's retained rows, argument columns and histogram state mean what the model that built
 /// them says, so state is carried to a model only when the digests are equal. Digests are compared
@@ -36,10 +36,10 @@ impl WindowModelDigest {
 }
 
 impl CreateWindowProcessor {
-    /// The digest of this model's canonical NSPL, which changes with any change to the window's
+    /// The digest of this model's canonical Plexus, which changes with any change to the window's
     /// inputs, bounds, state limit, branch, routes or aggregates.
-    pub fn model_digest(&self) -> error_stack::Result<WindowModelDigest, CanonicalNsplError> {
-        let text = self.to_canonical_nspl()?;
+    pub fn model_digest(&self) -> error_stack::Result<WindowModelDigest, CanonicalPlexusError> {
+        let text = self.to_canonical_plexus()?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"nervix/window-processor-model");
         hasher.update(text.as_bytes());

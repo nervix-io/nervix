@@ -2,11 +2,11 @@ Feature: IP address, network and URL functions
   Scenario Outline: Addresses and URLs parse into typed addresses and URL Standard components
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA raw_endpoint (
         id STRING,
@@ -117,11 +117,11 @@ Feature: IP address, network and URL functions
   Scenario Outline: A route filter selects messages by the network their typed address belongs to
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA raw_client (
         id STRING,
@@ -181,11 +181,11 @@ Feature: IP address, network and URL functions
   Scenario Outline: Malformed addresses, prefixes, networks, URLs and escapes fail only their message, and guards route them explicitly
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA raw_probe (
         id STRING,
@@ -298,11 +298,11 @@ Feature: IP address, network and URL functions
   Scenario Outline: Network functions keep the sensitivity of the values they read
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA secret_visit (
         id STRING,
@@ -370,7 +370,7 @@ Feature: IP address, network and URL functions
 
   Scenario Outline: A statement is rejected for an invalid constant network, a text address or a leaked result
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "<error>"
+    When these Plexus commands fail with "<error>"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA raw_client (

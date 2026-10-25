@@ -6,11 +6,11 @@ Feature: Attached acknowledgements across consumer moves
     And a 3 node nervix cluster is started
     And Kafka topic "moved_sink_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "moved_sink_out_{{test_id}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA moved_sink_event ( event_id STRING, branch_name STRING, sequence I64 );
       CREATE WIRE JSON SCHEMA moved_sink_wire MODE STRICT (
@@ -43,7 +43,7 @@ Feature: Attached acknowledgements across consumer moves
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR moved_sink_source ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY moved_sink_records ONTO NODE node-1 IGNORE PREFERENCES;
@@ -77,7 +77,7 @@ Feature: Attached acknowledgements across consumer moves
       {"event_id":"routed","branch_name":"a","sequence":2}
       """
     Then the admitted remote relay dispatch pause for domain "{{domain}}" is reached
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE EMITTER moved_sink ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
@@ -109,11 +109,11 @@ Feature: Attached acknowledgements across consumer moves
     And Kafka topic "owner_move_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "owner_move_sibling_{{test_id}}" exists with 1 partitions
     And Kafka topic "owner_move_target_{{test_id}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA owner_move_event ( event_id STRING );
       CREATE WIRE JSON SCHEMA owner_move_wire MODE STRICT ( event_id string );
@@ -146,7 +146,7 @@ Feature: Attached acknowledgements across consumer moves
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR owner_move_source ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY owner_move_records ONTO NODE node-2 IGNORE PREFERENCES;
@@ -188,7 +188,7 @@ Feature: Attached acknowledgements across consumer moves
       {"event_id":"during"}
       """
     Then the relay owner fan-out pause for domain "{{domain}}" is reached
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       RELOCATE EMITTER owner_move_target ONTO NODE node-3 IGNORE PREFERENCES;
       """
@@ -196,7 +196,7 @@ Feature: Attached acknowledgements across consumer moves
     When the relay owner fan-out pause for domain "{{domain}}" is released
     Then relay owner fan-out for domain "{{domain}}" has finished
     When the swap of emitter "owner_move_target" in domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     Then within "60s" node "node-1" eventually reports scheduled "emitter" "owner_move_target" owner different from placeholder "former_target_owner"
     Then within "60s" Kafka consumer group "owner_move_group_{{test_id}}" next offset for topic "owner_move_in_{{test_id}}" partition 0 is "at least 2"
     And within "30s" the observed broker receives payloads

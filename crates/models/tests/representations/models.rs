@@ -1,7 +1,7 @@
 //! Models and statements keep every field through their archived forms, and a stored Model's
 //! resource versions survive widening into the versions a statement asks for.
 //!
-//! The domain is the vocabulary's: every Model family and statement form, including states NSPL
+//! The domain is the vocabulary's: every Model family and statement form, including states Plexus
 //! cannot spell, such as negative and non-finite literals, empty arrays and collection casts. A
 //! stored Model binds concrete resource versions; a statement carries `LATEST` or a number.
 

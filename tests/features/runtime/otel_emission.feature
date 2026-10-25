@@ -6,11 +6,11 @@ Feature: OTEL emission
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the OTEL gRPC endpoint is published under fixture DNS
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA audit_event (
         event_ts DATETIME,
@@ -158,11 +158,11 @@ Feature: OTEL emission
     And the OTEL HTTP endpoint is published under fixture DNS
     And the OTEL gRPC endpoint is published under fixture DNS
     And the DNS fixture answers "otel-grpc.nervix.test" with addresses "127.0.5.3,127.0.0.1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA request_count (
         window_start DATETIME,
@@ -241,7 +241,7 @@ Feature: OTEL emission
       ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -284,11 +284,11 @@ Feature: OTEL emission
     Given OpenTelemetry Collector is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA latency_point (
         observed_at DATETIME,

@@ -285,7 +285,7 @@ fn bolero_recorded_entries_read_back_exactly_or_are_forgotten() {
 }
 
 /// A `RESTORE` the restore form may be filled from, in either mode. Half the time a domain
-/// restore names its domains in any spelling the name rule admits, rather than as NSPL writes a
+/// restore names its domains in any spelling the name rule admits, rather than as Plexus writes a
 /// name bare.
 fn filled_restore(arbitrary: &mut Arbitrary<'_>) -> Restore {
     let mode = arbitrary

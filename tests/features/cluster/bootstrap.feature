@@ -2,7 +2,7 @@ Feature: Cluster bootstrap
 
   Scenario: Bootstrap node forms the initial cluster
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """

@@ -1,5 +1,7 @@
 # Resource Versions And Bindings
 
+*Plexus, the Nervix graph definition language.*
+
 A resource version is an immutable directory tree that the cluster verifies and installs on every
 live node before anything can use it. A binding is the part of a model that selects one of those
 versions: a TLS VHOST, a protobuf codec or signaling protocol, an inferencer, a WASM processor, a
@@ -12,7 +14,7 @@ completed version it binds, and its consumers load exactly that version. An uplo
 version to the catalog. A running consumer moves to another version only when a validated,
 classified, and atomic model mutation rebinds it.
 
-This chapter describes the architecture. [Resources](./resources.md) owns the NSPL statements, the
+This chapter describes the architecture. [Resources](./resources.md) owns the Plexus statements, the
 upload format, the per-version limits, and examples.
 
 ## Ownership By Layer
@@ -61,7 +63,7 @@ runtime revision its node applied.
 
 Visual client-mount and VHOST-TLS forms select a resource and one of its completed versions through
 typed session choices. Their drafts may submit `LATEST`; neither form resolves it locally or
-creates resource content. The server applies the same version validation and pinning as the NSPL
+creates resource content. The server applies the same version validation and pinning as the Plexus
 command path, so the rendered stored Model and every listener use a concrete version.
 
 ## Version Lifecycle
@@ -341,7 +343,7 @@ before retrying against that identity. A conflict found after admission ends the
 transaction instead of replanning it.
 
 Either way, a plan never commits a `LATEST` it resolved against an older catalog.
-[Control Plane](./control-plane.md#replicated-nspl-transactions) defines preview identity,
+[Control Plane](./control-plane.md#replicated-plexus-transactions) defines preview identity,
 admission, and the frozen plan.
 
 ## Rebinding

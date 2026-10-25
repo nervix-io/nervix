@@ -172,9 +172,9 @@ class InventoryTests(unittest.TestCase):
             "client-arrow-rows",
             "client-arrow-selection",
             "client-binding-rows",
-            "nspl-expression",
-            "nspl-model",
-            "nspl-archive-model",
+            "plexus-expression",
+            "plexus-model",
+            "plexus-archive-model",
             "backup-record-manifest",
             "backup-runtime-state-records",
             "backup-streamed-state-records",
@@ -200,11 +200,11 @@ class InventoryTests(unittest.TestCase):
             "restore-installation-storage",
             "restore-staging-kept-measurement",
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax", "typed-hidden-tunables",
-            "nspl-statement",
-            "nspl-statement-text",
-            "nspl-expression-text",
-            "nspl-format-document",
-            "nspl-format-text",
+            "plexus-statement",
+            "plexus-statement-text",
+            "plexus-expression-text",
+            "plexus-format-document",
+            "plexus-format-text",
             "models-names",
             "models-name-validation",
             "models-external-names",
@@ -361,8 +361,8 @@ class InventoryTests(unittest.TestCase):
             "nervix-client-wire",
             "nervix-client-ffi",
             "nervix-server",
-            "nervix-nspl",
-            "nervix-nspl-format",
+            "nervix-plexus",
+            "nervix-plexus-format",
             "nervix-models",
             "nervix-backup",
             "nervix-branch-instances",
@@ -417,8 +417,8 @@ class InventoryTests(unittest.TestCase):
                                          "random_iterations = 0", 1))
             with self.assertRaisesRegex(bolero.BoleroError, "positive integer"):
                 bolero.load_inventory(path)
-            path.write_text(text.replace('id = "nspl-model"',
-                                         'id = "nspl-expression"', 1))
+            path.write_text(text.replace('id = "plexus-model"',
+                                         'id = "plexus-expression"', 1))
             with self.assertRaisesRegex(bolero.BoleroError, "duplicate id"):
                 bolero.load_inventory(path)
 
@@ -451,7 +451,7 @@ class InventoryTests(unittest.TestCase):
             ('cargo_bolero = "0.13.4"', 'cargo_bolero = "0.13"', "exact version"),
             ('nightly = "nightly-2026-09-17"', 'nightly = "nightly"', "dated toolchain"),
             ('sanitizer = "address"', 'sanitizer = "none"', "real sanitizer"),
-            ('id = "nspl-expression"', 'id = "Invalid ID"', "invalid target id"),
+            ('id = "plexus-expression"', 'id = "Invalid ID"', "invalid target id"),
             ('test_target = "lib"', 'test_target = "bin"', "invalid cargo test target"),
             ('test_target = "lib"', 'test_target = "bin:"', "invalid cargo test target"),
             ('test_target = "lib"', 'test_target = "example:owner"', "invalid cargo test target"),
@@ -462,7 +462,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_paths_and_missing_source_are_rejected(self) -> None:
         text = bolero.INVENTORY.read_text()
-        source = 'source = "crates/nspl/src/canonical_round_trip_tests.rs"'
+        source = 'source = "crates/plexus/src/canonical_round_trip_tests.rs"'
         self.assert_invalid_inventory(
             text.replace(source, 'source = ""', 1),
             "repository-relative path",
@@ -472,7 +472,7 @@ class InventoryTests(unittest.TestCase):
             "normalized repository-relative path",
         )
         self.assert_invalid_inventory(
-            text.replace(source, 'source = "crates/nspl/src/missing.rs"', 1),
+            text.replace(source, 'source = "crates/plexus/src/missing.rs"', 1),
             "missing source",
         )
 
@@ -744,7 +744,7 @@ class ExecutionTests(unittest.TestCase):
                 "name": package.replace("-", "_"), "kind": ["lib"],
                 "src_path": str(manifest.parent / "src/lib.rs"),
             }]
-            if package in {"nervix-server", "nervix-nspl-format"}:
+            if package in {"nervix-server", "nervix-plexus-format"}:
                 targets.append({
                     "name": package.replace("-", "_"), "kind": ["bin"],
                     "src_path": str(manifest.parent / "src/main.rs"),
@@ -759,7 +759,7 @@ class ExecutionTests(unittest.TestCase):
                     "name": "representations", "kind": ["test"],
                     "src_path": str(manifest.parent / "tests/representations/main.rs"),
                 })
-            if package == "nervix-nspl-format":
+            if package == "nervix-plexus-format":
                 targets.append({
                     "name": "repository_files", "kind": ["test"],
                     "src_path": str(manifest.parent / "tests/repository_files.rs"),
@@ -973,10 +973,10 @@ class ExecutionTests(unittest.TestCase):
                                               pathlib.Path(directory))
 
     def test_instrumented_build_returns_the_registered_harness(self) -> None:
-        target = dataclasses.replace(self.target, package="nervix-nspl-format")
+        target = dataclasses.replace(self.target, package="nervix-plexus-format")
         with tempfile.TemporaryDirectory() as directory:
             run = pathlib.Path(directory)
-            library = run / "nervix_nspl_format-1111"
+            library = run / "nervix_plexus_format-1111"
             integration = run / "repository_files-3333"
             for executable in (library, integration):
                 executable.write_bytes(b"")
@@ -1017,10 +1017,10 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(args[args.index("--profile") + 1], "fuzz")
 
     def test_build_deadline_changes_only_the_compilation_budget(self) -> None:
-        target = dataclasses.replace(self.target, package="nervix-nspl-format")
+        target = dataclasses.replace(self.target, package="nervix-plexus-format")
         with tempfile.TemporaryDirectory() as directory:
             run = pathlib.Path(directory)
-            library = run / "nervix_nspl_format-1111"
+            library = run / "nervix_plexus_format-1111"
             library.write_bytes(b"")
             output = f"  Executable unittests src/lib.rs ({library})\n"
             result = subprocess.CompletedProcess([], 0, output, "")
@@ -1757,16 +1757,16 @@ class CliTests(unittest.TestCase):
 
     def test_fuzz_routes_select_targets_and_reject_zero_duration(self) -> None:
         with mock.patch.object(bolero, "fuzz_targets") as fuzz:
-            self.assertEqual(self.invoke("fuzz", "nspl-expression", "3"), 0)
+            self.assertEqual(self.invoke("fuzz", "plexus-expression", "3"), 0)
             selected = next(target for target in self.inventory.targets
-                            if target.id == "nspl-expression")
+                            if target.id == "plexus-expression")
             self.assertEqual(fuzz.call_args.args[1], (selected,))
             self.assertEqual(fuzz.call_args.args[2], 3)
             self.assertEqual(self.invoke("fuzz-all"), 0)
             self.assertEqual(fuzz.call_args.args[1], self.inventory.targets)
             self.assertEqual(fuzz.call_args.args[2], 30)
             with self.assertRaisesRegex(bolero.BoleroError, "duration"):
-                self.invoke("fuzz", "nspl-expression", "0")
+                self.invoke("fuzz", "plexus-expression", "0")
             with self.assertRaisesRegex(bolero.BoleroError, "unknown Bolero target"):
                 self.invoke("fuzz", "absent", "1")
 
@@ -1775,12 +1775,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(self.invoke("qualify"), 0)
             qualify.assert_called_once_with(self.inventory)
         with mock.patch.object(bolero, "replay", return_value=101) as replay:
-            self.assertEqual(self.invoke("replay", "nspl-expression", "failure"), 101)
+            self.assertEqual(self.invoke("replay", "plexus-expression", "failure"), 101)
             selected = next(target for target in self.inventory.targets
-                            if target.id == "nspl-expression")
+                            if target.id == "plexus-expression")
             self.assertEqual(replay.call_args.args[0], selected)
         with mock.patch.object(bolero, "reduce_failure") as reduce:
-            self.assertEqual(self.invoke("reduce", "nspl-expression", "failure"), 0)
+            self.assertEqual(self.invoke("reduce", "plexus-expression", "failure"), 0)
             reduce.assert_called_once()
 
     def test_planning_and_combining_need_no_compiled_discovery(self) -> None:
@@ -1820,12 +1820,12 @@ class CliTests(unittest.TestCase):
 
     def test_sanitizer_replay_route_and_corrupt_records(self) -> None:
         with mock.patch.object(bolero, "replay_sanitizer", return_value=1) as replay_sanitizer:
-            self.assertEqual(self.invoke("replay-sanitizer", "nspl-expression", "failure"), 1)
-            self.assertEqual(replay_sanitizer.call_args.args[1].id, "nspl-expression")
+            self.assertEqual(self.invoke("replay-sanitizer", "plexus-expression", "failure"), 1)
+            self.assertEqual(replay_sanitizer.call_args.args[1].id, "plexus-expression")
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             runs = root / "target/bolero/runs"
-            saved = runs / "nspl-expression/1/crashes/crash-1"
+            saved = runs / "plexus-expression/1/crashes/crash-1"
             saved.parent.mkdir(parents=True)
             saved.write_bytes(b"\x01")
             with (
@@ -1834,7 +1834,7 @@ class CliTests(unittest.TestCase):
                 mock.patch.object(bolero, "replay") as replay,
             ):
                 with self.assertRaisesRegex(bolero.BoleroError, "corrupt replay record"):
-                    self.invoke("replay", "nspl-expression", str(saved))
+                    self.invoke("replay", "plexus-expression", str(saved))
                 replay.assert_not_called()
 
 

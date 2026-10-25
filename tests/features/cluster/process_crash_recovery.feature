@@ -5,7 +5,7 @@ Feature: Real process crash recovery
     Given Postgres is running
     And a nervix-server process is started with state snapshot interval "50ms"
     And Postgres table "process_window_{{test_id}}" exists
-    And the server process is configured with these NSPL commands
+    And the server process is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA window_input (tenant STRING, value I64);
@@ -88,7 +88,7 @@ Feature: Real process crash recovery
     Given Postgres is running
     And a nervix-server process is started with state snapshot interval "50ms"
     And Postgres table "process_open_windows_{{test_id}}" exists
-    And the server process is configured with these NSPL commands
+    And the server process is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA reading (tenant STRING, value I64);
@@ -203,7 +203,7 @@ Feature: Real process crash recovery
     Given Postgres is running
     And a nervix-server process is started with state snapshot interval "50ms"
     And Postgres table "process_crash_{{test_id}}" exists
-    And the server process is configured with these NSPL commands
+    And the server process is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA crash_event (

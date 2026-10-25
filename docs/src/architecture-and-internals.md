@@ -1,5 +1,7 @@
 # Architecture And Internals
 
+*Plexus, the Nervix graph definition language.*
+
 This section explains how Nervix is built and how it behaves internally.
 
 Use it for:
@@ -45,4 +47,4 @@ Use it for:
 - runtime semantics that are easier to understand from the implementation side
 - relay/state internals
 
-If you are looking for NSPL usage, setup, or feature-level guidance, start in the [Manual](./manual.md).
+If you are looking for Plexus usage, setup, or feature-level guidance, start in the [Manual](./manual.md).

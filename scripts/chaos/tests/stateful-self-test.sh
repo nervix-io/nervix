@@ -274,11 +274,42 @@ expect_pass 'guest counted replayed volatile input again' "${state}" counter --i
     --output "${tmp_dir}/counter-replayed.ndjson" --boundaries "${tmp_dir}/crash.json" --result "${tmp_dir}/counter.json"
 jq -e '.replay_excess_after_recovery.alpha == 2' "${tmp_dir}/counter.json" >/dev/null \
     || fail 'the guest verdict did not report the replay excess after recovery'
+# Each of the two volatile inputs is applied three times, then each recovered input once.
+# The complete output exposes every callback here; both branches continue two counts ahead.
+jq '.recovered_records = 54 | .pre_fault_outputs.chaos_counted_output = 52' \
+    "${tmp_dir}/crash.json" >"${tmp_dir}/counter-repeated-boundaries.json"
+jq -c -s '. as $rows
+    | ($rows[] | select(.sequence < 52)),
+      (range(0; 3) as $delivery | $rows[] | select(.sequence >= 52 and .sequence < 54)
+       | .branch_count += $delivery),
+      ($rows[] | select(.sequence >= 54) | .branch_count += 2)' \
+    "${tmp_dir}/counted.ndjson" >"${tmp_dir}/counter-repeated.ndjson"
+expect_pass 'guest applied each volatile input three times' "${state}" counter --input "${input}" \
+    --output "${tmp_dir}/counter-repeated.ndjson" --boundaries "${tmp_dir}/counter-repeated-boundaries.json" \
+    --result "${tmp_dir}/counter.json"
+jq -e '.replay_duplicates == {records: 4, events: 2}
+       and .replay_excess_after_recovery == {alpha: 2, beta: 2}' "${tmp_dir}/counter.json" >/dev/null \
+    || fail 'the guest verdict did not retain every repeated input and its count excess'
+# A checkpoint can retain callbacks whose outputs were not observed before the fault.
 jq -c 'if .sequence >= 56 then .branch_count = .branch_index + 5 else . end' "${tmp_dir}/counted.ndjson" \
-    >"${tmp_dir}/counter-beyond.ndjson"
-expect_failure 'guest count beyond what the volatile interval replays' 'exceeded what the volatile interval' \
-    "${tmp_dir}/counter.json" "${state}" counter --input "${input}" --output "${tmp_dir}/counter-beyond.ndjson" \
+    >"${tmp_dir}/counter-checkpoint.ndjson"
+expect_pass 'guest checkpoint retained repeated callbacks without observed outputs' "${state}" counter \
+    --input "${input}" --output "${tmp_dir}/counter-checkpoint.ndjson" \
     --boundaries "${tmp_dir}/crash.json" --result "${tmp_dir}/counter.json"
+jq -e '.replay_duplicates == {records: 0, events: 0}
+       and .replay_excess_after_recovery == {alpha: 5, beta: 5}' "${tmp_dir}/counter.json" >/dev/null \
+    || fail 'the guest verdict confused observed replays with checkpoint count excess'
+expect_failure 'guest count changed without a fault' 'differed from the branch index while no fault' \
+    "${tmp_dir}/counter.json" "${state}" counter --input "${input}" --output "${tmp_dir}/counter-checkpoint.ndjson" \
+    --boundaries "${tmp_dir}/none.json" --result "${tmp_dir}/counter.json"
+jq -c 'if .sequence == 100 then .branch_count += 1 else . end' "${tmp_dir}/counter-repeated.ndjson" \
+    >"${tmp_dir}/counter-repeated-unsteady.ndjson"
+expect_failure 'guest skipped a count after repeated delivery recovered' 'did not advance by one per record' \
+    "${tmp_dir}/counter.json" "${state}" counter --input "${input}" \
+    --output "${tmp_dir}/counter-repeated-unsteady.ndjson" \
+    --boundaries "${tmp_dir}/counter-repeated-boundaries.json" --result "${tmp_dir}/counter.json"
+jq -e '.failures == ["guest counts after recovery did not advance by one per record"]' \
+    "${tmp_dir}/counter.json" >/dev/null || fail 'the repeated-delivery control failed for an unexpected reason'
 jq -c 'if .sequence == 20 then .branch_count += 1 else . end' "${tmp_dir}/counted.ndjson" \
     >"${tmp_dir}/counter-inexact.ndjson"
 expect_failure 'guest count wrong before the fault' 'differed from the branch index while no fault' \

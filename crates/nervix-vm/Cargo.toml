@@ -56,7 +56,7 @@ xxhash-rust = { workspace = true }
 bolero = { workspace = true }
 criterion = { workspace = true }
 fastrand = { workspace = true }
-nervix-nspl = { workspace = true }
+nervix-plexus = { workspace = true }
 nonzero_ext = { workspace = true }
 rstest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

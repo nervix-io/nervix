@@ -3,12 +3,12 @@ Feature: Model alteration quiesce classification
     Given schema change drain timeout is configured as "120s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA alter_event ( seq I64 );
       CREATE WIRE JSON SCHEMA alter_event_wire MODE STRICT ( seq integer );
@@ -50,7 +50,7 @@ Feature: Model alteration quiesce classification
 
   @noop_alter_is_dynamic
   Scenario: A no-op ALTER is dynamic even while the domain cannot drain
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER RELAY alter_events SET CAPACITY 3;
       """
@@ -66,7 +66,7 @@ Feature: Model alteration quiesce classification
 
   @concurrent_alter_rejected
   Scenario: A second model alteration is rejected while the domain ALTER lock is held
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       BEGIN;
       ALTER WIRE JSON SCHEMA alter_event_wire
@@ -76,9 +76,9 @@ Feature: Model alteration quiesce classification
       COMMIT;
       """
     Then node "node-1" eventually reports status containing "{{domain}} status=Paused"
-    When these NSPL commands fail with "mutation is owned by transaction"
+    When these Plexus commands fail with "mutation is owned by transaction"
       """
       ALTER RELAY alter_events SET CAPACITY 4;
       """
     And emitter "alter_out" leaves stall mode
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds

@@ -1,7 +1,9 @@
 # Connector Crates And The Connector Contract
 
+*Plexus, the Nervix graph definition language.*
+
 An external integration meets Nervix at a data-plane boundary. The [ingestor](./ingestors.md)
-and [emitter](./emitters.md) manuals define its NSPL surface and delivery options. This chapter
+and [emitter](./emitters.md) manuals define its Plexus surface and delivery options. This chapter
 defines who owns the work after validation: the shared connector contract, each integration's
 transport, and the host that drives it. [Data Plane](./data-plane.md) describes what happens to
 the resulting Arrow batches inside the graph.
@@ -19,7 +21,7 @@ outbound request, from Arrow preparation to response and recovery.
 | Decision and composition | Convert a validated Model into a typed source or emitter start plan once. The registry decides every ingestor's source plan together with its codec and lowered routes, validating the source name, kind, client and route identities as one decision. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
 | `nervix-connector` | Define ingestor and emitter operations, typed boundary values, and opaque host services. It knows neither a driver nor graph execution state. |
 | `nervix-connector-*` | Own one integration's driver, connection and configuration interpretation, transport headers, protocol acknowledgements, and per-record results. A crate implements the ingestor contract, the emitter contract, or both. |
-| Host data plane | Own tasks, intake and Arrow decoding, branch routing, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse NSPL or read a Model during data-plane execution. |
+| Host data plane | Own tasks, intake and Arrow decoding, branch routing, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse Plexus or read a Model during data-plane execution. |
 
 The contract may name shared vocabulary types, Arrow, the async and error facilities needed by its
 boundary, the node's bounded executor, and configuration helpers for TLS, HTTP clients, service
@@ -479,12 +481,12 @@ every external collector's availability.
 
 ```mermaid
 sequenceDiagram
-    participant NSPL as NSPL and Models
+    participant Plexus as Plexus and Models
     participant Registry as Registry and decisions
     participant Host as Server host
     participant Driver as Connector crate
     participant Graph as Runtime graph
-    NSPL->>Registry: Semantic Model
+    Plexus->>Registry: Semantic Model
     Registry->>Registry: Validate capabilities and references
     Registry->>Host: Validated typed start plan
     Host->>Driver: Open with resolved configuration
@@ -997,7 +999,7 @@ host rejects the positions, that rejection fails on the same lost connection, an
 A `broker_redelivered` source therefore delivers at least once across a reconnect, and a message
 whose acknowledgement the broker never received is ingested again. A transport without an
 acknowledged delivery mode has no redelivery guarantee from Nervix. The
-sequence below shows an acknowledged broker policy. The precise source-specific effects and NSPL
+sequence below shows an acknowledged broker policy. The precise source-specific effects and Plexus
 modes are in [Ingestors](./ingestors.md) and
 [Shutdown And Recovery](./shutdown.md#connector-contracts).
 
@@ -2293,7 +2295,7 @@ drain boundary. This chapter does not redefine those output formats.
    capability in the [capability inventory](#capability-inventory). Confirm the crate boundary and
    run the repository's validation and connector tests.
 5. Update the [Ingestors](./ingestors.md) or [Emitters](./emitters.md) manual, relevant client and
-   metric documentation, and the [Plexus skill](https://github.com/nervix-io/nervix/blob/main/.agents/skills/nspl/SKILL.md) routing when its
+   metric documentation, and the [Plexus skill](https://github.com/nervix-io/nervix/blob/main/.agents/skills/plexus/SKILL.md) routing when its
    user-facing guidance changes. Regenerate the book.
 
 The connector split was functionally qualified across 46 integration feature files and 359

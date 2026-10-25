@@ -183,7 +183,7 @@ impl SubscriptionRequest {
     }
 
     pub fn to_query(&self) -> String {
-        nervix_nspl::subscribe::create_subscription_query(
+        nervix_plexus::subscribe::create_subscription_query(
             &self.name,
             &self.relay,
             self.delivery_behavior,

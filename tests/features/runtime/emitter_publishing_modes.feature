@@ -3,11 +3,11 @@ Feature: Emitter publishing modes
   Scenario Outline: Every emitter publishing mode round-trips through SHOW CREATE
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -194,7 +194,7 @@ Feature: Emitter publishing modes
           CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY POLICY BACKOFF 220ms MAX 22s VALUES { 'seq' = input.seq } FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER kafka_no_ack;
       """
@@ -202,7 +202,7 @@ Feature: Emitter publishing modes
       """
       MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER kafka_ack_sequential;
       """
@@ -210,7 +210,7 @@ Feature: Emitter publishing modes
       """
       MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 20ms MAX 2s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER kafka_ack_parallel;
       """
@@ -218,7 +218,7 @@ Feature: Emitter publishing modes
       """
       MODE ACK PARALLEL MAX 3 ACK TIMEOUT 3s RETRY POLICY BACKOFF 30ms MAX 3s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE EMITTER kafka_ack_parallel;
       """
@@ -226,7 +226,7 @@ Feature: Emitter publishing modes
       """
       publishing mode: ACK PARALLEL MAX 3 ACK TIMEOUT 3s RETRY POLICY BACKOFF 30ms MAX 3s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER pulsar_no_ack;
       """
@@ -234,7 +234,7 @@ Feature: Emitter publishing modes
       """
       MODE NO ACK RETRY POLICY BACKOFF 40ms MAX 4s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER pulsar_ack_parallel;
       """
@@ -242,7 +242,7 @@ Feature: Emitter publishing modes
       """
       MODE ACK PARALLEL MAX 5 ACK TIMEOUT 5s RETRY POLICY BACKOFF 50ms MAX 5s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER rabbit_no_ack;
       """
@@ -250,7 +250,7 @@ Feature: Emitter publishing modes
       """
       MODE NO ACK RETRY POLICY BACKOFF 60ms MAX 6s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER rabbit_ack_sequential;
       """
@@ -258,7 +258,7 @@ Feature: Emitter publishing modes
       """
       MODE ACK SEQUENTIAL ACK TIMEOUT 7s RETRY POLICY BACKOFF 70ms MAX 7s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER mqtt_qos_zero;
       """
@@ -266,7 +266,7 @@ Feature: Emitter publishing modes
       """
       MODE QOS 0 RETRY POLICY BACKOFF 80ms MAX 8s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER mqtt_qos_one;
       """
@@ -274,7 +274,7 @@ Feature: Emitter publishing modes
       """
       MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 9s RETRY POLICY BACKOFF 90ms MAX 9s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER mqtt_qos_two;
       """
@@ -282,7 +282,7 @@ Feature: Emitter publishing modes
       """
       MODE QOS 2 ACK PARALLEL MAX 10 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 10s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER nats_no_ack;
       """
@@ -290,7 +290,7 @@ Feature: Emitter publishing modes
       """
       MODE NO ACK RETRY POLICY BACKOFF 110ms MAX 11s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER nats_jetstream;
       """
@@ -298,7 +298,7 @@ Feature: Emitter publishing modes
       """
       MODE JETSTREAM ACK PARALLEL MAX 12 ACK TIMEOUT 12s RETRY POLICY BACKOFF 120ms MAX 12s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER redis_no_ack;
       """
@@ -306,7 +306,7 @@ Feature: Emitter publishing modes
       """
       MODE NO ACK RETRY POLICY BACKOFF 130ms MAX 13s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER zeromq_no_ack;
       """
@@ -314,7 +314,7 @@ Feature: Emitter publishing modes
       """
       MODE NO ACK RETRY POLICY BACKOFF 140ms MAX 14s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER sqs_single;
       """
@@ -322,7 +322,7 @@ Feature: Emitter publishing modes
       """
       MODE SINGLE RETRY POLICY BACKOFF 150ms MAX 15s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER sqs_batch;
       """
@@ -330,7 +330,7 @@ Feature: Emitter publishing modes
       """
       MODE BATCH RETRY POLICY BACKOFF 160ms MAX 16s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE EMITTER sqs_fifo;
       """
@@ -338,7 +338,7 @@ Feature: Emitter publishing modes
       """
       to: SQS QUEUE sqs_main QUEUE 'sqs_fifo.fifo' FIFO GROUP FROM BRANCH
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER sentry_ack;
       """
@@ -346,7 +346,7 @@ Feature: Emitter publishing modes
       """
       MODE ACK RETRY POLICY BACKOFF 170ms MAX 17s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER clickhouse_ack;
       """
@@ -358,7 +358,7 @@ Feature: Emitter publishing modes
       """
       MODE ACK RETRY POLICY BACKOFF 180ms MAX 18s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE EMITTER clickhouse_ack;
       """
@@ -372,7 +372,7 @@ Feature: Emitter publishing modes
       """
       flush: FLUSH IMMEDIATE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER postgres_ack;
       """
@@ -384,7 +384,7 @@ Feature: Emitter publishing modes
       """
       MODE ACK RETRY POLICY BACKOFF 190ms MAX 19s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER mysql_ack;
       """
@@ -396,7 +396,7 @@ Feature: Emitter publishing modes
       """
       MODE ACK RETRY POLICY BACKOFF 200ms MAX 20s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER mongodb_ack;
       """
@@ -408,7 +408,7 @@ Feature: Emitter publishing modes
       """
       MODE ACK RETRY POLICY BACKOFF 210ms MAX 21s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER iceberg_ack;
       """
@@ -430,11 +430,11 @@ Feature: Emitter publishing modes
   Scenario Outline: Invalid or incomplete emitter publishing contracts are rejected at creation
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -462,19 +462,19 @@ Feature: Emitter publishing modes
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 
-    When these NSPL commands fail with "MODE"
+    When these Plexus commands fail with "MODE"
       """
       CREATE KAFKA TOPIC EMITTER missing_mode FROM outgoing
         TO kafka_main TOPIC 'missing_mode' ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "RETRY POLICY"
+    When these Plexus commands fail with "RETRY POLICY"
       """
       CREATE KAFKA TOPIC EMITTER missing_retry_policy FROM outgoing
         TO kafka_main TOPIC 'missing_retry_policy' MODE NO ACK ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "SEQUENTIAL"
+    When these Plexus commands fail with "SEQUENTIAL"
       """
       CREATE KAFKA TOPIC EMITTER missing_ack_window FROM outgoing
         TO kafka_main TOPIC 'missing_ack_window'
@@ -482,7 +482,7 @@ Feature: Emitter publishing modes
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "ACK TIMEOUT"
+    When these Plexus commands fail with "ACK TIMEOUT"
       """
       CREATE KAFKA TOPIC EMITTER missing_ack_timeout FROM outgoing
         TO kafka_main TOPIC 'missing_ack_timeout'
@@ -490,14 +490,14 @@ Feature: Emitter publishing modes
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "MAX"
+    When these Plexus commands fail with "MAX"
       """
       CREATE KAFKA TOPIC EMITTER incomplete_retry_policy FROM outgoing
         TO kafka_main TOPIC 'incomplete_retry_policy'
           MODE NO ACK RETRY POLICY BACKOFF 10ms ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "QOS"
+    When these Plexus commands fail with "QOS"
       """
       CREATE KAFKA TOPIC EMITTER foreign_mode FROM outgoing
         TO kafka_main TOPIC 'foreign_mode'
@@ -505,7 +505,7 @@ Feature: Emitter publishing modes
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "greater than zero"
+    When these Plexus commands fail with "greater than zero"
       """
       CREATE KAFKA TOPIC EMITTER empty_ack_window FROM outgoing
         TO kafka_main TOPIC 'empty_ack_window'
@@ -513,7 +513,7 @@ Feature: Emitter publishing modes
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "requires FIFO GROUP"
+    When these Plexus commands fail with "requires FIFO GROUP"
       """
       CREATE SQS QUEUE EMITTER fifo_without_group FROM tenant_outgoing
         TO sqs_main QUEUE 'orders.fifo'
@@ -521,7 +521,7 @@ Feature: Emitter publishing modes
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "ending in .fifo"
+    When these Plexus commands fail with "ending in .fifo"
       """
       CREATE SQS QUEUE EMITTER group_on_standard_queue FROM tenant_outgoing
         TO sqs_main QUEUE 'orders' FIFO GROUP FROM BRANCH
@@ -529,7 +529,7 @@ Feature: Emitter publishing modes
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "requires branched input"
+    When these Plexus commands fail with "requires branched input"
       """
       CREATE SQS QUEUE EMITTER unbranched_fifo_group FROM outgoing
         TO sqs_main QUEUE 'orders.fifo' FIFO GROUP FROM BRANCH
@@ -537,7 +537,7 @@ Feature: Emitter publishing modes
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "requires branched input"
+    When these Plexus commands fail with "requires branched input"
       """
       CREATE SQS QUEUE EMITTER mixed_fifo_group FROM tenant_outgoing, outgoing
         TO sqs_main QUEUE 'mixed_orders.fifo' FIFO GROUP FROM BRANCH
@@ -545,11 +545,11 @@ Feature: Emitter publishing modes
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "requires branched input"
+    When these Plexus commands fail with "requires branched input"
       """
       ALTER SQS QUEUE EMITTER alter_fifo_group ADD FROM outgoing;
       """
-    When these NSPL commands fail with "exact non-sensitive STRING"
+    When these Plexus commands fail with "exact non-sensitive STRING"
       """
       CREATE SQS QUEUE EMITTER invalid_fifo_expression FROM tenant_outgoing
         TO sqs_main QUEUE 'orders.fifo' FIFO GROUP input.seq
@@ -557,7 +557,7 @@ Feature: Emitter publishing modes
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "MODE"
+    When these Plexus commands fail with "MODE"
       """
       CREATE KAFKA TOPIC EMITTER fifo_on_kafka FROM outgoing
         TO kafka_main TOPIC 'fifo_on_kafka' FIFO GROUP FROM BRANCH
@@ -565,7 +565,7 @@ Feature: Emitter publishing modes
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "BATCH MAX MESSAGES"
+    When these Plexus commands fail with "BATCH MAX MESSAGES"
       """
       CREATE CLICKHOUSE TABLE EMITTER clickhouse_without_batch FROM outgoing
         TO clickhouse_main TABLE 'clickhouse_events'
@@ -582,12 +582,12 @@ Feature: Emitter publishing modes
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -603,7 +603,7 @@ Feature: Emitter publishing modes
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER ZEROMQ PUSH EMITTER event_emitter
         SET MODE NO ACK RETRY POLICY BACKOFF 20ms MAX 200ms;
@@ -612,7 +612,7 @@ Feature: Emitter publishing modes
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER event_emitter;
       """
@@ -630,12 +630,12 @@ Feature: Emitter publishing modes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -668,7 +668,7 @@ Feature: Emitter publishing modes
       transient error: fault injector stalled emitter publish
       """
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
-    When these NSPL commands fail with "timed out draining domain"
+    When these Plexus commands fail with "timed out draining domain"
       """
       ALTER ZEROMQ PUSH EMITTER event_emitter
         SET MODE NO ACK RETRY POLICY BACKOFF 20ms MAX 200ms;
@@ -677,7 +677,7 @@ Feature: Emitter publishing modes
       """
       retrying_infrastructure
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER event_emitter;
       """
@@ -690,7 +690,7 @@ Feature: Emitter publishing modes
       """
       "seq":1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER ZEROMQ PUSH EMITTER event_emitter
         SET MODE NO ACK RETRY POLICY BACKOFF 20ms MAX 200ms;
@@ -699,7 +699,7 @@ Feature: Emitter publishing modes
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER event_emitter;
       """

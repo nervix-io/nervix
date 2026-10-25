@@ -55,7 +55,7 @@ Feature: Web console visual creation
   Scenario: A rejected visual create keeps its draft and inline failure
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE retained_bundle;
@@ -90,7 +90,7 @@ Feature: Web console visual creation
   Scenario: A retained resource draft changes its captured domain only by explicit action
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE DOMAIN {{domain}}_other;
@@ -119,7 +119,7 @@ Feature: Web console visual creation
   Scenario: A resource create reports that it is queued in the attached transaction
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       """
@@ -143,7 +143,7 @@ Feature: Web console visual creation
   Scenario: One admitted popup create survives a leader change without duplicate effects
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       """

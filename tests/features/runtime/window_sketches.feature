@@ -2,11 +2,11 @@ Feature: Bounded window sketches
   Scenario Outline: Sliding time windows merge distinct, quantile and top-k panes per branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA sketch_input (tenant STRING, value I64 OPTIONAL);
       CREATE SCHEMA sketch_output (
@@ -80,11 +80,11 @@ Feature: Bounded window sketches
   Scenario Outline: A recreated concrete branch starts with empty sketch panes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA sketch_input (tenant STRING, value I64);
       CREATE SCHEMA sketch_output (tenant STRING, first_value I64, distinct_values I64);
@@ -131,7 +131,7 @@ Feature: Bounded window sketches
       """
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION sketch_subscription TO sketch_outputs;
       """
@@ -157,11 +157,11 @@ Feature: Bounded window sketches
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA sketch_input (tenant STRING, value I64);
       CREATE SCHEMA sketch_output (tenant STRING, first_value I64, distinct_values I64);
@@ -207,7 +207,7 @@ Feature: Bounded window sketches
     When node "{{former_owner}}" is stopped
     Then node "{{promoted_replica}}" eventually observes a stable leader
     And within "60s" node "{{promoted_replica}}" eventually reports scheduled "window_processor" "sketch_window" owner equals placeholder "promoted_replica"
-    When these NSPL commands are executed on node "{{promoted_replica}}"
+    When these Plexus commands are executed on node "{{promoted_replica}}"
       """
       CREATE SUBSCRIPTION sketch_subscription TO sketch_outputs;
       """

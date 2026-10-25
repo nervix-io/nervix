@@ -111,7 +111,7 @@ just benchmark-nervix-local kafka-filter-map \
 name ends in `_flush_each`. The example therefore runs for 240 seconds. `--duration-seconds N`
 overrides that policy for reproduction or smoke testing.
 
-Nervix consumes the flush values directly as NSPL durations and binary sizes. The runner derives
+Nervix consumes the flush values directly as Plexus durations and binary sizes. The runner derives
 Vector's `batch.timeout_secs`, `batch.max_bytes`, and `end_every_period_ms` from those same
 settings. Flink uses its native Kafka producer and SQL operators; its ingestor and emitter batching
 cannot be equated to Nervix route flushes or Vector emitter batches. Reports retain each product's
@@ -134,7 +134,7 @@ Vector's `dedupe` evicts by cache size; Nervix deduplication expires by `MAX TIM
 and retains buffered records. The Vector cache is sized above the live keyspace, and its period
 matches `window_max_delay`, so both produce the record total that parity checks. Flink uses
 processing-time `ROW_NUMBER` deduplication and a tumbling SQL window of `window_max_delay`; it has
-no `window_messages` closure bound. The optional Nervix sketch and the NSPL-only
+no `window_messages` closure bound. The optional Nervix sketch and the Plexus-only
 `transform_expression` override are not comparable competitor settings; use the manifest defaults
 for three-way comparisons.
 
@@ -407,10 +407,10 @@ emitter_max_batch_size = "8MiB"
 
 [implementations.nervix]
 kind = "nervix"
-template = "nervix.nspl.upon"
+template = "nervix.plexus.upon"
 # Optional: start up to three Nervix nodes and run placement commands after START.
 nodes = 2
-after_start = "after-start.nspl.upon"
+after_start = "after-start.plexus.upon"
 
 [implementations.competitor]
 kind = "container"

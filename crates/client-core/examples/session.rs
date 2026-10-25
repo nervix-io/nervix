@@ -14,9 +14,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = client.execute("SHOW CLUSTER STATUS;").await?;
     println!("{}", result.message);
 
-    let where_clause = nervix_nspl::parse_expression("input.tenant = 'acme'").map_err(|error| {
-        std::io::Error::other(format!("invalid subscription expression: {error:#}"))
-    })?;
+    let where_clause =
+        nervix_plexus::parse_expression("input.tenant = 'acme'").map_err(|error| {
+            std::io::Error::other(format!("invalid subscription expression: {error:#}"))
+        })?;
     let request = SubscriptionRequest::new("acme_orders", "orders").with_where_clause(where_clause);
     let result = client.subscribe(&request).await?;
     println!("{}", result.message);

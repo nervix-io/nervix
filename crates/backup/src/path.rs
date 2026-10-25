@@ -4,7 +4,7 @@
 //! manifest.rkyv
 //! users.rkyv                                              (cluster backups)
 //! domains/<domain>/domain.rkyv
-//! domains/<domain>/models.nspl
+//! domains/<domain>/models.plexus
 //! domains/<domain>/resources/<resource>/<version>/version.rkyv
 //! domains/<domain>/resources/<resource>/<version>/archive.tar   (unless WITHOUT RESOURCES)
 //! domains/<domain>/state/wasm_processor/<processor>/<branch>/descriptor.rkyv
@@ -54,9 +54,9 @@ impl SectionPath {
         Self(format!("{}/domain.rkyv", domain_directory(domain)))
     }
 
-    /// A domain's Models as canonical NSPL.
+    /// A domain's Models as canonical Plexus.
     pub fn domain_models(domain: &DomainName) -> Self {
-        Self(format!("{}/models.nspl", domain_directory(domain)))
+        Self(format!("{}/models.plexus", domain_directory(domain)))
     }
 
     /// The catalog metadata of one resource version.
@@ -316,7 +316,7 @@ mod tests {
         );
         assert_eq!(
             SectionPath::domain_models(&domain("prod")).as_str(),
-            "domains/prod/models.nspl"
+            "domains/prod/models.plexus"
         );
         assert_eq!(
             SectionPath::resource_version_record(&domain("prod"), &resource("model.v2"), version)
@@ -357,10 +357,10 @@ mod tests {
         }
         assert!(SectionPath::parse(&"a/".repeat(4096)).is_err());
         assert_eq!(
-            SectionPath::parse("domains/prod/models.nspl")
+            SectionPath::parse("domains/prod/models.plexus")
                 .assured("a plain relative path is valid")
                 .as_str(),
-            "domains/prod/models.nspl"
+            "domains/prod/models.plexus"
         );
     }
 }

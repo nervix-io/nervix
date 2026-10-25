@@ -615,7 +615,7 @@ mod tests {
                 (
                     "nervix".to_string(),
                     Implementation::Nervix(NervixImplementation {
-                        template: "graph.nspl.upon".into(),
+                        template: "graph.plexus.upon".into(),
                         nodes: 1,
                         after_start: None,
                     }),
@@ -820,7 +820,7 @@ mod tests {
         crowded.implementations.insert(
             "nervix".to_string(),
             Implementation::Nervix(NervixImplementation {
-                template: "graph.nspl.upon".into(),
+                template: "graph.plexus.upon".into(),
                 nodes: 4,
                 after_start: None,
             }),

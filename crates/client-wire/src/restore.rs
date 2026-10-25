@@ -54,7 +54,7 @@ pub struct RestoreStart {
     pub request_id: RequestId,
     /// The durable identity of the restore across retries, reconnects and leader changes.
     pub execution_reference: CommandExecutionReference,
-    /// One `RESTORE` statement, as NSPL.
+    /// One `RESTORE` statement, as Plexus.
     pub statement: String,
     /// The archive's exact size and digest.
     pub archive: RestoreArchive,

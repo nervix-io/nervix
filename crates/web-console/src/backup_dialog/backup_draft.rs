@@ -40,7 +40,7 @@ pub(crate) struct BackupDraft {
     pub(crate) destination: String,
     pub(crate) resources: BackupResources,
     pub(crate) capture: CaptureChoice,
-    /// A quiesced capture's drain timeout as NSPL duration text; empty keeps the domain's own.
+    /// A quiesced capture's drain timeout as Plexus duration text; empty keeps the domain's own.
     pub(crate) timeout: String,
 }
 

@@ -1290,7 +1290,7 @@ feature = "tests/features/cluster/backup_wait.feature"
 id = "scenario.backup-multi-domain-wait"
 invariant = "One- and three-node cluster backups wait across independent domain cut budgets and retain both quiesced cuts."
 invocation = "scenarios"
-scenario = "An NSPL cluster backup waits across independent domain cut budgets"
+scenario = "A Plexus cluster backup waits across independent domain cut budgets"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1890,7 +1890,7 @@ feature = "tests/features/cluster/backup_wait.feature"
 id = "stress.backup-multi-domain-wait"
 invariant = "One- and three-node cluster backups wait across independent domain cut budgets and retain both quiesced cuts."
 invocation = "stress-restore-scenarios"
-scenario = "An NSPL cluster backup waits across independent domain cut budgets"
+scenario = "A Plexus cluster backup waits across independent domain cut budgets"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]

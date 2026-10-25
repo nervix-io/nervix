@@ -35,7 +35,7 @@ use nervix_models::{
     TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity,
     TransactionResolvedDomainStart, TransactionStatus, UserName,
 };
-use nervix_nspl::client_statement::ClientStatement;
+use nervix_plexus::client_statement::ClientStatement;
 use nervix_primitives::sync::{
     OwnedMutexGuard, Semaphore, StdArc, blocking::Mutex as ParkingMutex,
 };
@@ -2461,7 +2461,7 @@ impl SessionServiceImpl {
                     warn!(
                         transaction_id = id,
                         error = %error,
-                        "failed to resume replicated NSPL commit"
+                        "failed to resume replicated Plexus commit"
                     );
                 }
             });
@@ -2505,7 +2505,7 @@ impl SessionServiceImpl {
                             info!(
                                 transaction_id = transaction.id,
                                 owner = transaction.owner.as_str(),
-                                "expired inactive NSPL transaction"
+                                "expired inactive Plexus transaction"
                             );
                         }
                         Ok(_) => {}
@@ -2513,7 +2513,7 @@ impl SessionServiceImpl {
                             warn!(
                                 transaction_id = transaction.id,
                                 error = %error,
-                                "failed to expire inactive NSPL transaction"
+                                "failed to expire inactive Plexus transaction"
                             );
                         }
                     }

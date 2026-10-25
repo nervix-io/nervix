@@ -3,11 +3,11 @@ Feature: Domain execution time
   Scenario Outline: Every expression context observes its domain execution time
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA source_event (
         sequence I64
@@ -59,7 +59,7 @@ Feature: Domain execution time
       CREATE SUBSCRIPTION processed_events_subscription TO processed_events
         WHERE now() < ('2001-01-01T00:00:00Z' AS DATETIME);
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
@@ -85,11 +85,11 @@ Feature: Domain execution time
   Scenario Outline: A volatile Roto UDF receives the bound domain execution time
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UDF domain_time_precedes
         WITH ROTO_0_13
@@ -159,11 +159,11 @@ Feature: Domain execution time
   Scenario Outline: Generated message errors use the failing execution snapshot
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA calculation (
         id STRING,
@@ -220,7 +220,7 @@ Feature: Domain execution time
                 handled_at = now();
       CREATE SUBSCRIPTION calculation_errors_subscription TO calculation_errors;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
@@ -247,16 +247,16 @@ Feature: Domain execution time
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has historical-time tokenless WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE historical_time_guest;
       UPLOAD RESOURCE historical_time_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 10.0;
       CREATE SCHEMA trigger_event (

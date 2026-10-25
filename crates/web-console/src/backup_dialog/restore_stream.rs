@@ -239,7 +239,7 @@ pub(crate) async fn measure_archive<F: ArchiveFile>(
 /// One restore the console streams until it learns the outcome.
 pub(crate) struct RestoreUpload<F> {
     pub(crate) reference: CommandExecutionReference,
-    /// The `RESTORE` statement as canonical NSPL.
+    /// The `RESTORE` statement as canonical Plexus.
     pub(crate) statement: String,
     pub(crate) archive: RestoreArchive,
     pub(crate) file: F,
