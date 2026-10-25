@@ -73,11 +73,11 @@ Feature: Web console visual ingestor creation
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
     And selector ".create-name" is filled with "incomplete_source"
     And selector ".create-submit" is clicked
-    Then selector ".create-validation" contains "source type"
+    Then selector ".create-validation" contains "ingestor entity type"
     And selector ".create-name" has value "incomplete_source"
     When selector ".create-ingestor-source [data-source='http-endpoint']" is clicked
     And selector ".create-submit" is clicked
-    Then selector ".create-validation" contains "source client or endpoint"
+    Then selector ".create-validation" contains "ingestor client or endpoint"
 
   @visual_ingestor_scope
   Scenario: Changing the ingestor draft domain invalidates its selected source and codec
@@ -312,7 +312,7 @@ Feature: Web console visual ingestor creation
       CREATE CODEC visual_http_codec FROM JSON TO SCHEMA visual_http_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
       CREATE RELAY visual_http_relay SCHEMA visual_http_event UNBRANCHED;
-      CREATE CLIENT visual_http_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT visual_http_client CONFIG {
         'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
         'method' = 'GET',
         'timeout_ms' = 5000
@@ -353,6 +353,72 @@ Feature: Web console visual ingestor creation
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
       {"payload":"aligned","user_id":42}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @visual_ingestor_pulsar
+  Scenario Outline: A visually created Pulsar ingestor declares who owns its subscription and delivers
+    Given Pulsar is running
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA visual_pulsar_event (user_id I64);
+      CREATE WIRE JSON SCHEMA visual_pulsar_wire MODE STRICT (user_id integer);
+      CREATE CODEC visual_pulsar_codec FROM WIRE JSON SCHEMA visual_pulsar_wire TO SCHEMA visual_pulsar_event;
+      CREATE RELAY visual_pulsar_relay SCHEMA visual_pulsar_event UNBRANCHED;
+      CREATE PULSAR CLIENT visual_pulsar_client CONFIG { 'addr' = '{{pulsar_addr}}' };
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='ingestor']" is clicked
+    And selector ".create-name" is filled with "visual_pulsar_source"
+    And selector ".create-ingestor-source [data-source='pulsar-topic']" is clicked
+    And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_pulsar_client"
+    Then selector ".create-ingestor-source-ref [data-value='visual_pulsar_client']" exists
+    When selector ".create-ingestor-source-ref [data-value='visual_pulsar_client']" is clicked
+    And selector ".create-ingestor-topic" is filled with "visual_{{test_id}}"
+    And selector ".create-ingestor-subscription" is filled with "visual_{{test_id}}"
+    And selector ".create-ingestor-instances" is filled with "1"
+    And selector ".create-ingestor-mode [data-mode='no-ack']" is clicked
+    And selector ".create-ingestor-quiesce [data-quiesce='suspend']" is clicked
+    And selector ".create-ingestor-codec .create-choice-search" is filled with "visual_pulsar_codec"
+    Then selector ".create-ingestor-codec [data-value='visual_pulsar_codec']" exists
+    When selector ".create-ingestor-codec [data-value='visual_pulsar_codec']" is clicked
+    And selector ".create-ingestor-timestamp [data-timestamp='now']" is clicked
+    And selector ".create-ingestor-route .create-ingestor-branching [data-branch='unbranched']" is clicked
+    And selector ".create-ingestor-route .create-ingestor-relay .create-choice-search" is filled with "visual_pulsar_relay"
+    Then selector ".create-ingestor-route .create-ingestor-relay [data-value='visual_pulsar_relay']" exists
+    When selector ".create-ingestor-route .create-ingestor-relay [data-value='visual_pulsar_relay']" is clicked
+    And selector ".create-ingestor-route .create-ingestor-inherit [data-inherit='all']" is clicked
+    And selector ".create-ingestor-route .create-ingestor-flush [data-flush='immediate']" is clicked
+    And selector ".create-ingestor-route .create-ingestor-message-error [data-error='log']" is clicked
+    And selector ".create-ingestor-general-error [data-error='log']" is clicked
+    And selector ".create-submit" is clicked
+    Then selector ".create-validation" contains "owns the subscription"
+    When selector ".create-ingestor-subscription-ownership [data-ownership='ingestor']" is clicked
+    Then selector ".create-preview" contains "SUBSCRIPTION 'visual_{{test_id}}' OWNED BY INGESTOR"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
+    And these Plexus statements are executed on the leader node
+      """
+      CREATE SUBSCRIPTION visual_pulsar_subscription TO visual_pulsar_relay;
+      START;
+      """
+    And Pulsar message is published to topic "visual_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      {"user_id":42}
       """
 
     Examples:

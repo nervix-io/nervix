@@ -735,6 +735,7 @@ mod resolver;
 use resolver::{localhost_identity, test_resolver};
 
 mod lease;
+mod receive_window;
 
 #[nervix_primitives::test]
 async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
@@ -841,6 +842,122 @@ async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
                 .is_none()
         );
     }
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+/// A quiesced cut publishes new checkpoint revisions, and a replica catching up a state above the
+/// bulk budget then holds the one Snapshot stream toward that state's owner for as long as the
+/// transfer takes. The coordinator's section fetch to the same owner must not wait behind it.
+#[nervix_primitives::test]
+async fn a_held_snapshot_stream_leaves_a_backup_section_fetch_its_own_slot() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = connected_transports().await;
+    let release = watch::channel(false).0;
+    let snapshot_executor = Executor::default();
+    transport_b
+        .register_stream_handler::<SnapshotStreamRequest, _, _>({
+            let release = release.clone();
+            move |_context, _request| {
+                let mut release = release.subscribe();
+                let executor = snapshot_executor.clone();
+                async move {
+                    let chunk = executor
+                        .charge_owned(MemoryClass::Bulk, b"snapshot".to_vec())
+                        .await
+                        .map_err(StreamHandlerError::with_cause)?;
+                    let chunks = futures_util::stream::once(async move {
+                        if !*release.borrow() {
+                            release
+                                .changed()
+                                .await
+                                .expect("the release sender lives through the test");
+                        }
+                        Ok(chunk)
+                    });
+                    Ok(StreamingResponse::new(8, chunks))
+                }
+            }
+        })
+        .expect("snapshot stream handler should register");
+    let section_executor = Executor::default();
+    transport_b
+        .register_stream_handler::<backup::FetchCapturedSection, _, _>(move |_context, _request| {
+            let executor = section_executor.clone();
+            async move {
+                let chunk = executor
+                    .charge_owned(MemoryClass::Bulk, b"section".to_vec())
+                    .await
+                    .map_err(StreamHandlerError::with_cause)?;
+                Ok(StreamingResponse::new(
+                    7,
+                    futures_util::stream::iter([Ok(chunk)]),
+                ))
+            }
+        })
+        .expect("section stream handler should register");
+    timeout(Duration::from_secs(5), async {
+        while !transport_a.is_connected_to(&node_b) {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the target should become ready");
+
+    let mut snapshot = transport_a
+        .request_stream(&node_b, SnapshotStreamRequest)
+        .await
+        .expect("the snapshot stream should open and hold its slot until released");
+    let coordination = transport_a
+        .next_coordination_identity()
+        .expect("the coordinator should allocate an identity");
+    // No external deadline: a fetch that waited for the held Snapshot slot would fail at its own
+    // opening deadline instead of opening.
+    let mut section = transport_a
+        .request_stream(
+            &node_b,
+            backup::FetchCapturedSection {
+                coordination,
+                domain: DomainName::parse("default").expect("test domain should be valid"),
+                path: "domains/default/state/section".to_string(),
+            },
+        )
+        .await
+        .expect("a held snapshot stream must not occupy the section fetch's slot");
+    let section_chunk = section
+        .next_chunk()
+        .await
+        .expect("the section chunk should be readable")
+        .expect("the section stream should contain one chunk");
+    assert_eq!(section_chunk.as_ref(), b"section");
+    assert!(
+        section
+            .next_chunk()
+            .await
+            .expect("the section completion should be readable")
+            .is_none()
+    );
+
+    release.send_replace(true);
+    let snapshot_chunk = snapshot
+        .next_chunk()
+        .await
+        .expect("the snapshot chunk should be readable")
+        .expect("the snapshot stream should contain one chunk");
+    assert_eq!(snapshot_chunk.as_ref(), b"snapshot");
+    assert!(
+        snapshot
+            .next_chunk()
+            .await
+            .expect("the snapshot completion should be readable")
+            .is_none()
+    );
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;
@@ -1432,8 +1549,17 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         .expect_err("the authenticated sender must own the declared admission reply");
     assert!(matches!(
         error.current_context(),
-        TransportError::RemoteRejected { status: 403, .. }
+        TransportError::RelayGrantRefused(RelayGrantRefusal::ForeignRegistrar)
     ));
+    // Admission progress shares the sender's bounded application queue. Keep one update queued
+    // so terminal delivery cannot assume the application has consumed every progress frame.
+    transport_b
+        .send(
+            &node_a,
+            Envelope::Ack(registration(1, &node_a).resolution(RemoteAckOutcome::Alive)),
+        )
+        .await
+        .expect("admission progress should enter the sender application queue");
     transport_a
         .send(
             &node_b,
@@ -1453,23 +1579,43 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         )
         .await
         .expect_err("a second grant must wait until the first terminal outcome is sent");
-    assert!(matches!(
-        error.current_context(),
-        TransportError::RemoteRejected { status: 429, .. }
-    ));
+    let TransportError::RelayGrantRefused(refusal) = error.current_context() else {
+        panic!("the receiver answers the second grant with a typed refusal: {error:?}");
+    };
+    // The channel's first batch is still unadmitted while the application holds it, so the
+    // channel is busy before any other capacity is consulted; either way the refusal is temporary.
+    assert_eq!(*refusal, RelayGrantRefusal::ChannelBusy);
+    assert!(refusal.is_capacity());
 
     drop(first);
-    transport_b
-        .send(
+    let terminal = timeout(Duration::from_secs(2), async {
+        loop {
+            let received = incoming_a
+                .recv()
+                .await
+                .expect("the sender application queue should remain open");
+            if let Envelope::Ack(resolution) = &received.envelope
+                && resolution.outcome.is_progress()
+            {
+                assert_eq!(resolution.registration, registration(1, &node_a));
+                continue;
+            }
+            break received.envelope;
+        }
+    });
+    let (sent, terminal) = futures_util::future::join(
+        transport_b.send(
             &node_a,
             Envelope::Ack(registration(1, &node_a).resolution(RemoteAckOutcome::Ack)),
-        )
-        .await
-        .expect("the first relay terminal outcome should be sent");
-    let _terminal = timeout(Duration::from_secs(2), incoming_a.recv())
-        .await
-        .expect("the terminal outcome should enter the sender application queue")
-        .expect("the sender application queue should remain open");
+        ),
+        terminal,
+    )
+    .await;
+    sent.expect("the first relay terminal outcome should be sent");
+    assert_eq!(
+        terminal.expect("the terminal outcome should enter the sender application queue"),
+        Envelope::Ack(registration(1, &node_a).resolution(RemoteAckOutcome::Ack))
+    );
     transport_a
         .send(
             &node_b,
@@ -1484,6 +1630,129 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
     })
     .await
     .expect("redeemed grant expiry work should not delay transport shutdown");
+}
+
+/// A grant the receiver's relay budget has no room for is answered with a typed capacity refusal
+/// both ends count, and the same delivery is granted and received once the room returns.
+#[nervix_primitives::test]
+async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_a,
+        node_b,
+        executor_b,
+        mut incoming_b,
+        ..
+    } = connected_transports().await;
+    let payload = RelayPayload {
+        delivery: RelayDelivery {
+            channel_incarnation: [3; 16],
+            sequence: 0,
+        },
+        kind: RelayPayloadKind::Routed,
+        domain: DomainName::parse("test").expect("test domain should be valid"),
+        relay: RelayName::parse("relay").expect("test relay should be valid"),
+        key: None,
+        batch_ipc: Executor::default()
+            .try_charge_owned(MemoryClass::Relay, vec![1])
+            .expect("the test relay body should fit its budget"),
+        metadata: Vec::new(),
+        acks: Vec::new(),
+        admission: Some(registration(1, &node_a)),
+    };
+    let relay_memory = executor_b.memory(MemoryClass::Relay);
+    let room_for_no_grant = executor_b.limits().relay_scratch_bytes.as_u64();
+    let room = relay_memory
+        .capacity_bytes
+        .checked_sub(relay_memory.reserved_bytes)
+        .expect("a budget never reserves more than its capacity");
+    let filled = room
+        .checked_sub(room_for_no_grant)
+        .expect("an idle receiver has more room than one operation's scratch");
+    let occupied = executor_b
+        .try_reserve(MemoryClass::Relay, filled)
+        .expect("an idle receiver's relay budget takes the fill");
+    let refused = |snapshot: TransportSnapshot, direction: ConnectionDirection| {
+        snapshot.counters.relay_grant_refusals[direction.index()][RelayGrantRefusal::Memory.index()]
+    };
+
+    let error = transport_a
+        .send(&node_b, Envelope::RelayPayload(payload.clone()))
+        .await
+        .expect_err("a receiver without room for the grant refuses it");
+    assert!(matches!(
+        error.current_context(),
+        TransportError::RelayGrantRefused(RelayGrantRefusal::Memory)
+    ));
+    assert!(RelayGrantRefusal::Memory.is_capacity());
+    assert_eq!(
+        refused(transport_b.snapshot(), ConnectionDirection::Inbound),
+        1
+    );
+    assert_eq!(
+        refused(transport_a.snapshot(), ConnectionDirection::Outbound),
+        1
+    );
+
+    drop(occupied);
+    transport_a
+        .send(&node_b, Envelope::RelayPayload(payload))
+        .await
+        .expect("the same delivery is granted once the receiver has room");
+    let received = timeout(Duration::from_secs(2), incoming_b.recv())
+        .await
+        .expect("the granted relay should enter the application queue")
+        .expect("the application queue should remain open");
+    assert!(matches!(received.envelope, Envelope::RelayPayload(_)));
+    assert_eq!(
+        refused(transport_b.snapshot(), ConnectionDirection::Inbound),
+        1
+    );
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+#[test]
+fn each_relay_grant_refusal_counts_under_its_own_reason_and_fails_a_request_by_its_class() {
+    use strum::{EnumCount as _, IntoEnumIterator as _};
+
+    let observations = observation::TransportObservations::default();
+    for refusal in RelayGrantRefusal::iter() {
+        observations.relay_grant_refused(ConnectionDirection::Inbound, refusal);
+    }
+    let counters = observations.counters();
+    let inbound = counters.relay_grant_refusals[ConnectionDirection::Inbound.index()];
+    let outbound = counters.relay_grant_refusals[ConnectionDirection::Outbound.index()];
+    assert_eq!(
+        inbound,
+        [1; RelayGrantRefusal::COUNT],
+        "every refusal reason has a counter of its own"
+    );
+    assert_eq!(outbound, [0; RelayGrantRefusal::COUNT]);
+
+    for refusal in RelayGrantRefusal::iter() {
+        let class = StreamResetReason::of(&TransportError::RelayGrantRefused(refusal));
+        let expected = match refusal {
+            RelayGrantRefusal::Memory
+            | RelayGrantRefusal::QueueItem
+            | RelayGrantRefusal::TerminalOutcome
+            | RelayGrantRefusal::ChannelBusy => StreamResetReason::Capacity,
+            RelayGrantRefusal::SenderEpoch
+            | RelayGrantRefusal::BodyTooLarge
+            | RelayGrantRefusal::MissingAdmission
+            | RelayGrantRefusal::ForeignRegistrar
+            | RelayGrantRefusal::ContentConflict
+            | RelayGrantRefusal::OutOfOrder
+            | RelayGrantRefusal::AdmissionActive => StreamResetReason::Peer,
+        };
+        assert_eq!(class, expected, "{refusal}");
+        assert_eq!(
+            refusal.is_capacity(),
+            expected == StreamResetReason::Capacity,
+            "{refusal}"
+        );
+    }
 }
 
 #[nervix_primitives::test]
@@ -2151,10 +2420,25 @@ async fn bootstrap_rejects_a_certificate_from_another_cluster() {
         .bootstrap_target(PeerTarget::new(transport_b.local_addr(), "localhost"))
         .await
         .expect_err("a peer certificate from another cluster must be rejected");
-    assert!(matches!(
-        error.current_context(),
-        TransportError::InvalidHandshake(_)
-    ));
+    let TransportError::IncompatiblePeer { peer, mismatch } = error.current_context() else {
+        panic!("another cluster is a cluster-identity mismatch: {error:?}");
+    };
+    assert_eq!(peer, &node_b);
+    assert_eq!(
+        mismatch,
+        &PrerequisiteMismatch::ClusterIdentity {
+            local: "cluster-a".to_string(),
+            peer: "cluster-b".to_string(),
+        }
+    );
+    assert_eq!(
+        *transport_a.join_progress().borrow(),
+        JoinProgress::Refused(JoinRefusal {
+            peer: node_b.clone(),
+            mismatch: mismatch.clone(),
+        }),
+        "a bootstrap exchange that ends in a refusal ends the join"
+    );
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;

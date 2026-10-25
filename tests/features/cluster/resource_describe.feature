@@ -571,11 +571,21 @@ Feature: Resource lifecycle
       uploaded resource version 1
       """
     When node "node-3" is started
-    Then within "1s" these NSPL commands complete on node "node-3"
+    And client "control_probe" connects to node "node-3"
+    Then within "300s" node "node-3" observability metric "nervix_interconnect_bulk_bytes_total" with labels eventually reaches at least 1
+      """
+      class="bulk"
+      direction="received"
+      """
+    And within "1s" client "control_probe" completes these Plexus statements
       """
       SHOW CLUSTER STATUS;
       """
-    And within "30s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"
+    And the last command output contains
+      """
+      raft.id: node-3
+      """
+    And within "300s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"
       """
       DESCRIBE RESOURCE large_model VERSION 1;
       """

@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Kafka client Model, the topic source and sink Models with their offset and
+//! - **Owns.** The Kafka client Model, the topic source and emitter Models with their offset and
 //!   delivery modes, the topic and consumer group names a source reads with the rules Kafka holds
 //!   them to, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The Kafka driver, its configuration keys, or how a topic is consumed or
 //!   produced to.
 
@@ -14,24 +14,28 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, time::Duration};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
     configured_client::configured_client,
-    entity_union::{connector_sinks, connector_sources},
+    entity_union::{connector_emitters, connector_ingestors},
     external_name::{ExternalNameError, external_names, refuse_control_characters, require_length},
 };
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
-    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
-    PositionClass, RetryPolicy, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkReferenceKind, SourceBody, SourceEntity, SourceMetadataScope, SourceReference,
-    SourceReferenceKind, TopicName,
+    EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
+    EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
+    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
 };
 
 configured_client!(Kafka: unpooled, config Driver, CreateClientKafka => KafkaConfigEntry);
@@ -75,7 +79,7 @@ fn kafka_consumer_group_rule(text: &str) -> Result<(), ExternalNameError> {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct KafkaTopicSource {
+pub struct KafkaTopicIngestor {
     pub client: ClientName,
     pub topic: KafkaTopicName,
     pub offset_mode: KafkaOffsetMode,
@@ -84,12 +88,140 @@ pub struct KafkaTopicSource {
     pub quiesce: IngestQuiesceMode,
 }
 
-impl SourceEntity for KafkaTopicSource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
-        metadata: SourceMetadataScope::Kafka,
+/// What the connector of a KAFKA TOPIC ingestor holds and how long it waits.
+const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[
+        DeclaredBuffer {
+            holds: "messages librdkafka prefetches",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Driver(
+                    "queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "admitted synchronous control jobs per node",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 1024,
+                    unit: "pending jobs",
+                },
+                overflow: BufferOverflow::RefuseRequest,
+            },
+        },
+    ],
+    waits: &[
+        DeclaredWait {
+            wait: "name resolution",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "connection setup: TCP, TLS and SASL",
+            bound: WaitBound::Driver("socket.connection.setup.timeout.ms, 30 s"),
+        },
+        DeclaredWait {
+            wait: "a fetch",
+            bound: WaitBound::Driver("socket.timeout.ms, 60 s"),
+        },
+        DeclaredWait {
+            wait: "a consumer-group commit under ACK",
+            bound: WaitBound::Fixed(Duration::from_secs(30)),
+        },
+        DeclaredWait {
+            wait: "metadata, partition inspection, offset lookups, watermarks and seeks including \
+                   executor admission",
+            bound: WaitBound::Driver("socket.timeout.ms, 60 s per control job"),
+        },
+        DeclaredWait {
+            wait: "subscribe, assign and unsubscribe",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "destroying a consumer that joined its group, for its LeaveGroup answer",
+            bound: WaitBound::Driver("5 s per LeaveGroup request"),
+        },
+    ],
+    driver_limits: &[
+        "Every librdkafka key passes through, so a client can change each driver default above.",
+        "Connector control execution has two workers per node by default. A commit still \
+         unanswered after its caller's 30 s deadline retains its worker and the source's one \
+         in-flight commit until the native call ends. Native subscribe, assign and unsubscribe \
+         have no cancellable deadline; their caller waits socket.timeout.ms at most.",
+        "A consumer whose last handle is gone is destroyed by one connector control job, which \
+         waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s \
+         LeaveGroup timeout.",
+        "receive.message.max.bytes 100000000",
+    ],
+};
+
+/// What the connector of a KAFKA TOPIC emitter holds and how long it waits.
+const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[
+        DeclaredBuffer {
+            holds: "records the producer queues under ACK",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Driver(
+                    "queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "records the producer queues under NO ACK",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Driver(
+                    "queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576",
+                ),
+                overflow: BufferOverflow::FailPublish,
+            },
+        },
+        DeclaredBuffer {
+            holds: "records awaiting confirmation under ACK",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("ACK PARALLEL MAX"),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+    ],
+    waits: &[
+        DeclaredWait {
+            wait: "a produce request",
+            bound: WaitBound::Driver("request.timeout.ms, 30 s"),
+        },
+        DeclaredWait {
+            wait: "delivery under NO ACK",
+            bound: WaitBound::Driver("message.timeout.ms, 300 s"),
+        },
+        DeclaredWait {
+            wait: "delivery under ACK",
+            bound: WaitBound::Clause("ACK TIMEOUT"),
+        },
+        DeclaredWait {
+            wait: "destroying a producer, for its polling thread and the reports of the records \
+                   its purge failed",
+            bound: WaitBound::Driver("100 ms poll, then a 500 ms flush"),
+        },
+    ],
+    driver_limits: &[
+        "Every librdkafka key passes through, so a client can change each driver default above.",
+        "message.max.bytes 1000000",
+        "A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through \
+         ON MESSAGE ERROR.",
+        "A producer whose last handle is gone is destroyed by one connector control job, which \
+         waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms \
+         poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still \
+         resolving a name included.",
+    ],
+};
+
+impl IngestorDeclaration for KafkaTopicIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        // A Kafka record carries its headers as a list, in the order written, repeats included.
+        headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+        metadata: IngestorMetadataScope::Kafka,
         executes_on_every_cluster_node: false,
-        reference: SourceReferenceKind::Client(ConnectorKind::Kafka),
+        reference: IngestorReferenceKind::Client(ConnectorKind::Kafka),
         position_class: PositionClass::Replayable,
         acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
         delivery: &[
@@ -121,12 +253,13 @@ impl SourceEntity for KafkaTopicSource {
             },
             OptionDeclaration::INSTANCES,
         ],
+        bounds: KAFKA_INGESTOR_BOUNDS,
     };
 }
 
-impl SourceBody for KafkaTopicSource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Client(&self.client)
+impl IngestorEntityBody for KafkaTopicIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Client(&self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -193,15 +326,15 @@ impl KafkaIngestMode {
     }
 }
 
-connector_sources! {
+connector_ingestors! {
     connector Kafka = "KAFKA";
     /// What a Kafka source reads.
-    pub enum KafkaSource;
+    pub enum KafkaIngestor;
     /// The alterations of the ingestors that read a Kafka entity.
-    pub enum KafkaIngestorAlteration;
+    pub enum KafkaTopicIngestorAlteration;
     /// The entities a Kafka source reads.
-    pub enum KafkaSourceEntity {
-        Topic(KafkaTopicSource) = "TOPIC", "Kafka";
+    pub enum KafkaIngestorEntity {
+        Topic(KafkaTopicIngestor) = "TOPIC", "Kafka";
     }
 }
 
@@ -209,37 +342,35 @@ connector_sources! {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct KafkaTopicSink {
+pub struct KafkaTopicEmitter {
+    pub mode: KafkaTopicPublishingMode,
     pub client: ClientName,
-    pub topic: TopicName,
+    pub topic: KafkaTopicName,
 }
 
-impl SinkEntity for KafkaTopicSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: true,
-        reference: SinkReferenceKind::Client(ConnectorKind::Kafka),
+impl EmitterDeclaration for KafkaTopicEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        // A Kafka record carries its headers as a list, in the order written, repeats included.
+        headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+        reference: EmitterReferenceKind::Client(ConnectorKind::Kafka),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[
-            EmitterPublishingModeKind::NoAck,
-            EmitterPublishingModeKind::BrokerAck,
-        ],
+        publishing_modes: KafkaTopicPublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
             keywords: "TOPIC",
-            name: LocatorName::Unquoted {
-                label: "topic_name",
-            },
+            name: LocatorName::External(KafkaTopicName::DECLARATION),
         }),
         options: &[],
         envelope: &[],
         properties: &[],
+        bounds: KAFKA_EMITTER_BOUNDS,
     };
 }
 
-impl SinkBody for KafkaTopicSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for KafkaTopicEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::Kafka,
         })
@@ -250,12 +381,21 @@ impl SinkBody for KafkaTopicSink {
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector Kafka = "KAFKA";
-    /// What a Kafka sink writes.
-    pub enum KafkaSink;
-    /// The entities a Kafka sink writes.
-    pub enum KafkaSinkEntity {
-        Topic(KafkaTopicSink) = "TOPIC";
+    /// What a Kafka emitter writes.
+    pub enum KafkaEmitter;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum KafkaTopicEmitterMode;
+    /// The entities a Kafka emitter writes.
+    pub enum KafkaEmitterEntity {
+        Topic(KafkaTopicEmitter, KafkaTopicPublishingMode) = "TOPIC";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum KafkaTopicPublishingMode {
+        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
     }
 }

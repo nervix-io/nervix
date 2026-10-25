@@ -23,7 +23,7 @@ Feature: Remote record acknowledgements lost between nodes
       CREATE SCHEMA lost_ack_key ( branch_name STRING );
       CREATE BRANCH lost_ack_branch SCHEMA lost_ack_key TTL 5m;
       CREATE RELAY lost_ack_records SCHEMA lost_ack_event BRANCHED BY lost_ack_branch;
-      CREATE CLIENT lost_ack_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT lost_ack_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -36,9 +36,9 @@ Feature: Remote record acknowledgements lost between nodes
           BRANCHED BY lost_ack_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER lost_ack_sink
+      CREATE ATTACHED KAFKA TOPIC EMITTER lost_ack_sink
         FROM lost_ack_records
-        TO KAFKA lost_ack_kafka TOPIC lost_ack_out_{{test_id}}
+        TO lost_ack_kafka TOPIC 'lost_ack_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING lost_ack_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

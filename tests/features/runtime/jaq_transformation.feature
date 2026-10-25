@@ -74,8 +74,7 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -132,8 +131,7 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
-        CREATE CLIENT rabbit_main
-        TYPE RABBITMQ
+        CREATE RABBITMQ CLIENT rabbit_main
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
@@ -188,11 +186,12 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_redis_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_redis_notifications;
-        CREATE CLIENT redis_main
-        TYPE REDIS
+        CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
-          'addr' = '{{redis_addr}}'
+          'addr' = '{{redis_addr}}',
+          'subscription_buffer_messages' = '1024',
+          'idle_timeout_ms' = '30000'
         };
         CREATE REDIS PUBSUB INGESTOR redis_notifications
         FROM redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK
@@ -244,8 +243,7 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-jaq-{{test_id}}'
@@ -300,8 +298,7 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_nats_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_nats_notifications;
-        CREATE CLIENT nats_main
-        TYPE NATS
+        CREATE NATS CLIENT nats_main
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
@@ -354,8 +351,7 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_zeromq_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_zeromq_notifications;
-        CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+        CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_ingest_addr}}',
           'bind' = 'true'
@@ -411,8 +407,7 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_sqs_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_sqs_notifications;
-        CREATE CLIENT sqs_main
-        TYPE SQS
+        CREATE SQS CLIENT sqs_main
         CONFIG {
           'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
@@ -521,8 +516,7 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
-        CREATE CLIENT http_main
-        TYPE HTTP
+        CREATE HTTP CLIENT http_main
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
           'method' = 'GET',
@@ -574,8 +568,7 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
-        CREATE CLIENT ws_main
-        TYPE WEBSOCKETS
+        CREATE WEBSOCKETS CLIENT ws_main
         CONFIG {
           'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
@@ -626,8 +619,7 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
         CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
-        CREATE CLIENT prom_main
-        TYPE PROMETHEUS
+        CREATE PROMETHEUS CLIENT prom_main
         CONFIG {
           'addr' = '{{prometheus_addr}}',
           'timeout_ms' = 5000

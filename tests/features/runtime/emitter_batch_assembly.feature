@@ -43,10 +43,10 @@ Feature: Emitter payload assembly across Arrow carriers
           INHERIT ALL BRANCHED BY by_source_b SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE EMITTER assembled
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC EMITTER assembled
         FROM source_a_events, source_b_events
-        TO KAFKA kafka_main TOPIC assembled_{{test_id}}
+        TO kafka_main TOPIC 'assembled_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL

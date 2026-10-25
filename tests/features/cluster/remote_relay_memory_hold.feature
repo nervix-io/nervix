@@ -18,7 +18,7 @@ Feature: Remote relay delivery held back while the relay memory budget is full
       CREATE CODEC remote_hold_codec
         FROM WIRE JSON SCHEMA remote_hold_wire TO SCHEMA remote_hold_event;
       CREATE RELAY remote_hold_records SCHEMA remote_hold_event UNBRANCHED;
-      CREATE CLIENT remote_hold_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT remote_hold_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -31,10 +31,10 @@ Feature: Remote relay delivery held back while the relay memory budget is full
         TO remote_hold_records INHERIT ALL UNBRANCHED
           FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER remote_hold_sink
+      CREATE KAFKA TOPIC EMITTER remote_hold_sink
         FROM remote_hold_records
-        TO KAFKA remote_hold_kafka TOPIC remote_hold_out_{{test_id}}
-          MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING remote_hold_codec
+        TO remote_hold_kafka TOPIC 'remote_hold_out_{{test_id}}'
+          MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING remote_hold_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """

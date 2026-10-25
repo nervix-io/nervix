@@ -48,8 +48,7 @@ CREATE RELAY notifications
   SCHEMA notification
   BRANCHED BY by_user;
 
-CREATE CLIENT kafka_main
-  TYPE KAFKA
+CREATE KAFKA CLIENT kafka_main
   CONFIG {
     'bootstrap.servers' = 'localhost:9092'
   };
@@ -165,9 +164,9 @@ independent task, and every route sees the same immutable state snapshot for a t
 ## Codec emission with staged headers
 
 ```nspl
-CREATE EMITTER kafka_notifications
+CREATE KAFKA TOPIC EMITTER kafka_notifications
   FROM notifications
-  TO KAFKA kafka_main TOPIC notifications_out
+  TO kafka_main TOPIC 'notifications_out'
     MODE ACK PARALLEL MAX 1000 ACK TIMEOUT 30s
       RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING notification_codec

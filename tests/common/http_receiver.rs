@@ -26,6 +26,11 @@
 //! computed when its response is written. Capture times precede the scripted response, so timing
 //! assertions need no silence window.
 //!
+//! A receiver can also be strict about framing, as some origin servers are: it then answers a
+//! `POST`, `PUT` or `PATCH` that declares neither a `Content-Length` nor a chunked body with
+//! `411 Length Required` before any script is consulted, and records the refusal as a fault
+//! rather than capturing the request.
+//!
 //! # What the receiver observes of its clients
 //!
 //! Beyond the requests themselves, the receiver records two things about how its clients treat
@@ -63,6 +68,7 @@ use nervix_primitives::{
     task::{AbortOnDropHandle, JoinSet},
     time::Instant,
 };
+use nervix_recovery::Discarded as _;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::{
     RootCertStore, ServerConfig,
@@ -88,14 +94,14 @@ pub(crate) const RECEIVER_CONNECTION_STOP_BUDGET: Duration =
 pub(crate) const RECEIVER_STOP_BUDGET: Duration =
     Duration::from_secs(RECEIVER_CONNECTION_STOP_SECONDS + RECEIVER_ACCEPT_LOOP_JOIN_SECONDS);
 
-/// The application header bytes one HTTP emitter request may carry.
+/// The application header bytes one HTTP REQUEST emitter request may carry.
 const HTTP_EMITTER_HEADER_BYTES: usize = 32 * 1024;
-/// The encoded request target one HTTP emitter request may carry.
+/// The encoded request target one HTTP REQUEST emitter request may carry.
 const HTTP_EMITTER_TARGET_BYTES: usize = 8 * 1024;
-/// The application headers one HTTP emitter request may carry.
+/// The application headers one HTTP REQUEST emitter request may carry.
 const HTTP_EMITTER_HEADER_COUNT: usize = 128;
 /// The largest request head the receiver reads. A policy input: large enough that a request at
-/// every HTTP emitter limit at once, with its transport framing, is captured rather than refused.
+/// every HTTP REQUEST emitter limit at once, with its transport framing, is captured rather than refused.
 pub(crate) const MAX_REQUEST_HEAD_BYTES: usize = 256 * 1024;
 /// The most header fields one request head may carry. A policy input, with the same margin.
 pub(crate) const MAX_REQUEST_HEADERS: usize = 512;
@@ -124,11 +130,12 @@ static GENERATED_BODY_CHUNK: [u8; READ_CHUNK_BYTES] = [b'x'; READ_CHUNK_BYTES];
 
 const _: () = assert!(
     HTTP_EMITTER_HEADER_BYTES + HTTP_EMITTER_TARGET_BYTES < MAX_REQUEST_HEAD_BYTES,
-    "a request at every HTTP emitter limit at once must fit the receiver's request head"
+    "a request at every HTTP REQUEST emitter limit at once must fit the receiver's request head"
 );
 const _: () = assert!(
     HTTP_EMITTER_HEADER_COUNT < MAX_REQUEST_HEADERS,
-    "a request at the HTTP emitter header limit must leave room for transport framing fields"
+    "a request at the HTTP REQUEST emitter header limit must leave room for transport framing \
+     fields"
 );
 const _: () = assert!(
     RECEIVER_CONNECTION_STOP_BUDGET.as_nanos() < RECEIVER_STOP_BUDGET.as_nanos(),
@@ -157,6 +164,36 @@ pub(crate) enum ClientCertificatePolicy {
     /// The handshake fails unless the client presents the certificate the receiver issued.
     Required,
 }
+
+/// Whether a receiver demands that a request declare the length of the content its method defines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LengthPolicy {
+    /// Every request is captured, whatever framing it declares.
+    Lenient,
+    /// A `POST`, `PUT` or `PATCH`, whose methods define their request content, that declares
+    /// neither a `Content-Length` nor a chunked body is answered `411 Length Required` and not
+    /// captured.
+    RequiredForContent,
+}
+
+impl LengthPolicy {
+    /// Whether this policy refuses `request` for leaving its length undeclared.
+    fn refuses(self, request: &CapturedRequest) -> bool {
+        match self {
+            Self::Lenient => false,
+            Self::RequiredForContent => {
+                let defines_content = matches!(request.method.as_str(), "POST" | "PUT" | "PATCH");
+                let declares_length = !request.header_values("content-length").is_empty()
+                    || !request.header_values("transfer-encoding").is_empty();
+                defines_content && !declares_length
+            }
+        }
+    }
+}
+
+/// The answer a strict receiver gives a request that leaves its length undeclared.
+const LENGTH_REQUIRED_RESPONSE: &[u8] =
+    b"HTTP/1.1 411 Length Required\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
 
 /// One scripted answer to one request.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -622,6 +659,11 @@ pub(crate) enum ReceiverFault {
     MalformedChunk { connection: u64 },
     #[error("connection {connection} sent a Content-Length that is not a length")]
     MalformedContentLength { connection: u64 },
+    #[error(
+        "connection {connection} sent a {method} request that declares no length, and was \
+         answered 411 Length Required"
+    )]
+    LengthRequired { connection: u64, method: String },
     #[error("connection {connection} closed in the middle of a request")]
     IncompleteRequest { connection: u64 },
     #[error("connection {connection} failed its TLS handshake")]
@@ -837,6 +879,8 @@ impl ReceiverTlsIdentity {
 
 /// What every connection of one receiver shares.
 struct ReceiverState {
+    /// Fixed when the receiver starts, so every connection judges framing the same way.
+    length: LengthPolicy,
     script: Mutex<ReceiverScript>,
     captured: Mutex<Vec<CapturedRequest>>,
     faults: Mutex<RecordedFaults>,
@@ -920,8 +964,9 @@ enum Capture {
 }
 
 impl ReceiverState {
-    fn new() -> Self {
+    fn new(length: LengthPolicy) -> Self {
         Self {
+            length,
             script: Mutex::new(ReceiverScript {
                 pending: VecDeque::new(),
                 standing: ReceiverResponse::Respond(ScriptedResponse::status(200)),
@@ -1040,6 +1085,7 @@ impl HttpReceiver {
     pub(crate) async fn start(
         address: SocketAddr,
         transport: ReceiverTransport,
+        length: LengthPolicy,
     ) -> Result<Self, ReceiverStartError> {
         let listener = TcpListener::bind(address)
             .await
@@ -1055,7 +1101,7 @@ impl HttpReceiver {
             Some(identity) => (Some(identity.acceptor), Some(identity.files)),
             None => (None, None),
         };
-        let state = Arc::new(ReceiverState::new());
+        let state = Arc::new(ReceiverState::new(length));
         let cancellation = CancellationToken::new();
         let accept_loop = AcceptLoop {
             listener,
@@ -1465,6 +1511,11 @@ impl Connection {
                 Ok(None) => return ConnectionEnd::Closed,
                 Err(fault) => return ConnectionEnd::Faulted(fault),
             };
+            if self.state.length.refuses(&request.captured) {
+                return self
+                    .refuse_length(&mut stream, request.captured.method)
+                    .await;
+            }
             let closes = request.closes;
             let target = request.captured.target.clone();
             match self.state.capture(request.captured) {
@@ -1545,6 +1596,29 @@ impl Connection {
 
     /// Writes `bytes` of a response. A client that is gone before they are written abandoned the
     /// response, which the receiver counts rather than records as a fault.
+    /// Answers a request that left its length undeclared with `411 Length Required` and ends the
+    /// connection. The request was never captured, so nothing awaits a response and nothing is
+    /// abandoned, and the refusal is recorded as the connection's fault whether or not the client
+    /// read the answer.
+    async fn refuse_length<S>(&self, stream: &mut S, method: String) -> ConnectionEnd
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let written = nervix_primitives::select! {
+            () = self.cancellation.cancelled() => return ConnectionEnd::Closed,
+            written = async {
+                stream.write_all(LENGTH_REQUIRED_RESPONSE).await?;
+                stream.flush().await
+            } => written,
+        };
+        written
+            .discarded("the fault returned below records the refusal whether or not it was read");
+        ConnectionEnd::Faulted(ReceiverFault::LengthRequired {
+            connection: self.id,
+            method,
+        })
+    }
+
     async fn write<S>(
         &self,
         stream: &mut S,

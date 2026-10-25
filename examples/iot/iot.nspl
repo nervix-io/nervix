@@ -75,15 +75,13 @@ CREATE RELAY normal_telemetry SCHEMA iot_telemetry BRANCHED BY by_device CAPACIT
 CREATE BRANCH by_site_critical SCHEMA site_branch TTL 5m;
 CREATE RELAY site_critical_alerts SCHEMA iot_telemetry BRANCHED BY by_site_critical CAPACITY 2;
 
-CREATE CLIENT mqtt_edge
-  TYPE MQTT
+CREATE MQTT CLIENT mqtt_edge
   CONFIG {
     'addr' = 'mqtt://127.0.0.1:1883',
     'client_id' = 'nervix-iot-demo-{{instance}}'
   };
 
-CREATE CLIENT redis_alerts
-  TYPE REDIS
+CREATE REDIS CLIENT redis_alerts
   POOL SIZE MIN 1 MAX 4
   CONFIG {
     'addr' = 'redis://127.0.0.1:6379/'
@@ -174,40 +172,40 @@ CREATE ATTACHED REINGESTOR site_alert_repartition
     FLUSH EACH 250ms MAX BATCH SIZE 10kb
     ON MESSAGE ERROR LOG;
 
-CREATE ATTACHED EMITTER redis_site_critical_alerts
+CREATE ATTACHED REDIS PUBSUB EMITTER redis_site_critical_alerts
   FROM site_critical_alerts
-  TO REDIS PUBSUB redis_alerts CHANNEL iot_site_critical_alerts
-    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  TO redis_alerts CHANNEL 'iot_site_critical_alerts'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING iot_telemetry_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED EMITTER redis_battery_alerts
+CREATE ATTACHED REDIS PUBSUB EMITTER redis_battery_alerts
   FROM battery_alerts
-  TO REDIS PUBSUB redis_alerts CHANNEL iot_battery_alerts
-    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  TO redis_alerts CHANNEL 'iot_battery_alerts'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING iot_telemetry_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED EMITTER redis_thermal_alerts
+CREATE ATTACHED REDIS PUBSUB EMITTER redis_thermal_alerts
   FROM thermal_alerts
-  TO REDIS PUBSUB redis_alerts CHANNEL iot_thermal_alerts
-    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  TO redis_alerts CHANNEL 'iot_thermal_alerts'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING iot_telemetry_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED EMITTER redis_maintenance_alerts
+CREATE ATTACHED REDIS PUBSUB EMITTER redis_maintenance_alerts
   FROM maintenance_alerts
-  TO REDIS PUBSUB redis_alerts CHANNEL iot_maintenance_alerts
-    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  TO redis_alerts CHANNEL 'iot_maintenance_alerts'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING iot_telemetry_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB

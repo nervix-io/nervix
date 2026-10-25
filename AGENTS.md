@@ -127,8 +127,8 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - [Connector Crates And The Connector Contract](docs/src/connector-contract.md) is the authoritative
   architecture reference for external integrations and the contract between connector crates and
   their host. Any change to a connector crate, the shared connector contract, connector planning or
-  composition, or host source and sink execution must keep that chapter current in the same change.
-  Its scope includes layer and dependency ownership, source and sink plans and lifecycle, metadata
+  composition, or host ingestor and emitter execution must keep that chapter current in the same change.
+  Its scope includes layer and dependency ownership, ingestor and emitter plans and lifecycle, metadata
   and header semantics, ACK and commit boundaries, host loops and cadence, special integrations,
   failures, guarantees, limits, and observability.
 - [Cluster Interconnect](docs/src/interconnect.md) is the authoritative architecture reference for
@@ -255,6 +255,22 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   placements and revisions, failure before and after each durability and authority boundary,
   stale-node catch-up and why state does not resurrect, quiescence, shutdown and restart, replay and
   duplicate windows, observability, and limits.
+- [Backup And Restore Architecture](docs/src/backup-and-restore-architecture.md) is the
+  authoritative architecture reference for backup and restore. Any change to the archive crate or
+  the archive format, to how a backup cuts a domain or captures, stages, transfers, assembles,
+  retains or serves state, to how a restore receives, prepares, plans, admits, records or resumes
+  its steps, or to how restored state is converted, staged, published, gated, reclaimed or resumed
+  must keep that chapter current in the same change. Its scope includes ownership by layer, the
+  archive contract and its compatibility rules, cut kinds, the quiesced cut protocol and its capture
+  fence, owner capture, the capture and installation interconnect operations, transfer, assembly
+  and retention, restore intake, preparation and planning, admission and durable step progress, the
+  installation authority, staging, complete-generation publication and the installation gate,
+  generation storage, restore staging maintenance and its quota, lifecycle resumption, state
+  placement identities, failure semantics at every boundary, guarantees and limits, observability,
+  and qualification evidence. [Backup And Restore](docs/src/backup-and-restore.md) remains the owner
+  of the statements, the command-line and console surfaces, the archive's section and record tables,
+  the operator limits and the reported failures; consensus storage, the interconnect, data-plane
+  concurrency, WASM state and shutdown keep their own contracts.
 - [Shutdown And Recovery](docs/src/shutdown.md) is the authoritative architecture reference for
   stopping a node and recovering from a forced ending. Any change to shutdown phases, the shutdown
   or drain deadline, termination signals, terminating placement eligibility, intake stop, graph
@@ -270,10 +286,15 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   missing value, state variant, required identity, conversion failure, or boundary representation
   is modeled or validated must keep that chapter current in the same change. Interconnect,
   domain-clock, and shutdown details remain in their own authoritative chapters.
+- [Node Settings](docs/src/node-settings.md) is the authoritative architecture reference for
+  prerequisites, cluster parameters and node capabilities. Changes to setting declarations,
+  defaults, derivations, fixed-value contracts, validation, carriers, change procedures,
+  capability sizing or settings enforcement keep that chapter current in the same change.
+  Interconnect, consensus, connector and lifecycle chapters retain their detailed contracts.
 - [Execution Plans](docs/src/execution-plans.md) is the authoritative architecture reference for
   converting a committed schedule into one typed execution revision and installing it as running
   or passive runtime state. Any change to revision construction, typed node, resource, source,
-  sink, processor or message-error plans, schedule-delta application, graph publication, or
+  emitter, processor or message-error plans, schedule-delta application, graph publication, or
   plan-based recovery must keep that chapter current in the same change. The linked engine,
   connector, concurrency, error, resource and state chapters retain their detailed contracts.
 
@@ -332,7 +353,7 @@ the code. A contract rewritten to describe today's imports has stopped saying an
 ### Connector crates
 
 Every external integration belongs in its own crate under `crates/connectors/`, and implements the
-source contract, the sink contract, or both, from `nervix-connector` in `crates/connector`.
+ingestor contract, the emitter contract, or both, from `nervix-connector` in `crates/connector`.
 
 - A connector crate is an engine driven by the host. The host is the server's data plane, which owns
   task lifecycle, branch routing, acknowledgement tracking, quiesce, retry and flush cadence,
@@ -357,9 +378,32 @@ source contract, the sink contract, or both, from `nervix-connector` in `crates/
   encoded-size measure has a bounded Bolero property registered for ordinary and fuzz execution;
   shared implementations keep their properties with their owner. Unit tests do not replace
   required public scenarios or concurrency evidence.
-- The [connector hygiene standard](docs/src/connector-contract.md#connector-hygiene-standard)
-  owns the detailed requirements. Before closing a connector epic, review landed parallel work
-  against it and record evidence and compliance tasks on ClickUp. Keep the contract chapter,
+- Every buffer a connector holds between its transport and the host is declared in its entity's
+  `DeclaredBounds` with its capacity and overflow, and every network wait with what ends it,
+  unbounded ones included. A change adds no unbounded buffer and no wait that only the host's stop
+  ends; one that already exists stays declared unbounded until its connector bounds it. Each
+  client deadline key, such as `timeout_ms` or `connect_timeout_ms`, keeps the one meaning the
+  contract gives it and is read through `ConfiguredDeadline`; no driver call that parks its thread
+  runs on an asynchronous worker; and every deadline key an entity's waits name has its
+  `STALLED PEER` scenario in the capability inventory.
+  [Bounds and deadlines](docs/src/connector-contract.md#bounds-and-deadlines) owns the rule and
+  its review checklist.
+- A connector loses, duplicates or stalls nothing beyond what its declarations state. Every source
+  entity declares the position class and acknowledgement confirmation its transport actually
+  gives, and `acknowledge` returns only once that confirmation arrives, so progress, a drain and a
+  handoff wait for the transport. A read the host cancels returns every message it already took. A
+  payload its codec refuses is consumed as a decode rejection through the ingestor's general error
+  policy, never presented again. Every emitter implements `finish` for what its client still holds,
+  by the host's deadline, and a brokered emitter in `MODE ACK` awaits its broker through the shared
+  `ConfirmationWindow`, so a retry never resends a confirmed record. A connector delivery defect
+  is fixed red first, from a public scenario through the connector's real transport and, where the
+  defect is an interleaving, a Shuttle check over its production owner. The
+  [connector delivery standard](docs/src/connector-contract.md#connector-delivery-standard) owns
+  these rules and their review.
+- The [connector hygiene standard](docs/src/connector-contract.md#connector-hygiene-standard) and
+  the [connector delivery standard](docs/src/connector-contract.md#connector-delivery-standard)
+  own the detailed requirements. Before closing a connector epic, review landed parallel work
+  against both and record evidence and compliance tasks on ClickUp. Keep the contract chapter,
   relevant manuals and the ratchet current in the same change.
 
 `just ratchet` and the clock-boundary check treat the connector crates as data plane, so code that
@@ -446,7 +490,7 @@ choose a backend.
   stays retryable rather than becoming a decode, encode or authentication failure. A class whose
   wait queue is full refuses work that answers a request, because its sender can present it again.
   Work the node already accepted and keeps, which nothing can present again, such as a payload a
-  quiesce buffer retained or a poll a paced source moved past, states
+  quiesce buffer retained or a poll a paced ingestor moved past, states
   `QueueAdmission::WaitForPlace` and waits for a place instead; its owner lets shutdown and a new
   quiesce end that wait, and keeps the work where it was until then or decides on it again. A
   payload a source hands over without an acknowledgement waits only when holding the source's loop
@@ -684,6 +728,41 @@ build and the existing tests, and nothing in it changes behavior.
 - Session subscriptions retain their existing creation, deletion, delivery, sampling, and
   backpressure semantics. They are read-only filtered views and do not support construction,
   inheritance, values, or side effects.
+
+## Node Settings
+
+- A setting exists as a field of a class-typed group. Its `SettingDefinition` declares exactly
+  one sealed class (`Prerequisites`, `ClusterParameters` or `NodeCapabilities`), its semantic
+  value, name, single default, optional derivation and validation. Groups carry `Setting<D>`
+  fields; explicit values and defaults cross the same typed validation boundary.
+- A prerequisite is what a node must bring to reach the live cluster; it travels through gossip
+  and the handshake and is checked at join. [Node Settings](docs/src/node-settings.md) owns the
+  closed list and timing bounds. Nothing needed to reach the cluster depends on what it can
+  learn only after reaching it.
+- A cluster parameter is what the cluster accepts or promises. It has one Raft-committed value,
+  seeded only at first bootstrap and changed by an administrative Plexus statement. A value
+  the registry validates against is never an independent node flag.
+- A node capability is what one node can carry. It is detected or overridden locally and
+  announced through Raft; peers honour its bounds and placement uses its committed record.
+  It changes no cluster acceptance rule or guarantee.
+- Derived values are named methods on their owner, never flags. Defaults are written once in
+  the owning definition. Dependent defaults remain `Option` at the edge until resolved against
+  typed context. Validate operator-supplied relationships before I/O and transitions at commit.
+- A fixed constant declares `nervix::constant(fixed, reason = "...")`, gated with
+  `cfg_attr(nervix_lint, ...)`; the reason names the wire format, RFC, persisted layout, ABI or
+  invariant that fixes it. A convenient literal is not a fixed-value contract.
+- Values depending on the external system are clauses or declared client keys in that
+  connector's Plexus surface, owned by its connector epic; node settings own host policy.
+- Changes remain correct during a rolling restart in any order, take full effect when the
+  last node adopts them, and support the same rollback in reverse. Only prerequisites reject
+  incompatible peers. Mixed operational values within one current shape obey the alpha
+  one-shape rule; they introduce no alternate data representation.
+- Flags use `--<area>-<name>` and `NERVIX_<AREA>_<NAME>`. Resolved settings are observable with
+  secrets redacted, including per-node capabilities and committed-versus-running drift.
+- The temporary `hidden_tunables` source count only decreases while area owners adopt the
+  declarations. It counts governed numeric constants and literal policy calls outside class
+  defaults and reviewed fixed contracts. Its compiler-rule replacement removes the detector
+  and numeric baseline entry together.
 
 ## Runtime and Infrastructure Invariants
 
@@ -1156,8 +1235,11 @@ build and the existing tests, and nothing in it changes behavior.
   parallelism, because the wait ends when the condition holds.
 - Every scenario runs beside the rest of the suite. Do not add a tag, lock, or harness mode that
   runs a scenario alone or stops other scenarios from starting while it runs, such as an @exclusive
-  tag. A scenario that passes only on an idle machine is a defect in that scenario: fix its timing
-  assumption, and rely on the suite’s retries for what load remains.
+  tag. The one reservation is the retry's share: a retry holds a larger share of the run slots on
+  each attempt, never more than a quarter of them, as
+  [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md) specifies. A scenario that
+  passes only on an idle machine, or only once a retry's share quiets the machine, is a defect in
+  that scenario: fix its timing assumption, and rely on the suite’s retries for what load remains.
 - An assertion that something has **not** happened yet is the opposite, and no choice of window
   makes it reliable. Its window opens when the step starts, while the cadence it races started at
   the event before it, so the margin between them is consumed by whatever delayed the step
@@ -1241,7 +1323,8 @@ build and the existing tests, and nothing in it changes behavior.
   complexity 30, which reads no coverage.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual
   Rust cast expressions, struct fields whose presence depends on `cfg(feature = "testing")`, and
-  functions whose cyclomatic complexity exceeds 30.
+  functions whose cyclomatic complexity exceeds 30, and `hidden_tunables`, numeric policy outside
+  class-typed settings and fixed-value contracts as specified in Node Settings.
   The stable source parser sees inactive branches and named or tuple fields; raw identifiers,
   import aliases, qualified paths and conditional documentation attributes are not those facts.
   Complexity is measured by the cargo-crap version `scripts/cargo_crap.py` pins, which
@@ -1271,7 +1354,7 @@ build and the existing tests, and nothing in it changes behavior.
   expectation widened to cover another operation fail. Generated reports are outputs under target,
   never enforcement inputs. Do not infer policy from filenames, sharing traits or method names.
 - [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md) owns the complete
-  fifteen-family contract matrix, source/compiler scope, qualification and review limits. A new
+  sixteen-family contract matrix, source/compiler scope, qualification and review limits. A new
   or changed semantic rule ships with allowed/rejected compiler fixtures distinguished by the
   resolved fact, false-positive and false-negative controls, precise diagnostic/span assertions,
   and invalid, unfulfilled and widened-expectation checks. Source rules also qualify inactive
@@ -1333,12 +1416,14 @@ build and the existing tests, and nothing in it changes behavior.
   diagnostic image of the same revision, whose label makes every run fail unless the deadlock
   evidence of each process its nodes started qualifies; a change to the diagnostic image, its
   evidence collection or a path its scenarios exercise under tracked locks keeps both green.
-- Directed-link burst-loss proof samples 400 packets at 10 ms intervals within the same
-  approximately four-second observation window and 30-second sample bound; the probe helper's
-  Docker launch has a separate bound. Other profiles and healthy observations use 40 packets at
-  100 ms intervals. Effect limits retain their received and lost fractions at every sample size;
-  an incomplete sample, ineffective fault, excessive loss or missing consecutive burst fails
-  qualification. Sampling never extends a product deadline.
+- Directed-link loss proof, for random, burst and combined loss, samples 400 packets at 10 ms
+  intervals within the same approximately four-second observation window and 30-second sample
+  bound; the probe helper's Docker launch has a separate bound. A loss floor judged over 40
+  packets fails a working fault too often: 20% independent loss misses a 5% floor about once in
+  700 samples. Other profiles and healthy observations use 40 packets at 100 ms intervals. Effect
+  limits retain their received and lost fractions at every sample size; an incomplete sample,
+  ineffective fault, excessive loss or missing consecutive burst fails qualification. Sampling
+  never extends a product deadline.
 - `just release-evidence <pull-request>` holds a pull request's head revision to
   `tests/release-evidence.toml`: every label-gated method's label is on the pull request and the
   latest run of every required check passed on that revision. Its register lists each gap a
@@ -1462,12 +1547,50 @@ build and the existing tests, and nothing in it changes behavior.
   Shuttle, Loom, Turmoil, Chaos or Bolero evidence that covers it instead.
 - After completing requested repository changes, include a proposed Conventional Commit title and
   description in the final response. Follow Conventional Commits and select the title type from the
-  current `type-enum` in `./commitlint.config.js`. Put the title and description together in one
-  fenced code block. Keep the title and each description paragraph on a single unwrapped line; do
-  not insert manual line breaks within them because Git and GitHub handle display wrapping.
+  current `type-enum` in `./commitlint.config.js` by the meanings in [Commit Types](#commit-types).
+  Put the title and description together in one fenced code block. Keep the title and each
+  description paragraph on a single unwrapped line; do not insert manual line breaks within them
+  because Git and GitHub handle display wrapping.
 - When the user requests follow-up changes, regenerate both so the final response contains an
   updated title and description that reflect the complete resulting change instead of a stale
   earlier proposal.
+
+## Commit Types
+
+A commit or pull request title takes its type from the `type-enum` in `./commitlint.config.js`,
+and each type has exactly one meaning:
+
+- `feat` adds or extends a product feature: something a user of Nervix, a developer building on
+  it, or an operator or administrator running it can see.
+- `fix` repairs an actual product defect. A repair to a test is `test`, and a repair to CI or a
+  script is `build`; neither is ever `fix`.
+- `perf` improves the performance of the product. Faster tests are `test` and faster scripts are
+  `build`; neither is ever `perf`.
+- `refactor` changes product code without changing its functionality or its performance. A product
+  code change that also affects performance is `perf`.
+- `style` changes style, such as formatting, anywhere in the repository.
+- `test` covers anything related to tests of every kind, including new tests and fixes to existing
+  ones.
+- `build` changes scripts, `justfile` recipes, CI workflows, how Cargo is invoked, and other build
+  and CI tooling.
+- `doc` changes the published product documentation, such as the book under `docs/src`, or
+  documentation in code.
+- `chore` covers anything no other type matches, and a change whose affected part is hard to state
+  clearly.
+- `version` is the commit that changes the product version.
+- `dep` changes Cargo dependencies, typically by upgrading them.
+- `security` is the preferred type for a security issue, including a dependency upgrade.
+- `revert` reverts an earlier commit.
+- `drop` removes product functionality.
+- `agent` changes the instructions for AI agents: `AGENTS.md` and the agent instructions it
+  references, such as the skills under `.agents/skills`.
+- `bench` changes benchmarks only.
+
+Choose the most relevant type even where types intersect. A type names the change as a whole
+rather than every part it touches: a feature adds tests and is still `feat`, and a fix adds its
+reproducer and is still `fix`. Where two types describe the same change, the more specific one is
+the more relevant: an upgrade to a dependency version that fixes a vulnerability is `security`, not
+`dep`. A change to the `type-enum` keeps this section current in the same change.
 
 ## Error and Diagnostic Quality
 

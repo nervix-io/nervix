@@ -1,4 +1,4 @@
-Feature: HTTP emitter response classification
+Feature: HTTP REQUEST emitter response classification
   One HTTP request is sent for each eligible relay record. The emitter answers a definitive
   refusal through the message error route and continues with later records.
 
@@ -32,11 +32,11 @@ Feature: HTTP emitter response classification
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api
           METHOD 'POST'
           PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
@@ -115,11 +115,11 @@ Feature: HTTP emitter response classification
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api
           METHOD 'POST'
           PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
@@ -207,11 +207,11 @@ Feature: HTTP emitter response classification
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api
           METHOD 'POST'
           PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
@@ -277,11 +277,11 @@ Feature: HTTP emitter response classification
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api
           METHOD 'POST'
           PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
@@ -344,11 +344,11 @@ Feature: HTTP emitter response classification
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api
           METHOD 'POST'
           PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s

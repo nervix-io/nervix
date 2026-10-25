@@ -24,8 +24,7 @@ Feature: Altering schemas on a running domain
 
       CREATE RELAY running_events SCHEMA running_event UNBRANCHED;
 
-      CREATE CLIENT running_event_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT running_event_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
@@ -44,9 +43,9 @@ Feature: Altering schemas on a running domain
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE EMITTER running_event_out
+      CREATE ZEROMQ PUSH EMITTER running_event_out
         FROM running_events
-        TO ZEROMQ running_event_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING running_event_codec
+        TO running_event_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING running_event_codec
         INHERIT ALL
         FLUSH EACH 30s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -66,9 +65,9 @@ Feature: Altering schemas on a running domain
       ALTER SCHEMA running_event
         ADD FIELD note STRING;
       DROP EMITTER running_event_out;
-      CREATE EMITTER running_event_out
+      CREATE ZEROMQ PUSH EMITTER running_event_out
         FROM running_events
-        TO ZEROMQ running_event_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING running_event_codec
+        TO running_event_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING running_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -112,8 +111,7 @@ Feature: Altering schemas on a running domain
         TO SCHEMA timeout_event;
       CREATE RELAY timeout_events SCHEMA timeout_event UNBRANCHED;
 
-      CREATE CLIENT timeout_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT timeout_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
@@ -130,9 +128,9 @@ Feature: Altering schemas on a running domain
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER timeout_out
+      CREATE ZEROMQ PUSH EMITTER timeout_out
         FROM timeout_events
-        TO ZEROMQ timeout_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING timeout_event_codec
+        TO timeout_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING timeout_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -330,8 +328,7 @@ Feature: Altering schemas on a running domain
 
       CREATE RELAY rollback_events SCHEMA rollback_event UNBRANCHED CAPACITY 3;
 
-      CREATE CLIENT rollback_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT rollback_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
@@ -350,9 +347,9 @@ Feature: Altering schemas on a running domain
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE EMITTER rollback_out
+      CREATE ZEROMQ PUSH EMITTER rollback_out
         FROM rollback_events
-        TO ZEROMQ rollback_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING rollback_event_codec
+        TO rollback_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING rollback_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

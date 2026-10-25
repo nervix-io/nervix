@@ -15,10 +15,7 @@
     )
 )]
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::{Report, ResultExt};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -26,10 +23,9 @@ use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, DomainPlanningInputs, ReplicatedTransaction,
     TransactionActivity, TransactionCommandResult, TransactionCommitAdmissionFailure,
     TransactionCommitAdmissionPlan, TransactionCommitAdvance, TransactionDiagnostic,
-    TransactionMutationError, TransactionOutcome, TransactionQueueAdmission,
-    TransactionQueueLimits, TransactionQueueRequest, TransactionReportArchive,
-    TransactionScheduleEligibility, TransactionState, TransactionStatement,
-    TransactionStatementRequest, TransactionStepEffect, TransactionStepResult,
+    TransactionMutationError, TransactionOutcome, TransactionReportArchive,
+    TransactionScheduleEligibility, TransactionState, TransactionStatementRequest,
+    TransactionStepEffect, TransactionStepResult,
 };
 use nervix_models::{
     CanonicalImpactSet, CommandExecutionReference, DomainName, DomainSchedule, DomainState,
@@ -73,24 +69,18 @@ mod application;
 mod describe;
 mod impact;
 mod inspection;
+mod limits;
 mod rendering;
 mod request;
 pub(in crate::application) mod restored;
+mod standalone;
 pub(in crate::application) use impact::{QuiescenceAttempt, TransactionStepImpactRecorder};
 use inspection::transaction_inspection_status;
 pub use inspection::{InspectedReportError, InspectingSession, TransactionInspectionOutcome};
-
-pub(in crate::application) const DEFAULT_TRANSACTION_IDLE_TIMEOUT: Duration =
-    Duration::from_secs(15 * 60);
-
-pub(in crate::application) const DEFAULT_TRANSACTION_TOMBSTONE_RETENTION: Duration =
-    Duration::from_secs(15 * 60);
-
-pub(in crate::application) const DEFAULT_TRANSACTION_MAX_STATEMENTS: usize = 256;
-
-pub(in crate::application) const DEFAULT_TRANSACTION_MAX_SOURCE_BYTES: u64 = 1024 * 1024;
-
-pub(in crate::application) const DEFAULT_TRANSACTION_MAX_OPEN: usize = 1024;
+pub use limits::{
+    TransactionBounds, TransactionIdleTimeout, TransactionLimits, TransactionMaxOpen,
+    TransactionMaxSourceBytes, TransactionMaxStatements, TransactionTombstoneRetention,
+};
 
 /// Recovery is independent across transactions, but its background work remains bounded per node.
 /// One held executor still leaves capacity for unrelated domains and for later candidates.
@@ -631,40 +621,6 @@ fn finished_transaction_attachment(
         diagnostics,
     })
 }
-fn standalone_transaction_result(transaction: &ReplicatedTransaction) -> CommandResult {
-    if !matches!(
-        transaction.finished_outcome(),
-        Some(TransactionOutcome::Committed)
-    ) {
-        let mut result = transaction_commit_result(transaction);
-        result.transaction = None;
-        return result;
-    }
-
-    let Some(step) = transaction.commit_results().last() else {
-        return command_error(format!(
-            "durable command transaction '{}' completed without a command result",
-            transaction.id
-        ));
-    };
-    let disposition = if step.result.success {
-        CommandDisposition::Completed {
-            already_existed: step.result.already_existed,
-        }
-    } else {
-        CommandDisposition::Failed
-    };
-    CommandResult {
-        diagnostics: step
-            .result
-            .diagnostics
-            .iter()
-            .map(CommandDiagnostic::from)
-            .collect(),
-        transaction_admission: step.result.admission.clone(),
-        ..CommandResult::new(disposition, step.result.message.clone())
-    }
-}
 
 pub(in crate::application) fn is_queueable_transaction_statement(statement: &Statement) -> bool {
     statement.is_model_mutation()
@@ -716,7 +672,8 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         | Statement::DescribeUdf(_)
         | Statement::DescribePlacement(_)
         | Statement::DescribeRelocation(_)
-        | Statement::DescribeTransaction(_) => "DESCRIBE",
+        | Statement::DescribeTransaction(_)
+        | Statement::DescribeCluster(_) => "DESCRIBE",
         _ => "statement",
     }
 }
@@ -1040,294 +997,6 @@ impl SessionServiceImpl {
             self.release_session_transaction_binding(subscriptions);
         }
         result
-    }
-
-    pub(in crate::application) async fn execute_standalone_transaction(
-        &self,
-        transaction_id: String,
-        request_reference: CommandExecutionReference,
-        owner: UserName,
-        domain: DomainName,
-        source: String,
-        statement: Statement,
-    ) -> CommandResult {
-        let root_transaction_id = transaction_id;
-        let mut attempt_transaction_id = root_transaction_id.clone();
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let result = Box::pin(self.execute_standalone_transaction_attempt(
-                attempt_transaction_id.clone(),
-                request_reference.clone(),
-                owner.clone(),
-                domain.clone(),
-                source.clone(),
-                statement.clone(),
-            ))
-            .await;
-            let attempt = self
-                .inner
-                .consensus
-                .current_transaction(&attempt_transaction_id)
-                .await;
-            let Some(TransactionState::Finished(finished)) =
-                attempt.as_ref().map(|transaction| &transaction.state)
-            else {
-                return result;
-            };
-            if !matches!(
-                &finished.outcome,
-                TransactionOutcome::PlanningInputsChanged { .. }
-            ) {
-                return result;
-            }
-            attempt_transaction_id = format!(
-                "{root_transaction_id}.refresh.{}",
-                finished.outcome_revision
-            );
-        }
-    }
-
-    async fn execute_standalone_transaction_attempt(
-        &self,
-        transaction_id: String,
-        request_reference: CommandExecutionReference,
-        owner: UserName,
-        domain: DomainName,
-        source: String,
-        statement: Statement,
-    ) -> CommandResult {
-        if !is_queueable_transaction_statement(&statement) {
-            return command_error(format!(
-                "{} cannot use durable transaction application",
-                transaction_statement_label(&statement)
-            ));
-        }
-        let limits = TransactionQueueLimits {
-            max_statements: self.inner.transaction_max_statements,
-            max_source_bytes: self.inner.transaction_max_source_bytes,
-        };
-        let queued = TransactionStatementRequest {
-            request_reference,
-            expected_position: 0,
-            source,
-            statement,
-        };
-
-        let mut current = self
-            .inner
-            .consensus
-            .current_transaction(&transaction_id)
-            .await;
-        let mut prepared = None;
-        if current.is_none() {
-            let candidate = ReplicatedTransaction::open_for_command(
-                transaction_id.clone(),
-                domain.clone(),
-                owner.clone(),
-                self.transaction_activity(),
-                queued.request_reference.clone(),
-            );
-            if let Err(error) = candidate.queue_admission(&owner, &domain, &queued, limits) {
-                return command_error(error.to_string());
-            }
-            let prepared_admission = match self
-                .preflight_transaction_statement(&candidate, &queued)
-                .await
-            {
-                Ok(admission) => admission,
-                Err(error) => return command_error(format!("{error:#}")),
-            };
-            prepared = Some(prepared_admission);
-            if let Err(error) = self
-                .inner
-                .consensus
-                .open_transaction(candidate, self.inner.transaction_max_open)
-                .await
-                && self
-                    .inner
-                    .consensus
-                    .current_transaction(&transaction_id)
-                    .await
-                    .is_none()
-            {
-                return self.transaction_consensus_error_response(error).await;
-            }
-            current = self
-                .inner
-                .consensus
-                .current_transaction(&transaction_id)
-                .await;
-            if current
-                .as_ref()
-                .is_some_and(|transaction| transaction.statements.is_empty())
-            {
-                let prepared_admission = prepared
-                    .take()
-                    .verified("the newly opened transaction prepared its first admission above");
-                let admitted =
-                    TransactionStatement::admitted(queued.clone(), prepared_admission.result);
-                match self
-                    .inner
-                    .consensus
-                    .queue_transaction_statement(TransactionQueueRequest {
-                        id: transaction_id.clone(),
-                        owner: owner.clone(),
-                        domain: domain.clone(),
-                        activity: self.transaction_activity(),
-                        statement: admitted,
-                        report: prepared_admission.report,
-                        limits,
-                    })
-                    .await
-                {
-                    Ok(queued_transaction) => current = Some(queued_transaction),
-                    Err(error) => {
-                        return self.transaction_consensus_error_response(error).await;
-                    }
-                }
-            }
-        }
-        let mut transaction =
-            current.verified("the durable command transaction was opened or observed above");
-
-        if transaction.owner != owner || transaction.domain != domain {
-            return command_error(format!(
-                "durable command transaction '{}' is bound to a different owner or domain",
-                transaction.id
-            ));
-        }
-        if let TransactionState::Open(_) = &transaction.state {
-            match transaction.queue_admission(&owner, &domain, &queued, limits) {
-                Ok(TransactionQueueAdmission::Existing(_)) => {}
-                Ok(TransactionQueueAdmission::New) => {
-                    let prepared_admission = match prepared.take() {
-                        Some(prepared_admission) => prepared_admission,
-                        None => {
-                            match self
-                                .preflight_transaction_statement(&transaction, &queued)
-                                .await
-                            {
-                                Ok(admission) => admission,
-                                Err(error) => return command_error(format!("{error:#}")),
-                            }
-                        }
-                    };
-                    let admitted =
-                        TransactionStatement::admitted(queued.clone(), prepared_admission.result);
-                    transaction = match self
-                        .inner
-                        .consensus
-                        .queue_transaction_statement(TransactionQueueRequest {
-                            id: transaction_id.clone(),
-                            owner: owner.clone(),
-                            domain: domain.clone(),
-                            activity: self.transaction_activity(),
-                            statement: admitted,
-                            report: prepared_admission.report,
-                            limits,
-                        })
-                        .await
-                    {
-                        Ok(transaction) => transaction,
-                        Err(error) => {
-                            return self.transaction_consensus_error_response(error).await;
-                        }
-                    };
-                }
-                Err(error) => return command_error(error.to_string()),
-            }
-        }
-
-        let mut current = transaction;
-        let committing = loop {
-            nervix_primitives::task::consume_budget().await;
-            match &current.state {
-                TransactionState::Open(_) => {
-                    let prepared = match self.prepare_transaction_commit(&current).await {
-                        Ok(prepared) => prepared,
-                        Err(error) => {
-                            let message = transaction_commit_error_message(&error);
-                            match self
-                                .fail_incomplete_transaction_commit(
-                                    &current,
-                                    &owner,
-                                    self.transaction_activity(),
-                                    &error,
-                                )
-                                .await
-                            {
-                                Ok(Some(transaction)) => {
-                                    return standalone_transaction_result(&transaction);
-                                }
-                                Ok(None) => return command_error(message),
-                                Err(error) => {
-                                    return self.transaction_consensus_error_response(error).await;
-                                }
-                            }
-                        }
-                    };
-                    let admission = self
-                        .inner
-                        .consensus
-                        .start_transaction_commit(
-                            transaction_id.clone(),
-                            owner.clone(),
-                            self.transaction_activity(),
-                            prepared.expected_preview,
-                            prepared.report,
-                            prepared.plan,
-                        )
-                        .await;
-                    match admission {
-                        Ok(transaction) => break transaction,
-                        Err(error)
-                            if matches!(
-                                error.current_context(),
-                                ConsensusTransactionError::Mutation(
-                                    TransactionMutationError::PreviewStale { .. }
-                                        | TransactionMutationError::PlanningInputsChanged { .. }
-                                )
-                            ) =>
-                        {
-                            let refreshed = self
-                                .inner
-                                .consensus
-                                .current_transaction(&transaction_id)
-                                .await;
-                            let Some(refreshed) = refreshed else {
-                                return self.transaction_consensus_error_response(error).await;
-                            };
-                            current = refreshed;
-                        }
-                        Err(error) => {
-                            return self.transaction_consensus_error_response(error).await;
-                        }
-                    }
-                }
-                TransactionState::Committing(_) | TransactionState::Finished(_) => break current,
-            }
-        };
-        let finished = if matches!(committing.state, TransactionState::Finished(_)) {
-            Ok(committing)
-        } else {
-            Box::pin(self.execute_replicated_commit(&transaction_id)).await
-        };
-        match finished {
-            Ok(transaction) => standalone_transaction_result(&transaction),
-            Err(error) => {
-                if let Some(ConsensusError::LeadershipLost { leader_id }) =
-                    error.downcast_ref::<ConsensusError>()
-                {
-                    self.not_leader_response("", leader_id.clone()).await
-                } else {
-                    let message = transaction_commit_error_message(&error);
-                    command_error(format!(
-                        "durable command transaction '{transaction_id}' remains applying: \
-                         {message}"
-                    ))
-                }
-            }
-        }
     }
 
     pub(in crate::application) async fn plan_transaction_statements(
@@ -2805,7 +2474,6 @@ impl SessionServiceImpl {
         self.reconcile_persistent_commands(command_retry_fence, command_retry_fence)
             .await;
         let transactions = self.inner.consensus.current_transactions().await;
-        let mut tombstone_removal_required = false;
 
         for transaction in transactions.values() {
             nervix_primitives::task::consume_budget().await;
@@ -2843,15 +2511,25 @@ impl SessionServiceImpl {
                     }
                 }
                 TransactionState::Committing(_) => {}
-                TransactionState::Finished(finished) => {
+                TransactionState::Finished(_) => {
                     self.inner.transaction_bindings.remove(&transaction.id);
-                    if finished.finished_at <= finished_before {
-                        tombstone_removal_required = true;
-                    }
+                    #[cfg(feature = "testing")]
+                    self.inner
+                        .runtime
+                        .pause_transaction_cleanup_if_armed(
+                            self.inner.consensus.local_node_id(),
+                            &transaction.domain,
+                        )
+                        .await;
                 }
                 TransactionState::Open(_) => {}
             }
         }
+        let tombstone_removal_required = self
+            .inner
+            .consensus
+            .has_removable_finished_transactions(finished_before)
+            .await;
         if tombstone_removal_required
             && let Err(error) = self
                 .inner

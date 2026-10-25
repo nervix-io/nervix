@@ -1,5 +1,5 @@
 Feature: NATS emission
-  Scenario Outline: NATS emitter drains a wide columnar batch in order without duplicates
+  Scenario Outline: NATS SUBJECT emitter drains a wide columnar batch in order without duplicates
     Given NATS is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -48,8 +48,7 @@ Feature: NATS emission
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY columnar_events SCHEMA columnar_event BRANCHED BY by_tenant CAPACITY 64;
 
-      CREATE CLIENT nats_main
-        TYPE NATS
+      CREATE NATS CLIENT nats_main
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
@@ -66,10 +65,10 @@ Feature: NATS emission
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE ATTACHED EMITTER columnar_events_out
+      CREATE ATTACHED NATS SUBJECT EMITTER columnar_events_out
         FROM columnar_events
-        TO NATS nats_main SUBJECT columnar_out_{{test_id}}
-          MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        TO nats_main SUBJECT 'columnar_out_{{test_id}}'
+          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING columnar_event_codec
         INHERIT ALL EXCEPT secret
         SET secret = leak_sensitive(input.secret)
@@ -98,10 +97,8 @@ Feature: NATS emission
       relay="columnar_events"
       """
     When emitter "columnar_events_out" leaves stall mode
-    # The stall releases every buffered message at once, so this drains a larger burst than the
-    # streaming scenario below and is given the same budget. Measured drain of 32768 messages is
-    # about four seconds on an idle machine, which left the previous five second bound inside its
-    # own margin: it failed attempts on CI for this branch and for main alike.
+    # The independent sequence observation drains the complete burst while the runner polls
+    # other scenarios, retaining the original deadline and every sequence/header assertion.
     Then within "90s" the observed broker receives <message_count> messages in sequence by field "sequence" with headers
       """
       route=primary
@@ -113,7 +110,7 @@ Feature: NATS emission
       | 1            | 32768         |
       | 3            | 32768         |
 
-  Scenario Outline: NATS emitter publishes JSON payloads from a relay
+  Scenario Outline: NATS SUBJECT emitter publishes JSON payloads from a relay
     Given MQTT is running
     And NATS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -137,8 +134,7 @@ Feature: NATS emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
@@ -153,12 +149,11 @@ Feature: NATS emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT nats_main
-        TYPE NATS
+        CREATE NATS CLIENT nats_main
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
-        CREATE EMITTER nats_notifications FROM notifications TO NATS nats_main SUBJECT notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE NATS SUBJECT EMITTER nats_notifications FROM notifications TO nats_main SUBJECT 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -190,7 +185,7 @@ Feature: NATS emission
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: NATS emitter honors its flush deadline during sustained input collection
+  Scenario Outline: NATS SUBJECT emitter honors its flush deadline during sustained input collection
     # The message count stays below Core NATS's bounded subscription queue. The emitter's input
     # and output size limits are deliberately above this narrow batch's Arrow footprint, so
     # their independent timers must make progress.
@@ -222,8 +217,7 @@ Feature: NATS emission
 
       CREATE RELAY narrow_events SCHEMA narrow_event UNBRANCHED CAPACITY 64;
 
-      CREATE CLIENT nats_main
-        TYPE NATS
+      CREATE NATS CLIENT nats_main
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
@@ -239,11 +233,11 @@ Feature: NATS emission
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE ATTACHED EMITTER narrow_events_out
+      CREATE ATTACHED NATS SUBJECT EMITTER narrow_events_out
         FROM narrow_events
         COLLECT FOR 1ms MAX BATCH SIZE 64MiB
-        TO NATS nats_main SUBJECT narrow_out_{{test_id}}
-          MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        TO nats_main SUBJECT 'narrow_out_{{test_id}}'
+          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING narrow_event_codec
         INHERIT ALL
         INVOKE write_header("route", "narrow")
@@ -271,6 +265,8 @@ Feature: NATS emission
       direction="sent"
       relay="narrow_events"
       """
+    # Verify every sequence and header on the observation's runtime task, so a loaded scenario
+    # runner cannot spend the delivery budget between polls of an already buffered message.
     Then within "90s" the observed broker receives <message_count> messages in sequence by field "sequence" with headers
       """
       route=narrow
@@ -302,7 +298,7 @@ Feature: NATS emission
       CREATE SCHEMA user_id_branch ( user_id I64 );
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -319,9 +315,9 @@ Feature: NATS emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT nats_main TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };
-      CREATE EMITTER nats_jetstream FROM notifications
-        TO NATS nats_main SUBJECT jetstream_out_{{test_id}}
+      CREATE NATS CLIENT nats_main CONFIG { 'addr' = '{{nats_addr}}' };
+      CREATE NATS SUBJECT EMITTER nats_jetstream FROM notifications
+        TO nats_main SUBJECT 'jetstream_out_{{test_id}}'
           MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 1s
             RETRY POLICY BACKOFF 100ms MAX 500ms
           ENCODE USING notification_codec
@@ -391,7 +387,7 @@ Feature: NATS emission
         FROM WIRE JSON SCHEMA window_record_wire
         TO SCHEMA window_record;
       CREATE RELAY window_records SCHEMA window_record UNBRANCHED;
-      CREATE CLIENT nats_in TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };
+      CREATE NATS CLIENT nats_in CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE NATS SUBJECT INGESTOR window_in
         FROM nats_in SUBJECT 'window_in_{{test_id}}' QUEUE GROUP 'window_in_group_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING window_input_codec
@@ -402,9 +398,9 @@ Feature: NATS emission
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT nats_out TYPE NATS CONFIG { 'addr' = '{{nats_controlled_addr}}' };
-      CREATE EMITTER window_out FROM window_records
-        TO NATS nats_out SUBJECT window_out_{{test_id}}
+      CREATE NATS CLIENT nats_out CONFIG { 'addr' = '{{nats_controlled_addr}}' };
+      CREATE NATS SUBJECT EMITTER window_out FROM window_records
+        TO nats_out SUBJECT 'window_out_{{test_id}}'
           MODE JETSTREAM ACK PARALLEL MAX 16384 ACK TIMEOUT 3s
             RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING window_record_codec
@@ -426,6 +422,93 @@ Feature: NATS emission
       """
     When the controlled NATS endpoint forwards everything
     Then within "180s" NATS JetStream stream "window_{{test_id}}" holds every record from 1 to 12000 by field "sequence", and records 1 to 16 exactly once
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # A core NATS write delivers its records once the client flushed them to its socket. The emitter
+  # publishes through an endpoint the scenario controls, which goes down, so the client holds the
+  # three records one write hands it and the write runs out of the client's timeout_ms with its
+  # records unresolved. Every retry first waits for the client to flush what it holds and hands it
+  # nothing more, so the client holds one copy of each record. STOP ends the emitter either by
+  # draining it, whose retry waits for the client to send what it holds and then sends its own copy
+  # of each record, or by finishing it, which flushes what the client holds. Either way STOP returns
+  # only once the endpoint forwards again, and every held record reaches the subscriber, a retried
+  # one possibly twice.
+  @nats_finish_at_stop @emitter_finish_at_stop @deloxide_stress
+  Scenario Outline: STOP sends the records a core NATS write left with its client
+    Given NATS is running
+    And a NATS endpoint the scenario controls is configured
+    And drain timeout is configured as "60s"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And NATS subject "held_out_{{test_id}}" is observed
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA held_event ( sequence I64 );
+      CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );
+      CREATE CODEC held_events_codec FROM JSON TO SCHEMA held_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
+      CREATE VHOST edge held-nats-{{test_id}}.example.com;
+      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR held_source
+        FROM held_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_events_codec
+        TIMESTAMP NOW
+        TO held_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE NATS CLIENT held_nats CONFIG {
+        'addr' = '{{nats_controlled_addr}}',
+        'timeout_ms' = '1000'
+      };
+      CREATE NATS SUBJECT EMITTER held_output FROM held_events
+        TO held_nats SUBJECT 'held_out_{{test_id}}'
+          MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        ENCODE USING held_event_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "held-nats-{{test_id}}.example.com" path "/events"
+      """
+      [{"sequence":0}]
+      """
+    Then the observed broker receives a payload
+      """
+      {"sequence":0}
+      """
+    When the controlled NATS endpoint goes down
+    Then the controlled NATS endpoint refuses a client that reconnects
+    When http payload is posted to node "node-1" with host "held-nats-{{test_id}}.example.com" path "/events"
+      """
+      [{"sequence":1},{"sequence":2},{"sequence":3}]
+      """
+    Then within "30s" DESCRIBE EMITTER "held_output" on the leader node contains
+      """
+      did not finish within timeout_ms 1s
+      """
+    When STOP runs while the controlled NATS endpoint forwards everything after "2s"
+    Then STOP completed after the controlled NATS endpoint forwarded everything
+    And within "30s" the observed broker receives payloads
+      """
+      {"sequence":1}
+      {"sequence":2}
+      {"sequence":3}
+      """
 
     Examples:
       | cluster_size |

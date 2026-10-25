@@ -634,6 +634,11 @@ class Workspace:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise RunnerError(f"another native coverage run is using {build}") from None
+            # Cargo tags directories it creates. The collector creates this one first to lock
+            # it, so it also owns the cache marker that permits Cargo's guarded cleanup.
+            (build / "CACHEDIR.TAG").write_text(
+                "Signature: 8a477f597d28d172789f06886806bc55\n", encoding="utf-8"
+            )
             yield
 
     def display(self, path: Path) -> str:

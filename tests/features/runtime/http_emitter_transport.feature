@@ -1,9 +1,9 @@
-Feature: HTTP emitter transport failures and TLS identity
+Feature: HTTP REQUEST emitter transport failures and TLS identity
   Outbound attempts use the configured physical timeout and TLS identity. A failed attempt
   retains its request for the emitter's retry policy.
 
   @http_emitter_transport
-  Scenario Outline: An HTTP emitter presents its mounted client certificate
+  Scenario Outline: An HTTP REQUEST emitter presents its mounted client certificate
     Given HTTPS receiver "secure" is running with a certificate for "127.0.0.1" and requires a client certificate
     And HTTP receiver "secure" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -34,14 +34,14 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP MOUNT receiver_tls VERSION 1 CONFIG {
+      CREATE HTTP CLIENT api MOUNT receiver_tls VERSION 1 CONFIG {
         'endpoint' = '{{http_receiver.secure}}', 'timeout_ms' = 5000,
         'tls_ca_file' = '{{receiver_tls}}/ca.pem',
         'tls_cert_file' = '{{receiver_tls}}/client.pem',
         'tls_key_file' = '{{receiver_tls}}/client-key.pem'
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH '/events'
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH '/events'
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s WITHOUT BODY
         INVOKE write_header('Accept', 'application/json')
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -66,7 +66,7 @@ Feature: HTTP emitter transport failures and TLS identity
       | 3            |
 
   @http_emitter_transport
-  Scenario Outline: An HTTP emitter retries after a failed TLS handshake for <case>
+  Scenario Outline: An HTTP REQUEST emitter retries after a failed TLS handshake for <case>
     Given HTTPS receiver "secure" is running with a certificate for "<certificate_host>"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -96,11 +96,11 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.secure}}', 'timeout_ms' = 5000<ca_setting>
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH '/events'
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH '/events'
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -125,7 +125,7 @@ Feature: HTTP emitter transport failures and TLS identity
       | 3            | wrong host | localhost        | , 'tls_ca_file' = '{{receiver_tls}}/ca.pem' | certificate not valid for name |
 
   @http_emitter_transport
-  Scenario Outline: An HTTP emitter without the client certificate its receiver requires never delivers its request
+  Scenario Outline: An HTTP REQUEST emitter without the client certificate its receiver requires never delivers its request
     Given HTTPS receiver "secure" is running with a certificate for "127.0.0.1" and requires a client certificate
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -155,12 +155,12 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP MOUNT receiver_tls VERSION 1 CONFIG {
+      CREATE HTTP CLIENT api MOUNT receiver_tls VERSION 1 CONFIG {
         'endpoint' = '{{http_receiver.secure}}', 'timeout_ms' = 5000,
         'tls_ca_file' = '{{receiver_tls}}/ca.pem'
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH '/events'
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH '/events'
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -184,7 +184,7 @@ Feature: HTTP emitter transport failures and TLS identity
       | 3            |
 
   @http_emitter_transport
-  Scenario Outline: An HTTP emitter retries after <failure> without passing the next record
+  Scenario Outline: An HTTP REQUEST emitter retries after <failure> without passing the next record
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers with
       """
@@ -210,11 +210,11 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 300
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH concat('/events/', input.event_id)
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -244,7 +244,7 @@ Feature: HTTP emitter transport failures and TLS identity
       | 3            | lost response    | lose response | 200ms       |
 
   @http_emitter_transport
-  Scenario Outline: One HTTP emitter waits across its source relays
+  Scenario Outline: One HTTP REQUEST emitter waits across its source relays
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers with
       """
@@ -275,11 +275,11 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO source_b INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM source_a, source_b
-        TO HTTP api METHOD 'POST' PATH concat('/events/', input.event_id)
+      CREATE HTTP REQUEST EMITTER published FROM source_a, source_b
+        TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -335,11 +335,11 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 300
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH concat('/events/', input.event_id)
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -398,11 +398,11 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH concat('/events/', input.event_id)
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -436,7 +436,7 @@ Feature: HTTP emitter transport failures and TLS identity
       | 3            |
 
   @http_emitter_transport @http_emitter_dns
-  Scenario Outline: An HTTP emitter keeps its request pending while its endpoint name does not resolve or refuses connections
+  Scenario Outline: An HTTP REQUEST emitter keeps its request pending while its endpoint name does not resolve or refuses connections
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And cluster peers are addressed by "DNS names"
@@ -459,11 +459,11 @@ Feature: HTTP emitter transport failures and TLS identity
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://api.nervix.test:{{http_receiver_port.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH concat('/events/', input.event_id)
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -498,6 +498,66 @@ Feature: HTTP emitter transport failures and TLS identity
       Host: api.nervix.test:{{http_receiver_port.api}}
       """
     And HTTP receiver "api" has captured exactly 2 requests
+    And within "30s" DESCRIBE EMITTER "published" on the leader node contains
+      """
+      transient error: -
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @http_emitter_transport @http_emitter_dns @http_emitter_address_share
+  Scenario Outline: An HTTP REQUEST emitter dials its endpoint's next address once an earlier one has used its share of timeout_ms
+    Given HTTP receiver "api" is running
+    And HTTP receiver "api" answers unscripted requests with "respond 204"
+    And connections to "127.0.6.1" at the port of HTTP receiver "api" never complete
+    And cluster peers are addressed by "DNS names"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the DNS fixture answers "api.nervix.test" with addresses "127.0.6.1, 127.0.0.1"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA outbound_event (event_id STRING);
+      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
+      CREATE VHOST edge http-emitter-{{test_id}}.example.com;
+      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP CLIENT api CONFIG {
+        'endpoint' = 'http://api.nervix.test:{{http_receiver_port.api}}', 'timeout_ms' = 20000
+      };
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH concat('/events/', input.event_id)
+          MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "http-emitter-{{test_id}}.example.com" path "/events"
+      """
+      [{"event_id":"1"}]
+      """
+    # The first answer never completes its handshake, so its attempt ends when its share does:
+    # half of what the lookup left. The second answer then connects within the rest, and the
+    # request is sent and answered inside the same timeout_ms.
+    Then HTTP receiver "api" eventually receives at least 1 request
+    And HTTP receiver "api" request 1 is
+      """
+      POST /events/1
+      Host: api.nervix.test:{{http_receiver_port.api}}
+      Content-Length: 0
+      """
+    And HTTP receiver "api" has captured exactly 1 request
     And within "30s" DESCRIBE EMITTER "published" on the leader node contains
       """
       transient error: -

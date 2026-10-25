@@ -82,7 +82,7 @@ jobs:
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli
+          tool: just@latest
 
       - name: Plan the shards and their budgets
         id: shards
@@ -90,7 +90,7 @@ jobs:
           shards="$(just chaos suite shards "${CHAOS_SUITE}")"
           echo "shards=${shards}" >> "${GITHUB_OUTPUT}"
           echo "count=$(jq 'length' <<<"${shards}")" >> "${GITHUB_OUTPUT}"
-          jq -r '.[] | "shard \(.shard): \(.entries | join(", ")); \(.execution_minutes) min of runs, step \(.step_minutes) min, job \(.job_minutes) min"' \
+          jq -r '.[] | "shard \(.shard): \(.entries | join(", ")); \(.execution_minutes) min of runs, \(.preparation_minutes) min of preparation, step \(.step_minutes) min, job \(.job_minutes) min"' \
             <<<"${shards}"
 
       - name: Login to GHCR
@@ -156,15 +156,15 @@ jobs:
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli
+          tool: just@latest
 
-      # The suite runs with just, toml and the pinned jq on a PATH that holds no Rust toolchain,
+      # The suite runs with just and the pinned jq on a PATH that holds no Rust toolchain,
       # which shows that the external command builds nothing.
       - name: Prepare the controller's tools on a PATH without a Rust toolchain
         run: |
           tools="${RUNNER_TEMP}/chaos-tools"
           mkdir -p "${tools}"
-          install -m 0755 "$(command -v just)" "$(command -v toml)" "${tools}/"
+          install -m 0755 "$(command -v just)" "${tools}/"
           curl --fail --silent --show-error --location --retry 3 --max-time 120 \
             --output "${tools}/jq" "${CHAOS_JQ_URL}"
           echo "${CHAOS_JQ_SHA256}  ${tools}/jq" | sha256sum --check --strict
@@ -221,8 +221,9 @@ jobs:
           export CHAOS_NETWORK_PREFLIGHT_NERVIX_IMAGE="${CHAOS_IMAGE}"
           exec timeout --foreground --kill-after=10s 600s just test-chaos-network-preflight
 
-      # The suite step ends at its budget: the runs' own bounds and one teardown reserve. exec hands
-      # a cancellation's TERM to just, which passes it to the suite and the run it executes.
+      # The suite step ends at its budget: the suite's one verifier self-check, the runs' own bounds
+      # and one teardown reserve. exec hands a cancellation's TERM to just, which passes it to the
+      # suite and the run or verifier self-check it executes.
       - name: Run the ${{ inputs.suite }} suite
         timeout-minutes: ${{ matrix.shard.step_minutes }}
         run: |

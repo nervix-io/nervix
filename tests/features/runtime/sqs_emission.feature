@@ -1,5 +1,5 @@
 Feature: SQS emission
-  Scenario Outline: SQS emitter publishes JSON payloads from a relay
+  Scenario Outline: SQS QUEUE emitter publishes JSON payloads from a relay
     Given MQTT is running
     And SQS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -23,8 +23,7 @@ Feature: SQS emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
@@ -39,13 +38,12 @@ Feature: SQS emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT sqs_main
-        TYPE SQS
+        CREATE SQS CLIENT sqs_main
         CONFIG {
           'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
         };
-        CREATE EMITTER sqs_notifications FROM notifications TO SQS sqs_main QUEUE notifications_out_{{test_id}} MODE <publishing_mode> RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE SQS QUEUE EMITTER sqs_notifications FROM notifications TO sqs_main QUEUE 'notifications_out_{{test_id}}' MODE <publishing_mode> RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -106,8 +104,7 @@ Feature: SQS emission
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-poison-{{test_id}}'
@@ -121,15 +118,14 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_notifications
+      CREATE SQS QUEUE EMITTER sqs_notifications
       FROM notifications
-      TO SQS sqs_main QUEUE sqs_batch_poison_{{test_id}}
+      TO sqs_main QUEUE 'sqs_batch_poison_{{test_id}}'
       MODE BATCH RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
@@ -193,8 +189,7 @@ Feature: SQS emission
       TO SCHEMA note_event;
       CREATE RELAY notes SCHEMA note_event UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-noncharacter-{{test_id}}'
@@ -208,15 +203,14 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_notes
+      CREATE SQS QUEUE EMITTER sqs_notes
       FROM notes
-      TO SQS sqs_main QUEUE sqs_noncharacter_{{test_id}}
+      TO sqs_main QUEUE 'sqs_noncharacter_{{test_id}}'
       MODE <publishing_mode> RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING note_codec
       INHERIT ALL
@@ -277,8 +271,7 @@ Feature: SQS emission
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-fifo-{{test_id}}'
@@ -294,15 +287,14 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_orders
+      CREATE SQS QUEUE EMITTER sqs_orders
       FROM orders
-      TO SQS sqs_main QUEUE fifo_orders_{{test_id}}.fifo
+      TO sqs_main QUEUE 'fifo_orders_{{test_id}}.fifo'
       FIFO GROUP CASE
         WHEN now() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN input.tenant
         ELSE ''
@@ -366,8 +358,7 @@ Feature: SQS emission
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-fifo-kept-{{test_id}}'
@@ -383,15 +374,14 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_orders
+      CREATE SQS QUEUE EMITTER sqs_orders
       FROM orders
-      TO SQS sqs_main QUEUE fifo_kept_{{test_id}}.fifo
+      TO sqs_main QUEUE 'fifo_kept_{{test_id}}.fifo'
       FIFO GROUP FROM BRANCH
       MODE BATCH RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING order_codec
@@ -457,8 +447,7 @@ Feature: SQS emission
       TO SCHEMA order_event;
       CREATE RELAY orders SCHEMA order_event UNBRANCHED;
       CREATE RELAY rejected_orders SCHEMA rejected_order UNBRANCHED;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-fifo-failed-{{test_id}}'
@@ -473,15 +462,14 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_orders
+      CREATE SQS QUEUE EMITTER sqs_orders
       FROM orders
-      TO SQS sqs_main QUEUE fifo_failed_{{test_id}}.fifo
+      TO sqs_main QUEUE 'fifo_failed_{{test_id}}.fifo'
       FIFO GROUP CASE
         WHEN input.sequence = (2 AS I64) THEN (input.sequence / (input.sequence - (2 AS I64))) AS STRING
         ELSE input.tenant

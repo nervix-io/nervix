@@ -32,14 +32,12 @@ mod syslog;
 mod websockets;
 mod zeromq;
 
-use std::str::FromStr as _;
-
 use chumsky::prelude::*;
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_models::{
-    AlterIngestor, AlterIngestorOperation, AlterTransportIngestorOperation, ClientProducerSource,
-    CreateIngestor, CreateStatement, GeneralErrorPolicy, IngestSource, IngestSourceKind,
-    IngestTimestampSource, IngestorAlteration, IngestorEntityModel, IngestorInput, IngestorName,
+    AlterIngestor, AlterIngestorOperation, AlterTransportIngestorOperation, ClientProducerIngestor,
+    CreateIngestor, CreateStatement, GeneralErrorPolicy, IngestTimestampSource, IngestorAlteration,
+    IngestorEntity, IngestorEntityKind, IngestorEntityModel, IngestorInput, IngestorName,
     ShowIngestors, TransportIngestorInput,
 };
 
@@ -49,7 +47,7 @@ use crate::{
         LexedInput, ParseError, ParseFromSourceError, alter_ingestor_route_body,
         alter_op_separator, boxed_choice, codec_ref, field_ref, filter_where_clause,
         flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
-        into_parse_error, kw, kw_phrase, kw_phrase2, lex_input, relay_ref, suggest_from, tok,
+        into_parse_error, kw, kw_phrase2, lex_input, relay_ref, suggest_from, tok,
         where_expression,
     },
 };
@@ -63,32 +61,24 @@ pub fn show_ingestors_parser<'src>()
         .then_ignore(tok(Token::Semicolon).or_not())
 }
 
-/// The keyword that spells one word of a phrase the vocabulary declares.
-fn keyword(word: &'static str) -> Identifier {
-    Identifier::from_str(word).assured(
-        "every connector and entity keyword of a source pair is an NSPL keyword, as the \
-         every_pair_keyword_is_an_nspl_keyword test checks for every pair",
-    )
-}
-
 /// `<CONNECTOR> <ENTITY> INGESTOR`: the head that names the pair an ingestor reads, one composed
 /// phrase so completion offers it as one item.
 fn head<'src>(
-    kind: IngestSourceKind,
+    kind: IngestorEntityKind,
 ) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
-    kw_phrase([
-        keyword(kind.connector().keyword()),
-        keyword(kind.entity_keyword()),
+    crate::parser_support::connector_entity_head(
+        kind.connector(),
+        kind.entity_keyword(),
         Identifier::Ingestor,
-    ])
+    )
 }
 
 /// The connector and entity a statement's head names, for completion that reads the head before
 /// the rest of the statement is written.
 pub(crate) fn head_kind<'src>()
--> impl Parser<'src, &'src [Token], IngestSourceKind, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], IngestorEntityKind, extra::Err<ParseError<'src>>> + Clone {
     let mut heads = Vec::new();
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         heads.push(head(kind).to(kind).boxed());
     }
     choice(heads).boxed()
@@ -115,7 +105,7 @@ fn transport_input<'src, S, P>(
     body: P,
 ) -> impl Parser<'src, &'src [Token], DeclaredInput, extra::Err<ParseError<'src>>> + Clone
 where
-    S: IngestorEntityModel + Into<IngestSource> + 'src,
+    S: IngestorEntityModel + Into<IngestorEntity> + 'src,
     P: Parser<'src, &'src [Token], S, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
     head(S::KIND)
@@ -137,7 +127,7 @@ where
 /// `CLIENT PRODUCER INGESTOR <name> FROM <body>`, which decodes nothing and so names no codec.
 fn client_input<'src>()
 -> impl Parser<'src, &'src [Token], DeclaredInput, extra::Err<ParseError<'src>>> + Clone {
-    head(ClientProducerSource::KIND)
+    head(ClientProducerIngestor::KIND)
         .ignore_then(ingestor_name())
         .then_ignore(kw(Identifier::From))
         .then(client::producer_body())
@@ -340,7 +330,7 @@ where
 fn client_alteration<'src>()
 -> impl Parser<'src, &'src [Token], AlterIngestor, extra::Err<ParseError<'src>>> + Clone {
     let operation = choice((set_source(client::producer_body()), shared_operation()));
-    alteration::<ClientProducerSource, _, _>(operation)
+    alteration::<ClientProducerIngestor, _, _>(operation)
 }
 
 pub fn alter_ingestor_parser<'src>()
@@ -428,18 +418,23 @@ mod conformance_tests;
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr as _;
+
+    use meticulous::ResultExt as _;
     use nervix_models::{
-        ClientIngestMode, ClientIngestorAlteration, ClientProducerSource, CodecName,
-        EndpointIngestMode, FlushPolicy, HttpEndpointSource, HttpIngestorAlteration,
-        HttpRequestIngestMode, HttpRequestSource, HttpSource, IngestQuiesceMode,
-        IngestQuiesceOverflow, KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource,
-        MqttIngestMode, MqttIngestorAlteration, MqttQos, MqttSession, MqttSource, MqttTopicSource,
-        NatsIngestMode, NatsSource, NatsSubjectSource, PrometheusIngestMode, PrometheusQuerySource,
-        PrometheusSource, PulsarIngestMode, PulsarSource, PulsarTopicSource, RabbitMqIngestMode,
-        RabbitMqQueueSource, RabbitMqSource, RedisPubSubIngestMode, RedisPubSubSource, RedisSource,
-        RetryPolicy, SchemaName, SqsIngestMode, SqsQueueSource, SqsSource, SyslogIngestMode,
-        SyslogListenerSource, SyslogSource, WebsocketsConnectionSource, WebsocketsEndpointSource,
-        WebsocketsIngestMode, WebsocketsSource, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqSource,
+        ClientIngestMode, ClientIngestorAlteration, ClientProducerIngestor, CodecName,
+        EndpointIngestMode, FlushPolicy, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestMode,
+        HttpRequestIngestor, HttpRequestIngestorAlteration, IngestQuiesceMode,
+        IngestQuiesceOverflow, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor,
+        MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor,
+        MqttTopicIngestorAlteration, NatsIngestMode, NatsIngestor, NatsSubjectIngestor,
+        PrometheusIngestMode, PrometheusIngestor, PrometheusQueryIngestor, PulsarIngestMode,
+        PulsarIngestor, PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicIngestor,
+        RabbitMqIngestMode, RabbitMqIngestor, RabbitMqQueueIngestor, RedisIngestor,
+        RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SchemaName, SqsIngestMode,
+        SqsIngestor, SqsQueueIngestor, SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor,
+        WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
+        WebsocketsIngestor, ZeroMqIngestMode, ZeroMqIngestor, ZeroMqPullIngestor,
     };
     use nonzero_ext::nonzero;
 
@@ -473,7 +468,7 @@ mod tests {
 
     #[test]
     fn every_pair_keyword_is_an_nspl_keyword() {
-        for kind in IngestSourceKind::all() {
+        for kind in IngestorEntityKind::all() {
             for word in [kind.connector().keyword(), kind.entity_keyword()] {
                 assert!(
                     Identifier::from_str(word).is_ok(),
@@ -488,8 +483,10 @@ mod tests {
         let sources = [
             "KAFKA TOPIC INGESTOR i FROM c TOPIC 't' OFFSET BY DOMAIN MODE NO ACK ON QUIESCE \
              SUSPEND",
-            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' MODE NO ACK ON QUIESCE \
-             SUSPEND",
+            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' OWNED BY INGESTOR MODE NO \
+             ACK ON QUIESCE SUSPEND",
+            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' PROVISIONED MODE NO ACK ON \
+             QUIESCE SUSPEND",
             "RABBITMQ QUEUE INGESTOR i FROM c QUEUE 'q' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY \
              POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND",
             "SQS QUEUE INGESTOR i FROM c QUEUE 'q' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY \
@@ -549,7 +546,7 @@ mod tests {
             ),
             (
                 "PULSAR TOPIC INGESTOR i FROM c TOPIC 'public/default/orders' SUBSCRIPTION 's' \
-                 MODE NO ACK ON QUIESCE SUSPEND",
+                 PROVISIONED MODE NO ACK ON QUIESCE SUSPEND",
                 "invalid pulsar_topic 'public/default/orders': holds '/' without naming its \
                  domain, one of persistent, non-persistent",
             ),
@@ -576,8 +573,10 @@ mod tests {
              Orders' MODE NO ACK ON QUIESCE SUSPEND",
         ))
         .expect("a case-preserving topic and group parse");
-        let IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
-            topic, offset_mode, ..
+        let IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
+            topic,
+            offset_mode,
+            ..
         })) = &transport(&parsed).source
         else {
             panic!("expected a Kafka topic source");
@@ -728,7 +727,7 @@ mod tests {
              NEWEST;",
         )
         .expect("SET QUIESCE should parse");
-        let IngestorAlteration::Mqtt(MqttIngestorAlteration::Topic(operations)) =
+        let IngestorAlteration::Mqtt(MqttTopicIngestorAlteration::Topic(operations)) =
             &parsed.alteration
         else {
             panic!("the head names an MQTT topic");
@@ -749,7 +748,7 @@ mod tests {
         .expect("ALTER INGESTOR should parse all operations");
 
         assert_eq!(parsed.ingestor.as_str(), "event_source");
-        let IngestorAlteration::Http(HttpIngestorAlteration::Endpoint(operations)) =
+        let IngestorAlteration::Http(HttpRequestIngestorAlteration::Endpoint(operations)) =
             &parsed.alteration
         else {
             panic!("the head names an HTTP endpoint");
@@ -882,7 +881,7 @@ mod tests {
         assert_eq!(parsed.timestamp_source, None);
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+            IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                 client: nervix_models::ClientName::try_from("kafka_main")
                     .expect("valid client identifier"),
                 topic: nervix_models::KafkaTopicName::try_from("notifications")
@@ -1010,7 +1009,7 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+        let IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
             instances, mode, ..
         })) = &transport(&parsed).source
         else {
@@ -1042,7 +1041,7 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource { mode, .. })) =
+        let IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor { mode, .. })) =
             &transport(&parsed).source
         else {
             panic!("expected kafka ingestor source");
@@ -1079,7 +1078,7 @@ mod tests {
     fn parses_create_ingestor_pulsar_ack_sequential() {
         let input = r#"
             CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-              FROM pulsar_main TOPIC 'notifications' SUBSCRIPTION 'nervix_subscription' MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
+              FROM pulsar_main TOPIC 'notifications' SUBSCRIPTION 'nervix_subscription' OWNED BY INGESTOR MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
               ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1091,15 +1090,16 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
+            IngestorEntity::Pulsar(PulsarIngestor::Topic(PulsarTopicIngestor {
                 client: nervix_models::ClientName::try_from("pulsar_main")
                     .expect("valid client identifier"),
                 topic: nervix_models::PulsarTopicName::try_from("notifications")
                     .expect("valid topic identifier"),
-                subscription: nervix_models::PulsarSubscriptionName::try_from(
-                    "nervix_subscription"
-                )
-                .expect("valid subscription identifier"),
+                subscription: PulsarSubscription {
+                    name: nervix_models::PulsarSubscriptionName::try_from("nervix_subscription")
+                        .expect("valid subscription identifier"),
+                    ownership: PulsarSubscriptionOwnership::Ingestor,
+                },
                 instances: nonzero!(1u64),
                 mode: PulsarIngestMode::AckSequential {
                     timeout: "15s".to_string(),
@@ -1155,7 +1155,7 @@ mod tests {
         );
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
+            IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(RabbitMqQueueIngestor {
                 client: nervix_models::ClientName::try_from("rabbit_main")
                     .expect("valid client identifier"),
                 queue: nervix_models::RabbitMqQueueName::try_from("notifications")
@@ -1190,7 +1190,7 @@ mod tests {
         assert_eq!(parsed.name.as_str(), "redis_notifications");
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Redis(RedisSource::PubSub(RedisPubSubSource {
+            IngestorEntity::Redis(RedisIngestor::PubSub(RedisPubSubIngestor {
                 client: nervix_models::ClientName::try_from("redis_main")
                     .expect("valid client identifier"),
                 channel: nervix_models::RedisChannelName::try_from("notifications")
@@ -1227,7 +1227,7 @@ mod tests {
     #[test]
     fn suggests_every_kinded_head_after_create() {
         let suggestions = suggest_create_ingestor("CREATE ", "CREATE ".len());
-        for kind in IngestSourceKind::all() {
+        for kind in IngestorEntityKind::all() {
             let head = format!("{} INGESTOR", kind.phrase());
             assert!(suggestions.contains(&head), "{head} in {suggestions:?}");
         }
@@ -1263,7 +1263,8 @@ mod tests {
 
     #[test]
     fn pulsar_mode_context_does_not_offer_kafka_offset_keywords() {
-        let input = "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' MODE ";
+        let input = "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' OWNED \
+                     BY INGESTOR MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO ACK".to_string()));
@@ -1278,6 +1279,89 @@ mod tests {
         assert!(suggestions.contains(&"pulsar_subscription".to_string()));
         assert!(!suggestions.contains(&"SHARED".to_string()));
         assert!(!suggestions.contains(&"MODE".to_string()));
+    }
+
+    #[test]
+    fn parses_who_owns_a_pulsar_subscription_in_any_case() {
+        for (ownership, expected) in [
+            ("OWNED BY INGESTOR", PulsarSubscriptionOwnership::Ingestor),
+            ("owned by Ingestor", PulsarSubscriptionOwnership::Ingestor),
+            ("PROVISIONED", PulsarSubscriptionOwnership::Provisioned),
+            ("Provisioned", PulsarSubscriptionOwnership::Provisioned),
+        ] {
+            let source = format!(
+                "PULSAR TOPIC INGESTOR i FROM c TOPIC 'orders' SUBSCRIPTION 'Readers' {ownership} \
+                 INSTANCES 2 MODE NO ACK ON QUIESCE SUSPEND"
+            );
+            let parsed = parse_create_ingestor(&ingestor_with_source(&source))
+                .unwrap_or_else(|error| panic!("`{source}` should parse: {error:?}"));
+            let IngestorEntity::Pulsar(PulsarIngestor::Topic(PulsarTopicIngestor {
+                subscription,
+                instances,
+                ..
+            })) = &transport(&parsed).source
+            else {
+                panic!("expected a Pulsar topic source from `{source}`");
+            };
+            assert_eq!(subscription.name.as_str(), "Readers", "{source}");
+            assert_eq!(subscription.ownership, expected, "{source}");
+            assert_eq!(*instances, nonzero!(2u64), "{source}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_pulsar_subscription_whose_ownership_is_missing_or_misspelled() {
+        for ownership in [
+            "",
+            "OWNED",
+            "OWNED BY",
+            "OWNED BY DOMAIN",
+            "BY INGESTOR",
+            "PROVISIONED OWNED BY INGESTOR",
+            "OWNED BY INGESTOR PROVISIONED",
+        ] {
+            let source = format!(
+                "PULSAR TOPIC INGESTOR i FROM c TOPIC 'orders' SUBSCRIPTION 'readers' {ownership} \
+                 MODE NO ACK ON QUIESCE SUSPEND"
+            );
+            let error = parse_create_ingestor(&ingestor_with_source(&source)).expect_err(&format!(
+                "`{source}` declares no single ownership of its subscription"
+            ));
+            assert!(
+                matches!(error.current_context(), ParseFromSourceError::Parse { .. }),
+                "the grammar refuses `{source}`, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pulsar_subscription_name_is_followed_by_exactly_its_ownership_choices() {
+        let input = "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' ";
+        let suggestions = suggest_create_ingestor(input, input.len());
+        assert!(suggestions.contains(&"OWNED BY INGESTOR".to_string()));
+        assert!(suggestions.contains(&"PROVISIONED".to_string()));
+        for leaked in ["MODE", "INSTANCES", "OWNED", "BY", "INGESTOR", "OFFSET BY"] {
+            assert!(
+                !suggestions.contains(&leaked.to_string()),
+                "{leaked} offered after the subscription name: {suggestions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pulsar_ownership_is_followed_by_the_instances_and_the_mode() {
+        for ownership in ["OWNED BY INGESTOR", "PROVISIONED"] {
+            let input = format!(
+                "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' {ownership} "
+            );
+            let suggestions = suggest_create_ingestor(&input, input.len());
+            assert!(suggestions.contains(&"INSTANCES".to_string()), "{input}");
+            assert!(suggestions.contains(&"MODE".to_string()), "{input}");
+            assert!(
+                !suggestions.contains(&"PROVISIONED".to_string()),
+                "{input}: {suggestions:?}"
+            );
+        }
     }
 
     #[test]
@@ -1421,12 +1505,16 @@ mod tests {
     }
 
     #[test]
-    fn rabbitmq_mode_context_does_not_offer_kafka_only_modes() {
+    fn rabbitmq_mode_context_offers_declared_consumer_modes() {
         let input = "CREATE RABBITMQ QUEUE INGESTOR i FROM t QUEUE 'q' MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
-        assert!(!suggestions.contains(&"NO ACK".to_string()));
-        assert!(!suggestions.contains(&"PARALLEL".to_string()));
+        assert!(suggestions.contains(&"NO ACK".to_string()));
+
+        let input = format!("{input}ACK ");
+        let suggestions = suggest_create_ingestor(&input, input.len());
+        assert!(suggestions.contains(&"SEQUENTIAL".to_string()));
+        assert!(suggestions.contains(&"PARALLEL".to_string()));
     }
 
     #[test]
@@ -1455,7 +1543,7 @@ mod tests {
         assert_eq!(parsed.name.as_str(), "mqtt_notifications");
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
+            IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
                 client: nervix_models::ClientName::try_from("mqtt_main")
                     .expect("valid client identifier"),
                 topic: nervix_models::MqttTopicFilter::try_from("notifications")
@@ -1483,7 +1571,7 @@ mod tests {
 
         let parsed = parse_create_ingestor_tokens(&to_tokens(input)).expect("parse should succeed");
 
-        let IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
+        let IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
             client,
             topic,
             instances,
@@ -1519,7 +1607,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
+            IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
                 client: nervix_models::ClientName::try_from("mqtt_main")
                     .expect("valid client identifier"),
                 topic: nervix_models::MqttTopicFilter::try_from("devices/+/notifications")
@@ -1570,7 +1658,7 @@ mod tests {
         "#;
 
         let parsed = parse_create_ingestor_tokens(&to_tokens(input)).expect("parse should succeed");
-        let IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource { mode, .. })) =
+        let IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor { mode, .. })) =
             &transport(&parsed).source
         else {
             panic!("expected mqtt ingestor source");
@@ -1648,7 +1736,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Nats(NatsSource::Subject(NatsSubjectSource {
+            IngestorEntity::Nats(NatsIngestor::Subject(NatsSubjectIngestor {
                 client: nervix_models::ClientName::try_from("nats_main")
                     .expect("valid client identifier"),
                 subject: nervix_models::NatsSubjectName::try_from("notifications")
@@ -1745,16 +1833,106 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Prometheus(PrometheusSource::Query(PrometheusQuerySource {
+            IngestorEntity::Prometheus(PrometheusIngestor::Query(PrometheusQueryIngestor {
                 client: nervix_models::ClientName::try_from("prom_main")
                     .expect("valid client identifier"),
                 query: r#"label_replace(vector(42.5), "source", "local", "", "")"#.to_string(),
+                max_body_size: None,
                 every: "15s"
                     .parse()
                     .assured("the fixture cadence is a positive duration"),
                 mode: PrometheusIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             }))
+        );
+    }
+
+    #[test]
+    fn a_prometheus_query_bounds_its_response_between_query_and_every() {
+        let parsed = parse_create_ingestor(&ingestor_with_source(
+            "PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' max body size 4mib EVERY 15s MODE NO \
+             ACK ON QUIESCE SUSPEND",
+        ))
+        .expect("a positive whole size between QUERY and EVERY parses");
+        let IngestorEntity::Prometheus(PrometheusIngestor::Query(source)) =
+            &transport(&parsed).source
+        else {
+            panic!("the head names a Prometheus query");
+        };
+
+        assert_eq!(
+            source.max_body_size,
+            Some(
+                "4MiB"
+                    .parse()
+                    .assured("the fixture size is a whole number of mebibytes")
+            )
+        );
+    }
+
+    #[test]
+    fn a_prometheus_response_bound_is_a_positive_whole_size_written_before_every() {
+        for (body, diagnostic) in [
+            (
+                "QUERY 'up' MAX BODY SIZE 0B EVERY 15s",
+                "MAX BODY SIZE must be greater than zero",
+            ),
+            (
+                "QUERY 'up' MAX BODY SIZE 1.5MiB EVERY 15s",
+                "MAX BODY SIZE '1.5MiB' must be a whole number",
+            ),
+            (
+                "QUERY 'up' MAX BODY SIZE 16777216TiB EVERY 15s",
+                "MAX BODY SIZE '16777216TiB' exceeds the largest size",
+            ),
+            ("QUERY 'up' MAX BODY SIZE EVERY 15s", "byte_size_literal"),
+            ("QUERY 'up' MAX BODY 4MiB EVERY 15s", "SIZE"),
+            ("QUERY 'up' EVERY 15s MAX BODY SIZE 4MiB", "found MAX"),
+            ("MAX BODY SIZE 4MiB QUERY 'up' EVERY 15s", "QUERY"),
+        ] {
+            let source = ingestor_with_source(&format!(
+                "PROMETHEUS QUERY INGESTOR i FROM c {body} MODE NO ACK ON QUIESCE SUSPEND"
+            ));
+            let error = parse_create_ingestor(&source).expect_err("the bound must be refused");
+
+            assert!(
+                format!("{error:?}").contains(diagnostic),
+                "expected `{diagnostic}` for `{body}`, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prometheus_completion_offers_the_response_bound_once_before_every() {
+        let after_query = "CREATE PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' ";
+        let suggestions = suggest_create_ingestor(after_query, after_query.len());
+        assert!(
+            suggestions.contains(&"MAX BODY SIZE".to_string()),
+            "{suggestions:?}"
+        );
+        assert!(
+            suggestions.contains(&"EVERY".to_string()),
+            "{suggestions:?}"
+        );
+        assert!(!suggestions.contains(&"MAX".to_string()), "{suggestions:?}");
+
+        let after_bound =
+            "CREATE PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' MAX BODY SIZE 4MiB ";
+        let suggestions = suggest_create_ingestor(after_bound, after_bound.len());
+        assert_eq!(suggestions, vec!["EVERY".to_string()]);
+
+        let after_every = "CREATE PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' EVERY 15s ";
+        let suggestions = suggest_create_ingestor(after_every, after_every.len());
+        assert!(
+            !suggestions.contains(&"MAX BODY SIZE".to_string()),
+            "{suggestions:?}"
+        );
+
+        let http = "CREATE HTTP REQUEST INGESTOR i FROM c ";
+        let suggestions = suggest_create_ingestor(http, http.len());
+        assert!(
+            !suggestions.contains(&"MAX BODY SIZE".to_string()),
+            "the HTTP polling body declares no response bound yet: {suggestions:?}"
         );
     }
 
@@ -1774,7 +1952,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Http(HttpSource::Request(HttpRequestSource {
+            IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
                 client: nervix_models::ClientName::try_from("http_main")
                     .expect("valid client identifier"),
                 every: "1s"
@@ -1841,7 +2019,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+            IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
                 endpoint: nervix_models::EndpointName::try_from("http_notifications_endpoint")
                     .expect("valid endpoint identifier"),
                 mode: EndpointIngestMode::NoAck,
@@ -1867,7 +2045,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Websockets(WebsocketsSource::Endpoint(WebsocketsEndpointSource {
+            IngestorEntity::Websockets(WebsocketsIngestor::Endpoint(WebsocketsEndpointIngestor {
                 endpoint: nervix_models::EndpointName::try_from("ws_notifications_endpoint")
                     .expect("valid endpoint identifier"),
                 mode: EndpointIngestMode::NoAck,
@@ -1894,12 +2072,15 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Websockets(WebsocketsSource::Connection(WebsocketsConnectionSource {
-                client: nervix_models::ClientName::try_from("ws_main")
-                    .expect("valid client identifier"),
-                mode: WebsocketsIngestMode::NoAck,
-                quiesce: IngestQuiesceMode::Drop,
-            }))
+            IngestorEntity::Websockets(WebsocketsIngestor::Connection(
+                WebsocketsConnectionIngestor {
+                    headers: Vec::new(),
+                    client: nervix_models::ClientName::try_from("ws_main")
+                        .expect("valid client identifier"),
+                    mode: WebsocketsIngestMode::NoAck,
+                    quiesce: IngestQuiesceMode::Drop,
+                }
+            ))
         );
     }
 
@@ -1919,7 +2100,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
+            IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(ZeroMqPullIngestor {
                 client: nervix_models::ClientName::try_from("zmq_main")
                     .expect("valid client identifier"),
                 mode: ZeroMqIngestMode::NoAck,
@@ -1943,7 +2124,7 @@ mod tests {
         let parsed = parse_create_ingestor(input).expect("parse should succeed");
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
+            IngestorEntity::Syslog(SyslogIngestor::Listener(SyslogListenerIngestor {
                 client: nervix_models::ClientName::try_from("syslog_listener")
                     .expect("valid client identifier"),
                 mode: SyslogIngestMode::NoAck,
@@ -2000,7 +2181,7 @@ mod tests {
 
         assert_eq!(
             transport(&parsed).source,
-            IngestSource::Sqs(SqsSource::Queue(SqsQueueSource {
+            IngestorEntity::Sqs(SqsIngestor::Queue(SqsQueueIngestor {
                 client: nervix_models::ClientName::try_from("sqs_main")
                     .expect("valid client identifier"),
                 queue: nervix_models::SqsQueueName::try_from("notifications")
@@ -2031,7 +2212,7 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource { instances, .. })) =
+        let IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor { instances, .. })) =
             transport(&parsed).source.clone()
         else {
             panic!("expected kafka ingestor source");
@@ -2052,8 +2233,9 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::RabbitMq(RabbitMqSource::Queue(RabbitMqQueueSource {
-            instances, ..
+        let IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(RabbitMqQueueIngestor {
+            instances,
+            ..
         })) = transport(&parsed).source.clone()
         else {
             panic!("expected rabbitmq ingestor source");
@@ -2074,7 +2256,7 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Sqs(SqsSource::Queue(SqsQueueSource { instances, .. })) =
+        let IngestorEntity::Sqs(SqsIngestor::Queue(SqsQueueIngestor { instances, .. })) =
             transport(&parsed).source.clone()
         else {
             panic!("expected sqs ingestor source");
@@ -2179,7 +2361,7 @@ mod tests {
                                BACKOFF 100ms MAX 5s ON QUIESCE SUSPEND";
 
     /// The head, the name and the body of a client producer ingestor.
-    fn client_source() -> String {
+    fn client_entity() -> String {
         format!("CLIENT PRODUCER INGESTOR submit_events FROM {CLIENT_BODY}")
     }
 
@@ -2194,11 +2376,11 @@ mod tests {
 
     #[test]
     fn parses_a_client_source_without_a_codec() {
-        let parsed = parse_create_ingestor(&client_ingestor(&client_source()))
+        let parsed = parse_create_ingestor(&client_ingestor(&client_entity()))
             .expect("a client source should parse");
         assert_eq!(
             parsed.input,
-            IngestorInput::Client(ClientProducerSource {
+            IngestorInput::Client(ClientProducerIngestor {
                 schema: SchemaName::parse("event").expect("valid schema name"),
                 mode: ClientIngestMode {
                     window: nervix_models::AckWindow::Parallel {

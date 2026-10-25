@@ -29,20 +29,18 @@ Feature: Real process crash recovery
         TO window_outputs
           SET tenant = FIRST(input.tenant), samples = COUNT(input.value)
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT crash_postgres TYPE POSTGRES
+      CREATE POSTGRES CLIENT crash_postgres
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{postgres_addr}}'
         };
-      CREATE EMITTER window_output FROM window_outputs
-        TO POSTGRES crash_postgres INSERT TO TABLE process_window_{{test_id}}
-        VALUES {
+      CREATE POSTGRES TABLE EMITTER window_output FROM window_outputs
+        TO crash_postgres TABLE 'process_window_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s VALUES {
           "postgres_user_id" = input.samples,
           "postgres_now" = NOW() AS STRING,
           "postgres_action" = input.tenant
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s
-        BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 64 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -123,40 +121,34 @@ Feature: Real process crash recovery
         MAX TIME 10m
         BRANCHED BY by_reading_tenant
         TO unique_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT reading_postgres TYPE POSTGRES
+      CREATE POSTGRES CLIENT reading_postgres
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{postgres_addr}}'
         };
-      CREATE EMITTER copied_output FROM copied_readings
-        TO POSTGRES reading_postgres INSERT TO TABLE process_open_windows_{{test_id}}
-        VALUES {
+      CREATE POSTGRES TABLE EMITTER copied_output FROM copied_readings
+        TO reading_postgres TABLE 'process_open_windows_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s VALUES {
           "postgres_user_id" = input.value,
           "postgres_now" = NOW() AS STRING,
           "postgres_action" = concat('copied:', input.tenant)
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s
-        BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 64 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER unique_output FROM unique_readings
-        TO POSTGRES reading_postgres INSERT TO TABLE process_open_windows_{{test_id}}
-        VALUES {
+      CREATE POSTGRES TABLE EMITTER unique_output FROM unique_readings
+        TO reading_postgres TABLE 'process_open_windows_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s VALUES {
           "postgres_user_id" = input.value,
           "postgres_now" = NOW() AS STRING,
           "postgres_action" = concat('unique:', input.tenant)
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s
-        BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 64 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER window_output FROM reading_windows
-        TO POSTGRES reading_postgres INSERT TO TABLE process_open_windows_{{test_id}}
-        VALUES {
+      CREATE POSTGRES TABLE EMITTER window_output FROM reading_windows
+        TO reading_postgres TABLE 'process_open_windows_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s VALUES {
           "postgres_user_id" = input.total,
           "postgres_now" = NOW() AS STRING,
           "postgres_action" = concat('window:', input.tenant)
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s
-        BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 64 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -251,20 +243,18 @@ Feature: Real process crash recovery
           INHERIT ALL
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT crash_postgres TYPE POSTGRES
+      CREATE POSTGRES CLIENT crash_postgres
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{postgres_addr}}'
         };
-      CREATE EMITTER crash_output FROM crash_unique
-        TO POSTGRES crash_postgres INSERT TO TABLE process_crash_{{test_id}}
-        VALUES {
+      CREATE POSTGRES TABLE EMITTER crash_output FROM crash_unique
+        TO crash_postgres TABLE 'process_crash_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s VALUES {
           "postgres_user_id" = input.user_id,
           "postgres_now" = NOW() AS STRING,
           "postgres_action" = input.tenant
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s
-        BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 64 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

@@ -22,20 +22,19 @@ use chumsky::{
     util::MaybeRef,
 };
 use error_stack::Report;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckMode, AckWindow, AlterProcessorOperation, AssignmentTargetScope, BranchName,
-    BranchSelection, ChannelName, ClientConfigEntry, ClientName, ClusterNodeName, CodecName,
-    CollectionName, CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName, EmitterName,
-    EndpointName, Expression, ExternalName, FieldName, FlushPolicy, GeneralErrorPolicy,
-    GeneratorName, InferencerName, IngestorName, InputCollectPolicy, InspectionFormat,
-    JunctionName, LookupName, MaterializedStateDependency, MaterializedStatePolicy,
-    MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, QueueName, ReingestorName, RelayName,
-    ReordererName, RequestedResourceVersion, ResourceName, RetryPolicy, RouteConstruction,
-    SchemaName, SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName,
-    TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
-    WindowProcessorName, WireSchemaName,
+    BranchSelection, ClientConfigEntry, ClientName, ClusterNodeName, CodecName, CorrelatorName,
+    DeduplicatorName, DomainClockPeriod, DomainName, EmitterName, EndpointName, Expression,
+    ExternalName, FieldName, FlushPolicy, GeneralErrorPolicy, GeneratorName, InferencerName,
+    IngestorName, InputCollectPolicy, InspectionFormat, JunctionName, LookupName,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, ModelName, NameError,
+    OutputBranch, PayloadSizeLimit, PlacementName, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, ReingestorName, RelayName, ReordererName,
+    RequestedResourceVersion, ResourceName, RetryPolicy, RouteConstruction, SchemaName,
+    SignalingProtocolName, SubscriptionName, TransactionOperationNumber, UdfName, UserName,
+    VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
 
@@ -886,36 +885,6 @@ pub fn emitter_name<'src>()
     parse_name("emitter_name", EmitterName::parse)
 }
 
-pub fn topic_ref<'src>()
--> impl Parser<'src, &'src [Token], TopicName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name("topic_name", TopicName::parse)
-}
-
-pub fn subject_ref<'src>()
--> impl Parser<'src, &'src [Token], SubjectName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name("subject_name", SubjectName::parse)
-}
-
-pub fn collection_ref<'src>()
--> impl Parser<'src, &'src [Token], CollectionName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name("collection_name", CollectionName::parse)
-}
-
-pub fn queue_ref<'src>()
--> impl Parser<'src, &'src [Token], QueueName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name("queue_name", QueueName::parse)
-}
-
-pub fn channel_ref<'src>()
--> impl Parser<'src, &'src [Token], ChannelName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name("channel_name", ChannelName::parse)
-}
-
-pub fn table_ref<'src>()
--> impl Parser<'src, &'src [Token], TableName, extra::Err<ParseError<'src>>> + Clone {
-    parse_name("table_name", TableName::parse)
-}
-
 pub fn session_subscription_name<'src>()
 -> impl Parser<'src, &'src [Token], SubscriptionName, extra::Err<ParseError<'src>>> + Clone {
     parse_name("session_subscription_name", SubscriptionName::parse)
@@ -1092,6 +1061,19 @@ pub fn max_batch_size_clause<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     kw_phrase3(Identifier::Max, Identifier::Batch, Identifier::Size)
         .ignore_then(byte_size_lit())
+        .boxed()
+}
+
+/// `MAX BODY SIZE <bytes>`: the most bytes of one response a polled source reads. The size is a
+/// whole number greater than zero followed by its unit, refused here rather than rounded.
+pub fn max_body_size_clause<'src>()
+-> impl Parser<'src, &'src [Token], PayloadSizeLimit, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase3(Identifier::Max, Identifier::Body, Identifier::Size)
+        .ignore_then(byte_size_lit().try_map(|literal, span| {
+            literal
+                .parse::<PayloadSizeLimit>()
+                .map_err(|issue| Rich::custom(span, format!("MAX BODY SIZE {issue}")))
+        }))
         .boxed()
 }
 
@@ -1453,7 +1435,7 @@ pub fn set_or_where_route_construction<'src>()
     )
 }
 
-/// A construction limited to `WHERE`, for direct emitter sinks whose output is already fully
+/// A construction limited to `WHERE`, for direct emitter emitters whose output is already fully
 /// described by their `VALUES` mapping.
 pub fn where_only_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
@@ -1467,6 +1449,15 @@ pub fn bodyless_route_construction<'src>()
     boxed_choice!(
         route_construction_clause(RouteClause::Where, tok(Token::Comma)),
         route_construction_clause(RouteClause::Invoke, tok(Token::Comma)),
+    )
+}
+
+/// A bodyless request inside ALTER ends its invocation list before the next operation.
+pub fn bodyless_alter_route_construction<'src>()
+-> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    boxed_choice!(
+        route_construction_clause(RouteClause::Where, alter_list_separator()),
+        route_construction_clause(RouteClause::Invoke, alter_list_separator()),
     )
 }
 
@@ -1487,7 +1478,7 @@ pub fn route_construction<'src>()
 
 /// A route construction inside an `ALTER` operation, whose lists end where the next operation
 /// begins.
-fn alter_route_construction<'src>()
+pub fn alter_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
         route_construction_clause(RouteClause::Inherit, alter_list_separator()),
@@ -2169,6 +2160,23 @@ fn format_found_token(token: &Token) -> String {
     }
 }
 
+/// One connector/entity declaration head, composed from the vocabulary's shared language tokens.
+/// Ingestor and emitter grammars use the same primitive so completion offers each full phrase.
+pub(crate) fn connector_entity_head<'src>(
+    connector: nervix_models::ConnectorKind,
+    entity: &'static str,
+    role: Identifier,
+) -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    let connector = connector
+        .keyword()
+        .parse::<Identifier>()
+        .assured("every declared connector keyword belongs to the shared token definition");
+    let entity = entity
+        .parse::<Identifier>()
+        .assured("every declared entity keyword belongs to the shared token definition");
+    kw_phrase([connector, entity, role])
+}
+
 #[cfg(test)]
 mod tests {
     use chumsky::{
@@ -2478,18 +2486,17 @@ mod tests {
                 standalone: None,
             },
             EmbeddedRejection {
-                statement: "CREATE EMITTER to_ch FROM notifications TO CLICKHOUSE \
-                            clickhouse_client INSERT TO TABLE my_table VALUES { 'tags' = 1e9 } \
-                            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s BATCH MAX MESSAGES 500 \
-                            MAX SIZE 8MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR \
-                            LOG;",
+                statement: "CREATE CLICKHOUSE TABLE EMITTER to_ch FROM notifications TO \
+                            clickhouse_client TABLE 'my_table' MODE ACK RETRY POLICY BACKOFF \
+                            250ms MAX 30s VALUES { 'tags' = 1e9 } BATCH MAX MESSAGES 500 MAX SIZE \
+                            8MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
                 token: "1e9",
                 standalone: expression("1e9"),
             },
             EmbeddedRejection {
-                statement: "CREATE EMITTER e FROM r TO SQS sqs_main QUEUE q.fifo FIFO GROUP \
-                            input.a + / 1 MODE SINGLE RETRY POLICY BACKOFF 1s MAX 5s ENCODE USING \
-                            c FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+                statement: "CREATE SQS QUEUE EMITTER e FROM r TO sqs_main QUEUE 'q.fifo' FIFO \
+                            GROUP input.a + / 1 MODE SINGLE RETRY POLICY BACKOFF 1s MAX 5s ENCODE \
+                            USING c FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
                 token: "/",
                 standalone: expression("input.a + / 1"),
             },
@@ -2546,7 +2553,7 @@ mod tests {
                 vec!["MAX"],
             ),
             (
-                "CREATE EMITTER e FROM r TO SQS sqs_main QUEUE q.fifo FIFO GROUP input.a ",
+                "CREATE SQS QUEUE EMITTER e FROM r TO sqs_main QUEUE 'q.fifo' FIFO GROUP input.a ",
                 vec!["MODE"],
             ),
         ] {
@@ -2595,7 +2602,7 @@ mod tests {
             "CREATE ",
             "CREATE JUNCTION j FROM r ",
             "CREATE SUBSCRIPTION s TO r ",
-            "CREATE EMITTER e FROM r TO SQS sqs_main QUEUE q.fifo FIFO GROUP ",
+            "CREATE SQS QUEUE EMITTER e FROM r TO sqs_main QUEUE 'q.fifo' FIFO GROUP ",
         ] {
             let suggestions = crate::client_statement::suggest_client_statement(input, input.len());
             for keyword in expression_keywords {

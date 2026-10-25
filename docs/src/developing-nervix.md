@@ -208,7 +208,7 @@ including Kafka, Pulsar, RabbitMQ, Redis, MQTT, ClickHouse, Postgres, MySQL, Mon
 Prometheus, Quickwit, Jaeger, and a Sentry-compatible Bugsink service.
 
 The local Sentry-compatible service is available at `http://127.0.0.1:18090`. Sign in with
-`admin@example.org` / `admin`, create a project, and copy its DSN into a `TYPE SENTRY` client used
+`admin@example.org` / `admin`, create a project, and copy its DSN into a `SENTRY CLIENT` used
 by a Sentry emitter. These credentials and the Compose `SECRET_KEY` are development-only.
 
 RustFS provides the local Rust-written S3-compatible target for Iceberg emitters:
@@ -245,14 +245,14 @@ Start Nervix with `--otel-enabled` and keep the default OTLP endpoint when `just
 ## Connector Crates
 
 [Connector Crates And The Connector Contract](./connector-contract.md) is the architecture
-reference for ownership, source and sink lifecycle, and the cross-layer checklist for adding an
+reference for ownership, ingestor and emitter lifecycle, and the cross-layer checklist for adding an
 integration. The notes here identify the repository locations and validation commands.
 
 The shared contract is in `crates/connector`, and each external integration is in
 `crates/connectors/<name>`. The server's `src/runtime/ingestors` and emitter modules compose the
 typed plans with those crates. Keep driver dependencies in their integration crates; the server
 test harness may name a driver in `[dev-dependencies]` to provision or inspect an external system.
-The node's own endpoint source lives in `src/runtime/ingestors/endpoint.rs` because it has no
+The node's own endpoint ingestor lives in `src/runtime/ingestors/endpoint.rs` because it has no
 external driver. Follow the architecture chapter's [integration checklist](./connector-contract.md#adding-an-integration)
 when extending this layout.
 
@@ -284,15 +284,18 @@ The `[parallel]` groups map package lists onto that recipe, including the packag
 `--all-features` and the compiler tooling packages. Feature, target, profile and compiler selections
 stay separate, so mutually exclusive execution modes never share a Cargo invocation.
 
-Clippy uses `clippy/<package>/<configuration_hash>` beneath `CARGO_TARGET_DIR`, or the repository's
-`target` directory when that variable is unset. The hash includes the Cargo arguments and compiler,
-so each configuration has its own build directory lock. `just cargo-clippy-package <package>
-[arguments ...]` runs a focused check of all targets through the same recipe. The compiler driver
-builds keep their separate `typed-ratchet/driver` directory. All builds retain the configured kache
-wrapper. Cargo's compiler job limit applies separately within each invocation. On CI, where nothing
-reads a build directory after its lint and the runner's disk cannot hold every configuration's at
-once, a target that passed deletes its own; a failed target keeps its directory, and a local run
-keeps them all for the next one.
+Clippy builds in four directories, `clippy/0` to `clippy/3` beneath `CARGO_TARGET_DIR`, or the
+repository's `target` directory when that variable is unset. The SHA-256 of a configuration's
+package, Cargo arguments and toolchain, modulo four, selects its directory, so each run of a
+configuration returns to the directory that holds its artifacts. The configurations in a directory
+share the dependencies they build, build scripts included, and Cargo keeps the artifacts of
+different features, profiles, targets and flags, and of the stable and nightly compilers, apart
+there. Configurations in the same directory take turns on its build directory lock, so two of them
+selected at once run one after the other. Nothing deletes these directories, locally or on CI: the
+four of them bound what a lint leaves on disk. `just cargo-clippy-package <package> [arguments ...]`
+runs a focused check of all targets through the same recipe. The compiler driver builds keep their
+separate `typed-ratchet/driver` directory. All builds retain the configured kache wrapper. Cargo's
+compiler job limit applies separately within each invocation.
 
 `just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
 the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that
@@ -459,12 +462,14 @@ just test-shuttle
 ```
 
 Each check runs in its own process under the exploration it declares, then again under the
-uncontrolled-nondeterminism detector. `crates/model-harness/shuttle-inventory.toml` registers every
-check by package and test name, and the run fails when a registered check is missing, ignored or did
-not complete its exploration, and when a `shuttle_` test is not registered; add a new check to its
-package's list, and rename a renamed one there, in the same change. The command reports how many
-checks it discovered, selected, executed and saw complete. A substring selects a focused check or
-protocol family in every package, and a substring that selects nothing fails:
+uncontrolled-nondeterminism detector. Checks run beside each other, one per CPU the command may use,
+so restrict its CPUs, for example with `taskset -c 0-3 just test-shuttle`, to share a busy machine.
+`crates/model-harness/shuttle-inventory.toml` registers every check by package and test name, and
+the run fails when a registered check is missing, ignored or did not complete its exploration, and
+when a `shuttle_` test is not registered; add a new check to its package's list, and rename a
+renamed one there, in the same change. The command reports how many checks it discovered, selected,
+executed and saw complete. A substring selects a focused check or protocol family in every package,
+and a substring that selects nothing fails:
 
 ```bash
 just test-shuttle force_flush

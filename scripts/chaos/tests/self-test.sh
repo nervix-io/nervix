@@ -28,6 +28,7 @@ fi
 "${script_dir}/image-package-self-test.sh"
 "${script_dir}/startup-status-self-test.sh"
 "${script_dir}/backup-fixture-self-test.sh"
+"${script_dir}/verifier-self-check-self-test.sh"
 
 fail() {
     printf 'self-test failed: %s\n' "$*" >&2
@@ -207,24 +208,20 @@ pause_resumed="${tmp_dir}/pause-resumed.json"
 pause_events="${tmp_dir}/pause-events.ndjson"
 pause_result="${tmp_dir}/pause-duration.json"
 jq '.[0].Config.Env = [
-    "NERVIX_RAFT_HEARTBEAT_INTERVAL=250ms",
-    "NERVIX_RAFT_ELECTION_TIMEOUT_MIN=10s",
-    "NERVIX_RAFT_ELECTION_TIMEOUT_MAX=12s",
+    "NERVIX_RAFT_HEARTBEAT_INTERVAL=1500ms",
     "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=15s"
 ] | .[0].State.Paused = false' "${inspection_before}" >"${pause_before}"
 jq '.[0].State.Paused = true' "${pause_before}" >"${pause_active}"
 cp "${pause_before}" "${pause_resumed}"
 # These fixtures run the pause deployment, so the verifier checks them against its settings.
-pause_deployment=(CHAOS_RAFT_HEARTBEAT_INTERVAL CHAOS_RAFT_ELECTION_TIMEOUT_MIN
-    CHAOS_RAFT_ELECTION_TIMEOUT_MAX CHAOS_NODE_UNAVAILABILITY_TIMEOUT)
+pause_deployment=(CHAOS_RAFT_HEARTBEAT_INTERVAL CHAOS_NODE_UNAVAILABILITY_TIMEOUT)
 declare -A deployed_liveness=()
 for setting in "${pause_deployment[@]}"; do
     if [[ -n "${!setting+set}" ]]; then
         deployed_liveness["${setting}"]="${!setting}"
     fi
 done
-export CHAOS_RAFT_HEARTBEAT_INTERVAL=250ms CHAOS_RAFT_ELECTION_TIMEOUT_MIN=10s \
-    CHAOS_RAFT_ELECTION_TIMEOUT_MAX=12s CHAOS_NODE_UNAVAILABILITY_TIMEOUT=15s
+export CHAOS_RAFT_HEARTBEAT_INTERVAL=1500ms CHAOS_NODE_UNAVAILABILITY_TIMEOUT=15s
 printf '%s\n' \
     "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"pause",Actor:{ID:$id},timeNano:1800000000000000000}')" \
     "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"unpause",Actor:{ID:$id},timeNano:1800000006000000000}')" \
@@ -287,8 +284,6 @@ expect_pause_failure 'wrong configured threshold' before "${test_run_id}" "${tes
 unset "${pause_deployment[@]}"
 jq '.[0].Config.Env = [
     "NERVIX_RAFT_HEARTBEAT_INTERVAL=250ms",
-    "NERVIX_RAFT_ELECTION_TIMEOUT_MIN=1500ms",
-    "NERVIX_RAFT_ELECTION_TIMEOUT_MAX=3000ms",
     "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=10s"
 ]' "${pause_before}" >"${tmp_dir}/pause-default-deployment.json"
 "${pause_verifier}" before "${test_run_id}" "${test_project}" nervix-1 \
@@ -641,7 +636,7 @@ CHAOS_NODE_3_ADDRESS="10.213.7.13" \
     >"${compose_json}"
 
 jq -e --arg image "${placeholder_image}" \
-    --arg election_min "${CHAOS_RAFT_ELECTION_TIMEOUT_MIN:-1500ms}" \
+    --arg heartbeat "${CHAOS_RAFT_HEARTBEAT_INTERVAL:-250ms}" \
     --arg node_timeout "${CHAOS_NODE_UNAVAILABILITY_TIMEOUT:-10s}" \
     --arg snapshot_entries "${CHAOS_RAFT_SNAPSHOT_ENTRY_THRESHOLD:-10000}" \
     --arg covered_entries "${CHAOS_RAFT_COVERED_LOG_ENTRIES_RETAINED:-1000}" '
@@ -661,7 +656,7 @@ jq -e --arg image "${placeholder_image}" \
     and .services.observer.labels["io.nervix.chaos.role"] == "observer"
     and .services["clock-observer"].labels["io.nervix.chaos.role"] == "observer"
     and .services["clock-observer"].image == $image
-    and .services["nervix-1"].environment.NERVIX_RAFT_ELECTION_TIMEOUT_MIN == $election_min
+    and .services["nervix-1"].environment.NERVIX_RAFT_HEARTBEAT_INTERVAL == $heartbeat
     and .services["nervix-1"].environment.NERVIX_NODE_UNAVAILABILITY_TIMEOUT == $node_timeout
     and .services["nervix-1"].environment.NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD == $snapshot_entries
     and .services["nervix-1"].environment.NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED == $covered_entries
@@ -869,6 +864,7 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/recovery-self-test.sh"
 "${script_dir}/stateful-self-test.sh"
 "${script_dir}/backup-fault-self-test.sh"
+"${script_dir}/restore-self-test.sh"
 "${script_dir}/backup-state-self-test.sh"
 "${script_dir}/load-self-test.sh"
 "${script_dir}/mixed-self-test.sh"

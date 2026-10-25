@@ -69,12 +69,11 @@ Feature: Bounded execution and transient memory
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE EMITTER transformed_notifications FROM notifications TO KAFKA kafka_main TOPIC transformed_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_out
+      CREATE KAFKA TOPIC EMITTER transformed_notifications FROM notifications TO kafka_main TOPIC 'transformed_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_out
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -173,7 +172,7 @@ Feature: Bounded execution and transient memory
       CREATE CODEC polled_codec FROM JSON TO SCHEMA polled_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY polled_events SCHEMA polled_event UNBRANCHED;
-      CREATE CLIENT polled_http TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT polled_http CONFIG {
         'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
         'method' = 'GET',
         'timeout_ms' = 5000

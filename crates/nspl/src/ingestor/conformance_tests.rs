@@ -21,8 +21,8 @@ use std::collections::BTreeMap;
 
 use nervix_models::{
     ChoiceRequirement, CreateIngestor, DeclaredDelivery, IngestDeliveryKind, IngestQuiesceKind,
-    IngestSourceCapabilities, IngestSourceKind, IngestorInput, LocatorDeclaration, LocatorName,
-    Model, OptionDeclaration, OptionForm, OptionValue, SourceReferenceKind,
+    IngestorEntityCapabilities, IngestorEntityKind, IngestorInput, IngestorReferenceKind,
+    LocatorDeclaration, LocatorName, Model, OptionDeclaration, OptionForm, OptionValue,
 };
 use strum::IntoEnumIterator as _;
 
@@ -34,8 +34,8 @@ type Chosen = BTreeMap<&'static str, &'static str>;
 
 /// One ingestor statement of an entity, rendered from what its entity declares.
 struct Generated {
-    kind: IngestSourceKind,
-    declared: IngestSourceCapabilities,
+    kind: IngestorEntityKind,
+    declared: IngestorEntityCapabilities,
     /// The choices the statement makes for options a requirement names.
     chosen: Chosen,
     /// One option written in full in place of the option's own rendering, by its keywords.
@@ -53,7 +53,7 @@ struct Generated {
 impl Generated {
     /// A statement of `kind` in its first delivery and quiesce modes that require no choice, with
     /// every required option in its first form.
-    fn of(kind: IngestSourceKind) -> Self {
+    fn of(kind: IngestorEntityKind) -> Self {
         let declared = kind.capabilities();
         let delivery = unconditional_delivery(&declared);
         let quiesce = unconditional_quiesce(&declared);
@@ -154,7 +154,7 @@ impl Generated {
         let Some(Model::Ingestor(ingestor)) = created_model(&text) else {
             panic!("the grammar refuses what {} declares: {text}", self.kind);
         };
-        assert_eq!(ingestor.input.source_kind(), self.kind, "{text}");
+        assert_eq!(ingestor.input.entity_kind(), self.kind, "{text}");
         ingestor
     }
 
@@ -171,20 +171,20 @@ impl Generated {
 
 /// The reference a generated body names: a client, an endpoint, or the schema a producer's
 /// batches carry.
-fn reference(declared: &IngestSourceCapabilities) -> &'static str {
+fn reference(declared: &IngestorEntityCapabilities) -> &'static str {
     match declared.reference {
-        SourceReferenceKind::Client(_) => "source_client",
-        SourceReferenceKind::Endpoint(_) => "intake",
-        SourceReferenceKind::Schema => "SCHEMA batches",
+        IngestorReferenceKind::Client(_) => "source_client",
+        IngestorReferenceKind::Endpoint(_) => "intake",
+        IngestorReferenceKind::Schema => "SCHEMA batches",
     }
 }
 
 /// Whether the entity's payloads are decoded by a codec. A producer's batches already carry the
 /// ingestor's input schema, so the body that names a schema names no codec.
-fn decodes(declared: &IngestSourceCapabilities) -> bool {
+fn decodes(declared: &IngestorEntityCapabilities) -> bool {
     match declared.reference {
-        SourceReferenceKind::Client(_) | SourceReferenceKind::Endpoint(_) => true,
-        SourceReferenceKind::Schema => false,
+        IngestorReferenceKind::Client(_) | IngestorReferenceKind::Endpoint(_) => true,
+        IngestorReferenceKind::Schema => false,
     }
 }
 
@@ -202,7 +202,7 @@ fn first_example(option: &OptionDeclaration) -> &'static str {
 }
 
 /// The first delivery mode the entity declares that needs no choice written beside it.
-fn unconditional_delivery(declared: &IngestSourceCapabilities) -> &'static DeclaredDelivery {
+fn unconditional_delivery(declared: &IngestorEntityCapabilities) -> &'static DeclaredDelivery {
     let Some(delivery) = declared
         .delivery
         .iter()
@@ -214,7 +214,7 @@ fn unconditional_delivery(declared: &IngestSourceCapabilities) -> &'static Decla
 }
 
 /// The first quiesce mode the entity declares that needs no choice written beside it.
-fn unconditional_quiesce(declared: &IngestSourceCapabilities) -> IngestQuiesceKind {
+fn unconditional_quiesce(declared: &IngestorEntityCapabilities) -> IngestQuiesceKind {
     let Some(quiesce) = declared
         .quiesce
         .iter()
@@ -243,7 +243,7 @@ fn every_delivery_spelling() -> Vec<DeclaredDelivery> {
     ] {
         spellings.insert(shared.example, shared);
     }
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         for delivery in kind.capabilities().delivery {
             spellings.insert(delivery.example, *delivery);
         }
@@ -254,7 +254,7 @@ fn every_delivery_spelling() -> Vec<DeclaredDelivery> {
 /// Every option any entity declares, written in each of its forms, by its keywords.
 fn every_option_example() -> BTreeMap<&'static str, Vec<&'static str>> {
     let mut examples: BTreeMap<&'static str, Vec<&'static str>> = BTreeMap::new();
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         for option in kind.capabilities().options {
             let written = examples.entry(option.keywords).or_default();
             for example in option.examples() {
@@ -269,7 +269,7 @@ fn every_option_example() -> BTreeMap<&'static str, Vec<&'static str>> {
 
 #[test]
 fn every_declared_delivery_and_quiesce_mode_parses_into_its_kind() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         let declared = kind.capabilities();
         for delivery in declared.delivery {
             for quiesce in declared.quiesce {
@@ -280,6 +280,10 @@ fn every_declared_delivery_and_quiesce_mode_parses_into_its_kind() {
                 }
                 .choosing(delivery.requires)
                 .choosing(quiesce.requires);
+                if !delivery.kind.allows_quiesce(quiesce.kind) {
+                    generated.assert_refused("a quiesce mode this delivery cannot honor");
+                    continue;
+                }
                 let ingestor = generated.parse();
                 let text = generated.text();
                 assert_eq!(delivery_kind(&ingestor.input), delivery.kind, "{text}");
@@ -288,7 +292,7 @@ fn every_declared_delivery_and_quiesce_mode_parses_into_its_kind() {
                     ingestor.input.supports_quiesce(ingestor.input.quiesce()),
                     "the vocabulary refuses the quiesce mode the grammar accepted: {text}"
                 );
-                let Some(source) = ingestor.input.transport_source() else {
+                let Some(source) = ingestor.input.transport_entity() else {
                     continue;
                 };
                 for requirement in delivery.requires.iter().chain(quiesce.requires) {
@@ -305,7 +309,7 @@ fn every_declared_delivery_and_quiesce_mode_parses_into_its_kind() {
 
 #[test]
 fn every_declared_option_parses_in_each_of_its_forms() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         for option in kind.capabilities().options {
             for example in option.examples() {
                 let generated = Generated {
@@ -321,7 +325,7 @@ fn every_declared_option_parses_in_each_of_its_forms() {
 #[test]
 fn a_delivery_mode_the_entity_does_not_declare_is_refused() {
     let spellings = every_delivery_spelling();
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         let declared = kind.capabilities();
         for spelling in &spellings {
             if declared.declared_delivery(spelling.kind).is_some() {
@@ -339,7 +343,7 @@ fn a_delivery_mode_the_entity_does_not_declare_is_refused() {
 
 #[test]
 fn a_quiesce_mode_the_entity_does_not_declare_is_refused() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         let declared = kind.capabilities();
         for quiesce in IngestQuiesceKind::iter() {
             if declared.declared_quiesce(quiesce).is_some() {
@@ -356,7 +360,7 @@ fn a_quiesce_mode_the_entity_does_not_declare_is_refused() {
 
 #[test]
 fn a_mode_whose_required_choices_are_not_written_is_refused() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         let declared = kind.capabilities();
         for delivery in declared.delivery {
             if delivery.requires.is_empty() {
@@ -392,7 +396,7 @@ fn a_mode_whose_required_choices_are_not_written_is_refused() {
 #[test]
 fn an_option_only_another_entity_declares_is_refused() {
     let examples = every_option_example();
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         let declared = kind.capabilities();
         for (keywords, written) in &examples {
             if declared.option(keywords).is_some() {
@@ -411,7 +415,7 @@ fn an_option_only_another_entity_declares_is_refused() {
 
 #[test]
 fn a_required_option_cannot_be_left_out() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         for option in kind.capabilities().options {
             if !option.is_required() {
                 continue;
@@ -427,7 +431,7 @@ fn a_required_option_cannot_be_left_out() {
 
 #[test]
 fn an_empty_external_name_is_refused_where_a_name_is_declared() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         let declared = kind.capabilities();
         if let Some(locator) = declared.locator
             && let LocatorName::External(_) = locator.name
@@ -472,7 +476,7 @@ fn empty_names(option: &OptionDeclaration) -> Vec<String> {
 
 #[test]
 fn completion_offers_exactly_the_declared_delivery_modes() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         let declared = kind.capabilities();
         let generated = Generated::of(kind);
         let mut spellings = Vec::new();
@@ -495,7 +499,7 @@ fn completion_offers_exactly_the_declared_delivery_modes() {
 
 #[test]
 fn completion_offers_exactly_the_quiesce_modes_a_statement_can_name() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         let declared = kind.capabilities();
         let mut unconditional = Vec::new();
         let mut every = Vec::new();
@@ -517,7 +521,7 @@ fn completion_offers_exactly_the_quiesce_modes_a_statement_can_name() {
 
 #[test]
 fn completion_names_the_declared_locator_then_the_declared_options() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         let declared = kind.capabilities();
         let head = format!(
             "CREATE {} INGESTOR generated FROM {} ",

@@ -418,8 +418,7 @@ Feature: Domain clock contract regressions
         FROM WIRE JSON SCHEMA clock_source_wire
         TO SCHEMA clock_source_record;
       CREATE RELAY clock_source_records SCHEMA clock_source_record UNBRANCHED;
-      CREATE CLIENT clock_source
-        TYPE HTTP
+      CREATE HTTP CLIENT clock_source
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?fixture=domain-clock&delay_ms=25',
           'method' = 'GET',
@@ -471,8 +470,7 @@ Feature: Domain clock contract regressions
         FROM WIRE JSON SCHEMA cadence_source_wire
         TO SCHEMA cadence_source_record;
       CREATE RELAY cadence_source_records SCHEMA cadence_source_record UNBRANCHED;
-      CREATE CLIENT cadence_source
-        TYPE HTTP
+      CREATE HTTP CLIENT cadence_source
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?fixture=http-cadence&delay_ms=25',
           'method' = 'GET',
@@ -531,8 +529,7 @@ Feature: Domain clock contract regressions
         executed_at DATETIME
       );
       CREATE RELAY cadence_observations SCHEMA cadence_observation UNBRANCHED;
-      CREATE CLIENT cadence_prometheus
-        TYPE PROMETHEUS
+      CREATE PROMETHEUS CLIENT cadence_prometheus
         CONFIG {
           'addr' = '{{mock_http_addr}}/prometheus-clock-source/{{test_id}}/350',
           'timeout_ms' = 5000
@@ -590,8 +587,7 @@ Feature: Domain clock contract regressions
         executed_at DATETIME
       );
       CREATE RELAY rebound_observations SCHEMA rebound_observation UNBRANCHED;
-      CREATE CLIENT rebound_prometheus
-        TYPE PROMETHEUS
+      CREATE PROMETHEUS CLIENT rebound_prometheus
         CONFIG {
           'addr' = '{{mock_http_addr}}/prometheus-clock-source/{{test_id}}/10',
           'timeout_ms' = 5000

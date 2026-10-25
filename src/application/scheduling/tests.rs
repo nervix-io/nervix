@@ -42,6 +42,7 @@ fn voter_gossip(live: &[&str], dead: &[&str]) -> GossipState {
                 client_url: None,
                 console_url: None,
                 interconnect_endpoint: None,
+                prerequisites: None,
             })
             .collect(),
         dead_node_ids: dead.iter().map(|name| named(name)).collect(),
@@ -436,7 +437,7 @@ fn drain_require_group_prefers_policy_target_over_common_replica() {
     let domain = DomainName::parse("payments").expect("valid domain");
     let members = vec![
         placement_member("corridor_source", ModelKind::Junction),
-        placement_member("corridor_sink", ModelKind::Junction),
+        placement_member("corridor_emitter", ModelKind::Junction),
     ];
     let mut schedule = DomainSchedule::new(
         domain.clone(),
@@ -445,7 +446,7 @@ fn drain_require_group_prefers_policy_target_over_common_replica() {
                 Some(node_named("node-2")),
                 vec![node_named("node-2"), node_named("node-3")],
             ),
-            scheduled_node("corridor_sink", ModelKind::Junction).placed_on(
+            scheduled_node("corridor_emitter", ModelKind::Junction).placed_on(
                 Some(node_named("node-2")),
                 vec![node_named("node-2"), node_named("node-3")],
             ),
@@ -462,7 +463,7 @@ fn drain_require_group_prefers_policy_target_over_common_replica() {
                 Some(node_named("node-1")),
                 vec![node_named("node-1"), node_named("node-3")],
             ),
-            scheduled_node("corridor_sink", ModelKind::Junction).placed_on(
+            scheduled_node("corridor_emitter", ModelKind::Junction).placed_on(
                 Some(node_named("node-1")),
                 vec![node_named("node-1"), node_named("node-3")],
             ),
@@ -491,7 +492,7 @@ fn drain_require_group_prefers_policy_target_over_common_replica() {
     assert_eq!(
         moved,
         Some(DrainMove {
-            label: "placement group [corridor_source, corridor_sink]".to_string(),
+            label: "placement group [corridor_source, corridor_emitter]".to_string(),
             promoted_replica: None,
             fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
         })
@@ -752,8 +753,8 @@ fn server_intakes_follow_live_membership_through_schedule_reconciliation() {
     };
     ingestor.input =
         nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-            source: nervix_models::IngestSource::Http(nervix_models::HttpSource::Endpoint(
-                nervix_models::HttpEndpointSource {
+            source: nervix_models::IngestorEntity::Http(nervix_models::HttpIngestor::Endpoint(
+                nervix_models::HttpEndpointIngestor {
                     endpoint: named("ingress"),
                     mode: nervix_models::EndpointIngestMode::NoAck,
                     quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
@@ -823,13 +824,13 @@ fn merge_existing_schedule_data_rejects_a_split_require_group() {
     let domain = DomainName::parse("payments").expect("valid domain");
     let members = vec![
         placement_member("corridor_source", ModelKind::Junction),
-        placement_member("corridor_sink", ModelKind::Junction),
+        placement_member("corridor_emitter", ModelKind::Junction),
     ];
     let mut next = DomainSchedule::new(
         domain.clone(),
         vec![
             scheduled_node_on("corridor_source", ModelKind::Junction, "node-1"),
-            scheduled_node_on("corridor_sink", ModelKind::Junction, "node-1"),
+            scheduled_node_on("corridor_emitter", ModelKind::Junction, "node-1"),
         ],
         vec![placement_group(
             members.clone(),
@@ -840,7 +841,7 @@ fn merge_existing_schedule_data_rejects_a_split_require_group() {
         domain,
         vec![
             scheduled_node_on("corridor_source", ModelKind::Junction, "node-2"),
-            scheduled_node_on("corridor_sink", ModelKind::Junction, "node-3"),
+            scheduled_node_on("corridor_emitter", ModelKind::Junction, "node-3"),
         ],
         vec![placement_group(
             members,
@@ -871,13 +872,13 @@ fn merge_existing_schedule_data_preserves_an_intact_require_group() {
     let domain = DomainName::parse("payments").expect("valid domain");
     let members = vec![
         placement_member("corridor_source", ModelKind::Junction),
-        placement_member("corridor_sink", ModelKind::Junction),
+        placement_member("corridor_emitter", ModelKind::Junction),
     ];
     let mut next = DomainSchedule::new(
         domain.clone(),
         vec![
             scheduled_node_on("corridor_source", ModelKind::Junction, "node-1"),
-            scheduled_node_on("corridor_sink", ModelKind::Junction, "node-1"),
+            scheduled_node_on("corridor_emitter", ModelKind::Junction, "node-1"),
         ],
         vec![placement_group(
             members.clone(),
@@ -888,7 +889,7 @@ fn merge_existing_schedule_data_preserves_an_intact_require_group() {
         domain,
         vec![
             scheduled_node_on("corridor_source", ModelKind::Junction, "node-2"),
-            scheduled_node_on("corridor_sink", ModelKind::Junction, "node-2"),
+            scheduled_node_on("corridor_emitter", ModelKind::Junction, "node-2"),
         ],
         vec![placement_group(
             members,
@@ -918,13 +919,13 @@ fn drain_relocates_a_require_group_as_one_unit() {
     let domain = DomainName::parse("payments").expect("valid domain");
     let members = vec![
         placement_member("corridor_source", ModelKind::Junction),
-        placement_member("corridor_sink", ModelKind::Junction),
+        placement_member("corridor_emitter", ModelKind::Junction),
     ];
     let mut schedule = DomainSchedule::new(
         domain.clone(),
         vec![
             scheduled_node_on("corridor_source", ModelKind::Junction, "node-2"),
-            scheduled_node_on("corridor_sink", ModelKind::Junction, "node-2"),
+            scheduled_node_on("corridor_emitter", ModelKind::Junction, "node-2"),
         ],
         vec![placement_group(
             members.clone(),
@@ -935,7 +936,7 @@ fn drain_relocates_a_require_group_as_one_unit() {
         domain,
         vec![
             scheduled_node_on("corridor_source", ModelKind::Junction, "node-1"),
-            scheduled_node_on("corridor_sink", ModelKind::Junction, "node-1"),
+            scheduled_node_on("corridor_emitter", ModelKind::Junction, "node-1"),
         ],
         vec![placement_group(
             members,
@@ -977,7 +978,7 @@ fn failover_relocates_a_require_group_to_one_target() {
     let domain = DomainName::parse("payments").expect("valid domain");
     let members = vec![
         placement_member("corridor_source", ModelKind::Junction),
-        placement_member("corridor_sink", ModelKind::Junction),
+        placement_member("corridor_emitter", ModelKind::Junction),
     ];
     let mut schedule = DomainSchedule::new(
         domain,
@@ -986,7 +987,7 @@ fn failover_relocates_a_require_group_to_one_target() {
                 Some(node_named("node-2")),
                 vec![node_named("node-2"), node_named("node-3")],
             ),
-            scheduled_node("corridor_sink", ModelKind::Junction).placed_on(
+            scheduled_node("corridor_emitter", ModelKind::Junction).placed_on(
                 Some(node_named("node-2")),
                 vec![node_named("node-2"), node_named("node-1")],
             ),

@@ -10,7 +10,7 @@
 //!   request rejected later reads: its original source record, the materialized state its batch
 //!   was admitted with, and its attempted codec record; and which part of a delivered request is
 //!   payload: its codec record, never its method, target or headers.
-//! - **Depends on.** The emitter's HTTP sink plan, the VM's compile and execute API, the
+//! - **Depends on.** The emitter's HTTP emitter plan, the VM's compile and execute API, the
 //!   vocabulary's HTTP request fields, and the node's planned message errors.
 //! - **Must not know.** Which connector sends the requests, how their bodies are encoded, or when
 //!   the emitter publishes them.
@@ -394,7 +394,7 @@ impl CompiledHttpRequestFields {
     /// Compiles the request fields of the HTTP emitter `emitter` against `schemas`.
     pub(in crate::runtime) fn compile(
         emitter: &EmitterName,
-        sink: &HttpSinkPlan,
+        connector: &HttpRequestEmitterPlan,
         request: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
         schemas: HttpRequestSchemas,
         context: RuntimeVmCompileContext<'_>,
@@ -503,7 +503,7 @@ impl CompiledHttpRequestFields {
                 lookup_hash_maps,
                 error_sites: CompiledMessageErrorSites::new(),
             },
-            origin: sink.origin.clone(),
+            origin: connector.origin.clone(),
             body,
             sites,
             positions,
@@ -989,12 +989,12 @@ mod tests {
         (batch, completions)
     }
 
-    struct HttpSinkTestPlan {
-        sink: HttpSinkPlan,
+    struct HttpRequestEmitterTestPlan {
+        connector: HttpRequestEmitterPlan,
         request: nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     }
 
-    fn sink(method: &str, path: &str, header_writes: &str) -> HttpSinkTestPlan {
+    fn connector(method: &str, path: &str, header_writes: &str) -> HttpRequestEmitterTestPlan {
         use nervix_models::{Assignment, AssignmentTarget};
 
         let construction = RouteConstruction {
@@ -1016,8 +1016,8 @@ mod tests {
             SemanticScopePolicy::read_write("message", HTTP_REQUEST_NAMESPACE),
         )
         .expect("the test request fields must lower");
-        HttpSinkTestPlan {
-            sink: HttpSinkPlan {
+        HttpRequestEmitterTestPlan {
+            connector: HttpRequestEmitterPlan {
                 client: EmitterClientSpec {
                     name: named("api"),
                     config: ResolvedClientConfig::default(),
@@ -1030,7 +1030,7 @@ mod tests {
     }
 
     fn compile(
-        plan: &HttpSinkTestPlan,
+        plan: &HttpRequestEmitterTestPlan,
         output: Option<Arc<CompiledSchema>>,
     ) -> CompiledHttpRequestFields {
         let source = source_schema();
@@ -1043,7 +1043,7 @@ mod tests {
         });
         CompiledHttpRequestFields::compile(
             &named("deliver"),
-            &plan.sink,
+            &plan.connector,
             &plan.request,
             HttpRequestSchemas {
                 input: RuntimeVmSchema {
@@ -1068,14 +1068,14 @@ mod tests {
         let materialized = HashMap::default();
         let lookups = HashMap::default();
         let branching = ResolvedBranching::unbranched();
-        let plan = sink(
+        let plan = connector(
             "input.divisor",
             "'/events'",
             "INVOKE write_header('X-Test', 'value')",
         );
         let report = CompiledHttpRequestFields::compile(
             &named("deliver"),
-            &plan.sink,
+            &plan.connector,
             &plan.request,
             HttpRequestSchemas {
                 input: RuntimeVmSchema {
@@ -1120,7 +1120,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn each_row_is_rejected_at_its_first_failed_field_and_the_rest_keep_their_requests() {
         let compiled = compile(
-            &sink(
+            &connector(
                 "input.method",
                 "concat(input.path, repeat('a', input.padding))",
                 "INVOKE write_header('X-Id', input.id), write_header(input.header_name, \
@@ -1323,7 +1323,7 @@ mod tests {
             ("payload", ParseAsType::String),
         ]);
         let compiled = compile(
-            &sink(
+            &connector(
                 "'PUT'",
                 "concat('/v1/', output.payload, '/', id)",
                 "INVOKE write_header('X-Source', input.method), write_header('X-Message', \

@@ -20,6 +20,7 @@ shuttle = [
 ahash = { workspace = true }
 arch-into = { workspace = true }
 arrow-array = { workspace = true }
+arrow-buffer = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
@@ -37,7 +38,6 @@ nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 opendal = { workspace = true, features = [
-  "layers-retry",
   "layers-timeout",
   "services-azdls",
   "services-gcs",
@@ -49,6 +49,7 @@ reqwest_iceberg = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }
 tempfile = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
 typetag = { workspace = true }
@@ -59,6 +60,7 @@ webpki-roots = { workspace = true }
 [dev-dependencies]
 bolero = { workspace = true }
 http = { workspace = true }
+nervix-primitives = { workspace = true, features = ["test-util"] }
 nervix-test-environment = { workspace = true }
 reqsign-core = { workspace = true }
 serde_json = { workspace = true }
@@ -68,3 +70,4 @@ tokio = { workspace = true, features = [
   "net",
   "rt-multi-thread",
 ] }
+ubyte = { workspace = true }

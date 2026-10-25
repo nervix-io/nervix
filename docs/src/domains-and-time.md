@@ -120,8 +120,9 @@ Important runtime consequences:
 Successful lifecycle commands are completion boundaries. `START` returns after every current live
 node has prepared the same revision and every configured listener and assigned source has completed
 startup. `STOP` returns after intake and runtime work have stopped remotely, including when it is the
-last running domain. A dependent connection, observation, or publish can follow immediately through
-any live node.
+last running domain, and after every deduplicator and window branch it ended has written the state
+it published last, so a backup taken as soon as `STOP` returns holds that state. A dependent
+connection, observation, or publish can follow immediately through any live node.
 
 The lifecycle state, active paced-clock anchor, and one clock authority are replicated. The
 authority identifies a concrete incarnation of a named cluster node and carries a revision that
@@ -224,8 +225,8 @@ physical and run before route-local flushing. Connector retry and backoff timers
 physical controls; none of these operational waits is projected through the domain clock.
 
 An emitter's publish cadence and its publish attempts are separate state. Retry backoff, the
-acknowledgement keepalive that holds an upstream `MODE ACK` source open while a sink is
-unavailable, the sink acknowledgement timeout, the stop and drain deadlines, and an HTTP
+acknowledgement keepalive that holds an upstream `MODE ACK` source open while an emitter is
+unavailable, the emitter acknowledgement timeout, the stop and drain deadlines, and an HTTP
 `Retry-After` a server returns are all physical: a paced domain never shortens or lengthens the
 real wait an external system asked for. A failed attempt keeps the emitter's pending batches, their
 acknowledgements, and its unchanged cadence deadline; while a retry is scheduled the emitter waits
@@ -326,8 +327,8 @@ eligible handoff residue are preserved across the quiesce cycle.
 mapping after installing all compatible runtime state. That mapping projects the downtime, so
 `TIMESTAMP AT` admission uses the restored clock's reached windows. Unpaced domains resume without
 a mapping. A default restore stays stopped. A later normal `START` advances the generation and
-clears materialized relay rows while preserving compatible WASM state, source offsets and branch
-lifecycle. To start from the archived frontier with a new mapping, use a default restore and
+clears materialized relay rows while preserving compatible WASM state, source offsets, branch
+lifecycle, deduplicator keys and windows. To start from the archived frontier with a new mapping, use a default restore and
 explicit `START AT '<frontier>' TIME RATE <rate>`. `DESCRIBE DOMAIN` exposes the generation, start
 point and mapping; `LIST DOMAINS` exposes pace, status and generation. See
 [Backup And Restore](backup-and-restore.md#restoring).

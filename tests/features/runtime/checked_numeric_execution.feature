@@ -342,15 +342,14 @@ Feature: Checked numeric execution
           ON MESSAGE ERROR SEND TO numeric_errors
           SET input_id = input.id,
               error_message = error.message;
-      CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-      CREATE EMITTER operand_sink
+      CREATE ZEROMQ PUSH EMITTER operand_sink
         FROM operands
-        TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING operand_codec
+        TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING operand_codec
         INHERIT ALL
         SET left = input.left % input.divisor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB

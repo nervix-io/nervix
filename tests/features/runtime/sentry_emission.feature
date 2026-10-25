@@ -41,15 +41,14 @@ Feature: Sentry emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sentry_main
-      TYPE SENTRY
+      CREATE SENTRY CLIENT sentry_main
       CONFIG {
         'dsn' = '{{sentry_dns_dsn}}',
         'timeout_ms' = 5000
       };
-      CREATE EMITTER sentry_errors
+      CREATE SENTRY EVENT EMITTER sentry_errors
       FROM errors
-      TO SENTRY sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING error_event_codec
+      TO sentry_main MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING error_event_codec
       INHERIT ALL
       SET environment = CASE
         WHEN now() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN input.environment
@@ -105,12 +104,12 @@ Feature: Sentry emission
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_ingest
         TO errors INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT sentry_main TYPE SENTRY CONFIG {
+      CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = 'http://public@127.0.0.1:{{http_receiver_port.sentry}}/1',
         'timeout_ms' = 5000
       };
-      CREATE EMITTER sentry_errors FROM errors
-        TO SENTRY sentry_main MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      CREATE SENTRY EVENT EMITTER sentry_errors FROM errors
+        TO sentry_main MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING retry_codec INHERIT ALL
         <batch>
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -172,12 +171,12 @@ Feature: Sentry emission
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_ingest
         TO errors INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT sentry_main TYPE SENTRY CONFIG {
+      CREATE SENTRY CLIENT sentry_main CONFIG {
         'dsn' = 'http://public@127.0.0.1:{{http_receiver_port.sentry}}/1',
         'timeout_ms' = 5000
       };
-      CREATE EMITTER sentry_errors FROM errors
-        TO SENTRY sentry_main MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      CREATE SENTRY EVENT EMITTER sentry_errors FROM errors
+        TO sentry_main MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING retry_codec INHERIT ALL
 
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

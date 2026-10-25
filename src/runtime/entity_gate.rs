@@ -68,6 +68,8 @@ pub(crate) enum EntityGateOperationError {
     RelayFenceDeadline { domain: DomainName },
     #[error("entity gate for domain '{domain}' expired while it was being engaged")]
     EngagementExpired { domain: DomainName },
+    #[error("entity gate for domain '{domain}' ended because the node's runtime stopped")]
+    RuntimeStopped { domain: DomainName },
     #[error("entity gate coordination identity '{coordination}' is not held")]
     NotHeld { coordination: CoordinationIdentity },
     #[error("entity gate coordination identity '{coordination}' does not own the requested scope")]
@@ -109,12 +111,11 @@ impl EntityGateOperationError {
             Self::Released
             | Self::ReleaseTaskTerminated
             | Self::RelayFenceDeadline { .. }
-            | Self::EngagementExpired { .. } => {
-                nervix_interconnect::RemoteOperationFailure::Failed {
-                    subject,
-                    reason: self.to_string(),
-                }
-            }
+            | Self::EngagementExpired { .. }
+            | Self::RuntimeStopped { .. } => nervix_interconnect::RemoteOperationFailure::Failed {
+                subject,
+                reason: self.to_string(),
+            },
         }
     }
 }
@@ -216,6 +217,48 @@ impl EntityGateOperation {
 
     fn is_held(&self) -> bool {
         matches!(&*self.state.lock(), EntityGateOperationState::Held(_))
+    }
+}
+
+/// The tasks that finish this node's entity-gate engagements and releases and end each lease.
+///
+/// A lease outlives the call that engaged it, and one that a handoff left held after its
+/// destination did not activate keeps its relay gates, freezes and ingestor quiesce controls until
+/// its deadline, which can lie past this node's stop. No caller can own these tasks to their end,
+/// so the runtime does: closing the owner ends every lease this node holds and stops every
+/// engagement still waiting for its relays, and waiting for it returns once each of them has
+/// finished, so none outlives the runtime with what it retains.
+#[derive(Default)]
+pub(in crate::runtime) struct EntityGateTasks {
+    tracker: TaskTracker,
+    stopping: CancellationToken,
+}
+
+impl EntityGateTasks {
+    fn spawn(
+        &self,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> JoinHandle<()> {
+        self.tracker.spawn(task)
+    }
+
+    /// Whether the runtime has stopped, after which this node engages no new gate.
+    fn is_stopping(&self) -> bool {
+        self.stopping.is_cancelled()
+    }
+
+    /// The signal an engagement or a lease waits for beside its relays and its deadline.
+    fn stopping(&self) -> CancellationToken {
+        self.stopping.clone()
+    }
+
+    pub(in crate::runtime) fn close(&self) {
+        self.stopping.cancel();
+        self.tracker.close();
+    }
+
+    pub(in crate::runtime) async fn wait(&self) {
+        self.tracker.wait().await;
     }
 }
 
@@ -894,6 +937,13 @@ impl Runtime {
         lease: EntityGateLease<'_>,
     ) -> Result<(), Report<EntityGateOperationError>> {
         let EntityGateLease { deadline, reason } = lease;
+        // A stopped runtime has no domain left to fence, and the tasks that would keep a new
+        // engagement were already waited for.
+        if self.inner.entity_gate_tasks.is_stopping() {
+            return Err(Report::new(EntityGateOperationError::RuntimeStopped {
+                domain: domain.clone(),
+            }));
+        }
         let scope = EntityGateScope::new(domain, relays, affected_entities, purpose);
         let operation = match self.inner.entity_gate_holds.entry(coordination.clone()) {
             nervix_primitives::collections::dash_map::Entry::Occupied(entry) => {
@@ -912,21 +962,44 @@ impl Runtime {
                 let coordination = coordination.clone();
                 let reason = reason.to_string();
                 let engagement = operation.clone();
-                drop(nervix_primitives::task::spawn(async move {
-                    runtime
-                        .complete_entity_gate_engagement(
-                            coordination,
-                            scope,
-                            deadline,
-                            reason,
-                            engagement,
-                        )
-                        .await;
+                let stopping = self.inner.entity_gate_tasks.stopping();
+                drop(self.inner.entity_gate_tasks.spawn(async move {
+                    let completion = runtime.clone().complete_entity_gate_engagement(
+                        coordination.clone(),
+                        scope,
+                        deadline,
+                        reason,
+                        engagement.clone(),
+                    );
+                    nervix_primitives::select! {
+                        biased;
+                        _ = stopping.cancelled() => {
+                            runtime.end_interrupted_entity_gate_engagement(&coordination, &engagement);
+                        }
+                        _ = completion => {}
+                    }
                 }));
                 operation
             }
         };
         operation.wait_until_held().await
+    }
+
+    /// Ends an engagement this runtime's stop interrupted before it was held. Dropping the
+    /// unfinished engagement has already reopened the relays it fenced; its waiters now wake with
+    /// the stop, and the exact operation leaves the registry, so no later request observes a hold
+    /// that will never exist.
+    fn end_interrupted_entity_gate_engagement(
+        &self,
+        coordination: &CoordinationIdentity,
+        operation: &Arc<EntityGateOperation>,
+    ) {
+        operation.fail(EntityGateOperationError::RuntimeStopped {
+            domain: operation.scope().domain.clone(),
+        });
+        self.inner
+            .entity_gate_holds
+            .remove_if(coordination, |_, current| Arc::ptr_eq(current, operation));
     }
 
     async fn complete_entity_gate_engagement(
@@ -1040,19 +1113,32 @@ impl Runtime {
             return;
         }
         operation.complete(hold);
+        let stopping = self.inner.entity_gate_tasks.stopping();
         let entity_gate_holds = self.inner.entity_gate_holds.clone();
         let ingestors = self.inner.ingestors.clone();
         let ingestor_quiescence = self.inner.ingestor_quiescence.clone();
         let frozen_ownership_handoff_entities =
             self.inner.frozen_ownership_handoff_entities.clone();
         let expiring_operation = operation.clone();
-        drop(nervix_primitives::task::spawn(async move {
-            nervix_primitives::time::sleep_until(deadline).await;
-            debug!(
-                domain = expiring_operation.scope().domain.as_str(),
-                %coordination,
-                "entity gate lease reached its deadline"
-            );
+        // The lease ends at its deadline, or with this runtime when the node stops first.
+        drop(self.inner.entity_gate_tasks.spawn(async move {
+            nervix_primitives::select! {
+                biased;
+                _ = stopping.cancelled() => {
+                    debug!(
+                        domain = expiring_operation.scope().domain.as_str(),
+                        %coordination,
+                        "entity gate lease ended with its runtime"
+                    );
+                }
+                _ = nervix_primitives::time::sleep_until(deadline) => {
+                    debug!(
+                        domain = expiring_operation.scope().domain.as_str(),
+                        %coordination,
+                        "entity gate lease reached its deadline"
+                    );
+                }
+            }
             Self::release_entity_gate_operation_from_state(
                 &entity_gate_holds,
                 &ingestors,
@@ -1186,7 +1272,7 @@ impl Runtime {
         let frozen_ownership_handoff_entities =
             self.inner.frozen_ownership_handoff_entities.clone();
         let coordination = coordination.clone();
-        let release = nervix_primitives::task::spawn(async move {
+        let release = self.inner.entity_gate_tasks.spawn(async move {
             Self::release_entity_gate_operation_from_state(
                 &entity_gate_holds,
                 &ingestors,
@@ -1598,10 +1684,10 @@ mod tests {
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{
         AckMode, BranchSelection, ClusterNodeName, CoordinationIdentity, CreateEmitter,
-        CreateJunction, CreateRelay, DomainSchedule, EmitSink, EmitterName, EmitterPublishingMode,
-        ErrorPolicies, IngestQuiesceMode, IngestorName, ModelKind, ModelName, NodeRef,
-        ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName,
-        RetryPolicy, ZeroMqPushSink, ZeroMqSink,
+        CreateJunction, CreateRelay, DomainSchedule, EmitterEntity, EmitterName, ErrorPolicies,
+        IngestQuiesceMode, IngestorName, ModelKind, ModelName, NodeRef, ProcessorInputWhere,
+        ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName, RetryPolicy, ZeroMqEmitter,
+        ZeroMqPushEmitter,
     };
     use nervix_primitives::{
         sync::{
@@ -1782,6 +1868,7 @@ mod tests {
                 shutdown: shutdown_tx,
                 branched: Vec::new(),
                 tasks: vec![task],
+                domain_offsets: None,
             },
         );
         runtime.inner.ingestor_quiescence.insert(
@@ -1882,6 +1969,195 @@ mod tests {
         .await
         .expect("entity hold should release at its deadline");
         assert!(!gate.is_closed());
+    }
+
+    /// A lease that a handoff left held, with a deadline past the node's stop, ends with the
+    /// runtime: teardown releases its hold, so nothing of it is left to retain the ingestor control
+    /// it quiesced, or what that control holds, after the runtime stopped.
+    #[nervix_primitives::test]
+    async fn runtime_shutdown_ends_an_entity_gate_lease_held_past_its_stop() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let relay = named::<RelayName>("events");
+        let ingestor = named::<IngestorName>("events_source");
+        let coordination = coordination("coordinator-a", 7, 43);
+
+        let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+        let gate = fanout.dispatch_gate();
+        runtime.inner.relay_boundary_fanouts.insert(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
+            fanout,
+        );
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let task = nervix_primitives::task::spawn(async move {
+            let _ = shutdown_rx.wait_for(|shutdown| *shutdown).await;
+        });
+        runtime.inner.ingestors.insert(
+            key.clone(),
+            IngestorRuntime {
+                shutdown: shutdown_tx,
+                branched: Vec::new(),
+                tasks: vec![task],
+                domain_offsets: None,
+            },
+        );
+        runtime.inner.ingestor_quiescence.insert(
+            key.clone(),
+            test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend),
+        );
+        let affected = NodeRef {
+            kind: ModelKind::Ingestor,
+            identifier: ModelName::from(&ingestor.clone()),
+        };
+        runtime
+            .engage_entity_gate_operation(
+                &coordination,
+                &domain,
+                std::slice::from_ref(&relay),
+                std::slice::from_ref(&affected),
+                EntityGatePurpose::OwnershipHandoff,
+                EntityGateLease {
+                    deadline: Instant::now() + Duration::from_secs(3600),
+                    reason: "a lease past the node's stop",
+                },
+            )
+            .await
+            .expect("the handoff gate should engage");
+        let quiesced = runtime
+            .inner
+            .ingestor_quiescence
+            .get(&key)
+            .map(|control| control.value().clone())
+            .expect("the engaged ingestor keeps its quiesce control");
+        assert!(runtime.entity_gate_operation_is_held(&coordination));
+        assert!(gate.is_closed());
+        assert_eq!(
+            quiesced.cause(),
+            Some(IngestorQuiesceCause::OwnershipHandoff)
+        );
+
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
+
+        assert!(
+            !runtime.entity_gate_operation_is_held(&coordination),
+            "runtime teardown must end the lease it holds"
+        );
+        assert!(
+            !gate.is_closed(),
+            "the ended lease reopens the relay it fenced"
+        );
+        assert_eq!(
+            quiesced.cause(),
+            None,
+            "the ended lease releases the ingestor it quiesced"
+        );
+
+        runtime
+            .stop_ingestor(&domain, &ingestor)
+            .await
+            .expect("test ingestor should stop");
+    }
+
+    /// An engagement still waiting for its relays when the runtime stops ends with the stop: its
+    /// waiter learns why, the relay it fenced reopens, and nothing is left registered.
+    #[nervix_primitives::test]
+    async fn runtime_shutdown_ends_an_engagement_still_waiting_for_its_relays() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let relay = named::<RelayName>("events");
+        let coordination = coordination("leader-a", 12, 1);
+        let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
+        let gate = fanout.dispatch_gate();
+        runtime.inner.relay_boundary_fanouts.insert(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
+            fanout,
+        );
+        let dispatch = gate.acquire_dispatch().await;
+        let request = nervix_primitives::task::spawn({
+            let runtime = runtime.clone();
+            let domain = domain.clone();
+            let relay = relay.clone();
+            let coordination = coordination.clone();
+            async move {
+                runtime
+                    .engage_entity_gate_operation(
+                        &coordination,
+                        &domain,
+                        &[relay],
+                        &[],
+                        EntityGatePurpose::ModelAlteration,
+                        EntityGateLease {
+                            deadline: Instant::now() + Duration::from_secs(3600),
+                            reason: "an engagement the stop interrupts",
+                        },
+                    )
+                    .await
+            }
+        });
+        while !gate.is_closed() {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
+        }
+
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
+
+        let outcome = request
+            .await
+            .expect("the engagement request must not panic");
+        let Err(failure) = outcome else {
+            panic!("an engagement the stop interrupted is never held");
+        };
+        assert!(matches!(
+            failure.current_context(),
+            EntityGateOperationError::RuntimeStopped { domain: stopped } if stopped == &domain
+        ));
+        assert!(
+            !gate.is_closed(),
+            "the interrupted engagement reopens the relay it fenced"
+        );
+        assert!(runtime.inner.entity_gate_holds.get(&coordination).is_none());
+        drop(dispatch);
+    }
+
+    /// A runtime that has stopped engages no new gate, and a peer that asked learns that the
+    /// operation failed rather than that it addressed a hold this node never had.
+    #[nervix_primitives::test]
+    async fn a_stopped_runtime_refuses_a_new_entity_gate_engagement() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let coordination = coordination("leader-a", 13, 1);
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
+
+        let Err(refusal) = runtime
+            .engage_entity_gate_operation(
+                &coordination,
+                &domain,
+                &[],
+                &[],
+                EntityGatePurpose::OwnershipHandoff,
+                EntityGateLease {
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    reason: "an engagement after the stop",
+                },
+            )
+            .await
+        else {
+            panic!("a stopped runtime must refuse the engagement");
+        };
+        assert!(matches!(
+            refusal.current_context(),
+            EntityGateOperationError::RuntimeStopped { domain: stopped } if stopped == &domain
+        ));
+        assert!(matches!(
+            refusal.current_context().as_remote_failure(
+                nervix_interconnect::RemoteOperationSubject::Domain {
+                    domain: domain.clone(),
+                }
+            ),
+            nervix_interconnect::RemoteOperationFailure::Failed { .. }
+        ));
+        assert!(runtime.inner.entity_gate_holds.get(&coordination).is_none());
     }
 
     #[nervix_primitives::test]
@@ -2277,7 +2553,7 @@ mod tests {
     #[test]
     fn emitter_entity_pause_gates_every_input_relay() {
         let emitter = CreateEmitter {
-            name: named("combined_sink"),
+            name: named("combined_emitter"),
             from: ProcessorInputs::new(
                 vec![named("source_b"), named("source_a")],
                 vec![ProcessorInputWhere {
@@ -2289,18 +2565,20 @@ mod tests {
             body: nervix_models::EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-                client: named("sink"),
-            }))),
+            connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+                ZeroMqPushEmitter {
+                    mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                        retry_policy: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
+                    client: named("emitter"),
+                },
+            ))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: nervix_models::RouteConstruction::default(),
             materialized_state: Vec::new(),
@@ -2334,7 +2612,7 @@ mod tests {
                 })),
                 scheduled_model(nervix_models::Model::ClientZeroMq(
                     nervix_models::CreateClientZeroMq {
-                        name: named("sink"),
+                        name: named("emitter"),
                         mount: None,
                         config: Vec::new(),
                     },
@@ -2418,11 +2696,11 @@ mod tests {
             domain("testing"),
             vec![
                 junction("corridor_source", "inbound", "corridor_stage"),
-                junction("corridor_sink", "corridor_stage", "outbound"),
+                junction("corridor_emitter", "corridor_stage", "outbound"),
             ],
             Vec::new(),
         );
-        let affected = ["corridor_source", "corridor_sink"].map(|name| NodeRef {
+        let affected = ["corridor_source", "corridor_emitter"].map(|name| NodeRef {
             kind: ModelKind::Junction,
             identifier: named(name),
         });

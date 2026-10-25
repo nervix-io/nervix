@@ -26,8 +26,7 @@ Feature: ClickHouse emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
@@ -43,15 +42,13 @@ Feature: ClickHouse emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT clickhouse_client
-        TYPE CLICKHOUSE
+        CREATE CLICKHOUSE CLIENT clickhouse_client
         CONFIG {
           'addr' = '{{clickhouse_addr}}',
           'user' = 'default',
           'password' = 'nervix'
         };
-        CREATE EMITTER to_ch FROM notifications TO CLICKHOUSE clickhouse_client INSERT TO TABLE notifications_out_{{test_id}} VALUES { "clickhouse_user_id" = input.user_id, "clickhouse_now" = NOW() AS STRING, "clickhouse_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 500 MAX SIZE 1MiB
+        CREATE CLICKHOUSE TABLE EMITTER to_ch FROM notifications TO clickhouse_client TABLE 'notifications_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "clickhouse_user_id" = input.user_id, "clickhouse_now" = NOW() AS STRING, "clickhouse_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } BATCH MAX MESSAGES 500 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -105,8 +102,7 @@ Feature: ClickHouse emission
       FROM WIRE JSON SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-clickhouse-batch-{{test_id}}'
@@ -120,19 +116,16 @@ Feature: ClickHouse emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT clickhouse_client
-      TYPE CLICKHOUSE
+      CREATE CLICKHOUSE CLIENT clickhouse_client
       CONFIG {
         'addr' = '{{clickhouse_addr}}',
         'user' = 'default',
         'password' = 'nervix'
       };
-      CREATE EMITTER to_ch
+      CREATE CLICKHOUSE TABLE EMITTER to_ch
       FROM notifications
-      TO CLICKHOUSE clickhouse_client INSERT TO TABLE batch_ch_{{test_id}}
-      VALUES { "clickhouse_user_id" = input.user_id }
-      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-      BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      TO clickhouse_client TABLE 'batch_ch_{{test_id}}'
+      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { "clickhouse_user_id" = input.user_id } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;

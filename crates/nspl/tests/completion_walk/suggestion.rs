@@ -38,6 +38,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("min_pool_size", "1"),
     ("mqtt_qos", "1"),
     ("operation_number", "1"),
+    ("request_window", "8"),
     ("resource_version", "1"),
     // Deliberately constant: a conflict target has to name a column the VALUES record already
     // maps, so a fresh name per occurrence would never match.
@@ -55,6 +56,13 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("jaq_program", "'.'"),
     // External names follow their own system's rules and are quoted, so each filler satisfies the
     // rule of its kind.
+    ("clickhouse_table", "'nx_table'"),
+    ("iceberg_table", "'nx_table'"),
+    ("mongodb_collection", "'nx_collection'"),
+    ("mqtt_topic", "'nx/topic'"),
+    ("mysql_table", "'nx_table'"),
+    ("nats_publish_subject", "'nx.subject'"),
+    ("postgres_table", "'nx_table'"),
     ("kafka_consumer_group", "'nx-group'"),
     ("kafka_topic", "'nx.topic'"),
     ("message_count", "100"),
@@ -83,6 +91,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("timestamp", "'2026-01-01T00:00:00Z'"),
     // Server-issued identities are quoted literals rather than NSPL names.
     ("transaction_id", "'nx_transaction'"),
+    ("upgrade_header_name", "'x-nx-header'"),
     ("word", "nx_word"),
 ];
 

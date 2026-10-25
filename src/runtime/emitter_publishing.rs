@@ -8,7 +8,7 @@
 //! - **Depends on.** The emitter's buffer and retry schedule, the composition root that opens its
 //!   connector, the connector contract's lifecycle hooks and outcomes, and the node's
 //!   message-error handling.
-//! - **Must not know.** Which sink crate a connector comes from, how its input is encoded or
+//! - **Must not know.** Which emitter crate a connector comes from, how its input is encoded or
 //!   mapped, or how the emitter task receives its input.
 
 #![cfg_attr(
@@ -19,8 +19,8 @@
 use async_trait::async_trait;
 use error_stack::ResultExt as _;
 use nervix_connector::{
-    PerRecordOutcome, RejectedSinkRecord, SinkFinish, SinkFinishResult, SinkLifecycle,
-    SinkPublishError, SinkRecordPosition, SinkStagedCommit,
+    EmitterFinish, EmitterFinishResult, EmitterLifecycle, EmitterRecordPosition,
+    EmitterStagedCommit, EmitterWriteError, PerRecordOutcome, RejectedEmitterMember,
 };
 
 use super::{emitter_supervision::EmitterConfirmationWaitGuard, *};
@@ -61,10 +61,10 @@ fn emitter_stop_deadline_elapsed() -> Report<EmitterRuntimeError> {
         .attach_printable("emitter stop deadline elapsed while publishing or retrying")
 }
 
-/// Why the host is asking a sink to publish what it staged.
+/// Why the host is asking an emitter to publish what it staged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SinkCommitReason {
-    /// Only the commit cadence of what the sink staged, or the sink reaching its size boundary,
+enum EmitterCommitReason {
+    /// Only the commit cadence of what the emitter staged, or the emitter reaching its size boundary,
     /// releases it.
     Cadence,
     /// A retry publishes everything staged, and a shutdown that cuts its backoff short leaves the
@@ -74,7 +74,7 @@ enum SinkCommitReason {
     Drain,
 }
 
-impl SinkCommitReason {
+impl EmitterCommitReason {
     fn forces_commit(self) -> bool {
         match self {
             Self::Cadence => false,
@@ -95,7 +95,7 @@ impl SinkCommitReason {
 
 #[derive(Debug)]
 pub(super) struct RejectedEmitterRecord {
-    pub(super) position: SinkRecordPosition,
+    pub(super) position: EmitterRecordPosition,
     pub(super) reason: String,
     pub(super) structured_error: Option<StructuredMessageError>,
 }
@@ -117,7 +117,7 @@ pub(super) type EmitterPublishResult = Result<Option<PublishReport>, EmitterPubl
 pub(super) enum EmitterPublishBatchOwner {
     Caller,
     Buffer,
-    Sink,
+    Connector,
 }
 
 pub(super) struct EmitterPublishFailure {
@@ -140,10 +140,10 @@ impl EmitterPublishFailure {
         }
     }
 
-    fn sink(error: Report<EmitterRuntimeError>) -> Self {
+    fn connector(error: Report<EmitterRuntimeError>) -> Self {
         Self {
             error,
-            batch_owner: EmitterPublishBatchOwner::Sink,
+            batch_owner: EmitterPublishBatchOwner::Connector,
         }
     }
 
@@ -170,7 +170,7 @@ impl EmitterPublishFailure {
                 current.take();
                 buffer.drain_pending()
             }
-            EmitterPublishBatchOwner::Sink => {
+            EmitterPublishBatchOwner::Connector => {
                 current.take();
                 Vec::new()
             }
@@ -197,40 +197,40 @@ where
     }
 }
 
-/// A connector as the emitter task drives it, whichever sink contract it implements.
+/// A connector as the emitter task drives it, whichever emitter contract it implements.
 ///
 /// The composition root pairs every connector with what the host prepares its input with, so the
-/// task neither names a sink crate nor learns which contract a sink implements. The task makes one
+/// task neither names an emitter crate nor learns which contract an emitter implements. The task makes one
 /// call per flush, and the connector receives one virtual call per batch, never one per row.
 #[async_trait]
 #[cfg_attr(
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "the retained sink host invokes publication, retry, acknowledgement and commit \
-                  callbacks"
+        reason = "the retained emitter host invokes publication, retry, acknowledgement and \
+                  commit callbacks"
     )
 )]
-pub(super) trait EmitterSink: Send {
-    /// The hooks through which the host drives the connector's lifecycle, which both sink
+pub(super) trait EmitterConnector: Send {
+    /// The hooks through which the host drives the connector's lifecycle, which both emitter
     /// contracts share.
-    fn lifecycle(&self) -> &dyn SinkLifecycle;
+    fn lifecycle(&self) -> &dyn EmitterLifecycle;
 
-    fn lifecycle_mut(&mut self) -> &mut dyn SinkLifecycle;
+    fn lifecycle_mut(&mut self) -> &mut dyn EmitterLifecycle;
 
     /// Prepares every batch the emitter released for this connector's contract and writes it,
     /// together with the batch payloads earlier attempts retained.
     async fn publish_batches(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         publication: EmitterPublication<'_>,
     ) -> EmitterRuntimeResult<()>;
 }
 
 /// This emitter's connector, as its last attempt to open one left it.
-pub(super) enum EmitterSinkState {
+pub(super) enum EmitterConnectorState {
     /// The connector this emitter publishes through.
-    Open(OpenEmitterSink),
+    Open(OpenEmitterConnector),
     /// No connector could be opened, for this reason. The emitter retries on its declared
     /// backoff, and until then a publish attempt fails as one without a client.
     Unavailable { reason: String },
@@ -240,18 +240,84 @@ pub(super) enum EmitterSinkState {
 ///
 /// The cadence belongs to the rows this connector staged, so a connector opened in its place,
 /// which has staged nothing, starts without one.
-pub(super) struct OpenEmitterSink {
-    sink: Box<dyn EmitterSink>,
+pub(super) struct OpenEmitterConnector {
+    connector: Box<dyn EmitterConnector>,
     /// The `COMMIT EACH` deadline of the staged rows, armed by the first cadence check that finds
     /// them staged and cleared once the connector holds nothing.
     commit_cadence: BranchBufferTimer,
 }
 
-impl EmitterSinkState {
+/// The owning emitter's stop-drain answer, kept distinct from a missing host-bound answer.
+pub(super) enum EmitterStopDrainOutcome {
+    Finished {
+        report: Option<PublishReport>,
+        finished: EmitterFinish,
+    },
+    Failed(Report<EmitterRuntimeError>),
+    DeadlineElapsed,
+}
+
+impl EmitterConnectorState {
+    /// Resolves the host's label once from the opened connector's declaration. Before a
+    /// connector can open, its decided entity supplies the initialization diagnostic label.
+    pub(super) fn connector_label(&self, planned: &str) -> String {
+        match self {
+            Self::Open(open) => open
+                .connector
+                .lifecycle()
+                .kind()
+                .connector()
+                .keyword()
+                .to_ascii_lowercase(),
+            Self::Unavailable { .. } => planned.to_string(),
+        }
+    }
+
+    /// Drains by the stop deadline, then receives the emitter's own deadline outcome.
+    pub(super) async fn drain_for_stop(
+        &mut self,
+        label: &str,
+        context: &EmitterConnectorContext,
+        control: &mut EmitterPublishControl<'_>,
+        buffer: &mut EmitterBatchBuffer,
+        deadline: Instant,
+    ) -> EmitterStopDrainOutcome {
+        let drained = nervix_primitives::time::timeout_at(
+            deadline,
+            self.flush_all(label, context, control, buffer),
+        )
+        .await;
+        let report = match drained {
+            Ok(Ok(report)) => report,
+            Ok(Err(error)) => return EmitterStopDrainOutcome::Failed(error),
+            Err(_) => return EmitterStopDrainOutcome::DeadlineElapsed,
+        };
+        // The supervisor already waits through this grace for the stop answer. Reserve half for
+        // receiving the emitter's deadline report, and half for delivering it to the supervisor.
+        // The emitter still receives only the original deadline.
+        let finish_bound = deadline + PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE / 2;
+        match nervix_primitives::time::timeout_at(finish_bound, self.finish_transport(deadline))
+            .await
+        {
+            Ok(Ok(finished)) if Instant::now() <= deadline => {
+                EmitterStopDrainOutcome::Finished { report, finished }
+            }
+            Ok(Err(error)) => {
+                let description = error.current_context().to_string();
+                EmitterStopDrainOutcome::Failed(
+                    error
+                        .change_context(EmitterRuntimeError::FinishTransport)
+                        .attach_printable(description),
+                )
+            }
+            Ok(Ok(_)) | Err(_) => EmitterStopDrainOutcome::DeadlineElapsed,
+        }
+    }
+
     /// The state of an emitter whose connector just opened and has staged nothing yet.
-    pub(super) fn opened(sink: Box<dyn EmitterSink>) -> Self {
-        Self::Open(OpenEmitterSink {
-            sink,
+    pub(super) fn opened(connector: Box<dyn EmitterConnector>) -> Self {
+        Self::Open(OpenEmitterConnector {
+            connector,
             commit_cadence: BranchBufferTimer::default(),
         })
     }
@@ -259,7 +325,7 @@ impl EmitterSinkState {
     /// Opens this emitter's connector, unless its task is told to stop first.
     pub(super) async fn open_until_cancelled(
         plan: &EmitterStartPlan,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         input_schema: &CompiledSchema,
         output_schema: &Arc<CompiledSchema>,
         codec: Option<&Arc<CompiledCodec>>,
@@ -268,9 +334,9 @@ impl EmitterSinkState {
         nervix_primitives::select! {
             biased;
             _ = wait_for_emitter_work_cancel(work_cancel_rx) => Self::Unavailable {
-                reason: "emitter sink initialization canceled while stopping".to_string(),
+                reason: "emitter connector initialization canceled while stopping".to_string(),
             },
-            sink = Self::open(plan, context, input_schema, output_schema, codec) => sink,
+            connector = Self::open(plan, context, input_schema, output_schema, codec) => connector,
         }
     }
 
@@ -278,23 +344,25 @@ impl EmitterSinkState {
     /// could not be opened as this emitter's initialization failure.
     async fn open(
         plan: &EmitterStartPlan,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         input_schema: &CompiledSchema,
         output_schema: &Arc<CompiledSchema>,
         codec: Option<&Arc<CompiledCodec>>,
     ) -> Self {
-        match EmitterSinkStarter::start(plan, context, input_schema, output_schema, codec).await {
-            Ok(sink) => Self::opened(sink),
+        match EmitterConnectorStarter::start(plan, context, input_schema, output_schema, codec)
+            .await
+        {
+            Ok(connector) => Self::opened(connector),
             Err(error) => {
                 let reason = emitter_error_message(&error);
-                context.report_init_error(plan.sink.label(), &reason);
+                context.report_init_error(&plan.label, &reason);
                 Self::Unavailable { reason }
             }
         }
     }
 
     /// The wake that releases this emitter's buffered work on its own flush cadence and its
-    /// sink's staged work on its commit cadence.
+    /// emitter's staged work on its commit cadence.
     pub(super) fn cadence_wake(
         &self,
         clock: &DomainClock,
@@ -310,7 +378,7 @@ impl EmitterSinkState {
         }
     }
 
-    /// When the commit cadence of the rows this sink staged ends, once a cadence check armed it.
+    /// When the commit cadence of the rows this emitter staged ends, once a cadence check armed it.
     fn commit_cadence_deadline(&self) -> Option<BranchBufferDeadline> {
         match self {
             Self::Open(open) => open.commit_cadence.deadline(),
@@ -329,10 +397,10 @@ impl EmitterSinkState {
         }
     }
 
-    /// How many messages this sink staged out of the host's buffer and has not published yet.
+    /// How many messages this emitter staged out of the host's buffer and has not published yet.
     pub(super) fn staged_messages(&self) -> u64 {
         match self {
-            Self::Open(open) => open.sink.lifecycle().staged_messages(),
+            Self::Open(open) => open.connector.lifecycle().staged_messages(),
             Self::Unavailable { .. } => 0,
         }
     }
@@ -346,7 +414,7 @@ impl EmitterSinkState {
 
     fn requires_publish_failure_reinitialization(&self) -> bool {
         match self {
-            Self::Open(open) => !open.sink.lifecycle().keeps_client_on_publish_failure(),
+            Self::Open(open) => !open.connector.lifecycle().keeps_client_on_publish_failure(),
             Self::Unavailable { .. } => true,
         }
     }
@@ -360,10 +428,10 @@ impl EmitterSinkState {
 
     /// Finishes the open connector's transport client by `deadline`. An emitter without an open
     /// connector has no client, so it holds nothing.
-    pub(super) async fn finish_transport(&mut self, deadline: Instant) -> SinkFinishResult {
+    pub(super) async fn finish_transport(&mut self, deadline: Instant) -> EmitterFinishResult {
         match self {
-            Self::Open(open) => open.sink.lifecycle_mut().finish(deadline).await,
-            Self::Unavailable { .. } => Ok(SinkFinish::NothingHeld),
+            Self::Open(open) => open.connector.lifecycle_mut().finish(deadline).await,
+            Self::Unavailable { .. } => Ok(EmitterFinish::NothingHeld),
         }
     }
 
@@ -378,7 +446,7 @@ impl EmitterSinkState {
     pub(super) async fn flush_due(
         &mut self,
         label: &str,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
         buffer: &mut EmitterBatchBuffer,
         retry: bool,
@@ -389,8 +457,8 @@ impl EmitterSinkState {
             None
         };
         let reason = match retry {
-            true => SinkCommitReason::Retry,
-            false => SinkCommitReason::Cadence,
+            true => EmitterCommitReason::Retry,
+            false => EmitterCommitReason::Cadence,
         };
         let committed = self
             .commit_staged(label, context, control, buffer, reason)
@@ -401,7 +469,7 @@ impl EmitterSinkState {
     pub(super) async fn flush_all(
         &mut self,
         label: &str,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
         buffer: &mut EmitterBatchBuffer,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
@@ -446,14 +514,14 @@ impl EmitterSinkState {
             }
         }
         let committed = self
-            .commit_staged(label, context, control, buffer, SinkCommitReason::Drain)
+            .commit_staged(label, context, control, buffer, EmitterCommitReason::Drain)
             .await?;
         Ok(PublishReport::merge_optional(flushed, committed))
     }
 
     pub(super) async fn publish_batch(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
         buffer: &mut EmitterBatchBuffer,
         batch: EmitterPublishBatch,
@@ -468,25 +536,25 @@ impl EmitterSinkState {
             .flush_buffer(context, control, buffer)
             .await
             .map_err(EmitterPublishFailure::buffer)?;
-        // The write may have reached the sink's commit boundary, which publishes here rather than
-        // waiting for the next wake. Its failure belongs to the sink: the rows it staged are no
+        // The write may have reached the emitter's commit boundary, which publishes here rather than
+        // waiting for the next wake. Its failure belongs to the emitter: the rows it staged are no
         // longer in this buffer.
         let committed = self
-            .commit_staged_once(context, control, buffer, SinkCommitReason::Cadence)
+            .commit_staged_once(context, control, buffer, EmitterCommitReason::Cadence)
             .await
-            .map_err(EmitterPublishFailure::sink)?;
+            .map_err(EmitterPublishFailure::connector)?;
         Ok(PublishReport::merge_optional(flushed, committed))
     }
 
-    /// Publishes what the sink staged when its commit boundary is reached, retrying a failed
+    /// Publishes what the emitter staged when its commit boundary is reached, retrying a failed
     /// commit on the emitter's declared backoff while the acknowledgements it holds stay alive.
     async fn commit_staged(
         &mut self,
         label: &str,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
         buffer: &EmitterBatchBuffer,
-        reason: SinkCommitReason,
+        reason: EmitterCommitReason,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
         let mut reason = reason;
         loop {
@@ -509,14 +577,14 @@ impl EmitterSinkState {
                     let acks = self.pending_acks(buffer);
                     if !Self::wait_for_commit_retry(label, context, control, &acks, &error).await? {
                         return match reason {
-                            SinkCommitReason::Drain => {
+                            EmitterCommitReason::Drain => {
                                 Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled)
                                     .attach_printable(
                                         "emitter drain stopped while a staged commit remained \
                                          pending",
                                     ))
                             }
-                            SinkCommitReason::Cadence | SinkCommitReason::Retry => Ok(None),
+                            EmitterCommitReason::Cadence | EmitterCommitReason::Retry => Ok(None),
                         };
                     }
                     // An attempt the cadence started keeps retrying whatever is staged, exactly as
@@ -532,13 +600,13 @@ impl EmitterSinkState {
     }
 
     /// One commit attempt, bounded by the emitter's stop deadline and keeping every
-    /// acknowledgement the sink retained alive while the external system confirms it.
+    /// acknowledgement the emitter retained alive while the external system confirms it.
     async fn commit_staged_once(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
         buffer: &EmitterBatchBuffer,
-        reason: SinkCommitReason,
+        reason: EmitterCommitReason,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
         match self {
             Self::Open(open) => {
@@ -551,7 +619,7 @@ impl EmitterSinkState {
 
     async fn flush_buffer(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
         buffer: &mut EmitterBatchBuffer,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
@@ -573,8 +641,8 @@ impl EmitterSinkState {
             buffer.report_staged_messages(self.staged_messages());
             published.map_err(|()| emitter_stop_deadline_elapsed())??;
         }
-        // Every buffered row is resolved now, and the rows the sink delivered are sent, however
-        // many attempts delivered them. A sink that stages what it accepts has not published those
+        // Every buffered row is resolved now, and the rows the emitter delivered are sent, however
+        // many attempts delivered them. A emitter that stages what it accepts has not published those
         // rows yet, so its commit counts them as sent and this write counts none.
         let report = buffer.delivered_report();
         buffer.clear();
@@ -583,21 +651,23 @@ impl EmitterSinkState {
 
     async fn publish_buffered_batches(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         publication: EmitterPublication<'_>,
     ) -> EmitterRuntimeResult<()> {
         match self {
-            Self::Open(open) => open.sink.publish_batches(context, publication).await,
-            Self::Unavailable { .. } => Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                .attach_printable(
-                    "emitter has no initialized sink client for its configured sink",
-                )),
+            Self::Open(open) => open.connector.publish_batches(context, publication).await,
+            Self::Unavailable { .. } => Err(Report::new(
+                EmitterRuntimeError::ConnectorNotInitialized,
+            )
+            .attach_printable(
+                "emitter has no initialized emitter client for its configured emitter",
+            )),
         }
     }
 
     fn check_fault_injection(
         &self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         control: &EmitterPublishControl<'_>,
     ) -> EmitterRuntimeResult<()> {
         if control
@@ -627,22 +697,22 @@ impl EmitterSinkState {
             return Err(Report::new(EmitterRuntimeError::PublishStalled)
                 .attach_printable("fault injector stalled emitter publish"));
         }
-        // An unavailable client is the one injected fault a sink recovers from on its own: the
+        // An unavailable client is the one injected fault an emitter recovers from on its own: the
         // publish fails the way an unreachable external system does, and the emitter retries it on
         // its declared backoff until the fault clears.
         if control
             .fault_injection
-            .sink_client_is_unavailable(&context.emitter)
+            .emitter_client_is_unavailable(&context.emitter)
         {
             return Err(Report::new(EmitterRuntimeError::PublishBatch)
-                .attach_printable("sink fault injector returned an unavailable client"));
+                .attach_printable("emitter fault injector returned an unavailable client"));
         }
         Ok(())
     }
 
     async fn wait_for_commit_retry(
-        sink: &str,
-        context: &EmitterSinkContext,
+        connector: &str,
+        context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
         acks: &EmitterAcknowledgements,
         error: &Report<EmitterRuntimeError>,
@@ -650,7 +720,7 @@ impl EmitterSinkState {
         let reason = emitter_error_message(error);
         let wait = control.backoff.next_delay();
         context.record_retry(reason.clone(), wait, EmitterRetryKind::Commit);
-        context.report_flush_error(sink, &reason);
+        context.report_flush_error(connector, &reason);
         await_until_emitter_stop_deadline(
             control.stop_rx,
             control
@@ -662,11 +732,11 @@ impl EmitterSinkState {
     }
 }
 
-impl OpenEmitterSink {
+impl OpenEmitterConnector {
     fn pending_acks(&self, buffer: &EmitterBatchBuffer) -> EmitterAcknowledgements {
         EmitterAcknowledgements {
             runtime: buffer.pending_acks(),
-            sink: self.sink.lifecycle().pending_acks(),
+            connector: self.connector.lifecycle().pending_acks(),
         }
     }
 
@@ -674,12 +744,12 @@ impl OpenEmitterSink {
     /// it.
     async fn commit_staged_once(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
         buffer: &EmitterBatchBuffer,
-        reason: SinkCommitReason,
+        reason: EmitterCommitReason,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
-        let Some(staged) = self.sink.lifecycle().staged_commit() else {
+        let Some(staged) = self.connector.lifecycle().staged_commit() else {
             self.commit_cadence.clear();
             return Ok(None);
         };
@@ -690,7 +760,7 @@ impl OpenEmitterSink {
         let committed = {
             let _confirmation_wait =
                 EmitterConfirmationWaitGuard::begin(&context.confirmation_waits);
-            let commit = Box::pin(self.sink.lifecycle_mut().commit());
+            let commit = Box::pin(self.connector.lifecycle_mut().commit());
             await_until_emitter_stop_deadline(
                 control.stop_rx,
                 await_emitter_confirmation(&acks, commit),
@@ -698,8 +768,8 @@ impl OpenEmitterSink {
             .await
             .map_err(|()| emitter_stop_deadline_elapsed())?
         };
-        buffer.report_staged_messages(self.sink.lifecycle().staged_messages());
-        let committed = committed.map_err(sink_publish_failure)?;
+        buffer.report_staged_messages(self.connector.lifecycle().staged_messages());
+        let committed = committed.map_err(emitter_publish_failure)?;
         // The commit published everything staged, so the next rows staged start a cadence of
         // their own.
         self.commit_cadence.clear();
@@ -718,12 +788,12 @@ impl OpenEmitterSink {
     /// without asking, so neither of them reads the domain clock.
     fn commit_is_due(
         &mut self,
-        context: &EmitterSinkContext,
-        staged: SinkStagedCommit,
+        context: &EmitterConnectorContext,
+        staged: EmitterStagedCommit,
     ) -> EmitterRuntimeResult<bool> {
         match staged {
-            SinkStagedCommit::SizeReached => Ok(true),
-            SinkStagedCommit::Cadence(interval) => {
+            EmitterStagedCommit::SizeReached => Ok(true),
+            EmitterStagedCommit::Cadence(interval) => {
                 let snapshot = context.execution_snapshot()?;
                 self.commit_cadence
                     .arm_logical(&context.clock, &snapshot, interval);
@@ -736,11 +806,11 @@ impl OpenEmitterSink {
 }
 
 pub(super) fn emitter_unavailable_reason(
-    sink: &EmitterSinkState,
+    connector: &EmitterConnectorState,
     fault_injection: &ConfiguredFaultInjection,
     emitter: &EmitterName,
 ) -> Option<String> {
-    if let Some(reason) = sink.unavailable_reason() {
+    if let Some(reason) = connector.unavailable_reason() {
         return Some(reason.to_owned());
     }
     if fault_injection.emitter_should_stall(emitter) {
@@ -762,13 +832,13 @@ pub(super) async fn wait_for_emitter_work_cancel(work_cancel_rx: &mut watch::Rec
     }
 }
 
-impl EmitterSinkContext {
+impl EmitterConnectorContext {
     /// One write's outcome as it reaches the emitter.
     ///
-    /// A test build can stall the sink after it resolved the first records of a write: the
+    /// A test build can stall the emitter after it resolved the first records of a write: the
     /// answers for every later record are lost, as they are from a broker that stops answering
     /// after it accepted them, and the write fails as one whose outcome the emitter never
-    /// learned. Any other build receives the outcome exactly as the sink reported it.
+    /// learned. Any other build receives the outcome exactly as the emitter reported it.
     pub(super) fn received_outcome<Id: Copy + Ord>(
         &self,
         records: usize,
@@ -781,7 +851,7 @@ impl EmitterSinkContext {
             .runtime
             .inner
             .fault_injection
-            .take_emitter_sink_stall(&self.emitter)
+            .take_emitter_connector_stall(&self.emitter)
         else {
             return outcome;
         };
@@ -789,13 +859,13 @@ impl EmitterSinkContext {
     }
 }
 
-/// One answer a sink gave for one record of a write.
-enum SinkAnswer<Id> {
+/// One answer an emitter gave for one record of a write.
+enum EmitterAnswer<Id> {
     Delivered(Id),
-    Rejected(RejectedSinkRecord<Id>),
+    Rejected(RejectedEmitterMember<Id>),
 }
 
-impl<Id: Copy> SinkAnswer<Id> {
+impl<Id: Copy> EmitterAnswer<Id> {
     fn id(&self) -> Id {
         match self {
             Self::Delivered(id) => *id,
@@ -804,7 +874,7 @@ impl<Id: Copy> SinkAnswer<Id> {
     }
 }
 
-/// `outcome` as it arrives from a sink that stalled after it resolved `resolved` records: the
+/// `outcome` as it arrives from an emitter that stalled after it resolved `resolved` records: the
 /// answers for every record after the first `resolved`, in the order the host handed them over,
 /// never arrive, and the write fails as one whose outcome is unknown.
 fn stalled_after_resolving<Id: Copy + Ord>(
@@ -820,51 +890,56 @@ fn stalled_after_resolving<Id: Copy + Ord>(
             .assured("both counts total answers this node already holds in memory"),
     );
     for id in parts.delivered {
-        answers.push(SinkAnswer::Delivered(id));
+        answers.push(EmitterAnswer::Delivered(id));
     }
     for rejected in parts.rejected {
-        answers.push(SinkAnswer::Rejected(rejected));
+        answers.push(EmitterAnswer::Rejected(rejected));
     }
-    answers.sort_by_key(SinkAnswer::id);
+    answers.sort_by_key(EmitterAnswer::id);
     let mut stalled = PerRecordOutcome::with_capacity(resolved);
     for answer in answers.into_iter().take(resolved) {
         match answer {
-            SinkAnswer::Delivered(id) => stalled.deliver(id),
-            SinkAnswer::Rejected(rejected) => stalled.reject(rejected),
+            EmitterAnswer::Delivered(id) => stalled.deliver(id),
+            EmitterAnswer::Rejected(rejected) => stalled.reject(rejected),
         }
     }
     stalled.fail(
-        Report::new(SinkPublishError::Publish { sink: "stalled" }).attach_printable(format!(
-            "fault injector stalled the sink after it resolved {resolved} records"
+        Report::new(EmitterWriteError::Publish {
+            connector: "stalled",
+        })
+        .attach_printable(format!(
+            "fault injector stalled the emitter after it resolved {resolved} records"
         )),
     );
     stalled
 }
 
-/// A connector's publish failure as this emitter's own, keeping a misconfigured sink out of the
+/// A connector's publish failure as this emitter's own, keeping a misconfigured emitter out of the
 /// retry loop it would never leave.
-pub(super) fn sink_publish_failure(error: Report<SinkPublishError>) -> Report<EmitterRuntimeError> {
+pub(super) fn emitter_publish_failure(
+    error: Report<EmitterWriteError>,
+) -> Report<EmitterRuntimeError> {
     match error.current_context() {
-        SinkPublishError::Misconfigured { .. } => {
-            error.change_context(EmitterRuntimeError::InvalidSinkConfig)
+        EmitterWriteError::Misconfigured { .. } => {
+            error.change_context(EmitterRuntimeError::InvalidConnectorConfig)
         }
-        SinkPublishError::NotInitialized { .. }
-        | SinkPublishError::Publish { .. }
-        | SinkPublishError::Commit { .. } => {
+        EmitterWriteError::NotInitialized { .. }
+        | EmitterWriteError::Publish { .. }
+        | EmitterWriteError::Commit { .. } => {
             error.change_context(EmitterRuntimeError::PublishBatch)
         }
     }
 }
 
 pub(super) async fn finish_rejected_records(
-    context: &EmitterSinkContext,
+    context: &EmitterConnectorContext,
     batches: &mut [EmitterPublishBatch],
     rejected: Vec<RejectedEmitterRecord>,
     operation: MessageErrorOperation,
 ) -> EmitterRuntimeResult<()> {
     for rejected in rejected {
         nervix_primitives::task::consume_budget().await;
-        let SinkRecordPosition {
+        let EmitterRecordPosition {
             batch_index,
             row_index,
         } = rejected.position;
@@ -942,11 +1017,13 @@ pub(super) async fn finish_rejected_records(
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use nervix_connector::{ParsedRetryPolicy, SinkCommitReport, SinkPublishResult, SinkRecordId};
+    use nervix_connector::{
+        EmitterCommitReport, EmitterRecordId, EmitterWriteResult, ParsedRetryPolicy,
+    };
 
     use super::*;
     use crate::runtime::test_fixtures::{
-        input_batch, input_batch_with, input_value, sink_context, test_domain_clock_authority,
+        emitter_context, input_batch, input_batch_with, input_value, test_domain_clock_authority,
         unpaced_domain_state,
     };
 
@@ -1009,44 +1086,48 @@ mod tests {
 
     /// A connector whose every write fails with a failure the emitter does not retry, so a test
     /// drives the publish path up to the connector and observes what the host keeps afterwards.
-    struct UnencodableSink;
+    struct UnencodableEmitter;
 
     #[async_trait]
-    impl SinkLifecycle for UnencodableSink {
-        async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
-            Ok(SinkFinish::NothingHeld)
+    impl EmitterLifecycle for UnencodableEmitter {
+        fn kind(&self) -> nervix_models::EmitterEntityKind {
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
+        }
+
+        async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
+            Ok(EmitterFinish::NothingHeld)
         }
     }
 
     #[async_trait]
-    impl EmitterSink for UnencodableSink {
-        fn lifecycle(&self) -> &dyn SinkLifecycle {
+    impl EmitterConnector for UnencodableEmitter {
+        fn lifecycle(&self) -> &dyn EmitterLifecycle {
             self
         }
 
-        fn lifecycle_mut(&mut self) -> &mut dyn SinkLifecycle {
+        fn lifecycle_mut(&mut self) -> &mut dyn EmitterLifecycle {
             self
         }
 
         async fn publish_batches(
             &mut self,
-            _context: &EmitterSinkContext,
+            _context: &EmitterConnectorContext,
             _publication: EmitterPublication<'_>,
         ) -> EmitterRuntimeResult<()> {
             Err(Report::new(EmitterRuntimeError::EncodeBatch)
-                .attach_printable("the test sink encodes no record"))
+                .attach_printable("the test emitter encodes no record"))
         }
     }
 
     /// A connector that stages every row it is handed and publishes the rows only on its own
     /// commit, which is due once `size_boundary` rows are staged and otherwise after `cadence`.
-    struct StagingSink {
+    struct StagingEmitter {
         cadence: Duration,
         size_boundary: u64,
         staged: u64,
     }
 
-    impl StagingSink {
+    impl StagingEmitter {
         fn new(cadence: Duration, size_boundary: u64) -> Self {
             Self {
                 cadence,
@@ -1057,28 +1138,32 @@ mod tests {
     }
 
     #[async_trait]
-    impl SinkLifecycle for StagingSink {
-        async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
-            Ok(SinkFinish::NothingHeld)
+    impl EmitterLifecycle for StagingEmitter {
+        fn kind(&self) -> nervix_models::EmitterEntityKind {
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
         }
 
-        fn staged_commit(&self) -> Option<SinkStagedCommit> {
+        async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
+            Ok(EmitterFinish::NothingHeld)
+        }
+
+        fn staged_commit(&self) -> Option<EmitterStagedCommit> {
             if self.staged == 0 {
                 return None;
             }
             if self.staged >= self.size_boundary {
-                return Some(SinkStagedCommit::SizeReached);
+                return Some(EmitterStagedCommit::SizeReached);
             }
-            Some(SinkStagedCommit::Cadence(self.cadence))
+            Some(EmitterStagedCommit::Cadence(self.cadence))
         }
 
         fn staged_messages(&self) -> u64 {
             self.staged
         }
 
-        async fn commit(&mut self) -> SinkPublishResult<Option<SinkCommitReport>> {
+        async fn commit(&mut self) -> EmitterWriteResult<Option<EmitterCommitReport>> {
             let messages = std::mem::take(&mut self.staged);
-            Ok(Some(SinkCommitReport {
+            Ok(Some(EmitterCommitReport {
                 messages,
                 bytes: 0,
                 domain_timestamp: Timestamp::from_unix_nanos(100),
@@ -1087,23 +1172,23 @@ mod tests {
     }
 
     #[async_trait]
-    impl EmitterSink for StagingSink {
-        fn lifecycle(&self) -> &dyn SinkLifecycle {
+    impl EmitterConnector for StagingEmitter {
+        fn lifecycle(&self) -> &dyn EmitterLifecycle {
             self
         }
 
-        fn lifecycle_mut(&mut self) -> &mut dyn SinkLifecycle {
+        fn lifecycle_mut(&mut self) -> &mut dyn EmitterLifecycle {
             self
         }
 
         async fn publish_batches(
             &mut self,
-            _context: &EmitterSinkContext,
+            _context: &EmitterConnectorContext,
             publication: EmitterPublication<'_>,
         ) -> EmitterRuntimeResult<()> {
             for batch in publication.batches.iter_mut() {
                 for row in batch.pending_record_rows() {
-                    batch.mark_delivered(row, DeliveredAcknowledgements::Sink)?;
+                    batch.mark_delivered(row, DeliveredAcknowledgements::Connector)?;
                     self.staged = self
                         .staged
                         .checked_add(1)
@@ -1127,13 +1212,16 @@ mod tests {
 
     /// Hands `batch` to the emitter through its publish path and returns what that published.
     async fn publish(
-        sink: &mut EmitterSinkState,
-        context: &EmitterSinkContext,
+        connector: &mut EmitterConnectorState,
+        context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
         buffer: &mut EmitterBatchBuffer,
         batch: EmitterPublishBatch,
     ) -> Option<PublishReport> {
-        match sink.publish_batch(context, control, buffer, batch).await {
+        match connector
+            .publish_batch(context, control, buffer, batch)
+            .await
+        {
             Ok(published) => published,
             Err(failure) => panic!(
                 "the staging write must succeed: {}",
@@ -1154,9 +1242,10 @@ mod tests {
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
         };
-        let context = sink_context();
+        let context = emitter_context();
         let cadence = Duration::from_millis(20);
-        let mut sink = EmitterSinkState::opened(Box::new(StagingSink::new(cadence, u64::MAX)));
+        let mut connector =
+            EmitterConnectorState::opened(Box::new(StagingEmitter::new(cadence, u64::MAX)));
         let mut buffer = releasing_buffer();
 
         let before = context
@@ -1166,7 +1255,7 @@ mod tests {
         // The batch was accepted at a domain time far older than the write that stages it, which
         // must not shorten the cadence its staged rows wait.
         let published = publish(
-            &mut sink,
+            &mut connector,
             &context,
             &mut control,
             &mut buffer,
@@ -1182,8 +1271,8 @@ mod tests {
             published.is_none(),
             "a staged row is sent only by its commit"
         );
-        assert_eq!(sink.staged_messages(), 1);
-        let due_at = sink
+        assert_eq!(connector.staged_messages(), 1);
+        let due_at = connector
             .commit_cadence_due_at()
             .expect("the check after the staging write arms the commit cadence");
         let earliest = before
@@ -1198,19 +1287,20 @@ mod tests {
              between {before:?} and {after:?}"
         );
 
-        sink.cadence_wake(&context.clock, &buffer)
+        connector
+            .cadence_wake(&context.clock, &buffer)
             .wait()
             .await
             .expect("the fixture clock reaches the commit cadence");
-        let committed = sink
+        let committed = connector
             .flush_due("staging", &context, &mut control, &mut buffer, false)
             .await
             .expect("the commit due on its cadence succeeds");
 
         assert_eq!(committed.map(|report| report.messages), Some(1));
-        assert_eq!(sink.staged_messages(), 0);
+        assert_eq!(connector.staged_messages(), 0);
         assert!(
-            sink.commit_cadence_due_at().is_none(),
+            connector.commit_cadence_due_at().is_none(),
             "the rows staged next start a commit cadence of their own"
         );
     }
@@ -1227,13 +1317,15 @@ mod tests {
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
         };
-        let context = sink_context();
-        let mut sink =
-            EmitterSinkState::opened(Box::new(StagingSink::new(Duration::from_secs(60), 1)));
+        let context = emitter_context();
+        let mut connector = EmitterConnectorState::opened(Box::new(StagingEmitter::new(
+            Duration::from_secs(60),
+            1,
+        )));
         let mut buffer = releasing_buffer();
 
         let published = publish(
-            &mut sink,
+            &mut connector,
             &context,
             &mut control,
             &mut buffer,
@@ -1242,9 +1334,9 @@ mod tests {
         .await;
 
         assert_eq!(published.map(|report| report.messages), Some(1));
-        assert_eq!(sink.staged_messages(), 0);
+        assert_eq!(connector.staged_messages(), 0);
         assert!(
-            sink.commit_cadence_due_at().is_none(),
+            connector.commit_cadence_due_at().is_none(),
             "a commit due at the size boundary arms no cadence"
         );
     }
@@ -1261,20 +1353,20 @@ mod tests {
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
         };
-        let mut context = sink_context();
+        let mut context = emitter_context();
         let domain = unpaced_domain_state(context.domain.as_str());
         let lifecycle = DomainClockLifecycle::new(context.domain.clone());
         lifecycle.synchronize(&domain, &test_domain_clock_authority());
         context.clock = lifecycle
             .bind()
             .expect("the fixture installs an unpaced domain clock");
-        let mut sink = EmitterSinkState::opened(Box::new(StagingSink::new(
+        let mut connector = EmitterConnectorState::opened(Box::new(StagingEmitter::new(
             Duration::from_secs(60),
             u64::MAX,
         )));
         let mut buffer = releasing_buffer();
         let published = publish(
-            &mut sink,
+            &mut connector,
             &context,
             &mut control,
             &mut buffer,
@@ -1282,7 +1374,7 @@ mod tests {
         )
         .await;
         assert!(published.is_none());
-        assert!(sink.commit_cadence_due_at().is_some());
+        assert!(connector.commit_cadence_due_at().is_some());
 
         // Stopping a domain stops its clock before its emitters drain.
         lifecycle.stop(domain.start_version);
@@ -1290,59 +1382,59 @@ mod tests {
             context.execution_snapshot().is_err(),
             "a stopped domain has no domain time to read"
         );
-        let drained = sink
+        let drained = connector
             .flush_all("staging", &context, &mut control, &mut buffer)
             .await
             .expect("a drain commits what is staged without the domain clock");
 
         assert_eq!(drained.map(|report| report.messages), Some(1));
-        assert_eq!(sink.staged_messages(), 0);
-        assert!(sink.commit_cadence_due_at().is_none());
+        assert_eq!(connector.staged_messages(), 0);
+        assert!(connector.commit_cadence_due_at().is_none());
     }
 
     #[test]
-    fn a_stalled_sink_keeps_only_its_first_answers_in_the_order_they_were_handed_over() {
+    fn a_stalled_emitter_keeps_only_its_first_answers_in_the_order_they_were_handed_over() {
         let mut outcome = PerRecordOutcome::with_capacity(3);
-        outcome.deliver(SinkRecordId::new(2));
-        outcome.reject(RejectedSinkRecord::external(
-            SinkRecordId::new(1),
+        outcome.deliver(EmitterRecordId::new(2));
+        outcome.reject(RejectedEmitterMember::external(
+            EmitterRecordId::new(1),
             Timestamp::from_unix_nanos(1),
             "refused".to_string(),
         ));
-        outcome.deliver(SinkRecordId::new(0));
+        outcome.deliver(EmitterRecordId::new(0));
 
         let stalled = stalled_after_resolving(outcome, 2).into_parts();
 
-        assert_eq!(stalled.delivered, vec![SinkRecordId::new(0)]);
+        assert_eq!(stalled.delivered, vec![EmitterRecordId::new(0)]);
         assert_eq!(
             stalled
                 .rejected
                 .iter()
                 .map(|rejected| rejected.id)
                 .collect::<Vec<_>>(),
-            vec![SinkRecordId::new(1)]
+            vec![EmitterRecordId::new(1)]
         );
-        let error = sink_publish_failure(
+        let error = emitter_publish_failure(
             stalled
                 .infrastructure_error
-                .expect("a stalled sink leaves the write unresolved"),
+                .expect("a stalled emitter leaves the write unresolved"),
         );
         assert!(emitter_publish_error_is_retryable(&error));
         assert_eq!(
             emitter_error_message(&error),
-            "fault injector stalled the sink after it resolved 2 records"
+            "fault injector stalled the emitter after it resolved 2 records"
         );
     }
 
     #[test]
     fn an_empty_write_never_consumes_an_armed_stall() {
-        let context = sink_context();
-        let mut outcome = PerRecordOutcome::<SinkRecordId>::with_capacity(0);
-        outcome.deliver(SinkRecordId::new(0));
+        let context = emitter_context();
+        let mut outcome = PerRecordOutcome::<EmitterRecordId>::with_capacity(0);
+        outcome.deliver(EmitterRecordId::new(0));
 
         let received = context.received_outcome(0, outcome).into_parts();
 
-        assert_eq!(received.delivered, vec![SinkRecordId::new(0)]);
+        assert_eq!(received.delivered, vec![EmitterRecordId::new(0)]);
         assert!(received.infrastructure_error.is_none());
     }
 
@@ -1358,8 +1450,8 @@ mod tests {
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
         };
-        let context = sink_context();
-        let mut sink = EmitterSinkState::opened(Box::new(UnencodableSink));
+        let context = emitter_context();
+        let mut connector = EmitterConnectorState::opened(Box::new(UnencodableEmitter));
         let mut buffer = EmitterBatchBuffer::default();
         buffer.set_flush_policy(RuntimeFlushPolicy::Each {
             interval: Duration::from_secs(60),
@@ -1373,12 +1465,13 @@ mod tests {
             .expect("retry batch must buffer");
 
         assert!(
-            sink.flush_due("nats", &context, &mut control, &mut buffer, false)
+            connector
+                .flush_due("nats", &context, &mut control, &mut buffer, false)
                 .await
                 .expect("ordinary wake must remain idle")
                 .is_none()
         );
-        let error = match sink
+        let error = match connector
             .flush_due("nats", &context, &mut control, &mut buffer, true)
             .await
         {
@@ -1392,13 +1485,22 @@ mod tests {
 
     #[test]
     fn a_started_commit_keeps_forcing_itself_through_every_retry() {
-        assert!(!SinkCommitReason::Cadence.forces_commit());
-        assert!(SinkCommitReason::Retry.forces_commit());
-        assert!(SinkCommitReason::Drain.forces_commit());
+        assert!(!EmitterCommitReason::Cadence.forces_commit());
+        assert!(EmitterCommitReason::Retry.forces_commit());
+        assert!(EmitterCommitReason::Drain.forces_commit());
 
-        assert_eq!(SinkCommitReason::Cadence.forced(), SinkCommitReason::Retry);
-        assert_eq!(SinkCommitReason::Retry.forced(), SinkCommitReason::Retry);
-        assert_eq!(SinkCommitReason::Drain.forced(), SinkCommitReason::Drain);
+        assert_eq!(
+            EmitterCommitReason::Cadence.forced(),
+            EmitterCommitReason::Retry
+        );
+        assert_eq!(
+            EmitterCommitReason::Retry.forced(),
+            EmitterCommitReason::Retry
+        );
+        assert_eq!(
+            EmitterCommitReason::Drain.forced(),
+            EmitterCommitReason::Drain
+        );
     }
 
     #[nervix_primitives::test]
@@ -1413,18 +1515,18 @@ mod tests {
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
         };
-        let context = sink_context();
-        let mut sink = EmitterSinkState::opened(Box::new(UnencodableSink));
+        let context = emitter_context();
+        let mut connector = EmitterConnectorState::opened(Box::new(UnencodableEmitter));
         let mut buffer = EmitterBatchBuffer::default();
         buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
         buffer
             .push(
-                &sink_context(),
+                &emitter_context(),
                 EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
             )
             .expect("batch must buffer");
 
-        let error = match sink
+        let error = match connector
             .flush_all("nats", &context, &mut control, &mut buffer)
             .await
         {
@@ -1444,7 +1546,7 @@ mod tests {
             interval: Duration::from_secs(60),
             max_batch_size: u64::MAX,
         });
-        let context = sink_context();
+        let context = emitter_context();
         buffer
             .push(
                 &context,
@@ -1489,7 +1591,7 @@ mod tests {
         buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
         buffer
             .push(
-                &sink_context(),
+                &emitter_context(),
                 EmitterPublishBatch::from_batch(
                     input_batch_with(1, 0, AckSet::empty()),
                     Timestamp::from_unix_nanos(100),
@@ -1515,7 +1617,7 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[nervix_primitives::test]
-    async fn buffering_does_not_wait_for_sink_fault_until_a_flush_is_required() {
+    async fn buffering_does_not_wait_for_emitter_fault_until_a_flush_is_required() {
         let fault_injection = ConfiguredFaultInjection::default();
         fault_injection.fail_emitter("output");
         let mut backoff = RuntimeReconnectBackoff::default();
@@ -1527,9 +1629,9 @@ mod tests {
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
         };
-        let context = sink_context();
-        let mut sink = EmitterSinkState::Unavailable {
-            reason: "test sink intentionally has no client".to_string(),
+        let context = emitter_context();
+        let mut connector = EmitterConnectorState::Unavailable {
+            reason: "test emitter intentionally has no client".to_string(),
         };
         let mut buffer = EmitterBatchBuffer::default();
         buffer.set_flush_policy(RuntimeFlushPolicy::Each {
@@ -1537,7 +1639,7 @@ mod tests {
             max_batch_size: u64::MAX,
         });
 
-        let published = match sink
+        let published = match connector
             .publish_batch(
                 &context,
                 &mut control,

@@ -7,7 +7,7 @@ epic](https://app.clickup.com/t/86bbwcry1). The source audit began in [Domain cl
 that audit are represented by the current-source regressions below. Tasks 02–13 repaired and
 documented their owning product paths; task 14 records the final contract qualification.
 
-The Cucumber scenarios exercise NSPL and runtime behavior through public endpoints and session
+The Cucumber scenarios exercise Plexus and runtime behavior through public endpoints and session
 subscriptions. The clock-contract scenarios and direct arithmetic regressions run in the ordinary
 suite. Explicit tag selections isolate the focused cases; the validation records preserve the
 observed red baselines and subsequent results.
@@ -71,7 +71,7 @@ diagnostic; it cannot reset an anchor or survive behind an invariant claim.
 | F6 | VM contexts, `VALUES`, inference, and subscription expressions can read wall time. | [06](https://app.clickup.com/t/86bbwcrz9) | `Every expression context observes its domain execution time` |
 | F7 | Errors, tokenless WASM, and omitted generated timestamps use wall time. | [06](https://app.clickup.com/t/86bbwcrz9) | `Generated errors WASM timeouts and telemetry timestamps use their assigned clock classes` |
 | F8 | HTTP polling ignores pace; Prometheus polling reuses stale or duplicate due times. | [09](https://app.clickup.com/t/86bbwcrzf) | `Slow external polling coalesces missed cadence with fresh due timestamps` |
-| F9 | Branch activity is sampled before awaiting input. | [10](https://app.clickup.com/t/86bbwcrzh) | `Activity sampled after an awaited record keeps each logical branch alive` |
+| F9 | Branch activity is sampled before awaiting input. | [10](https://app.clickup.com/t/86bbwcrzh) | The production-owner unit `accepted_processor_input_records_branch_activity_at_its_own_domain_time`; public branch retirement and fresh pairings in `Fresh interleaved records correlate after all initial branch state retires` |
 | F10 | Timestamp range and clock arithmetic invariants are unenforced. | [02](https://app.clickup.com/t/86bbwcryd) | `Out-of-range paced starts and projections return typed timestamp diagnostics` |
 
 The cross-cutting physical deadline matrix belongs to [11](https://app.clickup.com/t/86bbwcrzy),
@@ -89,8 +89,8 @@ belongs to [14](https://app.clickup.com/t/86bbwct0e).
 | Mapping generations and stale lifecycle messages | `One fenced authority emits coalesced progress for each clock generation`, task 04 | One scenario with the production sticky scheduler: two nodes, and a third added during the run |
 | Missed cadence coalescing and fresh due time | `Slow external polling coalesces missed cadence with fresh due timestamps`, task 09 | One- and three-node random schedules |
 | Logical collection/flush and physical minima | `Paced branch collection and flush follow logical time while Immediate and source idle remain physical`, task 07 | Two interleaved branches on one and three nodes, preserving fields |
-| Logical emitter cadence and physical retry/ACK | `Emitter cadence follows logical time while retry and ACK deadlines remain physical`, task 08 | One- and three-node random schedules with controlled sink failure |
-| Fresh branch activity and logical retention | `Activity sampled after an awaited record keeps each logical branch alive`, task 10 | Two interleaved branches on one and three nodes, preserving fields |
+| Logical emitter cadence and physical retry/ACK | `Emitter cadence follows logical time while retry and ACK deadlines remain physical`, task 08 | One- and three-node random schedules with controlled emitter failure |
+| Fresh branch activity and logical retention | `Fresh interleaved records correlate after all initial branch state retires`, task 10; `Paced branch expiration follows domain logical time`; the production-owner unit `accepted_processor_input_records_branch_activity_at_its_own_domain_time` | Two interleaved branches on one and three nodes preserve fields and retire initial state before fresh correlations; the expiration outline checks logical retention, and the unit checks that accepted input refreshes domain-clock activity |
 | One snapshot across expression contexts | `Every expression context observes its domain execution time`, task 06 | One- and three-node random schedules through ingestion, a junction, and a subscription, extended by focused generator, inferencer, SQS, database, Iceberg, Sentry, and OTEL scenarios |
 | Failure, guest, generated metadata, and telemetry clock classes | `Generated errors WASM timeouts and telemetry timestamps use their assigned clock classes`, task 06 | One- and three-node random schedules with historical domain time, error routing, WASM lifecycle callbacks, tokenless output, and external telemetry fixtures |
 | Client observation of the committed mapping, generations, and admission window | `A session attaches to a domain clock once and follows every generation` and `A client paces simulated events by the domain clock it is attached to`, [Clock Attach 01](https://app.clickup.com/t/86bc8azgz) | One- and three-node random schedules; the three-node attachment is served by a follower |
@@ -116,7 +116,7 @@ belongs to [14](https://app.clickup.com/t/86bbwct0e).
 | Time-dependent expressions | The delayed-progress scenario emits `now()` into a schema-backed `DATETIME` field before and after controlled progress delivery. |
 | Delayed progress | `domain clock progress for domain ... is paused before delivery`, its bounded reached assertion, and `... resumes` form a test-only barrier around the next delivery. Teardown releases an armed barrier. |
 | Recorded external source | The explicitly started HTTP mock exposes `/clock-source/{name}`. Each request records its actual UTC nanoseconds, monotonic nanoseconds, query parameters, and count. `delay_ms` controls response latency. `clock source recorder ... is reset` and its bounded request-count assertion use `/clock-source-observations/{name}`. |
-| Sink retry and ACK | Existing emitter fault/stall controls and broker observers drive the scenarios `Kafka ACK ingestor waits while an attached emitter is stalled`, `Kafka ACK SEQUENTIAL replays on attached emitter failure`, and task 08's named cadence scenario together with `A stalled emitter keeps its upstream acknowledgement alive on the physical clock`. ACK state remains in memory. |
+| Emitter retry and ACK | Existing emitter fault/stall controls and broker observers drive the scenarios `Kafka ACK ingestor waits while an attached emitter is stalled`, `Kafka ACK SEQUENTIAL replays on attached emitter failure`, and task 08's named cadence scenario together with `A stalled emitter keeps its upstream acknowledgement alive on the physical clock`. ACK state remains in memory. |
 | Join, restart, leader, and owner loss | Existing cluster start/stop/restart, leadership transfer, placement inspection, and entity-gate controls are reused. Clock-owner scenarios select the production sticky scheduler before startup, following `Losing the former owner during a held drain leaves relocation to failover`. |
 
 The fixture endpoints do not provision product-owned external objects. A scenario starts the mock
@@ -132,7 +132,7 @@ introduced only for an explicit NSPL cadence or semantic lifetime. The resulting
 | --- | --- | --- |
 | Connector HTTP client | DNS, socket connection, TLS, request, response headers, and response-body transfer | The client's request timeout spans the request future and is separate from an ingestor's domain-bound `EVERY`. `HTTP request timeout stays physical while logical polling cadence scales` observes one timed-out request at rate `0.0001`, at least three at rate `100`, and at least 200 milliseconds between starts under a 250 millisecond timeout. |
 | Polling ingestor lifecycle | Quiesce and shutdown cancellation of an in-flight HTTP or Prometheus operation | The HTTP request, HTTP response body, and complete Prometheus query futures now race their task's shutdown and quiesce signals. `Cancelling an external poll stays physical across extreme clock generations` bounds `STOP` by 1500 milliseconds while a 30-second request is in flight, before and after replacing the historical clock generation. |
-| Broker and connector runtime | Reconnect backoff, broker RPC/confirmation timeout, ACK timeout, and ACK-alive refresh | `RuntimeReconnectBackoff` and sink confirmation waits use monotonic timers. `EmitterRetrySchedule` holds physical retry and ACK-alive deadlines separately from its still-armed logical flush or commit cadence. `Delayed acknowledgements stay alive on physical time at extreme domain rates` holds a Kafka delivery for 1200 milliseconds without replay at both extreme rates and both topologies. |
+| Broker and connector runtime | Reconnect backoff, broker RPC/confirmation timeout, ACK timeout, and ACK-alive refresh | `RuntimeReconnectBackoff` and emitter confirmation waits use monotonic timers. `EmitterRetrySchedule` holds physical retry and ACK-alive deadlines separately from its still-armed logical flush or commit cadence. `Delayed acknowledgements stay alive on physical time at extreme domain rates` holds a Kafka delivery for 1200 milliseconds without replay at both extreme rates and both topologies. |
 | Interconnect connection | TCP and TLS setup, certificate lifetime, reconnect, stream progress, request completion, idle retirement, and drain | Setup and progress waits use monotonic time. Certificate validity is read in actual UTC once and its remaining lifetime becomes a monotonic expiration deadline. A request constructs one deadline before acquiring its local queue lease and passes only the remaining duration to transfer, so queueing consumes the operation's bound. `stream_slot_queueing_consumes_the_request_deadline`, `membership_removal_cancels_an_active_request`, and `shutdown_cancels_an_active_request` are the direct unit controls. |
 | Cluster liveness | Gossip probing, health RPCs, node-unavailability detection, TLS reload, and peer retirement | These are process and node liveness operations driven by monotonic intervals and cancellation tokens. `Silent peers obey the same shutdown bound without and after a domain clock` applies the same 12-second node-shutdown bound with no installed clock and after a `0.0001` to `100` generation change. |
 | Raft | Election, heartbeat, membership mutation, replication RPC, snapshot transfer, and retained-log admission | OpenRaft receives physical heartbeat and election durations. RPC options become interconnect request deadlines; heartbeat traffic has a dedicated management connection, while snapshot chunks carry the remaining monotonic transfer deadline. Retention admission is bounded by one physical timeout around its queueing loop. |
@@ -216,10 +216,15 @@ task 02's F10 public coverage. Task 06 adds `domain_execution_time.feature` and 
 coverage in the listed runtime feature files for F6 and F7. Task 07 adds
 `domain_buffer_timing.feature` for F5's branch-local collection and flush clock classes. Task 08
 adds `domain_emitter_cadence.feature` for the remainder of F5 at the connector boundary: logical
-emitter and Iceberg cadence, the physical `FLUSH IMMEDIATE` minimum across sink families, the
+emitter and Iceberg cadence, the physical `FLUSH IMMEDIATE` minimum across emitter families, the
 physical retry and acknowledgement keepalive, and force-flush drain. Task 09
 adds the `domain_cadence` cases for recurring HTTP, Prometheus, and generator work. Task 10 adds
-`branch_activity_sampling.feature` for F9's accepted-input activity and logical retention.
+`branch_activity_sampling.feature` for F9's public branch re-creation and exact fresh pairings.
+The production-owner unit `accepted_processor_input_records_branch_activity_at_its_own_domain_time`
+asserts that accepted input refreshes domain-clock activity; `Paced branch expiration follows domain logical
+time` checks logical retention. The fresh-correlation outline observes initial retirement before
+posting new inputs and final retirement after matching, without requiring a pending input to
+survive beyond its TTL or treating a relay's disappearance as another owner's scan-phase witness.
 Task 11 adds `physical_infrastructure_deadlines.feature` for the cross-cutting physical boundary:
 poll cancellation, request timeout versus logical cadence, materialized `REQUIRED WAIT`, delayed
 ACK keepalive, and silent-peer shutdown before and after a clock-generation change.

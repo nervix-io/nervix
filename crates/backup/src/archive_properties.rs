@@ -64,12 +64,12 @@ impl Case {
         let mut archive = Vec::new();
         let mut sections = self.sections.iter();
         layout
-            .write_to(&mut archive, |entry, sink| {
+            .write_to(&mut archive, |entry, connector| {
                 let section = sections
                     .next()
                     .assured("each generated manifest entry has one section");
                 assert_eq!(entry, &section.entry);
-                std::io::Write::write_all(sink, &section.bytes)
+                std::io::Write::write_all(connector, &section.bytes)
             })
             .assured("the generated archive exports");
         assert!(sections.next().is_none());
@@ -349,12 +349,12 @@ impl Case {
         let mut sections = extracted.sections.iter();
         let mut reexported = Vec::new();
         layout
-            .write_to(&mut reexported, |entry, sink| {
+            .write_to(&mut reexported, |entry, connector| {
                 let section = sections
                     .next()
                     .assured("the extracted section sequence is complete");
                 assert_eq!(entry, &section.entry);
-                std::io::Write::write_all(sink, &section.bytes)
+                std::io::Write::write_all(connector, &section.bytes)
             })
             .assured("the extracted archive re-exports");
         assert_eq!(reexported, bytes);

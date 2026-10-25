@@ -48,7 +48,7 @@ Feature: Positive count settings
       CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       """
     And these NSPL commands fail with "instances must be greater than 0"
       """
@@ -75,17 +75,15 @@ Feature: Positive count settings
       """
       CREATE SCHEMA notification ( tenant STRING );
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT postgres_main TYPE POSTGRES POOL SIZE MIN 2 MAX 8 CONFIG {
+      CREATE POSTGRES CLIENT postgres_main POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = 'postgresql://nervix:nervix@127.0.0.1:5432/nervix?sslmode=disable'
       };
       """
     And these NSPL commands fail with "BATCH MAX MESSAGES must be between 1 and 65536, found 0"
       """
-      CREATE EMITTER postgres_out FROM notifications
-        TO POSTGRES postgres_main INSERT TO TABLE notifications
-        VALUES { "tenant" = input.tenant }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 0 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER postgres_out FROM notifications
+        TO postgres_main TABLE 'notifications'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "tenant" = input.tenant } BATCH MAX MESSAGES 0 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 

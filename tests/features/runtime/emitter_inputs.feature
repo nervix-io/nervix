@@ -51,29 +51,28 @@ Feature: Emitter relay inputs
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT emitter
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-      CREATE EMITTER combined_sink
+      CREATE ZEROMQ PUSH EMITTER combined_emitter
         FROM source_a_events WHERE input.source = 'a',
              source_b_events WHERE input.source = 'b'
         COLLECT FOR 20ms MAX BATCH SIZE 1MiB
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec
           INHERIT ALL
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       START;
       """
-    When emitter "combined_sink" enters stall mode
+    When emitter "combined_emitter" enters stall mode
     And http payload is posted to host "emitter-inputs-{{test_id}}.example.com" path "/a"
       """
       {"seq":1,"tenant":"acme","source":"a"}
       """
-    Then within "5s" DESCRIBE EMITTER "combined_sink" on the leader node contains
+    Then within "5s" DESCRIBE EMITTER "combined_emitter" on the leader node contains
       """
       transient error: fault injector stalled emitter publish
       """
@@ -85,7 +84,7 @@ Feature: Emitter relay inputs
       """
       {"seq":3,"tenant":"beta","source":"b"}
       """
-    And emitter "combined_sink" leaves fault mode
+    And emitter "combined_emitter" leaves fault mode
     Then within "5s" the observed broker receives payloads
       """
       "seq":1

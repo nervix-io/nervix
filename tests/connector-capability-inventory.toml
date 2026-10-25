@@ -2,13 +2,14 @@
 #
 # A capability is something a statement can make an entity do once it runs: deliver or publish in
 # one declared mode, write one declared option or make one choice of it, read one typed metadata
-# field, publish in batches, or set one envelope clause or property. Each entity declares its
-# capabilities in the vocabulary, beside everything else a statement can say about it, and
-# `just validate-connector-capabilities`, which `just validate` runs, holds this file to those
-# declarations: every declared capability names at least one scenario that observes it, every
-# entry names a capability its entity declares, once, and every scenario an entry names exists in
-# its feature file. A scenario is named exactly as its `Scenario:` or `Scenario Outline:` line
-# writes it.
+# field, publish in batches, set one envelope clause or property, or, as `STALLED PEER <key>`,
+# report a peer that stops answering within the client deadline key that bounds the wait. Each
+# entity declares its capabilities in the vocabulary, beside everything else a statement can say
+# about it, and `just validate-connector-capabilities`, which `just validate` runs, holds this file
+# to those declarations: every declared capability names at least one scenario that observes it,
+# every entry names a capability its entity declares, once, and every scenario an entry names
+# exists in its feature file. A scenario is named exactly as its `Scenario:` or `Scenario Outline:`
+# line writes it.
 #
 # A change that declares a new capability registers the scenario that observes it in the same
 # change; one that renames or moves a registered scenario updates its entry. Quiesce modes and
@@ -28,6 +29,13 @@ capability = "MODE ACK"
 entity = "CLICKHOUSE TABLE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/clickhouse_emission.feature", scenario = "ClickHouse emitter inserts mapped rows from a relay" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "CLICKHOUSE TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A ClickHouse emitter whose server never answers is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -69,21 +77,28 @@ scenarios = [
 capability = "METHOD"
 entity = "HTTP REQUEST EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP emitter sends each record with its own method, path, headers, and codec body" },
+  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP REQUEST emitter sends each record with its own method, path, headers, and codec body" },
 ]
 
 [[capability]]
 capability = "MODE ACK"
 entity = "HTTP REQUEST EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP emitter sends each record with its own method, path, headers, and codec body" },
+  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP REQUEST emitter sends each record with its own method, path, headers, and codec body" },
 ]
 
 [[capability]]
 capability = "PATH"
 entity = "HTTP REQUEST EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP emitter sends each record with its own method, path, headers, and codec body" },
+  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP REQUEST emitter sends each record with its own method, path, headers, and codec body" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "HTTP REQUEST EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/http_emitter_transport.feature", scenario = "A request whose attempts time out stays pending and reported, releases each timed-out connection, and is delivered once the endpoint answers" },
 ]
 
 [[capability]]
@@ -101,10 +116,24 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "HTTP REQUEST INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An HTTP polling ingestor whose server never answers is reported within timeout_ms" },
+]
+
+[[capability]]
 capability = "BATCH"
 entity = "ICEBERG TABLE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/iceberg_emission.feature", scenario = "An Iceberg emitter that declares BATCH commits every row at its data-file and commit boundaries" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "ICEBERG TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/iceberg_storage_deadlines.feature", scenario = "A paused Iceberg object store reports timeout_ms and recovers on the emitter retry policy" },
 ]
 
 [[capability]]
@@ -133,6 +162,7 @@ capability = "MODE ACK"
 entity = "ICEBERG TABLE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/iceberg_emission.feature", scenario = "Iceberg emitter flushes a disk-backed batch to S3" },
+  { feature = "tests/features/runtime/iceberg_emission.feature", scenario = "An Iceberg commit its catalog refused retries what it began with, and rows staged during its backoff are acknowledged only once a catalog commit of their own holds them" },
 ]
 
 [[capability]]
@@ -150,7 +180,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "KAFKA TOPIC EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/kafka_emission.feature", scenario = "Kafka emitter filter-map publishes message fields and headers" },
@@ -181,14 +211,14 @@ scenarios = [
 capability = "MODE NO ACK"
 entity = "KAFKA TOPIC INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka NO_ACK executes ingestor programs once for a collected ingest group" },
+  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka NO ACK executes ingestor programs once for a collected ingest group" },
 ]
 
 [[capability]]
 capability = "OFFSET BY CONSUMER GROUP"
 entity = "KAFKA TOPIC INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka NO_ACK executes ingestor programs once for a collected ingest group" },
+  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka NO ACK executes ingestor programs once for a collected ingest group" },
 ]
 
 [[capability]]
@@ -374,10 +404,17 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "NATS SUBJECT EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/nats_emission.feature", scenario = "NATS emitter publishes JSON payloads from a relay" },
+  { feature = "tests/features/runtime/nats_emission.feature", scenario = "NATS SUBJECT emitter publishes JSON payloads from a relay" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "NATS SUBJECT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A NATS emitter whose server goes down is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -412,7 +449,7 @@ scenarios = [
 capability = "BATCH"
 entity = "OTEL LOGS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
 ]
 
 [[capability]]
@@ -437,6 +474,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "OTEL LOGS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An OTEL <signal> emitter whose collector never answers over <protocol> is reported within timeout_ms" },
+]
+
+[[capability]]
 capability = "ATTRIBUTES"
 entity = "OTEL METRICS EMITTER"
 scenarios = [
@@ -447,7 +491,7 @@ scenarios = [
 capability = "BATCH"
 entity = "OTEL METRICS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
 ]
 
 [[capability]]
@@ -493,6 +537,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "OTEL METRICS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An OTEL <signal> emitter whose collector never answers over <protocol> is reported within timeout_ms" },
+]
+
+[[capability]]
 capability = "ATTRIBUTES"
 entity = "OTEL TRACES EMITTER"
 scenarios = [
@@ -503,7 +554,7 @@ scenarios = [
 capability = "BATCH"
 entity = "OTEL TRACES EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
 ]
 
 [[capability]]
@@ -525,6 +576,13 @@ capability = "SCOPE"
 entity = "OTEL TRACES EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL log and trace emitters export typed relay records over OTLP gRPC" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "OTEL TRACES EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An OTEL <signal> emitter whose collector never answers over <protocol> is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -563,6 +621,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "MAX BODY SIZE"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_ingestion.feature", scenario = "A Prometheus response above the ingestor's MAX BODY SIZE fails the poll" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "PROMETHEUS QUERY INGESTOR"
 scenarios = [
@@ -574,6 +639,13 @@ capability = "QUERY"
 entity = "PROMETHEUS QUERY INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/prometheus_ingestion.feature", scenario = "Prometheus ingestor follows paced domain logical time and cadence" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Prometheus ingestor whose server never answers is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -591,7 +663,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "PULSAR TOPIC EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "Pulsar mode controls when the input offset is committed" },
@@ -626,10 +698,17 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "SUBSCRIPTION"
+capability = "SUBSCRIPTION OWNED BY INGESTOR"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/pulsar_ingestion.feature", scenario = "Pulsar ingestor delivers JSON payloads to a subscribed relay" },
+  { feature = "tests/features/runtime/pulsar_subscriptions.feature", scenario = "Dropping a Pulsar ingestor removes the subscription it owns" },
+]
+
+[[capability]]
+capability = "SUBSCRIPTION PROVISIONED"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_subscriptions.feature", scenario = "A provisioned Pulsar subscription outlives its dropped ingestor and keeps what arrives meanwhile" },
 ]
 
 [[capability]]
@@ -647,10 +726,25 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "RABBITMQ QUEUE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ emitter whose broker never answers its TLS handshake is reported within connect_timeout_ms" },
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ emitter whose broker never answers its AMQP handshake is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ NO ACK emitter whose broker stops answering its round trip is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -668,6 +762,14 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ ingestor whose broker never answers its TLS handshake is reported within connect_timeout_ms" },
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ ingestor whose broker never answers its AMQP handshake is reported within connect_timeout_ms" },
+]
+
+[[capability]]
 capability = "BATCH"
 entity = "REDIS PUBSUB EMITTER"
 scenarios = [
@@ -675,10 +777,17 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "REDIS PUBSUB EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/redis_emission.feature", scenario = "Redis emitter publishes JSON payloads from a relay" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "REDIS PUBSUB EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Redis emitter whose server never answers is reported within connect_timeout_ms" },
 ]
 
 [[capability]]
@@ -689,10 +798,24 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "REDIS PUBSUB INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Redis subscription whose server never answers is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "STALLED PEER idle_timeout_ms"
+entity = "REDIS PUBSUB INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/redis_ingestion.feature", scenario = "An idle Redis subscription detects a silent connection and resubscribes" },
+]
+
+[[capability]]
 capability = "BATCH"
 entity = "SENTRY EVENT EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "Sentry accepts one event whose extra field preserves every batch member" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "Sentry accepts one event whose extra field preserves every batch member" },
 ]
 
 [[capability]]
@@ -700,6 +823,13 @@ capability = "MODE ACK"
 entity = "SENTRY EVENT EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/sentry_emission.feature", scenario = "Sentry emitter publishes codec JSON as authenticated event envelopes" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "SENTRY EVENT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Sentry emitter whose server never answers is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -734,7 +864,14 @@ scenarios = [
 capability = "MODE SINGLE"
 entity = "SQS QUEUE EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS emitter publishes JSON payloads from a relay" },
+  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS QUEUE emitter publishes JSON payloads from a relay" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An SQS QUEUE emitter whose service stops answering is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -755,14 +892,28 @@ scenarios = [
 capability = "BATCH"
 entity = "SYSLOG COLLECTOR EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "A Syslog TLS receiver sees one batched RFC 5425 frame" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "A Syslog TLS receiver sees one batched RFC 5425 frame" },
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "SYSLOG COLLECTOR EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/syslog_dns_resolution.feature", scenario = "Syslog UDP emitter reaches an endpoint named by the node DNS fixture" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "SYSLOG COLLECTOR EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Syslog collector whose server never answers its TLS handshake is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "SYSLOG COLLECTOR EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Syslog collector whose server stops reading is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -780,10 +931,38 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_support.feature", scenario = "A Syslog TLS listener closes a client that stalls its handshake within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "STALLED PEER idle_timeout_ms"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_support.feature", scenario = "A Syslog TCP listener closes a connection idle beyond idle_timeout_ms" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "WEBSOCKETS CONNECTION INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/websocket_client_ingestion.feature", scenario = "Websocket client ingestor connects to a remote endpoint and delivers a JSON payload" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A WebSocket connection whose server never answers its upgrade is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "STALLED PEER idle_timeout_ms"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_connection_bounds.feature", scenario = "A WebSocket connection reports a silent peer through idle_timeout_ms on <cluster_size> nodes" },
 ]
 
 [[capability]]
@@ -808,8 +987,67 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "ZEROMQ PUSH EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/zeromq_emission.feature", scenario = "ZeroMQ emitter publishes JSON payloads from a relay" },
+]
+
+[[capability]]
+capability = "STALLED PEER connect_timeout_ms"
+entity = "ZEROMQ PUSH EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A ZeroMQ emitter whose peer never answers its handshake is reported within connect_timeout_ms" },
+  { feature = "tests/features/runtime/zeromq_emission.feature", scenario = "A connect-mode ZeroMQ emitter whose peer never accepts is reported within connect_timeout_ms and delivers once the peer appears" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "ZEROMQ PUSH EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A ZeroMQ emitter whose peer stops reading is reported within timeout_ms" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "HTTP ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_acknowledgement.feature", scenario = "An HTTP response follows the attached consumer's <decision> decision" },
+]
+
+[[capability]]
+capability = "MODE ACK"
+entity = "WEBSOCKETS ENDPOINT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/endpoint_acknowledgement.feature", scenario = "A WebSocket endpoint acknowledges each <result> frame during and after signaling" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ NO ACK consumes automatically without prefetch or pending transport acknowledgements" },
+]
+
+[[capability]]
+capability = "MODE ACK PARALLEL"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must reject them after its connection was lost" },
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must acknowledge them after its connection was lost" },
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another delivery is rejected" },
+]
+
+[[capability]]
+capability = "HEADERS"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
+]
+
+[[capability]]
+capability = "metadata.frame_type"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
 ]

@@ -30,15 +30,14 @@ Feature: Pulsar TLS resource mounts
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_pulsar_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_pulsar_notifications;
-        CREATE CLIENT pulsar_tls
-        TYPE PULSAR
+        CREATE PULSAR CLIENT pulsar_tls
         MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{pulsar_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-        FROM pulsar_tls TOPIC 'tls_notifications_{{test_id}}' SUBSCRIPTION 'tls_notifications_group_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM pulsar_tls TOPIC 'tls_notifications_{{test_id}}' SUBSCRIPTION 'tls_notifications_group_{{test_id}}' OWNED BY INGESTOR MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

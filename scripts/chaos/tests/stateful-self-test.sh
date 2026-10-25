@@ -61,7 +61,7 @@ expect_setup_rejection 'one node supports only restart faults' 'owner-crash requ
     "${chaos_dir}/run-baseline.sh" --scenario stateful --image fixture --nodes 1 --fault owner-crash
 expect_setup_rejection 'one node rejects voter rotations' 'voter-stop requires --nodes 3' \
     "${chaos_dir}/run-baseline.sh" --scenario domain-time --image fixture --nodes 1 --fault voter-stop
-expect_setup_rejection 'other scenarios reject --fault' '--fault applies only to stateful, domain-time and backup-fault' \
+expect_setup_rejection 'other scenarios reject --fault' '--fault applies only to stateful, domain-time, backup-fault and restore-fault' \
     "${chaos_dir}/run-baseline.sh" --scenario baseline --image fixture --fault none
 
 # One hundred and twenty stateful records: sequences below 52 precede the milestone, 52 through 59
@@ -303,24 +303,26 @@ status=0
 # rate 4 and period 1 s. Rounds fault nervix-1, nervix-2 and nervix-3 in turn; removing nervix-2
 # stalls every tick for 12 seconds.
 origin_seconds=1790000000
+start_ms=1791000000000
 clock_line() {
     local ms="$1"
     local id="$2"
-    local lead_ms="${3:-50}"
+    local lead_ms="${3:-0}"
+    local authority_ms="${4:-${ms}}"
     local boundary_seconds=$((origin_seconds + id - 1))
-    local logical_ms=$(((id - 1) * 1000 + lead_ms))
+    local logical_ms=$((250 + (id - 1) * 1000 + lead_ms))
     printf '%d%06d [events] domain clock [chaos_paced] tick: generation 1, id %d, boundary %s, authority UTC %s, node logical %s\n' \
         "${ms}" 0 "${id}" \
         "$(date -u -d "@${boundary_seconds}" +%Y-%m-%dT%H:%M:%S).250Z" \
-        "$(date -u -d "@$((ms / 1000))" +%Y-%m-%dT%H:%M:%S).000Z" \
-        "$(date -u -d "@$((origin_seconds + logical_ms / 1000))" +%Y-%m-%dT%H:%M:%S).$(printf '%03d' $(((250 + logical_ms % 1000) % 1000)))Z"
+        "$(date -u -d "@$((authority_ms / 1000))" +%Y-%m-%dT%H:%M:%S).$(printf '%03d' $((authority_ms % 1000)))Z" \
+        "$(date -u -d "@$((origin_seconds + logical_ms / 1000))" +%Y-%m-%dT%H:%M:%S).$(printf '%03d' $((logical_ms % 1000)))Z"
 }
 attach_line() {
     local ms="$1"
-    printf '%d%06d attached to the clock of domain '"'"'chaos_paced'"'"': generation 1, paced: period 1s, skew 1s, logical origin %s.250Z, UTC anchor 2026-09-01T00:00:00Z, time rate 4\n' \
-        "${ms}" 0 "$(date -u -d "@${origin_seconds}" +%Y-%m-%dT%H:%M:%S)"
+    printf '%d%06d attached to the clock of domain '"'"'chaos_paced'"'"': generation 1, paced: period 1s, skew 1s, logical origin %s.250Z, UTC anchor %s, time rate 4\n' \
+        "${ms}" 0 "$(date -u -d "@${origin_seconds}" +%Y-%m-%dT%H:%M:%S)" \
+        "$(date -u -d "@$((start_ms / 1000))" +%Y-%m-%dT%H:%M:%S)Z"
 }
-start_ms=1791000000000
 write_observer() {
     local output="$1"
     local stall_from_ms="$2"
@@ -328,16 +330,17 @@ write_observer() {
     jq -nr --argjson start "${start_ms}" --argjson origin "${origin_seconds}" \
         --argjson from "${stall_from_ms}" --argjson to "${stall_to_ms}" '
         def at($seconds; $fraction): $seconds | todate | sub("Z$"; "." + $fraction + "Z");
+        def at_ms($ms): at($ms / 1000 | floor; ("00" + ($ms % 1000 | tostring))[-3:]);
         def stamp($ms): ($ms | tostring) + "000000";
         (stamp($start) + " attached to the clock of domain '"'"'chaos_paced'"'"': generation 1, paced: period 1s, skew 1s, logical origin "
-         + at($origin; "250") + ", UTC anchor 2026-09-01T00:00:00Z, time rate 4"),
+         + at($origin; "250") + ", UTC anchor " + at_ms($start) + ", time rate 4"),
         (range(0; 480) as $step | ($start + $step * 250) as $ms
          | select(($ms > $from and $ms < $to) | not)
          | ($step + 1) as $id
          | stamp($ms) + " [events] domain clock [chaos_paced] tick: generation 1, id " + ($id | tostring)
            + ", boundary " + at($origin + $id - 1; "250")
-           + ", authority UTC " + at($ms / 1000 | floor; "000")
-           + ", node logical " + at($origin + $id - 1; "300"))' >"${output}"
+           + ", authority UTC " + at_ms($ms)
+           + ", node logical " + at($origin + $id - 1; "250"))' >"${output}"
 }
 write_rounds() {
     local output="$1"
@@ -425,13 +428,51 @@ sed '4s/\.250Z, authority/.750Z, authority/' "${tmp_dir}/clock-nervix-1.log" >"$
 expect_failure 'tick off the period grid' 'left the period grid' "${tmp_dir}/clock.json" \
     "${clock}" clock --observer "nervix-1=${tmp_dir}/clock-grid.log" --period-ms 1000 --rate 4 \
     --rounds "${tmp_dir}/no-rounds.ndjson" --fault none --result "${tmp_dir}/clock.json"
-{ head -n 40 "${tmp_dir}/clock-nervix-1.log"; clock_line $((start_ms + 9800)) 20; } >"${tmp_dir}/clock-decreasing.log"
+{ head -n 40 "${tmp_dir}/clock-nervix-1.log"; clock_line $((start_ms + 9800)) 20 0 $((start_ms + 4750)); } >"${tmp_dir}/clock-decreasing.log"
 expect_failure 'tick ids going back within an attachment' 'did not increase' "${tmp_dir}/clock.json" \
     "${clock}" clock --observer "nervix-1=${tmp_dir}/clock-decreasing.log" --period-ms 1000 --rate 4 \
     --rounds "${tmp_dir}/no-rounds.ndjson" --fault none --result "${tmp_dir}/clock.json"
 { attach_line "${start_ms}"; clock_line $((start_ms + 250)) 2 -500; } >"${tmp_dir}/clock-ahead.log"
-expect_failure 'tick ahead of the serving node' "ahead of, or far behind" "${tmp_dir}/clock.json" \
+expect_failure 'tick ahead of the serving node' 'outside the mapping' "${tmp_dir}/clock.json" \
     "${clock}" clock --observer "nervix-1=${tmp_dir}/clock-ahead.log" --period-ms 1000 --rate 4 \
+    --rounds "${tmp_dir}/no-rounds.ndjson" --fault none --result "${tmp_dir}/clock.json"
+# Accepted progress can be sampled before a process pause and its serving reading after it.
+# The independent receipt timestamp bounds the reading; tick age does not bound it.
+{ attach_line "${start_ms}"; clock_line $((start_ms + 30250)) 2 120000 $((start_ms + 250)); } \
+    >"${tmp_dir}/clock-delayed-progress.log"
+expect_pass 'a delayed accepted tick with a current serving snapshot' "${clock}" clock \
+    --observer "nervix-1=${tmp_dir}/clock-delayed-progress.log" --period-ms 1000 --rate 4 \
+    --rounds "${tmp_dir}/no-rounds.ndjson" --fault none --result "${tmp_dir}/clock.json"
+jq -e '.ticks == 1 and .misprojected == []' "${tmp_dir}/clock.json" >/dev/null \
+    || fail 'the delayed accepted tick was not checked'
+{ attach_line "${start_ms}"; clock_line $((start_ms + 30250)) 2 0 $((start_ms + 250)); } \
+    >"${tmp_dir}/clock-delayed-frame.log"
+expect_pass 'a delayed frame with its earlier serving snapshot' "${clock}" clock \
+    --observer "nervix-1=${tmp_dir}/clock-delayed-frame.log" --period-ms 1000 --rate 4 \
+    --rounds "${tmp_dir}/no-rounds.ndjson" --fault none --result "${tmp_dir}/clock.json"
+{ attach_line "${start_ms}"; clock_line $((start_ms + 30250)) 2 121000 $((start_ms + 250)); } \
+    >"${tmp_dir}/clock-delayed-misprojection.log"
+expect_failure 'a delayed tick whose serving reading exceeds the receipt projection' 'outside the mapping' \
+    "${tmp_dir}/clock.json" "${clock}" clock \
+    --observer "nervix-1=${tmp_dir}/clock-delayed-misprojection.log" --period-ms 1000 --rate 4 \
+    --rounds "${tmp_dir}/no-rounds.ndjson" --fault none --result "${tmp_dir}/clock.json"
+{ attach_line "${start_ms}"; clock_line $((start_ms + 250)) 2 1000; } \
+    >"${tmp_dir}/clock-misprojection.log"
+expect_failure 'a serving reading one logical second ahead of the receipt projection' 'outside the mapping' \
+    "${tmp_dir}/clock.json" "${clock}" clock \
+    --observer "nervix-1=${tmp_dir}/clock-misprojection.log" --period-ms 1000 --rate 4 \
+    --rounds "${tmp_dir}/no-rounds.ndjson" --fault none --result "${tmp_dir}/clock.json"
+{ attach_line "${start_ms}"; clock_line $((start_ms + 30250)) 122 0 $((start_ms + 250)); } \
+    >"${tmp_dir}/clock-authority-misprojection.log"
+expect_failure 'a boundary not yet reached at the authority UTC observation' 'outside the mapping' \
+    "${tmp_dir}/clock.json" "${clock}" clock \
+    --observer "nervix-1=${tmp_dir}/clock-authority-misprojection.log" --period-ms 1000 --rate 4 \
+    --rounds "${tmp_dir}/no-rounds.ndjson" --fault none --result "${tmp_dir}/clock.json"
+{ attach_line "${start_ms}"; clock_line $((start_ms + 30250)) 2 0 $((start_ms + 1250)); } \
+    >"${tmp_dir}/clock-serving-behind-authority.log"
+expect_failure 'a serving reading before the authority projection but after the boundary' 'outside the mapping' \
+    "${tmp_dir}/clock.json" "${clock}" clock \
+    --observer "nervix-1=${tmp_dir}/clock-serving-behind-authority.log" --period-ms 1000 --rate 4 \
     --rounds "${tmp_dir}/no-rounds.ndjson" --fault none --result "${tmp_dir}/clock.json"
 { cat "${tmp_dir}/clock-nervix-1.log"; printf '%d%06d [events] domain clock [chaos_paced]: generation 1, paced: period 1s, skew 1s, logical origin 2026-01-01T00:00:00Z, UTC anchor 2026-09-01T00:00:00Z, time rate 4\n' $((start_ms + 200000)) 0; } \
     >"${tmp_dir}/clock-remapped.log"

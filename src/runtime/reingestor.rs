@@ -1266,7 +1266,7 @@ mod tests {
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            source_kind: ModelKind::Reingestor,
+            entity_kind: ModelKind::Reingestor,
             source: named("tenant_partition"),
             root_relay: root_relay.clone(),
             branch: None,
@@ -1424,7 +1424,7 @@ mod tests {
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            source_kind: ModelKind::Reingestor,
+            entity_kind: ModelKind::Reingestor,
             source: named("tenant_partition"),
             root_relay: root_relay.clone(),
             branch: None,
@@ -1509,9 +1509,31 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
+        use futures_util::FutureExt as _;
+        use nervix_models::{DomainClockState, DomainTimeRate};
+
         let runtime = Runtime::default();
         let domain = domain("default");
         install_unpaced_test_domain(&runtime, &domain);
+        let clock_lifecycle = DomainClockLifecycle::new(domain.clone());
+        // Actual UTC stays before the mapping's origin, so scheduling cannot advance logical
+        // time past a branch deadline while this test observes its output and acknowledgement.
+        let set_logical_time = |elapsed| {
+            clock_lifecycle.install_paced(
+                0,
+                DomainClockState::new(
+                    Timestamp::from_unix_nanos(i64::MAX),
+                    Timestamp::from_unix_nanos(0)
+                        .checked_add(elapsed)
+                        .expect("the fixture's logical times fit the timestamp range"),
+                    DomainTimeRate::ONE,
+                ),
+            );
+        };
+        set_logical_time(Duration::ZERO);
+        let domain_clock = clock_lifecycle
+            .bind()
+            .expect("the fixture installs its controlled domain clock");
         let relay = named("tenant_orders");
         let output_services = test_relay_boundary_services();
         let owner_task = runtime.spawn_relay_owner_task(
@@ -1532,7 +1554,7 @@ mod tests {
             DomainExecution {
                 revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
-                domain_clock: test_domain_clock(&domain),
+                domain_clock: domain_clock.clone(),
                 shutdown: execution_shutdown,
                 routing: runtime.stage_domain_routing(
                     &domain,
@@ -1572,7 +1594,7 @@ mod tests {
             IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
                     revision: ProcessorPlanRevision::new(),
-                    source_kind: ModelKind::Reingestor,
+                    entity_kind: ModelKind::Reingestor,
                     source: named("tenant_partition"),
                     root_relay: relay.clone(),
                     branch: None,
@@ -1599,9 +1621,6 @@ mod tests {
             branched_runtime.sender().max_capacity(),
             STUPID_CHANNEL_CAPACITY_REMOVE_ME.get()
         );
-        let (shutdown_tx, _) = watch::channel(false);
-        let broadcast = RelayBroadcast::with_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME);
-        let fan_in = RelayRuntimeFanIn::new(broadcast.new_receiver());
         let mut branched_entrypoint_senders = HashMap::default();
         branched_entrypoint_senders.insert(relay, branched_runtime.sender());
         let plan = EntrypointTestDomain {
@@ -1635,13 +1654,6 @@ mod tests {
         let input = ExecutionBuildDeps::from_routing(&domain, &routing)
             .bind_reingestor_input(&plan, &plan.inputs[0])
             .expect("the planned reingestor input binds");
-        let task = runtime.spawn_reingestor_task(
-            &domain,
-            &shutdown_tx,
-            branched_entrypoint_senders,
-            input,
-            fan_in,
-        );
         let (acme_acks, acme_completion) = AckSet::root();
         let (beta_acks, beta_completion) = AckSet::root();
         let mut acme_completion = Box::pin(acme_completion.wait());
@@ -1653,6 +1665,23 @@ mod tests {
                 named::<ReingestorName>("tenant_partition"),
             ),
         );
+        let error_policies = internal_processor_error_policies(GeneralErrorPolicy::Log);
+        let mut context = ReingestorDispatchContext {
+            routing: &routing,
+            domain: &domain,
+            reingestor: &input.reingestor,
+            mode: AckMode::Attached,
+            error_policies: &error_policies,
+            branched_senders: &branched_entrypoint_senders,
+            domain_clock: &domain_clock,
+            execution_now: domain_clock
+                .snapshot()
+                .expect("the fixture's clock remains installed")
+                .now(),
+        };
+        let mut output_buffers =
+            ReingestorOutputBuffers::new(input.routes.len(), output_counters.clone());
+        let materialized_values = HashMap::default();
         let input_batch = |tenant: &str, user_id, acks| {
             RelayRecordBatch::single(
                 schema.clone(),
@@ -1668,42 +1697,77 @@ mod tests {
             )
             .expect("input batch should build")
         };
-        broadcast
-            .broadcast(input_batch("acme", 42, acme_acks.attached()))
-            .await
-            .expect("acme message should broadcast");
-        acme_acks.ack_success();
-        timeout(Duration::from_secs(1), async {
-            while output_counters.admitted_work() != 1 {
-                nervix_primitives::task::consume_budget().await;
-                nervix_primitives::task::yield_now().await;
-            }
-        })
+        timeout(
+            Duration::from_secs(1),
+            runtime.dispatch_reingestor_outputs(
+                context,
+                &input,
+                &mut output_buffers,
+                input_batch("acme", 42, acme_acks.attached()),
+                &materialized_values,
+            ),
+        )
         .await
         .expect("acme output should enter its branch buffer");
+        acme_acks.ack_success();
+        assert_eq!(output_counters.admitted_work(), 1);
+        let acme_admitted_at = domain_clock
+            .snapshot()
+            .expect("the fixture's clock remains installed")
+            .now();
 
-        sleep(Duration::from_millis(200)).await;
-        broadcast
-            .broadcast(input_batch("beta", 7, beta_acks.attached()))
-            .await
-            .expect("beta message should broadcast");
-        beta_acks.ack_success();
-        timeout(Duration::from_secs(1), async {
-            while output_counters.admitted_work() != 2 {
-                nervix_primitives::task::consume_budget().await;
-                nervix_primitives::task::yield_now().await;
-            }
-        })
+        set_logical_time(Duration::from_millis(200));
+        context.execution_now = domain_clock
+            .snapshot()
+            .expect("the fixture's clock remains installed")
+            .now();
+        timeout(
+            Duration::from_secs(1),
+            runtime.dispatch_reingestor_outputs(
+                context,
+                &input,
+                &mut output_buffers,
+                input_batch("beta", 7, beta_acks.attached()),
+                &materialized_values,
+            ),
+        )
         .await
         .expect("beta output should enter its branch buffer");
+        beta_acks.ack_success();
+        assert_eq!(output_counters.admitted_work(), 2);
+        assert_eq!(output_buffers.deadlines().len(), 2);
+        let beta_admitted_at = domain_clock
+            .snapshot()
+            .expect("the fixture's clock remains installed")
+            .now();
 
         assert!(
-            timeout(Duration::from_millis(1), &mut beta_completion)
-                .await
-                .is_err(),
+            acme_completion.as_mut().now_or_never().is_none(),
+            "attached acme ACK must remain pending with the buffered output"
+        );
+        assert!(
+            beta_completion.as_mut().now_or_never().is_none(),
             "attached beta ACK must remain pending with the buffered output"
         );
+        assert!(output_subscription.recv().now_or_never().is_none());
 
+        set_logical_time(Duration::from_millis(500));
+        timeout(
+            Duration::from_secs(1),
+            runtime.flush_reingestor_outputs(
+                context.output_flush(),
+                &input.routes,
+                &mut output_buffers,
+                ReingestorOutputFlush::Due,
+            ),
+        )
+        .await
+        .expect("the due-output pass should complete");
+        assert_eq!(
+            output_buffers.deadlines().len(),
+            1,
+            "only acme is due; beta must stay in its own branch buffer"
+        );
         let first_output_batch = timeout(Duration::from_secs(1), output_subscription.recv())
             .await
             .expect("first output subscription should receive")
@@ -1717,6 +1781,15 @@ mod tests {
             ),
             Some(RuntimeValue::String("acme".to_string()))
         );
+        let acme_arrived_at = domain_clock
+            .snapshot()
+            .expect("the fixture's clock remains installed")
+            .now();
+        assert_eq!(
+            acme_arrived_at.duration_since(acme_admitted_at),
+            Some(Duration::from_millis(500)),
+            "acme flushes one cadence after its own admission"
+        );
         assert_eq!(
             timeout(Duration::from_secs(1), &mut acme_completion)
                 .await
@@ -1724,17 +1797,26 @@ mod tests {
             AckOutcome::Ack
         );
         assert!(
-            timeout(Duration::from_millis(100), output_subscription.recv())
-                .await
-                .is_err(),
+            output_subscription.recv().now_or_never().is_none(),
             "beta branch must retain its independent flush deadline"
         );
         assert!(
-            timeout(Duration::from_millis(1), &mut beta_completion)
-                .await
-                .is_err(),
+            beta_completion.as_mut().now_or_never().is_none(),
             "beta ACK must remain pending until the beta branch flushes"
         );
+        set_logical_time(Duration::from_millis(700));
+        timeout(
+            Duration::from_secs(1),
+            runtime.flush_reingestor_outputs(
+                context.output_flush(),
+                &input.routes,
+                &mut output_buffers,
+                ReingestorOutputFlush::Due,
+            ),
+        )
+        .await
+        .expect("the due-output pass should complete");
+        assert!(output_buffers.deadlines().is_empty());
         let second_output_batch = timeout(Duration::from_secs(1), output_subscription.recv())
             .await
             .expect("second output subscription should receive")
@@ -1748,6 +1830,16 @@ mod tests {
             ),
             Some(RuntimeValue::String("beta".to_string()))
         );
+        let beta_arrived_at = domain_clock
+            .snapshot()
+            .expect("the fixture's clock remains installed")
+            .now();
+        assert_eq!(
+            beta_arrived_at.duration_since(beta_admitted_at),
+            Some(Duration::from_millis(500)),
+            "beta flushes one cadence after its own admission"
+        );
+        assert!(beta_arrived_at > acme_arrived_at);
         assert_eq!(
             timeout(Duration::from_secs(1), &mut beta_completion)
                 .await
@@ -1755,8 +1847,6 @@ mod tests {
             AckOutcome::Ack
         );
 
-        let _ = shutdown_tx.send(true);
-        let _ = task.await;
         branched_runtime.shutdown().await;
         owner_task
             .stop(Duration::from_secs(1))

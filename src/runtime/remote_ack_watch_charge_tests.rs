@@ -13,9 +13,10 @@
 )]
 
 use futures_util::FutureExt as _;
-use nervix_execution::MemoryBudgetSnapshot;
+use nervix_execution::{MemoryBudgetSnapshot, MemoryClass};
 
 use super::*;
+use crate::runtime::relay_memory_hold::RECHECK_INTERVAL;
 
 fn relay_memory(executor: &Executor) -> MemoryBudgetSnapshot {
     executor.memory(MemoryClass::Relay)

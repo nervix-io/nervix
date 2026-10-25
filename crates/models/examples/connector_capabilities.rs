@@ -14,10 +14,12 @@
 )]
 
 use nervix_models::{
-    ChoiceRequirement, ClientConfigOwner, ClientDeclaration, ClientPooling, ConnectorKind,
-    EmitSinkCapabilities, EmitSinkKind, EmitterBatchLegality, EmitterBodyForm,
-    IngestSourceCapabilities, IngestSourceKind, LocatorDeclaration, LocatorName, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, SinkReferenceKind, SourceReferenceKind,
+    BufferBound, BufferCapacity, BufferOverflow, ChoiceRequirement, ClientConfigOwner,
+    ClientDeclaration, ClientPooling, ConnectorKind, DeclaredBounds, EmitterBatchLegality,
+    EmitterBodyForm, EmitterEntityCapabilities, EmitterEntityKind, EmitterReferenceKind,
+    HeaderModel, IngestorEntityCapabilities, IngestorEntityKind, IngestorReferenceKind,
+    LocatorDeclaration, LocatorName, OmittedDeadline, OptionDeclaration, OptionForm,
+    OptionPresence, OptionValue, WaitBound,
 };
 use serde_json::{Value, json};
 use strum::IntoEnumIterator as _;
@@ -30,8 +32,8 @@ use strum::IntoEnumIterator as _;
     )
 )]
 fn main() -> std::io::Result<()> {
-    let ingest: Vec<_> = IngestSourceKind::all().map(ingestor).collect();
-    let emit: Vec<_> = EmitSinkKind::all().map(emitter).collect();
+    let ingest: Vec<_> = IngestorEntityKind::all().map(ingestor).collect();
+    let emit: Vec<_> = EmitterEntityKind::all().map(emitter).collect();
     let mut clients = Vec::new();
     for kind in ConnectorKind::iter() {
         if let Some(declaration) = client(kind) {
@@ -61,6 +63,7 @@ fn option_value(value: OptionValue) -> String {
         OptionValue::Mapping => "named expressions".to_owned(),
         OptionValue::Client(connector) => format!("{connector} client"),
         OptionValue::Clause => "composed clause".to_owned(),
+        OptionValue::Size => "byte size".to_owned(),
     }
 }
 
@@ -102,9 +105,9 @@ fn requirements(requirements: &[ChoiceRequirement]) -> String {
     format!(" (requires {})", choices.join(" and "))
 }
 
-fn ingestor(kind: IngestSourceKind) -> Value {
-    let IngestSourceCapabilities {
-        reads_headers,
+fn ingestor(kind: IngestorEntityKind) -> Value {
+    let IngestorEntityCapabilities {
+        headers,
         metadata,
         executes_on_every_cluster_node,
         reference: source_reference,
@@ -114,11 +117,12 @@ fn ingestor(kind: IngestSourceKind) -> Value {
         quiesce,
         locator: declared_locator,
         options: declared_options,
+        bounds: declared_bounds,
     } = kind.capabilities();
     let reference = match source_reference {
-        SourceReferenceKind::Client(connector) => format!("{connector} client"),
-        SourceReferenceKind::Endpoint(endpoint) => format!("{endpoint:?} endpoint"),
-        SourceReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
+        IngestorReferenceKind::Client(connector) => format!("{connector} client"),
+        IngestorReferenceKind::Endpoint(endpoint) => format!("{endpoint:?} endpoint"),
+        IngestorReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
     };
     let modes: Vec<_> = delivery
         .iter()
@@ -135,13 +139,13 @@ fn ingestor(kind: IngestSourceKind) -> Value {
         .collect();
     let options: Vec<_> = declared_options.iter().map(option).collect();
     let from = match source_reference {
-        SourceReferenceKind::Schema => "SCHEMA <schema>",
-        SourceReferenceKind::Client(_) => "<client>",
-        SourceReferenceKind::Endpoint(_) => "<endpoint>",
+        IngestorReferenceKind::Schema => "SCHEMA <schema>",
+        IngestorReferenceKind::Client(_) => "<client>",
+        IngestorReferenceKind::Endpoint(_) => "<endpoint>",
     };
     let decode = match source_reference {
-        SourceReferenceKind::Schema => "",
-        SourceReferenceKind::Client(_) | SourceReferenceKind::Endpoint(_) => {
+        IngestorReferenceKind::Schema => "",
+        IngestorReferenceKind::Client(_) | IngestorReferenceKind::Endpoint(_) => {
             "\n  DECODE USING <codec>"
         }
     };
@@ -160,10 +164,101 @@ fn ingestor(kind: IngestSourceKind) -> Value {
         "entity": kind.phrase(), "connector": kind.connector().keyword(),
         "reference": reference, "locator": locator(declared_locator), "options": options,
         "modes": modes, "quiesce": quiesce, "metadata": metadata,
-        "headers": reads_headers, "every_node": executes_on_every_cluster_node,
+        "headers": header_model(headers), "every_node": executes_on_every_cluster_node,
         "position": position_class.as_ref(),
-        "confirmation": acknowledgement_confirmation.as_ref(), "template": template,
+        "confirmation": acknowledgement_confirmation.as_ref(),
+        "bounds": bounds(declared_bounds), "template": template,
     })
+}
+
+/// The header model of one side as the matrix states it, or `null` for a side whose messages carry
+/// no transport headers.
+fn header_model(model: Option<HeaderModel>) -> Value {
+    let Some(HeaderModel { layout, names }) = model else {
+        return Value::Null;
+    };
+    json!({
+        "layout": layout.as_ref(), "names": names.as_ref(),
+        "layout_meaning": layout.meaning(), "names_meaning": names.meaning(),
+    })
+}
+
+/// What an entity's connector holds and how long it waits, each bound written as the matrix
+/// states it.
+fn bounds(declared: DeclaredBounds) -> Value {
+    let DeclaredBounds {
+        buffers,
+        waits,
+        driver_limits,
+    } = declared;
+    let buffers: Vec<_> = buffers
+        .iter()
+        .map(|buffer| json!({ "holds": buffer.holds, "bound": buffer_bound(buffer.bound) }))
+        .collect();
+    let waits: Vec<_> = waits
+        .iter()
+        .map(|wait| json!({ "wait": wait.wait, "bound": wait_bound(wait.bound) }))
+        .collect();
+    let deadline_keys: Vec<_> = declared
+        .deadline_keys()
+        .into_iter()
+        .map(|key| key.key())
+        .collect();
+    json!({
+        "buffers": buffers, "waits": waits, "driver_limits": driver_limits,
+        "deadline_keys": deadline_keys,
+    })
+}
+
+fn buffer_bound(bound: BufferBound) -> String {
+    let (capacity, overflow) = match bound {
+        BufferBound::Bounded { capacity, overflow } => (capacity, overflow),
+        BufferBound::Unbounded => return "unbounded".to_owned(),
+    };
+    let capacity = match capacity {
+        BufferCapacity::Items { count, unit } => format!("at most {count} {unit}"),
+        BufferCapacity::Bytes(bytes) => format!("at most {bytes} bytes"),
+        BufferCapacity::Setting(setting) => format!("set by {setting}"),
+        BufferCapacity::Driver(default) => format!("driver default, {default}"),
+    };
+    let overflow = match overflow {
+        BufferOverflow::Backpressure => "when full, holds back what fills it",
+        BufferOverflow::DropAndCount => "when full, drops and counts what does not fit",
+        BufferOverflow::DropUncounted => "when full, drops what does not fit without counting it",
+        BufferOverflow::FailPublish => "when full, fails the publish for the host to retry",
+        BufferOverflow::PeerDiscards => {
+            "when full, its peer, told this capacity, discards what does not fit instead of \
+             sending it"
+        }
+        BufferOverflow::RefuseRequest => {
+            "when full, immediately refuses the request for its sender to retry"
+        }
+        BufferOverflow::FailPoll => "when exceeded, fails the poll; the next poll reads again",
+        BufferOverflow::FailRead => {
+            "when exceeded, fails the read and reconnects on the retry policy"
+        }
+    };
+    format!("{capacity}; {overflow}")
+}
+
+fn wait_bound(bound: WaitBound) -> String {
+    match bound {
+        WaitBound::Key { key, omitted } => {
+            let omitted = match omitted {
+                OmittedDeadline::Required => "required".to_owned(),
+                OmittedDeadline::Default(default) => {
+                    format!("{} when omitted", humantime::format_duration(default))
+                }
+                OmittedDeadline::Unbounded => "unbounded when omitted".to_owned(),
+                OmittedDeadline::Derived(rule) => format!("when omitted, {rule}"),
+            };
+            format!("`{}`; {omitted}", key.key())
+        }
+        WaitBound::Clause(clause) => format!("`{clause}`"),
+        WaitBound::Fixed(bound) => format!("fixed {}", humantime::format_duration(bound)),
+        WaitBound::Driver(default) => format!("driver default, {default}"),
+        WaitBound::Unbounded => "unbounded".to_owned(),
+    }
 }
 
 fn option_template(options: &[OptionDeclaration]) -> String {
@@ -179,9 +274,9 @@ fn option_template(options: &[OptionDeclaration]) -> String {
     text
 }
 
-fn emitter(kind: EmitSinkKind) -> Value {
-    let EmitSinkCapabilities {
-        writes_headers,
+fn emitter(kind: EmitterEntityKind) -> Value {
+    let EmitterEntityCapabilities {
+        headers,
         reference,
         body,
         batch,
@@ -191,11 +286,12 @@ fn emitter(kind: EmitSinkKind) -> Value {
         options,
         envelope,
         properties,
+        bounds: declared_bounds,
     } = kind.capabilities();
     let reference = match reference {
-        SinkReferenceKind::Client(connector) => format!("{connector} client"),
-        SinkReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
-        SinkReferenceKind::StorageClient(stores) => {
+        EmitterReferenceKind::Client(connector) => format!("{connector} client"),
+        EmitterReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
+        EmitterReferenceKind::StorageClient(stores) => {
             let names: Vec<_> = stores.iter().map(ToString::to_string).collect();
             format!("{} store and catalog clients", names.join(" | "))
         }
@@ -222,54 +318,42 @@ fn emitter(kind: EmitSinkKind) -> Value {
     json!({
         "entity": kind.phrase(), "connector": kind.connector().keyword(),
         "reference": reference, "locator": locator(declared_locator), "options": options,
-        "modes": modes, "headers": writes_headers,
+        "modes": modes, "headers": header_model(headers),
         "batch": batch, "batch_maximum": maximum, "body": body,
         "batch_transformation": requires_batch_transformation,
         "envelope": envelope, "properties": properties,
-        "template": emitter_template(kind, body),
+        "bounds": bounds(declared_bounds), "template": emitter_template(kind, body),
     })
 }
 
 /// Synopses use the current destination grammar; all clauses and choices come from declarations.
-fn emitter_template(kind: EmitSinkKind, body: &str) -> String {
+fn emitter_template(kind: EmitterEntityKind, body: &str) -> String {
     let declared = kind.capabilities();
-    let connector = kind.connector();
     let mut destination = match declared.reference {
-        SinkReferenceKind::Schema => format!("{connector} SCHEMA <schema>"),
-        SinkReferenceKind::StorageClient(stores) => {
-            let names: Vec<_> = stores.iter().map(ToString::to_string).collect();
-            format!("{connector} ON ({}) <store>", names.join(" | "))
-        }
-        SinkReferenceKind::Client(_) => {
-            if connector == ConnectorKind::Redis {
-                format!("{} <client>", kind.phrase())
-            } else {
-                format!("{connector} <client>")
-            }
-        }
+        EmitterReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
+        EmitterReferenceKind::StorageClient(_) => "<storage_client>".to_owned(),
+        EmitterReferenceKind::Client(_) => "<client>".to_owned(),
     };
     if let Some(locator) = declared.locator {
         destination.push_str(&format!(" {}", locator.example()));
     }
-    if connector == ConnectorKind::Otel && kind.entity_keyword() != "METRICS" {
-        destination.push_str(&format!(" {}", kind.entity_keyword()));
-    }
-    let mut options = Vec::new();
+    let mut payload_options = Vec::new();
+    let mut entity_options = Vec::new();
     for option in declared.options {
-        if option.keywords == "METRIC" {
-            destination.push_str(&option_template(&[*option]));
+        if declared.body == EmitterBodyForm::Values && !option.is_required() {
+            payload_options.push(*option);
         } else {
-            options.push(*option);
+            entity_options.push(*option);
         }
     }
-    if declared.body == EmitterBodyForm::Values {
-        destination.push_str(&format!("\n    {body}"));
-    }
-    destination.push_str(&option_template(&options));
-    let body_clause = match declared.body {
-        EmitterBodyForm::Codec | EmitterBodyForm::CodecOrWithoutBody => format!("\n    {body}"),
-        EmitterBodyForm::Values | EmitterBodyForm::Native => String::new(),
+    destination.push_str(&option_template(&entity_options));
+    let mut body_clause = match declared.body {
+        EmitterBodyForm::Codec | EmitterBodyForm::CodecOrWithoutBody | EmitterBodyForm::Values => {
+            format!("\n    {body}")
+        }
+        EmitterBodyForm::Native => String::new(),
     };
+    body_clause.push_str(&option_template(&payload_options));
     let batch = match declared.batch {
         EmitterBatchLegality::Required { .. } => "\n  BATCH MAX MESSAGES <count> MAX SIZE <bytes>",
         EmitterBatchLegality::Optional { .. } => {
@@ -278,9 +362,10 @@ fn emitter_template(kind: EmitSinkKind, body: &str) -> String {
         EmitterBatchLegality::Unavailable { .. } => "",
     };
     format!(
-        "CREATE EMITTER <name>\n  FROM <relay>\n  TO {destination}\n    MODE \
+        "CREATE {} EMITTER <name>\n  FROM <relay>\n  TO {destination}\n    MODE \
          <mode>{body_clause}\n  <construction>{batch}\n  FLUSH IMMEDIATE\n  ON MESSAGE ERROR \
-         LOG\n  ON GENERAL ERROR LOG;"
+         LOG\n  ON GENERAL ERROR LOG;",
+        kind.phrase()
     )
 }
 

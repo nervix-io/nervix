@@ -3,6 +3,9 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use error_stack::Report;
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
+use nervix_primitives::sync::Semaphore;
 use thiserror::Error;
 use ubyte::ByteUnit;
 
@@ -43,8 +46,7 @@ pub enum CpuClass {
     Bulk,
 }
 
-/// A bounded share of admission onto the blocking pool for synchronous filesystem and database
-/// work.
+/// A bounded share of admission onto the blocking pool for synchronous storage and connector I/O.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StorageClass {
     /// Consensus storage, admitted one job at a time. Admission is granted in the order it was
@@ -53,6 +55,9 @@ pub enum StorageClass {
     Consensus,
     /// Every other synchronous filesystem and database operation.
     Filesystem,
+    /// Blocking connector control I/O. A driver may retain a call after its caller stops waiting,
+    /// so these jobs never take filesystem or consensus worker permits.
+    Connector,
 }
 
 /// A reserved transient-memory budget. A class cannot borrow beyond its own ceiling, so a
@@ -63,6 +68,12 @@ pub enum MemoryClass {
     Commands,
     Relay,
     Bulk,
+    /// The receive window every open bulk stream grants its sender: what the transport may hold
+    /// for that stream before its reader takes it. A stream holds its window from before its
+    /// request leaves until the stream ends, and the chunks its reader takes are charged to `Bulk`.
+    /// Kept apart from `Bulk`, a stream waiting for a window never takes the room an open stream's
+    /// next chunk needs, and an open stream needs nothing more from this class to finish.
+    BulkWindow,
     /// Retained archive descriptions, restore planning, native conversion and serializer scratch.
     /// This reservation follows the description until its last reader exits; bounded I/O and
     /// generation publication use Bulk independently.
@@ -77,6 +88,7 @@ impl MemoryClass {
             Self::Commands => "commands",
             Self::Relay => "relay",
             Self::Bulk => "bulk",
+            Self::BulkWindow => "bulk_window",
             Self::RestoreMetadata => "restore_metadata",
             Self::Credentials => "credentials",
         }
@@ -100,6 +112,7 @@ impl WorkerClassName {
             Self::Cpu(CpuClass::Bulk) => "bulk_cpu",
             Self::Storage(StorageClass::Consensus) => "consensus_storage",
             Self::Storage(StorageClass::Filesystem) => "filesystem_storage",
+            Self::Storage(StorageClass::Connector) => "connector_storage",
         }
     }
 }
@@ -126,6 +139,7 @@ pub struct WorkerCounts {
     pub bulk_cpu: NonZeroUsize,
     pub consensus_storage: NonZeroUsize,
     pub filesystem_storage: NonZeroUsize,
+    pub connector_storage: Setting<ConnectorStorageWorkers>,
     /// The number of jobs one class may hold waiting for a worker. Beyond it, admission is refused
     /// with typed backpressure rather than growing an unbounded queue in front of the pool.
     pub pending_jobs: NonZeroUsize,
@@ -159,8 +173,47 @@ impl Default for WorkerCounts {
             bulk_cpu: data,
             consensus_storage: NonZeroUsize::MIN,
             filesystem_storage: NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
+            connector_storage: ConnectorStorageWorkers::resolve(None)
+                .assured("two connector workers fit the primitive's permit representation"),
             pending_jobs: NonZeroUsize::new(1024).unwrap_or(NonZeroUsize::MIN),
         }
+    }
+}
+
+/// Node-local capacity for synchronous connector control I/O.
+pub struct ConnectorStorageWorkers;
+
+impl SettingDefinition for ConnectorStorageWorkers {
+    type Class = NodeCapabilities;
+    type Value = NonZeroUsize;
+    type Context = ();
+    type Error = ExecutionConfigError;
+
+    const NAME: &'static str = "execution-connector-storage-workers";
+    const DERIVATION: Option<&'static str> = None;
+
+    fn default_value(_: &()) -> NonZeroUsize {
+        NonZeroUsize::new(2).verified("two connector workers are nonzero")
+    }
+
+    fn validate(value: &NonZeroUsize, _: &()) -> Result<(), Report<ExecutionConfigError>> {
+        if value.get() > Semaphore::MAX_PERMITS {
+            return Err(Report::new(ExecutionConfigError::WorkerCountTooLarge {
+                class: WorkerClassName::Storage(StorageClass::Connector).as_str(),
+                workers: value.get(),
+                maximum: Semaphore::MAX_PERMITS,
+            }));
+        }
+        Ok(())
+    }
+}
+
+impl ConnectorStorageWorkers {
+    /// Resolve the default or a local capacity claim through the same validation boundary.
+    pub fn resolve(
+        value: Option<NonZeroUsize>,
+    ) -> Result<Setting<Self>, Report<ExecutionConfigError>> {
+        Setting::resolve(value, &())
     }
 }
 
@@ -171,14 +224,35 @@ pub struct MemoryBudgets {
     pub commands: ByteUnit,
     pub relay: ByteUnit,
     pub bulk: ByteUnit,
+    /// The receive windows of the bulk streams a node has open at once.
+    pub bulk_window: ByteUnit,
     pub restore_metadata: ByteUnit,
     pub credentials: ByteUnit,
 }
 
+impl MemoryBudgets {
+    /// Every class's budget together, or `None` when they do not add up to a byte count.
+    pub fn total(&self) -> Option<ByteUnit> {
+        let mut total = 0_u64;
+        for budget in [
+            self.management,
+            self.commands,
+            self.relay,
+            self.bulk,
+            self.restore_metadata,
+            self.credentials,
+        ] {
+            total = total.checked_add(budget.as_u64())?;
+        }
+        Some(ByteUnit::Byte(total))
+    }
+}
+
 impl Default for MemoryBudgets {
-    /// 275 MiB of execution buffers plus 2 GiB of admitted retained restore metadata:
+    /// 291 MiB of execution buffers plus 2 GiB of admitted retained restore metadata:
     /// 8 MiB reserved for management, 24 MiB for commands and replication,
-    /// 192 MiB for relay work, 32 MiB for bulk buffers and 19 MiB for the one password hash a node
+    /// 192 MiB for relay work, 32 MiB for bulk buffers, 16 MiB for the receive windows of bulk
+    /// streams, sixteen of the default 1 MiB windows, and 19 MiB for the one password hash a node
     /// computes at a time.
     fn default() -> Self {
         Self {
@@ -186,6 +260,7 @@ impl Default for MemoryBudgets {
             commands: ByteUnit::Mebibyte(24),
             relay: ByteUnit::Mebibyte(192),
             bulk: ByteUnit::Mebibyte(32),
+            bulk_window: ByteUnit::Mebibyte(16),
             restore_metadata: ByteUnit::Gibibyte(2),
             credentials: CREDENTIAL_WORKING_BYTES,
         }
@@ -306,6 +381,7 @@ pub(crate) struct ValidatedBudgets {
     pub(crate) commands: u32,
     pub(crate) relay: u32,
     pub(crate) bulk: u32,
+    pub(crate) bulk_window: u32,
     pub(crate) restore_metadata: u32,
     pub(crate) credentials: u32,
 }
@@ -314,6 +390,12 @@ pub(crate) struct ValidatedBudgets {
 /// contradiction by waiting forever for a budget that cannot hold it.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ExecutionConfigError {
+    #[error("the {class} worker count {workers} exceeds the primitive's {maximum} permits")]
+    WorkerCountTooLarge {
+        class: &'static str,
+        workers: usize,
+        maximum: usize,
+    },
     #[error(
         "the {class} memory budget of {budget} bytes cannot hold its largest {operation} of \
          {required} bytes"
@@ -442,6 +524,14 @@ impl ExecutionConfig {
                     self.budgets.bulk,
                     "sealed snapshot section beside one body chunk",
                     bulk_required,
+                )?,
+                // The window each bulk stream backs is the transport's setting, so the transport
+                // checks that this budget holds one when it binds.
+                bulk_window: permits(
+                    MemoryClass::BulkWindow.as_str(),
+                    self.budgets.bulk_window,
+                    "bulk stream receive window",
+                    1,
                 )?,
                 restore_metadata: permits(
                     MemoryClass::RestoreMetadata.as_str(),

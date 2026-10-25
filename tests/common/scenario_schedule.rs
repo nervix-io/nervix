@@ -2,8 +2,9 @@
 //!
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
-//! - **Owns.** Feature-group admission, run-slot admission, feature take-up priority, and the
-//!   long-running declaration that orders run-slot admission.
+//! - **Owns.** Feature-group admission, run-slot admission, feature take-up priority, the
+//!   long-running declaration that orders run-slot admission, the retry count, and the share of
+//!   the run slots each run of a scenario holds.
 //! - **Depends on.** Tokio channels, a short synchronous queue lock, and feature names and tags
 //!   supplied by the parser.
 //! - **Must not know.** Scenario steps, node state, or Cucumber's result writer.
@@ -11,9 +12,11 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
+    num::NonZeroU32,
     time::Duration,
 };
 
+use arch_into::ArchInto as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::sync::{StdArc, blocking::Mutex, oneshot, watch};
 
@@ -79,6 +82,81 @@ pub(crate) enum ScenarioAttempt {
     Retry,
 }
 
+/// How many times Cucumber runs a failed scenario again before it reports the scenario failed.
+pub(crate) const SCENARIO_RETRIES: usize = 2;
+
+/// The first retry of a scenario holds this divisor's share of the run slots, and each later retry
+/// holds twice the share of the run before it. A scenario that failed beside the rest of the suite
+/// therefore runs again beside fewer other scenarios, and never alone.
+const FIRST_RETRY_SLOT_DIVISOR: usize = 16;
+
+/// The share of the run slots the last retry holds, as a divisor of the pool: the first retry's
+/// share, doubled once for each retry after it.
+const LAST_RETRY_SLOT_DIVISOR: usize = FIRST_RETRY_SLOT_DIVISOR >> (SCENARIO_RETRIES - 1);
+
+const _: () = assert!(
+    SCENARIO_RETRIES >= 1,
+    "a failed scenario runs again before the suite reports it"
+);
+const _: () = assert!(
+    LAST_RETRY_SLOT_DIVISOR << (SCENARIO_RETRIES - 1) == FIRST_RETRY_SLOT_DIVISOR,
+    "each retry holds exactly twice the share of the run before it"
+);
+const _: () = assert!(
+    LAST_RETRY_SLOT_DIVISOR >= 4,
+    "no run holds more than a quarter of the run slots, so a retry never runs a scenario alone"
+);
+
+/// Which run of a scenario an admission is for, counted from one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ScenarioRun(NonZeroU32);
+
+impl ScenarioRun {
+    /// A scenario's first run.
+    pub(crate) const FIRST: Self = Self(NonZeroU32::MIN);
+
+    pub(crate) fn new(run: NonZeroU32) -> Self {
+        Self(run)
+    }
+
+    pub(crate) fn number(self) -> u32 {
+        self.0.get()
+    }
+
+    /// Whether this is the scenario's first run or a run after a failed one.
+    pub(crate) fn attempt(self) -> ScenarioAttempt {
+        if self == Self::FIRST {
+            ScenarioAttempt::First
+        } else {
+            ScenarioAttempt::Retry
+        }
+    }
+
+    /// How many of a pool of `slots` run slots this run holds from admission to the end of its
+    /// teardown.
+    ///
+    /// A first run holds one slot. The first retry holds a sixteenth of the pool and each later
+    /// retry twice the share of the run before it, so the second retry holds an eighth. A run past
+    /// the configured retries, as a `--retry` override allows, keeps the last retry's share. Every
+    /// run holds at least one slot, so a pool of fewer than sixteen slots gives a first retry one.
+    pub(crate) fn run_slots(self, slots: usize) -> usize {
+        let run: usize = self.number().arch_into();
+        if run == 1 {
+            return 1;
+        }
+        let retry = run
+            .checked_sub(1)
+            .verified("the first run returned above, so this run is a retry");
+        let doublings = retry
+            .min(SCENARIO_RETRIES)
+            .checked_sub(1)
+            .verified("a retry counts from one");
+        let divisor = FIRST_RETRY_SLOT_DIVISOR >> doublings;
+        let share = slots / divisor;
+        share.max(1)
+    }
+}
+
 impl FeatureLimit {
     pub(crate) fn for_name(name: &str) -> Self {
         if WEB_CONSOLE_FEATURE_NAMES.contains(&name) {
@@ -127,6 +205,8 @@ impl fmt::Display for AdmissionWait {
 #[derive(Debug)]
 pub(crate) struct ScenarioAdmission {
     limit: FeatureLimit,
+    /// The run slots this admission holds, all given back together when it ends.
+    slots: usize,
     pool: StdArc<AdmissionPool>,
     active: bool,
 }
@@ -135,24 +215,42 @@ impl ScenarioAdmission {
     pub(crate) fn limit(&self) -> FeatureLimit {
         self.limit
     }
+
+    pub(crate) fn slots(&self) -> usize {
+        self.slots
+    }
 }
 
 impl Drop for ScenarioAdmission {
     fn drop(&mut self) {
         if self.active {
-            self.pool.release(self.limit);
+            self.pool.release(self.limit, self.slots);
         }
     }
 }
 
 pub(crate) struct ScenarioRunSlots {
+    /// The size of the pool, from which each run's share is taken.
+    slots: usize,
     pool: StdArc<AdmissionPool>,
 }
 
 struct Waiter {
     feature_name: String,
+    /// The run slots this waiter's run holds once admitted.
+    slots: usize,
     grant: oneshot::Sender<ScenarioAdmission>,
     reason: watch::Sender<AdmissionWait>,
+}
+
+/// What the waiter a queue offers next allows admission to do.
+enum Offer {
+    /// The queue has no waiter to offer.
+    Empty,
+    /// The offered waiter needs more run slots than are free. Admission keeps every slot that
+    /// frees up for it, rather than for a smaller waiter behind it, until its share is free.
+    Waiting,
+    Admitted(Waiter),
 }
 
 #[derive(Default)]
@@ -167,6 +265,21 @@ impl AttemptQueues {
             ScenarioAttempt::First => &mut self.first,
             ScenarioAttempt::Retry => &mut self.retries,
         }
+    }
+
+    /// Takes the waiter at `index` of the `attempt` queue when the free run slots cover its share.
+    fn offer(&mut self, attempt: ScenarioAttempt, index: usize, available_slots: usize) -> Offer {
+        let queue = self.for_attempt(attempt);
+        let Some(waiter) = queue.get(index) else {
+            return Offer::Empty;
+        };
+        if waiter.slots > available_slots {
+            return Offer::Waiting;
+        }
+        let waiter = queue
+            .remove(index)
+            .verified("the waiter at this index was read above under the same lock");
+        Offer::Admitted(waiter)
     }
 
     fn waiting(&self) -> impl Iterator<Item = &Waiter> {
@@ -226,33 +339,49 @@ impl AdmissionState {
         queue.for_attempt(attempt).push_back(waiter);
     }
 
-    fn next_eligible(&mut self) -> Option<(FeatureLimit, Waiter)> {
+    /// Takes the waiter admission serves next, if `available_slots` cover its share.
+    ///
+    /// Waiters are offered in priority order, and the first eligible one decides: when its share
+    /// is not yet free, nothing is admitted, so the slots that free up gather for it instead of
+    /// going one at a time to the waiters behind it.
+    fn next_eligible(&mut self, available_slots: usize) -> Option<(FeatureLimit, Waiter)> {
         for attempt in [ScenarioAttempt::Retry, ScenarioAttempt::First] {
-            if self.available_wasm_state_reset > 0
-                && let Some(waiter) = self.wasm_state_reset.for_attempt(attempt).pop_front()
-            {
-                return Some((FeatureLimit::WasmStateReset, waiter));
+            if self.available_wasm_state_reset > 0 {
+                match self.wasm_state_reset.offer(attempt, 0, available_slots) {
+                    Offer::Admitted(waiter) => return Some((FeatureLimit::WasmStateReset, waiter)),
+                    Offer::Waiting => return None,
+                    Offer::Empty => {}
+                }
             }
             if self.available_web_console > 0 {
                 let queue = self.web_console.for_attempt(attempt);
-                let next = queue.iter().enumerate().min_by_key(|(_, waiter)| {
-                    self.web_console_grants
-                        .get(&waiter.feature_name)
-                        .copied()
-                        .unwrap_or_default()
-                });
-                if let Some((index, _)) = next {
-                    let waiter = queue
-                        .remove(index)
-                        .verified("the selected web console waiter is still at its queue index");
-                    return Some((FeatureLimit::WebConsole, waiter));
+                let fairest = queue
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, waiter)| {
+                        self.web_console_grants
+                            .get(&waiter.feature_name)
+                            .copied()
+                            .unwrap_or_default()
+                    })
+                    .map(|(index, _)| index);
+                if let Some(index) = fairest {
+                    match self.web_console.offer(attempt, index, available_slots) {
+                        Offer::Admitted(waiter) => return Some((FeatureLimit::WebConsole, waiter)),
+                        Offer::Waiting => return None,
+                        Offer::Empty => {}
+                    }
                 }
             }
-            if let Some(waiter) = self.long_running.for_attempt(attempt).pop_front() {
-                return Some((FeatureLimit::Unlimited, waiter));
+            match self.long_running.offer(attempt, 0, available_slots) {
+                Offer::Admitted(waiter) => return Some((FeatureLimit::Unlimited, waiter)),
+                Offer::Waiting => return None,
+                Offer::Empty => {}
             }
-            if let Some(waiter) = self.ordinary.for_attempt(attempt).pop_front() {
-                return Some((FeatureLimit::Unlimited, waiter));
+            match self.ordinary.offer(attempt, 0, available_slots) {
+                Offer::Admitted(waiter) => return Some((FeatureLimit::Unlimited, waiter)),
+                Offer::Waiting => return None,
+                Offer::Empty => {}
             }
         }
         None
@@ -305,14 +434,19 @@ impl fmt::Debug for AdmissionPool {
 impl AdmissionPool {
     fn dispatch(self: &StdArc<Self>, state: &mut AdmissionState) {
         while state.available_slots > 0 {
-            let Some((limit, waiter)) = state.next_eligible() else {
+            let Some((limit, waiter)) = state.next_eligible(state.available_slots) else {
                 break;
             };
-            state.available_slots -= 1;
+            let slots = waiter.slots;
+            state.available_slots = state
+                .available_slots
+                .checked_sub(slots)
+                .verified("a waiter is offered only when the free run slots cover its share");
             state.take_feature(limit);
             let feature_name = waiter.feature_name;
             let admission = ScenarioAdmission {
                 limit,
+                slots,
                 pool: self.clone(),
                 active: true,
             };
@@ -321,7 +455,7 @@ impl AdmissionPool {
                 // this lock, then offer the same capacity to the next waiter.
                 abandoned.active = false;
                 drop(abandoned);
-                state.available_slots += 1;
+                state.available_slots += slots;
                 state.release_feature(limit);
             } else if limit == FeatureLimit::WebConsole {
                 *state.web_console_grants.entry(feature_name).or_default() += 1;
@@ -330,11 +464,11 @@ impl AdmissionPool {
         state.refresh_wait_reasons();
     }
 
-    fn release(self: &StdArc<Self>, limit: FeatureLimit) {
+    fn release(self: &StdArc<Self>, limit: FeatureLimit, slots: usize) {
         let mut state = self.state.lock();
-        // Give the feature capacity and its run slot back in one decision. Otherwise an ordinary
-        // waiter can consume the slot before a feature waiter awakened by the release is polled.
-        state.available_slots += 1;
+        // Give the feature capacity and its run slots back in one decision. Otherwise an ordinary
+        // waiter can consume a slot before a feature waiter awakened by the release is polled.
+        state.available_slots += slots;
         state.release_feature(limit);
         self.dispatch(&mut state);
     }
@@ -344,6 +478,7 @@ impl ScenarioRunSlots {
     pub(crate) fn new(slots: usize) -> Self {
         assert!(slots > 0, "a scenario suite needs at least one run slot");
         Self {
+            slots,
             pool: StdArc::new(AdmissionPool {
                 state: Mutex::new(AdmissionState {
                     available_slots: slots,
@@ -355,12 +490,14 @@ impl ScenarioRunSlots {
         }
     }
 
+    /// Admits `run` of a scenario once its feature capacity and its share of the run slots are
+    /// both free, reporting through `waiting_for` what it waits for meanwhile.
     pub(crate) async fn admit_with(
         &self,
         limit: FeatureLimit,
         length: ScenarioLength,
         feature_name: &str,
-        attempt: ScenarioAttempt,
+        run: ScenarioRun,
         mut waiting_for: impl FnMut(AdmissionWait),
     ) -> ScenarioAdmission {
         let (grant, mut granted) = oneshot::channel();
@@ -371,9 +508,10 @@ impl ScenarioRunSlots {
             state.queue(
                 limit,
                 length,
-                attempt,
+                run.attempt(),
                 Waiter {
                     feature_name: feature_name.to_owned(),
+                    slots: run.run_slots(self.slots),
                     grant,
                     reason: reason_sender,
                 },

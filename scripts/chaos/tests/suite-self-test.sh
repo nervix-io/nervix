@@ -57,14 +57,21 @@ runner_reserve="$(sed -n 's/^teardown_reserve_seconds=\([0-9][0-9]*\)$/\1/p' "${
 suite_reserve="$(sed -n 's/^teardown_reserve_minutes=\([0-9][0-9]*\)$/\1/p' "${chaos_dir}/suite.sh")"
 [[ -n "${runner_reserve}" && -n "${suite_reserve}" && "${runner_reserve}" -eq $((suite_reserve * 60)) ]] \
     || fail "the suite's teardown reserve of ${suite_reserve} minutes is not the runner's ${runner_reserve} seconds"
+# A shard's step funds the one verifier self-check its suite executes before the first run, so no
+# entry's budget pays for it.
+# shellcheck source=../verifier-self-check.sh
+source "${chaos_dir}/verifier-self-check.sh"
+preparation_minutes=$(((chaos_verifier_self_check_seconds + 59) / 60))
 for suite in smoke soak; do
     "${chaos_dir}/suite.sh" shards "${suite}" >"${tmp_dir}/${suite}-shards.json"
-    jq -e --slurpfile suites "${chaos_dir}/suites.json" --arg suite "${suite}" --argjson reserve "${suite_reserve}" '
+    jq -e --slurpfile suites "${chaos_dir}/suites.json" --arg suite "${suite}" --argjson reserve "${suite_reserve}" \
+        --argjson preparation "${preparation_minutes}" '
         ($suites[0].suites[$suite].entries) as $entries
         | length == ([$entries[].shard] | unique | length)
           and all(.[]; . as $shard
                   | .execution_minutes == ([$entries[] | select(.shard == $shard.shard) | .budget_minutes] | add)
-                  and .step_minutes == .execution_minutes + $reserve
+                  and .preparation_minutes == $preparation
+                  and .step_minutes == .execution_minutes + .preparation_minutes + $reserve
                   and .job_minutes == .step_minutes + $suites[0].ci_reserve_minutes
                   and .entries == [$entries[] | select(.shard == $shard.shard) | .id])
     ' "${tmp_dir}/${suite}-shards.json" >/dev/null || fail "the ${suite} shard budgets do not add up"
@@ -73,8 +80,35 @@ done
 # The copy runs beside stand-ins and its own definitions.
 bundle="${tmp_dir}/bundle"
 mkdir -p "${bundle}/tests" "${bundle}/bin"
-cp "${chaos_dir}/suite.sh" "${chaos_dir}/suite-report.jq" "${chaos_dir}/require-jq.sh" "${bundle}/"
+cp "${chaos_dir}/suite.sh" "${chaos_dir}/suite-report.jq" "${chaos_dir}/require-jq.sh" \
+    "${chaos_dir}/verifier-self-check.sh" "${bundle}/"
 printf '#!/usr/bin/env bash\nexit 0\n' >"${bundle}/tests/suite-self-test.sh"
+
+# The verifier self-check stand-in records each execution and every signal in the suite directory
+# its --evidence names, and acts out the outcome this file chooses: pass, fail or hold until a
+# signal ends it. The file lives outside the bundle, so choosing an outcome leaves the identity of
+# the scripts the suite checked unchanged.
+verifier_outcome="${tmp_dir}/verifier-outcome"
+printf 'pass\n' >"${verifier_outcome}"
+cat >"${bundle}/tests/self-test.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "\$#" -eq 2 && "\$1" == --evidence ]] || exit 9
+suite_dir="\${2%/verifier-self-test}"
+printf 'verifier\n' >>"\${suite_dir}/sequence.txt"
+case "\$(cat "${verifier_outcome}")" in
+    pass) printf 'chaos harness self-test passed\n' ;;
+    fail) printf 'self-test failed: a verifier passed a known failure\n' >&2; exit 3 ;;
+    hold)
+        trap 'printf "TERM\n" >>"\${suite_dir}/verifier.signals"; exit 143' TERM
+        printf '%s\n' "\$\$" >"\${suite_dir}/verifier.pid"
+        while true; do
+            sleep 0.1
+        done
+        ;;
+    *) exit 9 ;;
+esac
+EOF
 
 cat >"${bundle}/bin/docker" <<EOF
 #!/usr/bin/env bash
@@ -122,18 +156,20 @@ set -euo pipefail
 shift
 scenario="\$1"
 shift
-image="" artifacts="" run_id="" run_timeout="" arguments=()
+image="" artifacts="" run_id="" run_timeout="" verifier_record="" arguments=()
 while [[ "\$#" -gt 0 ]]; do
     case "\$1" in
         --image) image="\$2"; shift 2 ;;
         --artifacts) artifacts="\$2"; shift 2 ;;
         --run-id) run_id="\$2"; shift 2 ;;
         --timeout) run_timeout="\$2"; shift 2 ;;
+        --verifier-self-check) verifier_record="\$2"; shift 2 ;;
         *) arguments+=("\$1"); shift ;;
     esac
 done
-printf '%s|%s|%s|%s|%s\n' "\${scenario}" "\${arguments[*]-}" "\${image}" "\${run_timeout}" "\${run_id}" \
-    >>"\${artifacts}/stub-calls.txt"
+printf '%s|%s|%s|%s|%s|%s\n' "\${scenario}" "\${arguments[*]-}" "\${image}" "\${run_timeout}" "\${run_id}" \
+    "\${verifier_record}" >>"\${artifacts}/stub-calls.txt"
+printf 'run %s\n' "\${run_id}" >>"\${artifacts}/sequence.txt"
 run_dir="\${artifacts}/\${run_id}"
 [[ "\${scenario}" == refused ]] && exit 2
 mkdir -p "\${run_dir}/results" "\${run_dir}/tls"
@@ -271,7 +307,8 @@ case "${run_id}" in
     *-stuck) exit 1 ;;
 esac
 EOF
-chmod +x "${bundle}/bin/docker" "${bundle}/chaos.sh" "${bundle}/cleanup.sh" "${bundle}/tests/suite-self-test.sh"
+chmod +x "${bundle}/bin/docker" "${bundle}/chaos.sh" "${bundle}/cleanup.sh" "${bundle}/tests/suite-self-test.sh" \
+    "${bundle}/tests/self-test.sh"
 
 write_definitions() {
     jq -n "$1" >"${bundle}/suites.json"
@@ -297,7 +334,9 @@ expect_invalid "{ci_reserve_minutes: 10, suites: {s: {description: \"d\", entrie
 expect_invalid "{ci_reserve_minutes: 10, suites: {s: {description: \"d\", entries: [${entry}, (${entry} | .id = \"two\" | .shard = 3)]}}}" \
     'shards must be numbered from 1 without gaps'
 expect_invalid "{ci_reserve_minutes: 10, suites: {s: {description: \"d\", entries: [(${entry} | .run += [\"--timeout\", \"60\"])]}}}" \
-    'the suite sets --image, --artifacts, --run-id and --timeout itself'
+    'the suite sets --image, --artifacts, --run-id, --timeout and --verifier-self-check itself'
+expect_invalid "{ci_reserve_minutes: 10, suites: {s: {description: \"d\", entries: [(${entry} | .run += [\"--verifier-self-check\", \"r.json\"])]}}}" \
+    'the suite sets --image, --artifacts, --run-id, --timeout and --verifier-self-check itself'
 expect_invalid "{ci_reserve_minutes: 10, suites: {s: {description: \"d\", entries: [(${entry} | .budget_minutes = 1)]}}}" \
     'budget_minutes must be an integer from 2 through 360'
 expect_invalid "{ci_reserve_minutes: 10, suites: {s: {description: \"d\", entries: [(${entry} | .budget = 4)]}}}" \
@@ -336,10 +375,12 @@ write_definitions '{ci_reserve_minutes: 10, suites: {
 
 suite shards outcomes >"${tmp_dir}/shards.json"
 expect_json "${tmp_dir}/shards.json" '
-    . == [{shard: 1, entries: ["pass", "product", "setup", "refused"], execution_minutes: 17, step_minutes: 32, job_minutes: 42},
-          {shard: 2, entries: ["silent", "liar", "other-image", "unclassified", "stopped"], execution_minutes: 25, step_minutes: 40, job_minutes: 50},
-          {shard: 3, entries: ["mixed"], execution_minutes: 40, step_minutes: 55, job_minutes: 65}]' \
-    'shards did not report each shard with its execution, step and job budgets'
+    . == [{shard: 1, entries: ["pass", "product", "setup", "refused"], execution_minutes: 17, preparation_minutes: 10,
+           step_minutes: 42, job_minutes: 52},
+          {shard: 2, entries: ["silent", "liar", "other-image", "unclassified", "stopped"], execution_minutes: 25,
+           preparation_minutes: 10, step_minutes: 50, job_minutes: 60},
+          {shard: 3, entries: ["mixed"], execution_minutes: 40, preparation_minutes: 10, step_minutes: 65, job_minutes: 75}]' \
+    'shards did not report each shard with its execution, preparation, step and job budgets'
 suite list >"${tmp_dir}/list.txt"
 grep -Fq '    mixed  40 min  just chaos run mixed --duration 30m' "${tmp_dir}/list.txt" \
     || fail 'list did not print an entry with its budget and command'
@@ -400,11 +441,27 @@ expect_json "${record}" '
       and $mixed.resources == {max_node_memory_bytes: 87304437.76, max_backlog: 35, longest_output_stall_ms: 44896}' \
     'the suite did not record the seed, recovery distribution and resources of a mixed run'
 calls="${tmp_dir}/runs/outcomes-1/stub-calls.txt"
-[[ "$(sed -n 1p "${calls}")" == "pass|--nodes 3|${digest_reference}|180|outcomes-1-pass" ]] \
+verifier_record="${tmp_dir}/runs/outcomes-1/verifier-self-check.json"
+[[ "$(sed -n 1p "${calls}")" == "pass|--nodes 3|${digest_reference}|180|outcomes-1-pass|${verifier_record}" ]] \
     || fail "the suite ran the first entry as $(sed -n 1p "${calls}")"
-[[ "$(sed -n 10p "${calls}")" == "mixed|--duration 30m|${digest_reference}|2400|outcomes-1-mixed" ]] \
+[[ "$(sed -n 10p "${calls}")" == "mixed|--duration 30m|${digest_reference}|2400|outcomes-1-mixed|${verifier_record}" ]] \
     || fail "the suite ran the last entry as $(sed -n 10p "${calls}")"
 [[ "$(wc -l <"${calls}")" -eq 10 ]] || fail 'the suite did not run every entry after one failed'
+# The suite executes the verifier self-check once, before its first run, and hands every run the
+# record of that passing check rather than each run spending its own budget on the same check.
+sequence="${tmp_dir}/runs/outcomes-1/sequence.txt"
+[[ "$(sed -n 1p "${sequence}")" == verifier && "$(grep -c '^verifier$' "${sequence}")" -eq 1 \
+    && "$(grep -c '^run ' "${sequence}")" -eq 10 ]] \
+    || fail "the suite did not execute one verifier self-check before its runs: $(tr '\n' ' ' <"${sequence}")"
+jq -e --argjson bound "${chaos_verifier_self_check_seconds}" '.verifier_self_check
+    | .status == "passed" and .exit_code == 0 and .bound_seconds == $bound
+      and .output == "verifier-self-test.txt" and .record == "verifier-self-check.json"
+      and (.duration_seconds | type == "number") and (.process.pid | type == "number")' "${record}" >/dev/null \
+    || fail 'the suite did not record the verifier self-check it executed'
+chaos_verifier_record_refusal "${verifier_record}" "${bundle}" >"${tmp_dir}/adoption.txt" \
+    || fail "the suite wrote a verifier self-check record its runs cannot adopt: $(cat "${tmp_dir}/adoption.txt")"
+grep -Fq 'chaos harness self-test passed' "${tmp_dir}/runs/outcomes-1/verifier-self-test.txt" \
+    || fail 'the suite did not keep the output of its verifier self-check'
 summary="${tmp_dir}/runs/outcomes-1/summary.md"
 # The summary is Markdown, so its code spans are written with escaped backticks.
 expect_summary() {
@@ -529,6 +586,29 @@ expect_json "${tmp_dir}/runs/unchecked-1/suite.json" '.status == "failed" and .s
     and .error.category == "controller" and all(.entries[]; .status == "not-started")' \
     'a failed suite self-check did not stop the suite as a controller failure'
 [[ ! -e "${tmp_dir}/runs/unchecked-1/stub-calls.txt" ]] || fail 'the suite ran an entry after its self-check failed'
+
+# A verifier self-check that fails starts no run, leaves no record a run could adopt and fails the
+# suite as a controller failure.
+printf 'fail\n' >"${verifier_outcome}"
+status=0
+suite green --image nervix:local --artifacts "${tmp_dir}/runs" --suite-id unverified-1 \
+    >"${tmp_dir}/unverified.txt" 2>&1 || status=$?
+printf 'pass\n' >"${verifier_outcome}"
+[[ "${status}" -eq 1 ]] || fail "a failed verifier self-check returned ${status}, expected 1"
+expect_json "${tmp_dir}/runs/unverified-1/suite.json" '.status == "failed"
+    and .verifier_self_check.status == "failed" and .verifier_self_check.exit_code == 3
+    and .error.category == "controller"
+    and .error.message == "the verifier self-check exited 3; see verifier-self-test.txt"
+    and all(.entries[]; .status == "not-started" and .reason == "the verifier self-check failed")' \
+    'a failed verifier self-check did not stop the suite as a controller failure'
+[[ ! -e "${tmp_dir}/runs/unverified-1/stub-calls.txt" ]] \
+    || fail 'the suite ran an entry after its verifier self-check failed'
+[[ ! -e "${tmp_dir}/runs/unverified-1/verifier-self-check.json" ]] \
+    || fail 'a failed verifier self-check left a record a run could adopt'
+grep -Fq 'a verifier passed a known failure' "${tmp_dir}/runs/unverified-1/verifier-self-test.txt" \
+    || fail 'the suite did not keep the output of its failed verifier self-check'
+grep -Fq '**CONTROLLER failure:** the verifier self-check exited 3; see verifier-self-test.txt' \
+    "${tmp_dir}/runs/unverified-1/summary.md" || fail 'the summary did not name the failed verifier self-check'
 
 # The runs need jq 1.8: an older or unrecognized jq is refused, and a suite stops before any run.
 real_jq="$(command -v jq)"
@@ -760,6 +840,53 @@ grep -Fq "Cleanup removed what 1 run left behind, after capturing it under \`cle
     "${tmp_dir}/runs/killed-1/summary.md" || fail 'the summary did not report what cleanup removed'
 grep -Fq "Cleanup passed TERM to \`killed-1-slow\`, which outlived its controller." \
     "${tmp_dir}/runs/killed-1/summary.md" || fail 'the summary did not report the run cleanup ended'
+
+# A signal while the verifier self-check executes reaches it as the suite's one TERM, and no entry
+# starts.
+printf 'hold\n' >"${verifier_outcome}"
+PATH="${bundle}/bin:${PATH}" "${bundle}/suite.sh" green --image nervix:local --artifacts "${tmp_dir}/runs" \
+    --suite-id held-1 >"${tmp_dir}/held.txt" 2>&1 &
+suite_pid=$!
+background_pids+=("${suite_pid}")
+wait_for_file "${tmp_dir}/runs/held-1/verifier.pid"
+kill -TERM "${suite_pid}"
+status=0
+wait "${suite_pid}" || status=$?
+[[ "${status}" -eq 143 ]] || fail "a suite ended by TERM in its verifier self-check returned ${status}, expected 143"
+expect_json "${tmp_dir}/runs/held-1/suite.json" '.status == "interrupted" and .signal == "TERM"
+    and .verifier_self_check.status == "interrupted"
+    and all(.entries[]; .status == "not-started")' \
+    'a signal in the verifier self-check did not end it and keep every entry from starting'
+[[ "$(cat "${tmp_dir}/runs/held-1/verifier.signals")" == TERM ]] \
+    || fail "the verifier self-check received $(tr '\n' ' ' <"${tmp_dir}/runs/held-1/verifier.signals"), not one TERM"
+[[ ! -e "${tmp_dir}/runs/held-1/stub-calls.txt" && ! -e "${tmp_dir}/runs/held-1/verifier-self-check.json" ]] \
+    || fail 'an interrupted verifier self-check started a run or left a record'
+
+# A verifier self-check whose controller was killed leads its own session; cleanup passes it one
+# TERM, and it ends before the wait does.
+PATH="${bundle}/bin:${PATH}" "${bundle}/suite.sh" green --image nervix:local --artifacts "${tmp_dir}/runs" \
+    --suite-id held-killed-1 >"${tmp_dir}/held-killed.txt" 2>&1 &
+suite_pid=$!
+background_pids+=("${suite_pid}")
+wait_for_file "${tmp_dir}/runs/held-killed-1/verifier.pid"
+wait_for_record "${tmp_dir}/runs/held-killed-1/suite.json" '.verifier_self_check.process.pid != null'
+kill -KILL "${suite_pid}"
+{ wait "${suite_pid}" || true; } 2>/dev/null
+suite cleanup --wait 60 "${tmp_dir}/runs/held-killed-1" >"${tmp_dir}/cleanup-held.txt" 2>&1 \
+    || fail "cleanup of a suite killed in its verifier self-check failed: $(cat "${tmp_dir}/cleanup-held.txt")"
+printf 'pass\n' >"${verifier_outcome}"
+expect_json "${tmp_dir}/runs/held-killed-1/suite.json" '.status == "interrupted"
+    and .verifier_self_check.status == "interrupted"
+    and .cleanup.verifier_self_check == {terminated: true, killed_processes: 0}
+    and .cleanup.runs == [] and all(.entries[]; .status == "not-started")' \
+    'cleanup did not end the verifier self-check of a killed controller'
+[[ "$(cat "${tmp_dir}/runs/held-killed-1/verifier.signals")" == TERM ]] \
+    || fail 'the verifier self-check of a killed controller did not receive exactly one TERM from cleanup'
+process_gone "$(cat "${tmp_dir}/runs/held-killed-1/verifier.pid")" \
+    || fail 'cleanup left the verifier self-check executing'
+grep -Fq 'Cleanup passed TERM to the verifier self-check, which outlived its controller.' \
+    "${tmp_dir}/runs/held-killed-1/summary.md" || fail 'the summary did not report the verifier self-check cleanup ended'
+
 suite cleanup "${tmp_dir}/runs/outcomes-1" >"${tmp_dir}/cleanup-passed.txt" 2>&1 \
     || fail 'cleanup after a finished suite failed'
 expect_json "${tmp_dir}/runs/outcomes-1/suite.json" '.status == "failed" and all(.cleanup.runs[]; .leftovers == null)

@@ -3,8 +3,8 @@
 //! Layer: test harness.
 //!
 //! - **Owns.** Generated relay grant requests and replies, admission exchanges, acknowledgement
-//!   resolutions and connection bindings, with every branch key, record metadata and registration
-//!   they carry, and the properties that the bounded rkyv codec keeps each one whole and refuses
+//!   resolutions and connection bindings with their prerequisite records and refusals, with every
+//!   branch key, record metadata and registration they carry, and the properties that the bounded rkyv codec keeps each one whole and refuses
 //!   damaged bytes with a typed failure that leaves no charge and no allocation behind.
 //! - **Depends on.** The wire messages, the bounded codec, the executor and the vocabulary
 //!   generators.
@@ -27,13 +27,17 @@ use nervix_models::{
 };
 use nervix_primitives::sync::StdArc;
 use rkyv::{rancor::Error as RkyvError, util::AlignedVec};
+use strum::{EnumCount as _, IntoEnumIterator as _};
 
 use super::{
-    ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
-    RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, RelayMetadata, decode_aligned,
-    decode_rkyv, encode_rkyv, validation_depth,
+    ConnectionAccepted, ConnectionAnswer, ConnectionHello, RelayAdmissionRequest,
+    RelayAdmissionResponse, RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse,
+    RelayMetadata, decode_aligned, decode_rkyv, encode_rkyv, validation_depth,
 };
-use crate::{PoolClass, RelayAdmissionStatus, RelayDelivery, RelayPayload, RelayPayloadKind};
+use crate::{
+    PoolClass, RelayAdmissionStatus, RelayDelivery, RelayGrantRefusal, RelayPayload,
+    RelayPayloadKind,
+};
 
 /// The bytes one case reads its messages from.
 const CASE_BYTES: usize = 2048;
@@ -190,6 +194,7 @@ struct WireCase {
     status: RelayAdmissionStatus,
     resolution: RemoteAckResolution,
     hello: ConnectionHello,
+    answer: ConnectionAnswer,
 }
 
 impl WireCase {
@@ -198,9 +203,11 @@ impl WireCase {
         // most 64 bytes, and a choice read after they run out takes its first option, which would
         // leave nearly every case with the first disposition, status and outcome and no branch
         // key.
-        let disposition_choice = arbitrary.entropy().byte() % 6;
+        let disposition_choice = arbitrary.entropy().byte() % 7;
+        let refusal_choice = arbitrary.entropy().byte();
         let status_choice = arbitrary.entropy().byte() % 8;
         let outcome_choice = arbitrary.entropy().byte() % 4;
+        let answer_accepts = arbitrary.entropy().flag();
         let kind = arbitrary.entropy().pick([
             RelayPayloadKind::Routed,
             RelayPayloadKind::SubscriptionFanout,
@@ -254,7 +261,8 @@ impl WireCase {
             2 => RelayGrantDisposition::Admitted,
             3 => RelayGrantDisposition::Rejected(reason.clone()),
             4 => RelayGrantDisposition::Cancelled,
-            _ => RelayGrantDisposition::Retired,
+            5 => RelayGrantDisposition::Retired,
+            _ => RelayGrantDisposition::Refused(refusal(refusal_choice)),
         };
         let status = match status_choice {
             0 => RelayAdmissionStatus::Reserved,
@@ -277,11 +285,22 @@ impl WireCase {
         };
         let resolution = registration(arbitrary).resolution(outcome);
         let hello = ConnectionHello {
-            fingerprint: arbitrary.digest(),
             class,
             process_epoch: arbitrary.entropy().any_u64(),
             node_id: arbitrary.rule_name::<ClusterNodeName>(),
             advertised_host: arbitrary.string(),
+            prerequisites: arbitrary.node_prerequisites(),
+        };
+        let answer = if answer_accepts {
+            ConnectionAnswer::Accepted(ConnectionAccepted {
+                process_epoch: arbitrary.entropy().any_u64(),
+                node_id: arbitrary.rule_name::<ClusterNodeName>(),
+                prerequisites: arbitrary.node_prerequisites(),
+            })
+        } else {
+            ConnectionAnswer::Refused {
+                mismatch: arbitrary.prerequisite_mismatch(),
+            }
         };
         Self {
             payload,
@@ -291,6 +310,7 @@ impl WireCase {
             status,
             resolution,
             hello,
+            answer,
         }
     }
 
@@ -302,6 +322,14 @@ impl WireCase {
             metadata: RelayMetadata::from_payload(&self.payload),
         }
     }
+}
+
+/// The grant refusal a generated choice names, every refusal reachable.
+fn refusal(choice: u8) -> RelayGrantRefusal {
+    let index = usize::from(choice) % RelayGrantRefusal::COUNT;
+    RelayGrantRefusal::iter()
+        .nth(index)
+        .assured("an index below the refusal count names a refusal")
 }
 
 fn delivery(entropy: &mut Entropy<'_>) -> RelayDelivery {
@@ -487,14 +515,9 @@ fn bolero_relay_messages_reach_the_receiver_whole() {
                     management_round_trip(&executor, management_limit, case.hello.clone()).await,
                     case.hello
                 );
-                let accepted = ConnectionAccepted {
-                    fingerprint: case.hello.fingerprint,
-                    process_epoch: case.hello.process_epoch,
-                    node_id: case.hello.node_id.clone(),
-                };
                 assert_eq!(
-                    management_round_trip(&executor, management_limit, accepted.clone()).await,
-                    accepted
+                    management_round_trip(&executor, management_limit, case.answer.clone()).await,
+                    case.answer
                 );
             });
             drop(case);
@@ -554,16 +577,18 @@ enum ReadAs {
     AdmissionResponse,
     Resolution,
     Hello,
+    Answer,
 }
 
 impl ReadAs {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::GrantRequest,
         Self::GrantResponse,
         Self::AdmissionRequest,
         Self::AdmissionResponse,
         Self::Resolution,
         Self::Hello,
+        Self::Answer,
     ];
 }
 
@@ -923,6 +948,16 @@ fn bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message() {
                         )
                         .await
                     }
+                    ReadAs::Answer => {
+                        encode_rkyv(
+                            &executor,
+                            MemoryClass::Relay,
+                            CpuClass::Data,
+                            limit,
+                            case.answer.clone(),
+                        )
+                        .await
+                    }
                 }
                 .assured("a bounded message encodes");
                 let damaged_bytes = damage.apply(valid.to_vec());
@@ -983,6 +1018,12 @@ fn bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message() {
                     }
                     ReadAs::Hello => {
                         check_damaged::<ConnectionHello>(&executor, damaged, |decoded, again| {
+                            assert_eq!(again, decoded);
+                        })
+                        .await;
+                    }
+                    ReadAs::Answer => {
+                        check_damaged::<ConnectionAnswer>(&executor, damaged, |decoded, again| {
                             assert_eq!(again, decoded);
                         })
                         .await;

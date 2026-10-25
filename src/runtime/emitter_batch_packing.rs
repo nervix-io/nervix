@@ -8,7 +8,7 @@
 //!   rejected alone, or rejected together with the candidate it shared a failed container with.
 //! - **Depends on.** The emitter's compiled codec, which prepares members and encodes containers,
 //!   and its declared batching policy, with source relay and concrete branch identity.
-//! - **Must not know.** Which sink publishes a payload, how its members are acknowledged, or when
+//! - **Must not know.** Which emitter publishes a payload, how its members are acknowledged, or when
 //!   the emitter flushes.
 //!
 //! Packing is synchronous so that it runs wherever the codec's own execution policy requires: a
@@ -24,7 +24,7 @@ use std::num::NonZeroUsize;
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_connector::SinkRecordPosition;
+use nervix_connector::EmitterRecordPosition;
 use nervix_models::{EmitterBatchPolicy, RelayName};
 use nervix_primitives::sync::Arc;
 
@@ -47,7 +47,7 @@ pub(super) struct BatchEnvelope {
 #[derive(Debug)]
 pub(super) enum PackingRow {
     Ready {
-        position: SinkRecordPosition,
+        position: EmitterRecordPosition,
         envelope: BatchEnvelope,
     },
     Seal,
@@ -66,7 +66,7 @@ pub(super) struct PackingCarrier {
 /// One payload a candidate was encoded into, with the rows it carries in packing order.
 #[derive(Debug)]
 pub(super) struct BatchPayload {
-    pub(super) rows: Vec<SinkRecordPosition>,
+    pub(super) rows: Vec<EmitterRecordPosition>,
     pub(super) envelope: BatchEnvelope,
     pub(super) payload: Vec<u8>,
 }
@@ -78,18 +78,18 @@ pub(super) enum PackedOutcome {
     Payload(BatchPayload),
     /// The row's member value could not be produced, so it is rejected alone before packing.
     MemberFailed {
-        position: SinkRecordPosition,
+        position: EmitterRecordPosition,
         error: Report<CodecError>,
     },
     /// The row alone still exceeds `MAX SIZE` after a bounded encoding of it.
     Oversize {
-        position: SinkRecordPosition,
+        position: EmitterRecordPosition,
         exceeded: PayloadLimitExceeded,
     },
     /// The container of the candidate these rows formed could not be produced, so they fail
     /// together. The report keeps the evaluation or writer failure beneath the reason.
     ContainerFailed {
-        rows: Vec<SinkRecordPosition>,
+        rows: Vec<EmitterRecordPosition>,
         error: Report<BatchContainerError>,
     },
 }
@@ -104,7 +104,7 @@ pub(super) struct BufferedBatchPacking {
 
 /// A row prepared as a batch member.
 struct PreparedMember<'a> {
-    position: SinkRecordPosition,
+    position: EmitterRecordPosition,
     source_relay: &'a RelayName,
     branch_key: &'a Option<BranchKey>,
     envelope: &'a BatchEnvelope,
@@ -406,7 +406,7 @@ mod tests {
             branch_key: source.key,
             batch: source.batch,
             rows: vec![PackingRow::Ready {
-                position: SinkRecordPosition {
+                position: EmitterRecordPosition {
                     batch_index,
                     row_index: 0,
                 },
@@ -443,11 +443,11 @@ mod tests {
             vec![
                 (
                     vec![
-                        SinkRecordPosition {
+                        EmitterRecordPosition {
                             batch_index: 0,
                             row_index: 0
                         },
-                        SinkRecordPosition {
+                        EmitterRecordPosition {
                             batch_index: 1,
                             row_index: 0
                         },
@@ -455,7 +455,7 @@ mod tests {
                     br#"[{"value":1},{"value":2}]"#.to_vec(),
                 ),
                 (
-                    vec![SinkRecordPosition {
+                    vec![EmitterRecordPosition {
                         batch_index: 2,
                         row_index: 0
                     }],
@@ -463,11 +463,11 @@ mod tests {
                 ),
                 (
                     vec![
-                        SinkRecordPosition {
+                        EmitterRecordPosition {
                             batch_index: 3,
                             row_index: 0
                         },
-                        SinkRecordPosition {
+                        EmitterRecordPosition {
                             batch_index: 4,
                             row_index: 0
                         },
@@ -500,11 +500,11 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                vec![SinkRecordPosition {
+                vec![EmitterRecordPosition {
                     batch_index: 0,
                     row_index: 0
                 }],
-                vec![SinkRecordPosition {
+                vec![EmitterRecordPosition {
                     batch_index: 2,
                     row_index: 0
                 }],
@@ -561,15 +561,15 @@ mod tests {
         assert_eq!(
             positions,
             vec![
-                vec![SinkRecordPosition {
+                vec![EmitterRecordPosition {
                     batch_index: 0,
                     row_index: 0
                 }],
-                vec![SinkRecordPosition {
+                vec![EmitterRecordPosition {
                     batch_index: 1,
                     row_index: 0
                 }],
-                vec![SinkRecordPosition {
+                vec![EmitterRecordPosition {
                     batch_index: 2,
                     row_index: 0
                 }],
@@ -1088,7 +1088,7 @@ mod tests {
                         row_choice,
                         envelope,
                     } => rows.push(PackingRow::Ready {
-                        position: SinkRecordPosition {
+                        position: EmitterRecordPosition {
                             batch_index,
                             row_index: *row_choice,
                         },
@@ -1109,7 +1109,7 @@ mod tests {
 
     /// One row of the reference packing: where it came from and the encoding it contributes.
     struct ReferenceMember {
-        position: SinkRecordPosition,
+        position: EmitterRecordPosition,
         relay: usize,
         branch: Option<&'static str>,
         envelope: usize,
@@ -1128,11 +1128,11 @@ mod tests {
     #[derive(Debug, PartialEq)]
     enum ExpectedOutcome {
         Payload {
-            rows: Vec<SinkRecordPosition>,
+            rows: Vec<EmitterRecordPosition>,
             envelope: BatchEnvelope,
             payload: Vec<u8>,
         },
-        Oversize(SinkRecordPosition),
+        Oversize(EmitterRecordPosition),
     }
 
     /// The documented packing of carriers, computed from each row's own encoding and the format's
@@ -1285,7 +1285,7 @@ mod tests {
                             reference.pack(&mut run);
                             continue;
                         };
-                        let position = SinkRecordPosition {
+                        let position = EmitterRecordPosition {
                             batch_index,
                             row_index: *row_choice,
                         };

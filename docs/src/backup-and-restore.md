@@ -19,6 +19,13 @@ A restore recreates what an archive holds: every domain and user of a cluster ar
 cluster, whatever its nodes are named, or one domain beside the domains a cluster already has,
 under its archived name or a new one.
 
+This chapter owns the statements, their options, the command-line and console surfaces, the
+archive's sections and records, the limits and the reported failures. [Backup And Restore
+Architecture](./backup-and-restore-architecture.md) describes how they work: the cut protocol and
+owner capture, transfer and retention, restore preparation, durable step progress, state
+installation and generation publication, staging maintenance, and the evidence behind each
+guarantee.
+
 ## Backing Up
 
 ```nspl
@@ -37,12 +44,14 @@ BACKUP CLUSTER TO './cluster-config.nvxb' WITHOUT STATE;
 - `WITHOUT STATE` omits runtime state and takes no domain mutation lease.
 - `WITHOUT PAUSE` includes published runtime checkpoints without pausing a running domain. Its
   state and configuration need not be from one quiesced cut.
-- `TIMEOUT <duration>` bounds each running domain's quiesce wait. It is valid with the normal
-  quiesced capture. Domains are captured in sequence and each receives its own budget. Each owner
-  stages its share of a domain's state within that same budget, however long its state takes to
-  stage; a stopped domain's owners stage within the budget too, and a `WITHOUT PAUSE` capture's
-  owners within the default one. The command's total wait includes all cuts, admission and
-  archive assembly.
+- `TIMEOUT <duration>` bounds each running domain's cut, from the wait for its mutation lease
+  through its owners' staging; the resume that follows is not bounded. It is valid with the normal
+  quiesced capture, and without it the cut has 60 seconds. Domains are captured in sequence and each
+  receives its own budget. Each remote owner stages its share of a domain's state within that same
+  budget, however long its state takes to stage; a stopped domain's remote owners stage within the
+  budget too, and a `WITHOUT PAUSE` capture's remote owners within the default one, while the
+  leader's own share of those two captures has no deadline. The command's total wait includes all
+  cuts, admission and archive assembly.
 - The path names a file on the client's machine. A leading `~/` refers to the client user's home
   directory. In the web console it names the file the browser saves the archive as.
 
@@ -50,76 +59,38 @@ BACKUP CLUSTER TO './cluster-config.nvxb' WITHOUT STATE;
 archive as a browser download; see [From The Web Console](#from-the-web-console). It must be sent
 alone: not in a batch with other statements and not while a transaction is open.
 
-Each domain records the applied configuration revision and Raft log entry of its own capture.
-Before reading state, each owner waits up to five seconds to apply the selected log revision,
-brings its runtime plan current, and checks the sending leader again. An owner that cannot reach
-the revision refuses capture. This also applies to stopped and live captures.
-For a quiesced running domain, the leader holds a replicated domain mutation lease, pauses and
-drains the domain across live nodes, asks state owners to publish and stage their checkpoints,
-and reads the configuration while the cut is held. The leader resumes the domain and releases its
-lease before copying staged state into the final archive. Other domains continue independently.
-Each owner asks its active ingestor, reingestor, and processor supervisors to checkpoint their
-current branch lifecycle, including branches created since the periodic snapshot. Capture retains
-the immutable checkpoint published by each entity's replication handle; a handle awaiting its first
-checkpoint contributes no lifecycle state. It seals those checkpoints and the current Kafka offsets
-durably before opening one database snapshot that also
-contains the already durable WASM guest saves. A stopped domain reads its stored checkpoints
-without active task requests.
-The cut lists that snapshot's checkpoints without reading their payloads, and reads only those it
-archives, all from the same snapshot however late they are read. A branch lifecycle is read while
-the cut is taken only when a WASM, deduplicator or window branch of its entity needs a typed key,
-one lifecycle at a time, and only the keys those branches need are kept.
-Each selected WASM save stays in that snapshot until its scheduled generation has been checked.
-The capture storage job inspects a selected segmented header's bounded size; staging admission
-uses that recorded size without a database read on an async worker.
-The owner then opens one save at a time, charges its inline checkpoint conversion to
-`restore_metadata`, and streams its raw bytes into a quota-owned staged section under a fixed
-192 KiB bulk working charge. The checkpoint read supplies both the bytes and the descriptor's
-revision. The writer seals the section's actual length and BLAKE3 digest. Neither another save nor an
-encoded guest section is retained whole during the write; a superseded save is never opened.
-Each Kafka offset and branch lifecycle checkpoint then becomes its own archive section. It is read
-whole into one aligned allocation charged to `restore_metadata`, its entries convert one at a time,
-and its record streams through a 64 KiB bulk buffer into a quota-owned staged file that seals the
-section's exact length and digest. The record's serializer scratch, one resolver per entry, is
-charged to `restore_metadata` beside the checkpoint. Neither the converted entries nor the encoded
-record are held whole, so native metadata larger than the bulk budget is archived within it.
-Materialized relays capture shared Arrow row views, typed branch keys, per-row watermarks, revision,
-ownership fence and branch generation under their assignment barrier. Capture reads the current
-entries at the cut, including updates since the periodic snapshot; it never waits for that interval.
-An empty relay contributes an explicit empty generation. A live capture obtains the same complete
-relay generation under that barrier, while its domain-wide cut retains live capture semantics.
-The lifecycle checkpoint also makes every active deduplicator and window processor branch task
-publish its state. For each branch a captured lifecycle holds, capture takes the keyspace its
-deduplicator published, every key with the time it was first seen, and the rows its window
-retains, with their aggregate argument values, admission sequences and watermarks, the branch
-incarnation the window belongs to, and every linear histogram's pending delayed removals. A branch
-with no live publication on its owner, including an inactive window with a sealed publication,
-contributes its stored checkpoint. A stopped domain reads stored checkpoints only. An evicted
-branch contributes nothing.
-Stored keyspace and window selections retain the cut's immutable database view until their
-scheduled owner and schema are checked. Each owner opens one selected checkpoint at a time,
-streams it to quota-owned disk in 64 KiB blocks, and admits an immutable mapping after unlinking
-its temporary name. The checkpoint revision comes from the same read as its bytes. A running
-branch's live publication supersedes its stored checkpoint before that checkpoint is opened.
+Each domain records the applied configuration revision and Raft log entry of its own capture, and
+every owner applies that revision before it reads state. For a quiesced running domain, the leader
+holds a replicated domain mutation lease, pauses the domain and drains its admitted work across the
+live nodes and every node the schedule assigns the domain's work to, asks the scheduled state owners
+to publish and stage their checkpoints, and reads the configuration while the cut is held. Messages parked by `REQUIRED WAIT` and the rows a window retains do not hold
+the drain: the cut captures them as state. The leader resumes the domain and releases its lease
+before it copies the staged state into the final archive, and other domains continue
+independently. A stopped domain needs no pause: its owners read their stored checkpoints. A
+`WITHOUT PAUSE` capture takes no lease and reads the latest published checkpoints while the domain
+runs, and reports a live cut even for a stopped domain.
 
-Keyspace validation compares borrowed native keys for uniqueness and records their sizes; only
-the next archive group is converted into owned key parts. A stored window validates its header,
-sequences, identities and delayed removals, then indexes its native column sections. It decodes
-one native group at a time to determine the canonical archive boundaries, releases those decoded
-columns, and subsequently reads only sections overlapping each input or argument group. The
-descriptor and every group's order, bytes, length and digest use the same archive contracts as
-capture of a live publication.
-The drain uses the shutdown admitted-work view: active intake and generators, active source ACK
-roots, relay and node buffers, relays that admitted a batch while the node read that view, and
-emitter buffers or publishes. Parked `REQUIRED WAIT` messages and the rows a window retains until
-it advances are exempt: their acknowledgements wait for input the paused domain does not admit,
-and the cut captures them as state. Once every node reports no admitted work, the leader requests a confirming force-flush
-generation on every node and waits for its obligations to finish before asking owners to capture.
-An unavailable sink keeps its publish and ACK counts outstanding until `TIMEOUT` expires; the
-failed backup reports those counts and resumes the domain.
-A leader-tenure change during a cut refuses the archive. The paused-domain recovery path releases
-the old coordinator's lease and resumes the domain under the new leader. A client that retries the
-same execution reference may complete a new cut under that leader.
+Every state a cut archives comes from the node the domain's schedule names as that placement's
+primary, never from a replica's copy. A cut whose scheduled state owner the cluster does not report
+live fails, and so does a cut whose schedule places such an entity on no node, as when every node
+that could host it is cordoned or down, and a quiesced cut, before it pauses, while a node that
+runs the domain's work is not reported live, so the archive of a quiesced or stopped cut never
+lacks a placement's state.
+A `WITHOUT PAUSE` capture holds no lease, and a placement that failover or relocation moves while it
+runs can be left out. Send the backup again once the node is back, or once failover has moved its
+placements; with replicas, failover promotes one as soon as the failed cut has released its lease.
+
+The cut captures every kind of runtime state the archive holds: WASM guest saves, Kafka source
+offsets, branch lifecycle, fresh materialized relay generations, deduplicator keyspaces and the rows
+every window retains. Each owner stages its share one checkpoint at a time, so state larger than the
+node's bulk memory budget is archived within it. [The Quiesced
+Cut](./backup-and-restore-architecture.md#the-quiesced-cut) and [Capture On The
+Owners](./backup-and-restore-architecture.md#capture-on-the-owners) describe each step.
+
+An unavailable emitter keeps its publish and ACK counts outstanding until `TIMEOUT` expires; the
+failed backup reports those counts and resumes the domain. A leader change during a cut refuses
+that cut. The next leader resumes the domain and runs the backup again under the same execution
+reference, so a client that retries the reference receives the archive of that new cut.
 
 The server renders each domain's models as NSPL, parses the rendered text back, and refuses the
 backup unless it yields exactly the committed models. A resource version's bytes are read from the
@@ -266,16 +237,17 @@ reference. The client then downloads it through the session service's `DownloadB
 call, which the web console reaches through a console WebSocket of its own;
 [Sessions](sessions.md#backup-downloads) describes the call.
 
-- The archive is retained until a download receives all of it, or until the retry validity of the
-  backup's execution reference ends, 15 minutes by default; see
-  [Command Completion](command-completion.md#lifecycle-and-ownership).
+- The archive is retained until a download has queued all of it, or until the retry validity of
+  the backup's execution reference ends: 15 minutes by default, counted from the time the reference
+  was issued; see [Command Completion](command-completion.md#lifecycle-and-ownership).
 - A download is not bounded by the request timeout, because an archive may take far longer to
   transfer than a command takes to run. Each frame must arrive within the request timeout instead.
 - A download that fails in transport starts again from the first byte. Running the backup again
   with the same execution reference returns its recorded outcome, and the client downloads the
   archive again while it is retained.
-- The first download that receives the whole archive releases it. A later download of the same
-  backup is refused, and a new backup is needed for another copy.
+- The first download that queues the archive's last frame releases it, before its client confirms
+  that the frame arrived. A later download of the same backup is refused, and a new backup is
+  needed for another copy.
 - Only the user who ran the backup may download its archive.
 - The archive stays on the node that assembled it. A download sent to another node that does not
   hold it is redirected to the leader.
@@ -295,16 +267,19 @@ reads the whole archive and verifies every section's length and digest before it
 The description names the archive format, the Nervix and NSPL releases that wrote it, the cluster,
 the capture time, the scope, whether resource bytes are included, and the users of a cluster
 archive. For each domain it names the revision and Raft log entry the domain was read at, its
-status, cut kind, pace and start count, the size and digest of its models, and each resource version with the
+status, pace and start count, its latest start point, the clock mapping and logical frontier when
+the archive holds them, the size and digest of its models, its cut kind with a quiesced cut's
+engagement and release times and quiesce counters, and each resource version with the
 `root_checksum` and `manifest_checksum` that `DESCRIBE RESOURCE` prints for the same version.
-It also reports the latest start point, clock mapping and logical frontier, and inventories WASM guest saves by processor and branch fingerprint, Kafka positions by
-topic and partition, branch lifecycle records by processor and branch count, and materialized relays
-by schema fingerprint, revision, fence, branch generation, row count and bounded Arrow groups.
-Deduplicator keyspaces are listed by branch fingerprint with their key count, groups, revision and
-schema fingerprint. Window processor state is listed by branch fingerprint with its retained rows,
-groups, branch incarnation, next admission sequence, pending delayed histogram removals, revision,
-schema fingerprint and window model digest. The inspection does not print branch-key field values
-or deduplicator keys.
+It inventories WASM guest saves by processor and branch fingerprint, Kafka offsets by ingestor with
+their partition count, branch lifecycle records by processor and branch count, and materialized
+relays by schema fingerprint, revision, fence, branch generation, row count and bounded Arrow
+groups. `FORMAT JSON` also lists every Kafka position by topic and partition. Deduplicator keyspaces
+are listed by branch fingerprint with their key count, groups, revision and schema fingerprint.
+Window processor state is listed by branch fingerprint with its retained rows, groups, branch
+incarnation, next admission sequence, pending delayed histogram removals, revision, schema
+fingerprint and window model digest. The inspection does not print branch-key field values or
+deduplicator keys.
 
 ```text
 backup: ./cluster.nvxb
@@ -318,8 +293,10 @@ resources: included
 users: default,operator
 domains:
 - domain=payments revision=812 raft_term=4 raft_index=812 status=RUNNING pace=unpaced start_version=2
-  cut: quiesced
+  start_point: Resume
   models: bytes=4213 blake3=5d41402abc4b2a76b9719d911017c592…
+  cut: quiesced
+  cut_times: engaged_at=2026-09-27 12:00:00 UTC released_at=2026-09-27 12:00:01 UTC buffered_records=0 buffered_bytes=0 dropped_records=0 rejected_records=0
   resource_versions:
   - resource=proto version=1 state=completed root_checksum=… manifest_checksum=… file_count=3 total_bytes=18204 archive_bytes=24576 created_by_node=node-1 created_at=2026-09-20 08:15:00 UTC archive=included blake3=…
   runtime_state:
@@ -327,7 +304,9 @@ domains:
   - window_processor=latency_window branch=4f2a… rows=1 groups=1 incarnation=1 next_sequence=6 delayed_removals=4 revision=12 schema_fingerprint=… model=…
 ```
 
-An archive that fails verification is refused whole, with the section and the check that failed.
+An archive that fails verification is refused whole, naming the check that failed and, where the
+check concerns one section, that section. The JSON form prints `{"error": {"code":
+"INVALID_ARCHIVE", "message": "..."}}` instead.
 
 ## Restoring
 
@@ -359,7 +338,9 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
   state but starts sources without the archived Kafka positions.
 - A state section whose entity is absent or whose schema fingerprint differs from the published
   schedule is skipped. The restore succeeds and reports a warning naming the skipped state in its
-  command diagnostics and CLI output; that entity starts without the skipped checkpoint.
+  command diagnostics and CLI output; that entity starts without the skipped checkpoint. A dry run
+  reports no such warnings, because they are derived from the schedule an applied restore
+  publishes.
 - Every other archived branch key must be a key of the branching its restored entity declares:
   each branch lifecycle entry, the branch each WASM, deduplicator and window descriptor names, and
   the branch of each materialized record identity. See
@@ -367,9 +348,11 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
 - A window whose restored window processor is not the archived window model, or whose branch
   incarnation is not the one the restored branch lifecycle holds for that branch, is skipped with a
   warning naming the reason, and that branch's window starts empty.
-- A verified state record with an unknown kind tag or unsupported record version is also skipped
-  with a warning. The archive reader still rejects malformed records of a supported kind, and
-  always validates section lengths and digests.
+- A state record whose header names another state kind than the manifest declares for its
+  section, or a record version the reader does not support, is also skipped with a warning,
+  together with the sections it owns. The archive reader still rejects malformed records of a
+  supported kind and an unknown record kind in the manifest, and always validates section lengths
+  and digests.
 - The path names a file on the client's machine. A leading `~/` refers to the client user's home
   directory. In the web console it names the archive file the operator chose.
 
@@ -401,16 +384,21 @@ sent alone: not in a batch with other statements and not while a transaction is 
 
 A restore stages the archive's compatible branch lifecycle, WASM guest checkpoints, Kafka
 positions, materialized relay checkpoints, deduplicator keyspaces and windows on every newly
-assigned owner and replica after its models are scheduled. Each
-node validates the complete staged inventory, synchronizes its generation namespace, then
-atomically selects it through one durably synchronized active-generation pointer. Nodes without assigned checkpoints publish an empty
-set. In-memory state handles are cleared only after that publication. A replicated installation
-gate prevents `START` until every target node has published the complete set; it survives failure,
-lease release and node restart. A source uses its restored next offset when it starts, clamped to
-the partitions its current source assignment contains and clamped to their live low and high
+assigned owner and replica after its models are scheduled. Each node validates the complete staged
+set and durably selects it at once, so its readers see either the complete previous set or the
+complete restored one; nodes without assigned checkpoints publish an empty set. A replicated
+installation gate refuses `START` until every target node has published its complete
+set; it survives failure, lease release and node restart. [State
+Installation](./backup-and-restore-architecture.md#state-installation) describes the staging,
+publication and gate. A source uses its restored next offset when it starts, clamped to the
+partitions its current source assignment contains and clamped to their live low and high
 watermarks. Materialized state binds to the exact restored schema fingerprint and archived start
 generation before a branch or generator starts. Its rows, typed keys, watermarks, revision and
 branch generation are preserved. A new assignment establishes its own ownership fence.
+Materialized row watermarks are preserved event times, including explicit `TIMESTAMP AT` values,
+but branch activity is not archived with those rows: a resumed or restarted relay starts its
+restored branches' retention at its activation-time domain-clock snapshot, so a preserved past or
+future event timestamp cannot expire a restored branch early or extend its idle lifetime.
 
 A deduplicator branch restores every archived key under the restored schema fingerprint, with the
 time the key was first seen in the source cluster. Each key is normalized as the restored
@@ -438,8 +426,8 @@ cannot resume and is refused before admission. An unpaced resume needs no clock 
 
 A normal `START` after a default stopped restore, or after `STOP`, advances the start generation
 and clears materialized state. It preserves compatible WASM state, source positions, branch
-lifecycle, deduplicator keys and windows. To establish a new clock at the saved logical frontier instead, leave the domain stopped
-and use `START AT '<frontier>' TIME RATE <rate>` explicitly.
+lifecycle, deduplicator keys and windows. To establish a new clock at the saved logical frontier
+instead, leave the domain stopped and use `START AT '<frontier>' TIME RATE <rate>` explicitly.
 
 ### Archived Branch Keys
 
@@ -457,8 +445,9 @@ belong is never staged, so no installed checkpoint names a branch the restored e
 routing could not reach.
 
 Planning checks every branch lifecycle entry and the branch of every WASM, deduplicator and window
-descriptor whose entity the planned schedule holds under the archived schema fingerprint; a section
-the restore skips is not checked. The conversion of a materialized relay checks the branch of each
+descriptor whose entity the planned schedule holds under the archived schema fingerprint. A section
+skipped because its entity is absent or holds another schema fingerprint is not checked, while a
+window skipped only for its window model or branch incarnation still is. The conversion of a materialized relay checks the branch of each
 record identity as it reads it. A dry run runs the same checks, and a restore `WITHOUT STATE`
 installs no archived key and checks none. A key that does not belong refuses the whole restore
 before it changes anything. The refusal names the archive section, the lifecycle entry, descriptor
@@ -475,204 +464,66 @@ state, so a restore resumed by a new leader or a retry stages none that does not
 
 ### Publishing The State Generation
 
-A node writes restored checkpoint bytes into an installation-specific namespace in chunks of at
-most 64 KiB. A completed checkpoint has a revision, length and BLAKE3 digest and an authority-bound
-receipt; incomplete chunks have no completed receipt. Guest saves stream directly from the staged
-archive on the coordinator and from the sealed upload file on a remote node. Neither path assembles
-a guest save in a second full-size buffer or reserves a file-read chunk inside an already reserved
-full checkpoint.
-Materialized payloads use archive-owned rkyv descriptors and scalar identity records with
-exact-schema Arrow IPC column sections. Planning, including a dry run, verifies their Arrow
-schema, row count and unique typed branch identities. Conversion stages bounded native header,
-identity and column pieces, then concatenates them into a quota-owned file with a 64 KiB buffer.
-That file uses the same streamed publisher as a guest save, including when one relay's container
-exceeds the 32 MiB bulk budget. It never enters encoded metadata installation. Temporary conversion
-pieces and the completed container can briefly occupy twice the container's disk space.
-Deduplicator and window sections follow the same boundary, including a keyspace or a window whose
-native checkpoint exceeds the 32 MiB bulk budget. Planning, including a dry run, and installation
-decode every key group, input group and argument group under the exact Arrow schema the restored
-models give it, one bounded group at a time on the bulk CPU workers. Each decoded group is charged
-to bulk memory only while it converts. Conversion checks the key and row counts, rejects a key that
-appears twice, and checks each delayed histogram bucket against the restored histogram's bucket
-count.
+A restore stages every checkpoint of a restored domain's state, on every node that will hold it, in
+storage no reader sees, then publishes the complete set on each node at once: a reader sees either
+the complete previous set or the complete restored one, never a mix. Restored state of any size
+installs within each node's fixed working memory. Guest saves stream from the staged archive, and
+materialized relays, deduplicator keyspaces, windows, branch lifecycle and Kafka offsets convert one
+bounded group or entry at a time into quota-owned files, so a single relay, keyspace or window may
+exceed the 32 MiB bulk budget. A conversion can briefly occupy twice its checkpoint's disk space.
+[State Installation](./backup-and-restore-architecture.md#state-installation), [Converting Archived
+State](./backup-and-restore-architecture.md#converting-archived-state) and [Generation
+Storage](./backup-and-restore-architecture.md#generation-storage) describe each step.
 
 Every Arrow section of an archive is scanned before Arrow's reader reads it, whatever digests the
 archive carries for its own bytes. A section whose stream is not framed within its bytes is refused
-as misframed, and one that declares a field type Nervix does not carry, or a record batch at odds
-with its own schema, as undecodable, when planning reads it, a dry run included. Nothing is
-allocated from a length the section only declares.
-
-A deduplicator conversion holds the keyspace as the runtime holds a restored one: every key
-normalized as the restored `DEDUPLICATE ON` expressions key it, in an expiry map. That is how a key
-the archive holds twice is found. The parts and values of the keys follow their Arrow columns, and
-are charged to the `restore_metadata` class as each group is admitted; a conversion that class
-cannot hold now is refused rather than kept waiting. The fixed share of every key, its map entry
-and its serializer resolver, was admitted with the archive description. The native checkpoint then
-streams from the resident keyspace into a quota-owned file through a 64 KiB buffered writer under
-the fixed 2 MiB bulk grant, converting one entry at a time. It is the same encoding the runtime
-writes for the same keys.
-
-A window conversion seals each archived group's input rows, and then its argument columns, into
-quota-owned pieces as soon as each is admitted, so it holds one archived section and its decoded
-batch at a time and never the whole window. When a group's row identities fit one 1 MiB identity
-record, its archived input and argument sections become the checkpoint's Arrow sections
-unchanged. Otherwise the group splits into groups that fit, whose columns are projected again.
-The window header, which counts the rows and the nested containers' bytes, is written last and
-placed first; the delayed histogram removals follow in bounded typed sections. The pieces are then
-concatenated into the checkpoint file with one 64 KiB buffer, and briefly occupy twice the
-checkpoint's disk space.
+as misframed, and one that declares a field type Nervix does not carry, a dictionary encoding or
+compression, or a record batch at odds with its own schema, as undecodable, when planning reads it,
+a dry run included. Nothing is allocated from a length the section only declares.
 
 A conversion the node refuses only for room does not fail the restore. A memory class with no room
 left, a worker queue that is full and a staging quota that cannot hold another piece judged nothing
-of the archive, so the conversion releases what it holds and converts the refused unit again. For a
-window the unit is one section: it is read and decoded again into a checkpoint that is exactly as
-it was before the refused attempt, whose staged pieces were dropped. A window refused while its
-sealed pieces are finished into one checkpoint is converted again from its first group. For a
-keyspace the unit is the keyspace from its first group, because the keys already admitted are what
-held its charge. A unit is converted again every 50 ms for up to 30 seconds after the node first
-refuses it. A refusal that outlasts that wait ends the conversion and is reported as the node
-having had no room for it, since what the restore itself holds can be what fills the budget. A
-request larger than a whole budget, and archived content that does not fit the restored shapes,
-end it at once.
-
-Backup section openings share Snapshot admission with materialized readers. A capacity-only
-refusal retries within the opening's single 30-second deadline; other failures end the fetch.
-Completed response streams release their transport permits before local verification and decoding.
-
-Publication checks each receipt, checkpoint header and ordered chunk against the complete expected
-inventory. It synchronizes those writes before committing the small pointer containing the exact
-installation authority and inventory, then synchronizes that pointer before clearing runtime
-handles or acknowledging publication. Cancellation or failure on either side of pointer publication
-leaves the replicated start gate closed. An exact retry repeats pointer durability and cleanup;
-it cannot select different counts or a different authority under the same generation.
-
-Every read selects the pointer, checkpoint headers and chunks from one database snapshot. Readers
-that opened a view before publication keep its complete prior set while obsolete keys are deleted.
-Checkpoint jobs retain the namespace they selected before execution and compare it again under
-the installation barrier; a queued job for another namespace cannot write into the restored set.
-Normal checkpoint writes and replica installation use the selected namespace. Generation identity
-is separate from a WASM branch's guest-state lifetime and its checkpoint revision.
-
-Successful publication removes obsolete namespace keys and completed or abandoned receipts through
-bounded deletion batches. A snapshot can retain the data it still reads after that deletion.
-Within the selected namespace, whether initial or restored, the same maintenance owner removes
-chunk sets whose selected header is absent, inline, or names another checkpoint revision.
-Segmented replacement and incomplete streamed revisions therefore use the same liveness check.
-Ordinary checkpoints, replica installation,
-handoff, forced recovery, module rebinding and entity or stale-identity purge therefore release
-unreachable restored payloads without requiring another restore generation. Existing snapshot readers retain complete
-values through Fjall's snapshot retention.
-Every node runs restore checkpoint maintenance at startup and then one second after each completed
-sweep, independently of leadership. It borrows one applied consensus revision and then takes the
-same installation barrier as checkpoint writers and publishers. A generation is retained while
-its exact installation belongs to an applying restore, even when leadership or its mutation lease
-has changed. A generation ahead of the node's applied log is retained until catch-up establishes
-its outcome; a node without an applied log retains every generation. The selected durable
-publication is always retained. Terminal, expired, missing and superseded attempts become
-reclaimable once the node has applied their generation. Cleanup covers headers, revision indices,
-receipts and chunks, including chunks written before a receipt existed. It uses bounded deletion
-batches and synchronizes completed deletion; cancellation or restart resumes from remaining keys.
-Cursors seek past initial headers, indices and receipts and selected headers/indices; deletion also seeks past retained
-applying or future generations. In the selected chunk namespace, one header check selects each
-placement/revision set, and a cursor skips the whole referenced set. Unreferenced sets use the same
-bounded deletion batches. Checkpoint writers, purges and pointer publication share the installation
-barrier, so the selected view stays authoritative during cleanup. Readers keep their complete
-database snapshots. Reclamation never releases the start gate or changes the selected publication.
-
-A segmented header consists only of its fixed archived root. Maintenance checks the value size
-before copying or decoding that bounded header; a larger valid current value is an inline checkpoint.
-Fjall's ordinary LSM size query can still read and cache the underlying value. Database reads,
-caches, memtables, snapshot retention and compaction are separate allocation owners; the fixed
-2 MiB maintenance reservation bounds its caller-owned buffers rather than total database memory.
-Runtime storage requires its current format marker. A missing or
-invalid marker in nonempty checkpoint storage fails with an instruction to recreate the node state
-directory.
-
-Local archive readers and received upload readers retain their staged artifact and disk quota through the storage job, including cancellation.
-
-All checkpoint installation and generation-publication jobs reserve 2 MiB of bulk memory per
-node, independent of checkpoint bytes and count. Native lifecycle and Kafka conversion writes the
-current checkpoint encoding directly to a quota-owned file, using a 64 KiB buffered writer; it
-never collects converted entries or complete encoded output. The same file source drives local
-installation and ordered 64 KiB transfers to remote owners and replicas. Completed native files
-retain their actual length, digest and rounded disk quota until the final reader exits.
-
-Restore preparation has a separate, per-node `restore_metadata` admission class, defaulting to
-2 GiB. Before decoding, an admitted 512-byte read validates the first physical tar header as the
-regular `manifest.rkyv` entry and checks its length against the record limit; the manifest
-then verifies off the async workers under its own charge. A verified manifest sizes the retained
-preparation reservation: 16 times encoded record bytes (including the manifest), 64 times NSPL
-bytes, and 2 MiB of fixed overhead. Resource archives, guest saves and the materialized,
-deduplicator and window Arrow groups remain on disk; their conversion is charged separately. The charge
-covers overlapping owned archive values, aligned decode buffers, model parsing and planning
-copies, branch text and typed-key conversion, and native serializer resolvers. Once the
-description is decoded, the reservation also grows by the fixed share of every key the archive's
-deduplicator descriptors count: the key's entry in the resident keyspace and its resolver in the
-streamed checkpoint's serializer scratch. A window descriptor's record already carries each
-retained row's watermarks, so its record charge covers the per-row identities a window conversion
-builds one group at a time. Admission refuses unaddressable estimates or unavailable capacity
-before a restore changes the cluster. Parsing and the pure restore planner run as admitted bulk
-CPU work.
-
-The description, parsed Models and reservation have one shared lifetime. A native encoding job
-retains that owner through cancellation; each entry is converted separately, and fixed-capacity
-serializer scratch holds entry resolvers plus the largest entry's nested resolvers. Resolver
-scratch therefore depends on entry count, while strings and encoded checkpoint output stream.
-The 2 MiB bulk charge measures bounded I/O and storage working memory, and does not describe total
-restore memory. Physical checkpoint placement encodings remain limited to 60 KiB. Database caches,
-memtables, compaction, and live-state materialization at `START` keep their respective owners and
-allocation bounds. The generation publisher has no aggregate-payload admission limit.
-
-Materialized capture row views and grouping arrays have an 8 MiB metadata ceiling per relay and
-are charged before capture. Archive identities are at most 1 MiB per group, and Arrow columns at
-most 8 MiB. Typed branch uniqueness conversion has an independent 8 MiB commands reservation;
-native restore row views have an independent 8 MiB relay reservation. Decoded columns are charged
-cumulatively to relay memory through installation; loading refuses further groups when that class
-is full. Row projection and Arrow encoding share one admission and one bounded bulk CPU job,
-so projected columns never wait for a second grant while retaining the first. Typed native
-identities are also converted only after their allocation is charged. Arrow decoding is admitted
-one section at a time on the bulk CPU workers. Native checkpoint readers keep one
-database snapshot and at most one 64 KiB stored chunk across all their section reads. Ordinary materialized sealing also writes bounded pieces to quota-owned disk; cross-node
-generator reads stream the sealed file, and periodic persistence replaces a segmented checkpoint
-only after its chunks are durable. Those paths support a container above the default bulk budget.
-The ownership-handoff metadata boundary remains bounded by its resident-entry admission.
+of the archive, so the deduplicator or window conversion is tried again every 50 ms for up to 30
+seconds after the node first refused it. A refusal that outlasts that wait ends the conversion and
+is reported as the node having had no room for it, since what the restore itself holds can be what
+fills the budget. A request larger than a whole budget, and archived content that does not fit the
+restored shapes, end it at once. A materialized relay's conversion is not tried again: a refusal
+ends it.
 
 ### Restore Checkpoint Storage Quota And Metrics
 
 `nervix-server --restore-staging-max-bytes <bytes>` and
-`NERVIX_RESTORE_STAGING_MAX_BYTES` set the node-local unpublished checkpoint limit, defaulting to
-`128GiB`. This is separate from the quota for archive and transfer files. Admission counts the
+`NERVIX_RESTORE_STAGING_MAX_BYTES` set the node-local unpublished checkpoint limit. Without them the
+node derives it at startup as the smaller of `128GiB` and the size of the volume that holds its
+database, and a given limit larger than that volume refuses the start, as
+[The Startup Preflight](./node-settings.md#the-startup-preflight) describes. This is separate from
+the quota for archive and transfer files. Admission counts the
 current key and value bytes of every unpublished restored namespace across all domains, including
-partial chunks, headers, indices and receipts. It measures value lengths without assembling
-payloads. The complete incoming checkpoint footprint must fit before the first chunk is written;
-the installation barrier prevents concurrent jobs from oversubscribing the allowance. An exact
-staging retry first removes its own incomplete checkpoint data and reuses that allowance.
-
-A node measures that usage by reading every unpublished entry once, and keeps the measurement
-for as long as it stays exact. A checkpoint that stages completely adds its admitted footprint,
-which is exactly the keys and values it wrote. Whatever else changes what the measurement
-counts forgets it: a staging attempt that fails after its first chunk or replaces an earlier
-attempt at the same checkpoint, a sweep that reclaims a namespace or leftover receipts, and a
-publication. The next admission or sweep then measures again, and so does the first one after a
-node starts. Admission and an idle sweep therefore read no staged entry, however much another
-restore left unpublished on the node, and a restore staged beside a generation that is still
-retained costs what it stages itself. The measurement is taken, kept and changed only under the
-installation barrier.
+partial chunks, headers, indices and receipts, reading each unpublished entry one chunk at a time
+without assembling a payload. The complete incoming checkpoint footprint must fit before the first
+chunk is written; the installation barrier prevents concurrent jobs from oversubscribing the
+allowance. Staging a checkpoint again first removes the earlier attempt at the same placement in
+that generation, complete or not, and reuses its allowance. A node keeps its measurement for as long
+as it stays exact, so admission and an idle sweep read no staged entry; [Restore Staging
+Maintenance](./backup-and-restore-architecture.md#restore-staging-maintenance) describes when it
+measures again.
 Published checkpoint data is outside this quota; leftover receipts remain staging until removed.
 Lowering the allowance on restart preserves retained installations that already exceed it and
 refuses additional staging until usage fits or those attempts end.
 A quota refusal reports the limit, used bytes and requested bytes and leaves the target stopped
-with its installation gate closed. After terminal failure, maintenance reclaims the attempt.
-Use the retained execution reference to recover an uncertain applying command; a terminal failed
-restore requires a fresh target domain for another restore.
+with its installation gate closed. After terminal failure, maintenance reclaims the attempt. An
+uncertain applying restore is recovered by sending it again under its execution reference, as the
+Rust client's `restore_with_reference` does; `nervix-cli restore` starts every restore under a
+fresh reference. A terminal failed restore requires a fresh target domain for another restore.
 
-The public `/metrics` endpoint reports these node-local series after completed sweeps:
+The public `/metrics` endpoint reports these node-local series after completed sweeps, and reads
+zero until the first sweep completes:
 
 | Series | Meaning |
 | --- | --- |
 | `nervix_restore_staging_bytes` | Current unpublished checkpoint key and value bytes |
 | `nervix_restore_staging_keys` | Current unpublished checkpoint key count |
-| `nervix_restore_staging_limit_bytes` | Configured unpublished checkpoint allowance |
+| `nervix_restore_staging_limit_bytes` | Unpublished checkpoint allowance, as configured or derived from the database volume at startup |
 | `nervix_restore_staging_reclaimed_bytes_total` | Unpublished and unreferenced active checkpoint key/value bytes removed by completed sweeps since node start |
 | `nervix_restore_staging_sweeps_total` | Completed sweeps since node start |
 | `nervix_restore_keyspaces_disk_bytes` | SST allocation of shared checkpoint and publication keyspaces |
@@ -694,13 +545,15 @@ have finished:
 1. **Receive.** The client streams the archive to the leader, which stages it in its staging area
    and checks that it is exactly the size and BLAKE3 digest the client declared.
 2. **Verify.** The leader reads the whole archive and verifies its manifest, every section's length
-   and digest, every record, and each resource version's bytes against the version's root
-   checksum. It parses the `models.nspl` of every domain the archive holds, which must hold one
-   `CREATE` of a model per statement.
+   and digest, and every record. It parses the `models.nspl` of every domain the archive holds,
+   which must hold one `CREATE` of a model per statement.
 3. **Plan.** The leader resolves every archived user under the user policy, checks that no
-   restored domain name exists, pins every model to the resource versions the restore imports, and
+   restored domain name exists, checks each imported resource version's bytes against the
+   version's root checksum, pins every model to the resource versions the restore imports, and
    plans each domain's models with the transaction planner against the domain as the restore will
-   create it. A dry run ends here and reports the plan.
+   create it. Unless the restore is `WITHOUT STATE`, it also checks every archived branch key and
+   converts every materialized relay, deduplicator keyspace and window under the restored models.
+   A dry run ends here and reports the plan.
 
 The restore then applies its steps in order, and records each step in the replicated state as it
 completes:
@@ -717,8 +570,9 @@ completes:
       and UDFs prepare. The batch is not bounded by the statement and source-byte limits of a
       transaction. Before recording this step, admit an installation generation bound to the
       leader tenure, restore execution and mutation lease. Stage compatible branch lifecycle,
-      source offsets, WASM saves and materialized generations on the newly scheduled owners and replicas, then publish the
-      complete set on every target node. Recording completion releases the replicated start gate.
+      source offsets, WASM saves, materialized generations, deduplicator keyspaces and windows on
+      the newly scheduled owners and replicas, then publish the complete set on every target node.
+      Recording completion releases the replicated start gate.
       With `RESUME`, that same effect installs the archived clock mapping and makes the domain
       running; a delayed coordinator cannot republish after activation.
       `WITHOUT STATE` publishes an empty set, and `WITHOUT SOURCE OFFSETS` omits source positions.
@@ -742,7 +596,11 @@ batch of the domain's models.
 Each domain also reports its planned or applied `status` and archived `start_version`.
 
 A step that fails ends the restore. The steps before it stay applied, and the outcome names the
-step and the reason, followed by the report of every step:
+step and the reason, followed by the report of every step. Users, a created domain and the release
+of the installation gate are recorded together with their effects; resource versions and the model
+batch are applied first and are found applied when the restore repeats their step. A created
+domain that does not become usable on every live node fails its create step after recording it, so
+that step stays applied and is reported failed:
 
 ```text
 restore failed at step 'apply models of domain 'payments'': ...; the steps before it stay applied
@@ -775,8 +633,10 @@ no other command changes those domains while it applies.
 - Only the leader the archive was streamed to holds it. If leadership moves, or the leader
   restarts, while a restore applies, the restore stays applying, and the next leader resumes it
   from its first step not recorded once the client sends the archive again with the same execution
-  reference. The Rust client does so when it is redirected or its connection fails. A step is
-  recorded together with its effect, so no step is applied twice. Resuming an unfinished state
+  reference. A leader that still holds the archive, such as one that regains leadership, resumes it
+  without a resend. The Rust client sends it again when it is redirected or its connection fails.
+  No step is applied twice: each is recorded together with its effect, or finds its effect already
+  applied when it repeats. Resuming an unfinished state
   installation admits a new generation. Local and remote staging and publication revalidate
   authority at the storage mutation boundary; a delayed request from the preceding coordinator
   cannot replace the completed generation or clear its runtime handles.
@@ -784,8 +644,8 @@ no other command changes those domains while it applies.
   reference ends, 15 minutes by default, the new leader ends the restore as failed. The steps it
   recorded stay applied, and the outcome says how many.
 
-The staged archive is released when its restore finishes, or when the retry validity of the
-execution reference ends.
+The staged archive is released when its restore's outcome is recorded, or when the retry validity
+of the execution reference ends; a dry run releases it when it answers.
 
 ### Restoring From The Command Line
 
@@ -873,8 +733,9 @@ describes the dialog itself.
   the archive with the `DownloadBackup` call over a console WebSocket, from the node that reported
   the backup. It hands the archive to the browser as a download only once its size and BLAKE3
   digest match the backup's summary, under the last component of the file the statement names.
-  A download that fails in transport starts again from the first byte while the archive is
-  retained. A download the leader refuses ends with its reason, and the backup itself completed.
+  A download that fails in transport starts again from the first byte after a one-second pause,
+  for up to eight attempts and redirects in all, while the archive is retained. A download the
+  leader refuses ends with its reason, and the backup itself completed.
 - **A reload resumes a backup.** The browser tab records the backup's execution reference, query
   text, and domain until its archive is downloaded. A reloaded page sends the backup again under
   that reference, which returns the recorded outcome instead of running the backup twice, and
@@ -900,9 +761,10 @@ describes the dialog itself.
 
 ## Archive Format
 
-An archive is a tar stream. Every entry is a regular file with owner-only permissions and a zero
-modification time, and names longer than a tar header holds use GNU long-name entries. The manifest
-is always the first entry, so a reader validates everything that follows against it as the stream
+An archive is a tar stream. Every section is a regular file entry with owner-only permissions and a
+zero modification time, and a path longer than a tar header holds is carried by a GNU long-name
+entry before it. The manifest is always the first entry and lists every other section in the order
+the stream holds them, so a reader validates everything that follows against it as the stream
 arrives.
 
 | Section | Content | Present |
@@ -927,8 +789,11 @@ arrives.
 | `domains/<domain>/state/window_processor/<processor>/<branch>/groups/<group>/arguments.arrow` | Each retained row's aggregate argument values, one nullable column per argument in demand order, row-aligned with the input rows | With each window input group |
 
 Materialized group coordinates are zero-based decimal numbers padded to ten digits. A descriptor
-with zero rows has zero groups. The archive reader accepts arbitrary section ordering, verifies
-both sections of every group, and rejects missing, duplicate or inconsistent current groups.
+with zero rows has zero groups. A record comes before the sections it owns: a resource version
+before its upload, a WASM descriptor before its guest save, and a descriptor before its groups.
+Within a descriptor, groups may appear in any order, and so may the two sections of one group. The
+archive reader verifies both sections of every group, and rejects missing, duplicate or
+inconsistent current groups.
 Deduplicator and window groups use the same coordinates. `<branch>` is the branch key's
 fingerprint in hexadecimal, or `unbranched`. A deduplicator or window descriptor names at most as
 many groups as it has keys or rows, and none when it has none; every named group must be present,
@@ -938,10 +803,12 @@ Every `.arrow` section is one canonical Arrow IPC stream: its schema message, on
 and the end-of-stream marker, which ends the section. Every message opens with the continuation
 marker, and every length the stream declares, a message's metadata, its body and each column
 buffer, lies within the section. Its schema declares only the field types Nervix carries, without
-a dictionary encoding, and its record batch declares the field nodes and buffers that schema's
-fields take. A restore refuses any other section before it decodes or allocates anything from it.
+a dictionary encoding or compression, and its record batch declares the field nodes and buffers
+that schema's fields take. A restore refuses any other section before it decodes or allocates
+anything from it; `DESCRIBE BACKUP` verifies an Arrow section's length and digest without decoding
+it.
 
-A resource named `.` or `..` appears in a section path as `%2E` or `%2E%2E`.
+A resource or state entity named `.` or `..` appears in a section path as `%2E` or `%2E%2E`.
 
 A record section begins with a twelve-byte header: the magic `NVXBKREC`, then the record's kind and
 its format version, each a little-endian 16-bit integer. The rest is an
@@ -949,7 +816,7 @@ its format version, each a little-endian 16-bit integer. The rest is an
 
 | Kind | Tag | Format version | Holds |
 | --- | --- | --- | --- |
-| Manifest | 1 | 2 | Archive format major version, producer and NSPL releases, cluster id, capture time, scope, whether resource bytes are included, each domain's revision, Raft log entry and cut kind, and each section's path, content kind, length and BLAKE3 digest |
+| Manifest | 1 | 2 | Archive format major version, producer and NSPL releases, cluster id, capture time, scope, whether resource bytes are included, each domain's revision, Raft log entry and cut kind, with a quiesced cut's engagement and release times and quiesce counters, and each section's path, content kind, length and BLAKE3 digest |
 | Users | 2 | 1 | Every user's name and password hash as a PHC string |
 | Domain | 3 | 1 | Pace, default placement policy, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
@@ -957,14 +824,17 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | Kafka domain offsets | 6 | 1 | The ingestor schema fingerprint and ordered topic and partition positions, expressed as the next offset to consume |
 | Branch lifecycle | 7 | 1 | The owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
 | Materialized relay descriptor | 8 | 1 | Domain and relay names, schema fingerprint, revision, ownership fence, branch generation, row count and group count |
-| Materialized group identities | 9 | 1 | Ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
+| Materialized record identities | 9 | 1 | Ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
 | Deduplicator keyspace descriptor | 10 | 1 | Domain and deduplicator names, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
 | Window state descriptor | 11 | 1 | Domain and window processor names, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
 
 The archive format major version is `1`. A reader refuses invalid record magic, an unsupported
-manifest or required configuration record, a first entry other than the manifest, and any section
-whose place, length or digest differs from what the manifest declares. Unknown optional state
-record kinds and unsupported state record versions produce restore warnings and are skipped.
+manifest or required configuration record, an unknown record kind in the manifest, a first entry
+other than the manifest, and any section whose place, length or digest differs from what the
+manifest declares. A state record whose header names another state kind than the manifest declares,
+or an unsupported state record version, produces a restore warning and is skipped with the sections
+it owns. [The Archive Contract](./backup-and-restore-architecture.md#the-archive-contract) defines
+these rules.
 
 `models.nspl` holds one `CREATE` statement per model, separated by blank lines, in an order that
 creates every model after each model its configuration names. Resource bindings name explicit
@@ -973,102 +843,9 @@ versions.
 An archive holds password hashes, and its models and resources can hold credentials and other
 secrets. Store it as a secret.
 
-### Archive Fidelity Checks
-
-The registered [archive properties](./property-testing-and-fuzzing.md) compare complete current
-manifests, users, domain lifecycle and clocks, resource catalogs, WASM descriptors and guest saves,
-Kafka offsets, ordered branch lifecycle entries, materialized generation descriptors and every
-identity group's typed branch keys and watermarks. Valid synthetic Arrow groups include nullable,
-sensitive, nested, byte and floating-point columns. They exercise the production record validators,
-manifest-first tar writer, streaming reader and restore-content reader, checking every section's
-membership, order, length, digest and bytes. Re-exporting verified extracted values produces the
-same archive bytes. Canonical NSPL documents also reparse to their complete ordered Models across
-multiple domains. Synthetic payloads cover empty data, tar block boundaries and long section paths;
-entry permissions remain owner-only.
-
-Separate malformed-input targets check current record headers and fields, inconsistent metadata,
-missing or reordered sections and truncated streams before verified contents reach installation.
-Materialized cases also reject inconsistent row/group counts, missing identity or column sections,
-invalid keys/watermarks and damaged Arrow bytes. Deduplicator and window properties compare
-complete descriptors, typed branch keys, row sequences and watermarks, delayed histogram removals
-and every Arrow group's bytes. The restore conversion property streams every rebuilt keyspace and
-checks it against the runtime's own encoding of the same keys byte for byte, and rebuilds windows
-both from archived sections kept whole and from groups split by a narrow identity record; their
-malformed cases reject reversed watermarks, impossible
-sequences and group counts, a zero incarnation, missing key, input or argument groups, misplaced
-group numbers and descriptors that name more groups than the archive holds. The owning runtime column property separately
-checks exact-schema encoding, restore conversion and complete native generation equality.
-Schema agreement with the restored schedule remains the restore planner's contract, exercised by
-public restore scenarios. The one-node and three-node WASM/Kafka restore scenario compares every
-archived field and raw resource/guest byte before the restored domain starts, then proves subsequent
-START behavior and two-branch isolation. It asserts domain renaming, the stopped lifecycle and the
-new guest lifetime explicitly; capture metadata belongs to each new backup. The materialized
-one-node and three-node restore scenario also re-exports the stopped domain before START, comparing
-every descriptor field, identity and Arrow byte, including generations larger than the bulk budget.
-Its acknowledged materialized inputs retain an explicit event timestamp across retries. An
-identical successful replay must preserve the exact revision count and all archived fields, even
-when a failed earlier attempt reached only part of the relay fan-out.
-Kafka offsets and branch lifecycle records are written by one streamed writer, whose output a
-registered property compares byte for byte with rkyv's encoding of the complete wire shape, and
-two more properties stream records from stored native lifecycles and from Kafka offset checkpoints
-in any partition order, with partitions recorded twice, comparing every archived value. The
-native metadata backup scenario restores lifecycle and Kafka metadata above the bulk budget
-stopped, interrupts its first re-export partway through a section, which publishes no archive, and
-re-exports it again with every value identical while each node stays within its bulk budget. It
-then restores that archive with `RESUME` and backs up the running domain, whose every lifecycle
-branch and partition offset is the same.
-The native metadata restore scenario also restarts the restored owner and replicas, preserves
-their placements and exact stored values, and checks subsequent Kafka input and isolated output
-for both tenants. `just test-native-metadata-restore-repeat` qualifies its three-node example ten
-consecutive times with concurrency four and no retries. Each attempt retains its source revision,
-source patch, scenario output and node logs under `target/native-metadata-restore`; only ten passing
-examples produce a completion record. The same scenario remains registered in both complete
-Deloxide selections, which additionally exercise the tracked blocking locks on the restore path.
-The guest-save scenario uses two 40 MiB branch saves in both one- and three-node clusters. It
-measures every owner's bulk reservations during public backup, interrupts a guest section after
-two chunks and verifies that no archive appears, then retries, restores with `--resume`, compares
-the guest bytes exactly and checks the next even output of each branch. A mismatch names each
-differing save with its lengths, digests, first differing offset and the bytes there, never the
-whole saves. A resumed restore replays the inputs whose acknowledgements its archive does not hold,
-so the exact comparison relies on every input of the source cut being acknowledged; a checkpoint of
-a save this large can outlast the source's `ACK TIMEOUT` under load, which the branch's keepalive
-of the inputs that checkpoint holds prevents from becoming a replay. See
-[WASM State And Recovery](wasm-state.md#stages).
-The deduplicator and window one-node and three-node scenarios re-export a stopped restore with
-identical descriptors and Arrow groups, stop an installation before its first deduplicator or
-window checkpoint, which leaves `START` gated, and release a delayed coordinator's publication
-after a resumed restore, which is refused without changing the active keyspaces and windows.
-The running restore scenario re-exports its deduplicator state after the endpoint accepts a metric
-probe and before admitting new payments, comparing exact descriptors and Arrow groups to the
-source archive. That comparison includes each key's original `seen_at`; the restored window's
-retained rows are checked by their subsequent output for both branches. A focused keyspace test
-checks that a restored duplicate stays suppressed until its original three-minute deadline and is
-accepted at that deadline. The public scenario observes eventual delivery after that boundary;
-its subscription receive time is not an expiry timestamp because a loaded runner may delay the
-first post or the read beyond the deadline.
-RESTORE explicitly resets the source ownership fence to zero in the stored checkpoint; revisions
-and branch generations remain exact. A stopped backup reads this checkpoint's ordered groups from
-the same immutable database view as its other state, stages one bounded group at a time and retains
-the original Arrow bytes. A running or paused backup captures fresh runtime rows under their existing
-assignment barriers. These representation
-checks do not establish capture-fence or installation-ordering correctness, which retain their
-production-owner concurrency and recovery evidence.
-The registered keyspace and window properties additionally open admitted native checkpoint views
-and compare every complete emitted Arrow group byte for byte with the resident path. The window
-oracle decodes the same native checkpoint, since persistence can normalize unused Boolean buffer
-bits of a live carrier. Restoring the bounded reader's output compares all significant row values
-and validity with the live publication. The checks compare revisions, counts, group boundaries,
-sequences, watermarks and delayed removals. The stored-branch capture outline exercises a stopped
-domain and a stopped restore with
-a keyspace and a window above 32 MiB beside 24 small branches, checks exact re-export, and reports
-sampled per-node bulk and metadata reservations separately from harness allocator statistics.
-Mappings are included in their admission class; jemalloc's resident figure excludes mappings
-outside jemalloc and is not the process's complete resident set.
-
-Materialized row watermarks are preserved event times, including explicit `TIMESTAMP AT` values.
-Materialized branch activity is not archived with those rows. A resumed or restarted relay starts
-its restored branches' retention at its activation-time domain-clock snapshot; a preserved past
-or future event timestamp cannot expire a restored branch early or extend its idle lifetime.
+The [Qualification Evidence](./backup-and-restore-architecture.md#qualification-evidence) of the
+architecture chapter lists the properties that check archive fidelity and the public scenarios
+that compare restored and re-exported state.
 
 ## Limits
 
@@ -1079,15 +856,16 @@ or future event timestamp cannot expire a restored branch early or extend its id
 | Archives and snapshot transfers a node stages at once | 128 GiB |
 | Download chunk | 256 KiB |
 | Frames a download queues ahead of its client | 4 |
-| Retention | Until downloaded, or the retry validity of the execution reference ends |
-| Restore chunk | 256 KiB |
+| Retention | Until a download has queued all of it, or the retry validity of the execution reference ends, counted from when the reference was issued |
+| Restore chunk | 256 KiB from the Rust client and the console; the leader accepts any nonempty chunk within one frame |
 | Restore frames the Rust client queues ahead of the transport | 8 |
-| Restore archive retention | Until the restore finishes, or the retry validity of the execution reference ends |
-| State section staging on an owner | Charged to the same node staging quota until fetched or expired |
+| Restore archive retention | Until the restore's outcome is recorded, or the retry validity of the execution reference ends |
+| State section staging on an owner | Charged to the same node staging quota until fetched, or for at most 600 seconds; a Kafka offset or branch lifecycle section reserves the 64 MiB record limit while it is written |
+| One owner's capture inventory | One management reply of at most 64 KiB per owner and domain |
 | WASM guest save capture | One selected save at a time: `restore_metadata` reserves three times its stored checkpoint size for the inline Fjall value and decoded reader; three fixed 64 KiB bulk buffers cover segmented reads, transfer and staging. A save up to the 64 MiB guest limit can exceed the 32 MiB default bulk budget. |
 | Kafka offset or branch lifecycle section capture | One checkpoint at a time per owner: `restore_metadata` holds twice the stored checkpoint plus 64 KiB for the whole section, beside serializer scratch of one resolver per entry; a 64 KiB bulk buffer streams the record |
 | One Kafka offset or branch lifecycle section | The 64 MiB record limit |
-| Native conversion I/O, checkpoint installation and complete generation publication per node | Fixed 2 MiB bulk working-memory reservation; 64 KiB buffers and checkpoint chunks |
+| Native conversion I/O, checkpoint installation, complete generation publication and each maintenance sweep | Fixed 2 MiB bulk working-memory reservation per job; 64 KiB buffers and checkpoint chunks |
 | Retained archive metadata and preparation per node | 2 GiB default independent admission class; 16 times record bytes plus 64 times NSPL bytes plus 2 MiB |
 | Native conversion serializer scratch | Fixed-capacity entry resolvers plus the largest entry's nested resolvers, covered by the retained preparation charge |
 | Materialized identity group / Arrow group | 1 MiB / 8 MiB |
@@ -1100,19 +878,20 @@ or future event timestamp cannot expire a restored branch early or extend its id
 | Restore conversion admission wait | 30 seconds after the node first refuses one unit for room: a window section, a window while its checkpoint is finished, or a keyspace. The unit is converted again every 50 ms |
 | Restored window rows a branch reopens | No row ceiling of their own; their row views are charged to the relay memory class while the branch reopens the window |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
-| Unpublished restore checkpoint keys and values per node | 128 GiB by default; configurable with `--restore-staging-max-bytes` |
+| Unpublished restore checkpoint keys and values per node | The smaller of 128 GiB and the size of the volume that holds the node database by default; configurable with `--restore-staging-max-bytes`, up to that size |
 | Freeze of one running domain | From its pause until its owners have staged their state, at most the backup's `TIMEOUT`, or the 60-second domain drain timeout when none is given; archive assembly and the download follow the resume |
 
 The freeze covers only the drain of admitted work, the confirming force flush and the owners'
 staging. The leader resumes the domain before it assembles the archive, so neither the archive's
-size nor the client's download rate lengthens the freeze, and a domain whose sink stops
-acknowledging stays frozen only until the timeout fails the backup. A fault during the freeze never
-yields a partial archive: when a state owner crashes or loses contact with its peers, the backup
-either completes from a cut that every owner captured or fails with `backup failed:`, and the
-domain resumes either way, a node that was unreachable resuming once it rejoins. A leader change
-refuses the cut it interrupted, and the new leader cuts again for a client that retries the
-execution reference. Stopping or restarting the node that holds an archive ends its download, and
-the archive is lost with it.
+size nor the client's download rate lengthens the freeze, and a domain whose emitter stops
+acknowledging stays frozen only until the timeout fails the backup. A state owner that crashes or
+loses contact with its peers during the freeze, while the cluster still reports it live, fails the
+backup with `backup failed:`, and the domain resumes either way, a node that was unreachable
+resuming once it rejoins. A state owner the cluster reports down when the cut captures fails the
+backup as well, naming the node, rather than leaving its state out of the archive; see [Guarantees
+And Limits](./backup-and-restore-architecture.md#guarantees-and-limits). A leader change refuses
+the cut it interrupted, and the new leader cuts again under the same execution reference. Stopping or
+restarting the node that holds an archive ends its download, and the archive is lost with it.
 
 A freeze grows with the branches the domain holds and the state they carry. The freezes measured
 for [Backup 07](https://app.clickup.com/t/86bc8dbxv), with the commands and image identities that
@@ -1120,8 +899,11 @@ produced them, range from a tenth of a second for a few branches to about three 
 thousand branches on one node and seven on three, and stay under two seconds with 72 MiB of WASM
 guest state, all far inside the drain timeout.
 
-A backup larger than the staging quota fails. A backup that fits waits while the leader's staging
-area is full, until retained archives are downloaded or expire and snapshot transfers finish.
+A backup larger than the staging quota fails. Owners stage their sections, and the leader fetches
+them, only while node staging has room, and either refuses when it is full; the final archive waits
+for room while the leader's staging area is full, until retained archives are downloaded or expire
+and snapshot transfers finish. The leader holds the fetched sections and the assembled archive
+together until assembly ends.
 
 A restore stages its archive under the same limits, and is refused rather than kept waiting when
 the archive is larger than one archive may be, or the leader's staging area cannot hold it now; send
@@ -1131,9 +913,9 @@ bounded installation or publication job within its bulk working-memory budget (3
 A state set, and an individual materialized relay, deduplicator keyspace or window, may exceed that
 budget. An individual job that cannot be admitted fails with the start gate still closed.
 
-A restored deduplicator keyspace or window that exceeds one 2 MiB state-sync response is installed
-on every assigned owner and replica, but its replicas do not follow the revisions the owner
-publishes after `RESUME`, which is the replica limit any keyspace or window of that size has. The
+A restored deduplicator keyspace, window or guest save larger than one 2 MiB replication message is
+installed on every assigned owner and replica, and its replicas follow the revisions the owner
+publishes after `RESUME` through a bulk checkpoint transfer, up to the 256 MiB transfer bound. The
 owner persists them: a window whose retained rows exceed one 8 MiB snapshot section is sealed in
 pieces on quota-owned disk and published as a segmented checkpoint, so it survives a restart at
 any size the node's snapshot staging quota holds rather than only within the bulk budget.
@@ -1148,40 +930,66 @@ contents. The reasons are:
   back to themselves
 - a domain's clock mapping cannot be read at the capture time
 - a resource version's bytes are not installed on the leader, or do not match their catalog entry
-- the archive is larger than one archive may be, or a record does not encode
+- the archive could not be staged on this node, because it is larger than one archive may be or
+  staging failed, or a record does not encode
 - a captured branch lifecycle or Kafka offset checkpoint does not decode, its record exceeds the
-  64 MiB record limit, or `restore_metadata` cannot admit its conversion now, naming the entity
-- a selected WASM guest save cannot be read or its `restore_metadata` conversion cannot be
-  admitted, or its staged write is interrupted; the failure names the processor without guest bytes
-- a quiesced domain cannot pause, drain, capture its owners or resume within its timeout
+  64 MiB record limit, or its lifecycle keys or serializer scratch cannot be admitted to
+  `restore_metadata` now, naming the entity; the checkpoint's own conversion charge waits for room
+- a selected WASM guest save cannot be read or its staged write is interrupted; the failure names
+  the processor without guest bytes, and its `restore_metadata` conversion charge waits for room
+- a node that runs the domain's work is not reported live when a quiesced cut starts, naming the
+  domain, an entity the node runs and the node; the domain was not paused
+- a placement's scheduled state owner is not reported live when the cut captures, naming the
+  domain, the entity and the node
+- the schedule places an entity whose state the cut archives on no node, naming the domain and the
+  entity; uncordon a node or bring one back so the entity can be placed
+- an owner has not applied the cut revision within five seconds, or cannot capture or stage its
+  share, naming the domain
+- a quiesced domain cannot take its lease or capture its owners within its timeout, reported as
+  `timed out waiting to capture domain '<domain>'`, or does not pause and drain in time, reported
+  with what each node still held
+- the backup coordinator lost its leader tenure while capturing a domain
 
-A capture that fails or is interrupted drops every section its owners staged for it. No archive is
-assembled from a partial capture, and the backup can be sent again.
-The same refusal applies to a selected stored keyspace or window whose immutable view, native
-validation, typed metadata or bounded projection cannot be admitted. Cancellation is checked
-between stored chunks, identities and keys; refused or interrupted staging drops its private
-files and returns their quota. No partial branch checkpoint becomes an archive section.
+A capture that fails or is interrupted assembles no archive. The leader drops the sections it
+fetched and the failing owner drops its partial files; sections other owners staged for the capture
+expire 600 seconds after they were staged, holding their staging quota until then. The backup can be
+sent again, and takes a new cut. The same refusal applies to a selected stored keyspace or window
+whose immutable view, native validation, typed metadata or bounded projection cannot be admitted.
+Cancellation is checked between stored chunks, identities and keys; refused or interrupted staging
+drops its private files and returns their quota. No partial branch checkpoint becomes an archive
+section.
 
-A refused restore reports `restore refused:` and the reason, and changed nothing. The reasons are:
+A restore stream the leader refuses reports `restore refused (<failure>):` and the reason, and
+changed nothing. The failures are `InvalidStream` and `InvalidStatement` for a stream that does not
+open with one `RESTORE` statement or continue with chunks, `SizeMismatch` and `DigestMismatch` for
+chunks that add up to another size or have another digest, `QuotaExceeded` for an archive larger
+than one archive may be or than the leader's staging area can hold now, and `StagingFailed` for an
+archive the leader could not stage.
 
-- the stream did not carry the archive its start declared: its chunks add up to another size, or
-  its bytes have another digest
-- the leader's staging area cannot hold the archive now, or the archive is larger than one archive
-  may be
-- the archive does not verify: the section and the check that failed are named
+A restore the leader refuses after it received the archive reports `restore refused:` and the
+reason, and changed nothing. The reasons are:
+
+- the archive could not be read on the leader, or is not a valid backup archive: the check that
+  failed is named
 - a restored domain's `models.nspl` does not parse, naming the domain and the line, or holds a
   statement that creates no model, naming the domain, the statement's number and its line
 - `RESTORE CLUSTER` was given a domain archive, or `RESTORE DOMAIN` names a domain the archive does
   not hold
 - a restored domain name exists
 - an archived user exists and the user policy is `FAIL`
-- the archive was taken `WITHOUT RESOURCES` and holds completed resource versions, or holds a
-  version's bytes that do not match its root checksum
-- a model binds a resource version the restore does not import as completed
-- a domain's models do not form a valid configuration, as the transaction planner finds
+- the archive was taken `WITHOUT RESOURCES` and holds completed resource versions, holds no bytes of
+  a completed version, holds a version's bytes that do not match its root checksum, records a
+  completed version without its checksums, or names a version outside its resource's declared
+  sequence or a resource its catalog does not declare
+- a model does not name its resource versions by number, or binds a resource version the restore
+  does not import as completed
+- `RESUME` was given for a paced domain the archive holds no clock mapping for
+- a domain's models do not form a valid configuration, as the transaction planner finds, or do not
+  give its deduplicator and window state an archive shape
 - an archived branch key the restore would install is not a key of the branching its restored
   entity declares, naming the section, the lifecycle entry, descriptor or record identity, the
-  entity, the branch and the field; see [Archived Branch Keys](#archived-branch-keys)
+  entity, the branch and the field; see [Archived Branch Keys](#archived-branch-keys), or the
+  restored entity declares no branching its archived branch keys could belong to
 - an archived materialized relay, deduplicator keyspace or window does not convert under the shape
   its restored model gives it, or its conversion cannot be admitted, naming the entity; a dry run
   runs the same conversion. A deduplicator or window conversion the node refuses only for room is
@@ -1191,11 +999,15 @@ A refused restore reports `restore refused:` and the reason, and changed nothing
 
 A restore that failed at a step reports `restore failed at step '<step>':`, the reason, and that the
 steps before it stay applied, together with the report of every step. The reasons are a consensus
-refusal of the step, a resource version that could not be installed or completed on every live
-node, a model batch the leader refused, such as lookup data that does not load at its path or TLS
-material that does not load, and state that does not convert or install. Installation converts
+refusal of the step, a created domain whose stopped state did not become usable on every live node,
+a resource version that could not be installed or completed on every live node, a domain that holds
+models the restore did not apply, a model batch the leader refused, such as lookup data that does
+not load at its path or TLS material that does not load, a node that did not apply the installation
+revision within five seconds, and state that does not convert or install. Installation converts
 each keyspace and window as planning did, with the same wait for room, so a momentarily busy node
-does not fail the step; a refusal for room that outlasts the wait does. A restore whose archive no
-client sent to a new leader before the retry validity of its execution reference ended reports
-`restore stopped after the steps it recorded`. No message includes password hashes or resource
-bytes.
+does not fail the step; a refusal for room that outlasts the wait does. An admitted restore that
+cannot reach its first step not recorded, because the leader no longer holds its archive or the
+restore no longer plans against the cluster, reports `restore failed:`, the reason, and that the
+steps it recorded stay applied. A restore whose archive no client sent to a new leader before the
+retry validity of its execution reference ended reports `restore stopped after the steps it
+recorded`. No message includes password hashes or resource bytes.

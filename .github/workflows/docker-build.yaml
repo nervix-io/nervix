@@ -25,8 +25,12 @@ permissions:
   issues: write
 
 env:
+  # Kache sizes its local store from the cache volume (5%, rounded and bounded).
+  # Keep the default so a runner disk change also changes its cache budget.
   KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
+  # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
+  KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "68719476736"
 
 jobs:
   meta:
@@ -53,7 +57,8 @@ jobs:
     name: build-${{ matrix.image }}-${{ matrix.arch }}
     needs: meta
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 80
+    # Run 39534273321's amd64 build took 65 minutes. Reserve another half plus upload headroom.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -88,7 +93,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli
+          tool: just@latest
 
       - name: Login to GHCR
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -97,6 +102,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Runner diagnostics before Build and push arch image
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: build-and-push-arch-image
 
       - name: Build and push arch image
         env:
@@ -156,7 +166,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli
+          tool: just@latest
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -164,6 +174,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Runner diagnostics before Build and push the diagnostic image
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: build-and-push-the-diagnostic-image
 
       - name: Build and push the diagnostic image
         env:
@@ -215,14 +230,15 @@ jobs:
         run: docker logout ghcr.io
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,wild-linker
+          tool: just@latest,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -257,7 +273,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -270,11 +285,21 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Runner diagnostics before Run benchmarks
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: run-benchmarks
+
       - name: Run benchmarks
         run: >-
           just benchmark-ci
           "${NERVIX_BENCHMARK_IMAGE}"
           "${RUNNER_TEMP}/nervix-benchmarks"
+
+      - name: Runner diagnostics before Measure ordinary primitive costs
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: measure-ordinary-primitive-costs
 
       - name: Measure ordinary primitive costs
         run: |
@@ -608,14 +633,15 @@ jobs:
             texlive-xetex
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk
+          tool: just@latest,trunk
 
       # The book build compiles nervix-server and nervix-cli: the screenshot tool
       # drives a real server, and the nervix-cli reference is rendered from the
@@ -637,7 +663,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -667,6 +692,11 @@ jobs:
             echo "llms_url=${llms_url}"
             echo "pdf_url=${pdf_url}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Runner diagnostics before Publish Book
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: publish-book
 
       - name: Publish Book
         env:

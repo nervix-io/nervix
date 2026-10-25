@@ -95,14 +95,12 @@ nodes reference. Kafka client config is passed through to the Kafka driver, so
 `bootstrap.servers` uses its familiar key.
 
 ```nspl
-CREATE CLIENT kafka_local
-  TYPE KAFKA
+CREATE KAFKA CLIENT kafka_local
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9092'
   };
 
-CREATE CLIENT redis_local
-  TYPE REDIS
+CREATE REDIS CLIENT redis_local
   POOL SIZE MIN 1 MAX 4
   CONFIG {
     'addr' = 'redis://127.0.0.1:6379/'
@@ -132,7 +130,7 @@ CREATE KAFKA TOPIC INGESTOR kafka_orders
 Reading top to bottom:
 
 - `KAFKA TOPIC INGESTOR` names the connector and the entity the ingestor reads. `FROM` names the
-  `TYPE KAFKA` client, and the topic and consumer group are string literals sent to Kafka exactly
+  `KAFKA CLIENT`, and the topic and consumer group are string literals sent to Kafka exactly
   as written.
 - `OFFSET BY CONSUMER GROUP` tracks progress in Kafka; `MODE ACK SEQUENTIAL` acknowledges records
   in order. The full Kafka source grammar is in
@@ -149,14 +147,14 @@ Reading top to bottom:
 ## Emit To Redis
 
 An emitter drains a relay out of the graph. The Redis integration is Pub/Sub
-([Supported Emitter Sinks](emitters.md#supported-emitter-sinks)), and the same codec that decoded
+([Supported Emitter Emitters](emitters.md#supported-emitter-emitters)), and the same codec that decoded
 the input encodes it back to JSON:
 
 ```nspl
-CREATE EMITTER redis_orders
+CREATE REDIS PUBSUB EMITTER redis_orders
   FROM orders
-  TO REDIS PUBSUB redis_local CHANNEL orders_out
-    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  TO redis_local CHANNEL 'orders_out'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING order_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -164,7 +162,7 @@ CREATE EMITTER redis_orders
   ON GENERAL ERROR LOG;
 ```
 
-Redis Pub/Sub exposes no delivery confirmation, so `MODE NO_ACK` names server acceptance as the
+Redis Pub/Sub exposes no delivery confirmation, so `MODE NO ACK` names server acceptance as the
 publish boundary. The required retry policy paces connection and other infrastructure failures;
 it does not turn subscriber presence into an acknowledgment.
 
@@ -211,14 +209,12 @@ CREATE CODEC order_codec
 
 CREATE RELAY orders SCHEMA order_record UNBRANCHED;
 
-CREATE CLIENT kafka_local
-  TYPE KAFKA
+CREATE KAFKA CLIENT kafka_local
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9092'
   };
 
-CREATE CLIENT redis_local
-  TYPE REDIS
+CREATE REDIS CLIENT redis_local
   POOL SIZE MIN 1 MAX 4
   CONFIG {
     'addr' = 'redis://127.0.0.1:6379/'
@@ -237,10 +233,10 @@ CREATE KAFKA TOPIC INGESTOR kafka_orders
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE EMITTER redis_orders
+CREATE REDIS PUBSUB EMITTER redis_orders
   FROM orders
-  TO REDIS PUBSUB redis_local CHANNEL orders_out
-    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  TO redis_local CHANNEL 'orders_out'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING order_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB

@@ -7,18 +7,19 @@ never evidence of its owner or effect.
 
 `just ratchet` runs both owners. `just validate` and `just validate-ci` require the same gate;
 formatting is applied by the former and checked by the latter. The compiler emits ordinary
-`nervix::` diagnostics. The four structural counts compare with `debt-baseline.json`; a count
+`nervix::` diagnostics. The five structural counts compare with `debt-baseline.json`; a count
 may decrease and cannot increase. `just ratchet --update` records a decrease only after the
 complete gate passes. No numeric allowance controls a semantic rule.
 
 ## Rule Contracts
 
-The fifteen rule families below have one implementation each. The family name remains useful
+The sixteen rule families below have one implementation each. The family name remains useful
 for describing its purpose; a compiler family can emit more than one diagnostic where a missing
 contract and a violated contract require different corrections.
 
 | Family | Purpose and owning fact | Allowed example | Rejected example | Enforcement and qualification |
 | --- | --- | --- | --- | --- |
+| `hidden_tunables` | Numeric policy belongs to a class-typed setting or an explicitly fixed constant. [Node Settings](node-settings.md) owns the classification. | One definition default; a constant with its fixed-format reason; a capacity derived from typed input. | A numeric constant or literal policy call outside that boundary. | Stable source parser; governed-type, alias, exclusion, tracked/new-source, inactive and macro controls; fixed-contract compiler fixtures and the registered bounded `typed-hidden-tunables` property. |
 | `data_plane_lock_acquisitions` | Resolve synchronization APIs and the execution contract of their callers. [Concurrency](data-plane-concurrency.md#source-contracts) owns contexts, effects and bounds. | A task-local `HashMap::entry`; a registry acquisition with a lifecycle contract. | A recurring callback reaching a DashMap shard or a lifecycle-only helper. | Compiler `sync_acquisition`, `lifecycle_call`, `unknown_effect`; resolved receiver, helper, callback, trait, foreign item, macro and expectation fixtures. |
 | `bare_error_signatures` | A Nervix failure contract carries its complete contextual report. [Errors](errors-and-diagnostics.md) owns outcome, library and foreign-interface classifications. | `Result<T, Report<DomainError>>`; an exact reason-bearing outcome contract. | An owned failure in an alias, inferred future or stream without its report. | Compiler `bare_error_signature`; associated-output, alias, inference, metadata and report-carrier fixtures. |
 | `discarded_results` | Preserve a failure or classify recovery at its consuming operation. | A propagated failure or the recovery owner's explicit `Discarded` operation. | A failed outcome discarded through a binding, projection or `drop`. | Compiler `discarded_outcome`; complete and partial-discard, borrowed, tuple and collection fixtures. |
@@ -64,18 +65,18 @@ Cargo runs the driver for each workspace target through `scripts/typed_lint_wrap
 compiler wrapper the host configures. That compiler wrapper reports a compiler ended by a signal with
 the exit status of a compile error, so the driver runs as the workspace wrapper's child instead of
 replacing it. It inherits the wrapper's descriptors, Cargo's jobserver among them, and ends when the
-wrapper ends, so a compiler wrapper that stops a compilation still stops the driver. A compilation
-that fails leaves a termination record beside the reports: its exit status or signal, its peak
-resident size and the out-of-memory kills the kernel counted in its cgroup while it ran. When Cargo
-fails, the gate names each failed compilation as terminated by a signal, failed with compiler
-errors, or exited without a compiler error, which means the driver itself failed, for example while
-publishing its report. A Cargo failure with no failed compilation happened outside them, in Cargo, a
-build script or the compiler wrapper. Records of an earlier run are discarded before Cargo starts.
-The analysis needs about the memory of rustc's own check of each target, and the server library's is
-the largest; the kernel's out-of-memory killer ends a compilation with a signal and no message, which
-the gate reports as such instead of as a missing report.
+wrapper ends, so a compiler wrapper that stops a compilation still stops the driver. Every
+compilation leaves a compilation record in a `compilations` directory beside the reports: its exit
+status or signal, its start, duration and peak resident size, the out-of-memory kills the kernel
+counted in its cgroup while it ran, and its [host memory admission](#host-memory-admission). When
+Cargo fails, the gate names each compilation whose record holds a failure as terminated by a signal,
+failed with compiler errors, or exited without a compiler error, which means the driver itself
+failed, for example while publishing its report. A Cargo failure with no failed compilation happened
+outside them, in Cargo, a build script or the compiler wrapper. Records of an earlier run are
+discarded before Cargo starts. The kernel's out-of-memory killer ends a compilation with a signal and
+no message, which the gate reports as such instead of as a missing report.
 
-Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The four
+Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The five
 counts retain their product-debt scope: directory components named `tests`, `benches` or
 `examples` are excluded. In-crate `tests.rs`, `*_tests.rs` and `test_fixtures.rs` count toward
 file size and function complexity but are excluded from cast/field debt. Test-only items are excluded from those two
@@ -95,6 +96,103 @@ The parser requires no rustc internals or analysis driver. `just typed-ratchet-s
 builds it on the stable toolchain. Native compiler coverage builds it on that producer's pinned
 toolchain so LLVM profiles and exporters match. The tooling workspace stays outside product
 dependencies, including browser and ordinary release graphs.
+
+## Hidden Tunables
+
+`hidden_tunables` counts one site for each numeric `const` item typed as `Duration`, `usize`,
+`u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`, `NonZero*` or `ByteUnit`. Associated constants
+count too. A counted initializer contributes no further policy-call sites. Names are read from
+the source type, following explicit import renames and type aliases within their lexical scope,
+independent of their declaration order.
+This syntax rule does not resolve custom types, glob imports or cross-file reexports; the
+eventual compiler rule owns those semantic facts.
+
+The count also includes a call with a numeric literal in its arguments when it constructs a
+Duration through `from_*`, chooses `with_capacity*`, a `channel` capacity (excluding a watch
+channel's initial value), `bounded` or `sync_channel`, constructs `Semaphore` or `ArrayQueue`,
+or calls `add_permits`. Numeric arithmetic inside an argument counts; a capacity supplied
+entirely by a named value does not add a call site. These names deliberately describe source
+syntax, including same-spelled custom calls; they do not claim resolved API recognition.
+Raw identifier spellings retain the same recognized type, policy call and definition owner.
+
+The shared source discovery excludes test directories and in-crate test files. This count also
+excludes `tools/`, the `arbitrary`, `benchmark`, `model-harness` and `test-environment` crates,
+test-only items and test functions. Other inactive configurations remain visible. Authored
+macro fragments use the same token substitution and parsing owner as the cast count.
+
+An exact `SettingDefinition::default_value` implementation owns its one default. A `Default`
+implementation of a nonempty struct whose fields are all `Setting<D>` owns its group defaults.
+Their bodies are outside the count; unrelated `Default` bodies and other definition methods
+remain counted. A fixed constant is excluded only with one valid
+`#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = "..."))]` annotation. The source check
+refuses invalid contracts before measuring. The compiler independently checks exact placement,
+kind, reason and duplication on compiled constants. A reason is reviewed justification, not a
+proof that the literal is fixed. No filename or per-site allowance substitutes for it.
+
+The baseline is introduced at the measured repository count and may only decrease. The area
+owners classify the counted values while preserving their existing defaults. The settings
+compiler-rule cutover removes this detector and its numeric baseline entry in the same change.
+`scripts/tests/test_ratchet.py` pins eligibility and the gate; compiler fixtures qualify the
+constant contract; the registered `typed-hidden-tunables` property checks complete source/site
+representations and every generated location in ordinary and sanitizer execution.
+
+## Host Memory Admission
+
+An analysis compilation needs about the memory of rustc's own check of its target, and the server
+library's dwarfs every other: it peaks between about 11 and 13.5 GiB in each of the ten declared
+configurations that compile it, while no other analysis compilation reaches 2 GiB. Configurations
+run one after another, and inside one the server library compiles after the crates it depends on,
+so one validation holds little more than one server analysis at a time. Validations in several
+worktrees of one host run at the same time, though, and nothing else admits them against the
+host's memory: kache, the compiler wrapper the host configures, runs a chain with a workspace
+wrapper directly, outside its own memory-weighted scheduler. Five server analyses at once exceed a
+62 GiB host, and the kernel's out-of-memory killer ends one of them.
+
+`tools/nervix-lint/configurations.toml` declares the admission: a threshold, a wait limit and a
+reservation for every compilation, by crate and target kind, that peaks above the threshold. The
+runner hands the policy to every compilation through the workspace wrapper. A compilation with a
+reservation takes a place in one queue, `/tmp/nervix-analysis-admission-<uid>`, which every worktree
+of the user shares on the host, before its driver starts, and holds it until the driver ends:
+
+- It waits while an older waiter is ahead of it. A waiter that has not decided for ten polls, such
+  as a stopped wrapper, keeps its place but no longer holds back the waiters behind it.
+- It is admitted when its reservation fits in what each memory domain it runs in has left after the
+  growth still to come of every compilation admitted in that domain. The domains are the host, with
+  the kernel's estimate of its available memory, and each ancestor cgroup with a memory limit, with
+  its limit less its usage plus its inactive file pages. An admitted compilation's growth still to
+  come is its reservation less its driver's resident size.
+- It is admitted when no other compilation is admitted, whether or not its reservation fits, so the
+  queue always progresses: with too little memory the declared compilations run one at a time. A
+  compilation admitted alone into too little memory can still be killed, and its record names the
+  kill as before.
+- It starts at the wait limit when neither happens first, so every wait is bounded. Admission never
+  fails a compilation.
+
+A place is an exclusive advisory lock on the compilation's lease file, so the kernel releases the
+place of a wrapper that ends without releasing it, and the next decision deletes its lease. Every
+decision holds the queue's lock. A waiter reports what it waits for when it starts waiting and every
+minute after: its reservation, the waiters ahead of it, each admitted compilation by crate,
+configuration, worktree and process, and the memory left. A queue that cannot be used admits
+nothing: the compilation starts at once, and its report and record name the failure. A platform
+that does not report its memory, such as one without `/proc`, runs the declared compilations one at
+a time.
+
+The admission lands in each compilation record: the reservation, the outcome (`fit`, `alone`,
+`wait_limit`, `queue_locked` when the queue's lock stayed held through the wait limit, or
+`unavailable`), the seconds waited, the memory left at the decision and the number of admitted
+compilations. The runner requires a record for every expected target Cargo compiled in the run and
+holds every record of the run to the declaration, including those of the workspace libraries a
+binary configuration compiles for its binaries: a compilation that peaks above its reservation, or
+above the threshold without one, fails the gate and names the declaration to change, so the
+reservations keep covering what the compilations use. Such a failure also discards the configuration's analysis, because Cargo
+would find the compilation fresh and the next run would measure nothing. The completion evidence
+keeps the measurements, and the runner prints each configuration's largest compilation and every
+admission that waited or did not fit.
+
+Admission covers the declared analysis compilations only. Clippy's compilations go through kache's
+own scheduler, and tests, scenario clusters and other work on the host are admitted by nothing; each
+decision sees the memory they use, not the memory they will use. The queue belongs to one user on
+one host, so separate users, containers and machines have queues of their own.
 
 ## Function Complexity
 

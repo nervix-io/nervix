@@ -1,9 +1,9 @@
 use error_stack::ResultExt as _;
-use nervix_connector::{ParsedRetryPolicy, SourceAckPolicy};
+use nervix_connector::{IngestorAckPolicy, ParsedRetryPolicy};
 use nervix_models::{IngestAcknowledgement, parse_duration_text};
 
 use super::{
-    ingestors::{DeliverySetting, IngestorStartError, SourceStartError},
+    ingestors::{DeliverySetting, IngestorConnectorStartError, IngestorStartError},
     *,
 };
 
@@ -60,13 +60,19 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
         acknowledgement: IngestAcknowledgement<'_>,
-    ) -> error_stack::Result<SourceAckPolicy, IngestorStartError> {
+    ) -> error_stack::Result<IngestorAckPolicy, IngestorStartError> {
         match acknowledgement {
-            IngestAcknowledgement::Unacknowledged => Ok(SourceAckPolicy::None),
+            IngestAcknowledgement::Unacknowledged => Ok(IngestorAckPolicy::None),
+            IngestAcknowledgement::Request { timeout, .. } => {
+                Self::parse_ack_timeout(domain, ingestor, timeout)?;
+                // Request intake owns this window; there is no broker position for the polling
+                // source loop to confirm.
+                Ok(IngestorAckPolicy::None)
+            }
             IngestAcknowledgement::Sequential { timeout, retry } => {
                 let timeout = Self::parse_ack_timeout(domain, ingestor, timeout)?;
                 let retry = Self::parse_retry_policy(domain, ingestor, retry)?;
-                Ok(SourceAckPolicy::Sequential { timeout, retry })
+                Ok(IngestorAckPolicy::Sequential { timeout, retry })
             }
             IngestAcknowledgement::Parallel {
                 max,
@@ -82,7 +88,7 @@ impl Runtime {
                 )?;
                 let timeout = Self::parse_ack_timeout(domain, ingestor, timeout)?;
                 let retry = Self::parse_retry_policy(domain, ingestor, retry)?;
-                Ok(SourceAckPolicy::Parallel {
+                Ok(IngestorAckPolicy::Parallel {
                     max_in_flight: addressable_count(max),
                     batch_timeout,
                     timeout,
@@ -101,7 +107,7 @@ impl Runtime {
         value: &str,
     ) -> error_stack::Result<Duration, IngestorStartError> {
         parse_duration_text(value).map_err(|report| {
-            Report::new(SourceStartError::InvalidDuration {
+            Report::new(IngestorConnectorStartError::InvalidDuration {
                 setting,
                 value: value.to_string(),
                 source: report.current_context().clone(),
@@ -231,8 +237,8 @@ mod tests {
             IngestorStartError::Initialize { ingestor: failed, .. } if failed == ingestor
         );
         let cause = matches!(
-            report.downcast_ref::<SourceStartError>(),
-            Some(SourceStartError::InvalidDuration { setting: invalid, .. }) if *invalid == setting
+            report.downcast_ref::<IngestorConnectorStartError>(),
+            Some(IngestorConnectorStartError::InvalidDuration { setting: invalid, .. }) if *invalid == setting
         );
         initialize && cause
     }
@@ -346,8 +352,8 @@ mod tests {
             );
             assert!(
                 matches!(
-                    error.downcast_ref::<SourceStartError>(),
-                    Some(SourceStartError::InvalidDuration { source, .. })
+                    error.downcast_ref::<IngestorConnectorStartError>(),
+                    Some(IngestorConnectorStartError::InvalidDuration { source, .. })
                         if source.to_string() == why
                 ),
                 "{error:?}"
@@ -494,7 +500,7 @@ mod tests {
                 IngestAcknowledgement::Unacknowledged,
             )
             .expect("an unacknowledged mode has nothing to parse"),
-            SourceAckPolicy::None
+            IngestorAckPolicy::None
         );
         assert_eq!(
             Runtime::parse_ingest_acknowledgement(
@@ -506,7 +512,7 @@ mod tests {
                 },
             )
             .expect("valid sequential mode"),
-            SourceAckPolicy::Sequential {
+            IngestorAckPolicy::Sequential {
                 timeout: Duration::from_secs(2),
                 retry: parsed_retry,
             }
@@ -523,7 +529,7 @@ mod tests {
                 },
             )
             .expect("valid parallel mode"),
-            SourceAckPolicy::Parallel {
+            IngestorAckPolicy::Parallel {
                 max_in_flight: NonZeroUsize::new(4).assured("four is non-zero"),
                 batch_timeout: Duration::from_millis(250),
                 timeout: Duration::from_secs(2),

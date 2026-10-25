@@ -1,12 +1,12 @@
-//! Kafka source runtime composition and domain-offset bridge.
+//! Kafka ingestor runtime composition and domain-offset bridge.
 //!
 //! Layer: data plane.
 //!
 //! - **Owns.** Composing the Kafka connector plan with host-owned intake, replicated domain
-//!   offsets, and the partition watch a domain-offset source rebalances on.
-//! - **Depends on.** The connector source contract, typed Kafka plans, and pre-resolved runtime
+//!   offsets, and the partition watch a domain-offset ingestor rebalances on.
+//! - **Depends on.** The connector ingestor contract, typed Kafka plans, and pre-resolved runtime
 //!   handles.
-//! - **Must not know.** The Kafka driver, NSPL parsing, registry validation, or placement
+//! - **Must not know.** The Kafka driver, Plexus parsing, registry validation, or placement
 //!   computation.
 
 #![cfg_attr(
@@ -16,19 +16,20 @@
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
-use nervix_connector::{SourceConnector, SourcePlan};
+use nervix_connector::{IngestorConnector, IngestorPlan};
 use nervix_connector_kafka::{
     KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
     KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit,
-    KafkaOffsetPosition, KafkaSource, KafkaSourceError, KafkaSourceOffsetMode, KafkaSourcePlan,
-    TopicPartitionInspector,
+    KafkaOffsetPosition, KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode,
+    KafkaTopicIngestorPlan, TopicPartitionInspector,
 };
 
 use super::{
     super::*,
-    IngestorStartError, SourceStartError,
-    source::{
-        BrokerSourceInstance, BrokerSourcePolicy, SourceCompanion, SourceInstance, SourceStart,
+    IngestorConnectorStartError, IngestorStartError,
+    connector::{
+        BrokerIngestorInstance, BrokerIngestorPolicy, IngestorCompanion, IngestorInstance,
+        IngestorStart,
     },
 };
 
@@ -38,8 +39,15 @@ struct RuntimeKafkaDomainOffsets {
     domain: DomainName,
     ingestor: IngestorName,
     topic: String,
-    state: KafkaOffsetStateOriginator,
+    /// The originator this ingestor instance acts under, which schedule application replaces when
+    /// a reassignment keeps the instance running.
+    state: StdArc<KafkaOffsetOriginatorSlot>,
 }
+
+const _: () = assert!(matches!(
+    KafkaTopicIngestor::KIND,
+    nervix_models::IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic)
+));
 
 #[async_trait]
 impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
@@ -72,6 +80,7 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
         };
         let start = match last_start {
             nervix_models::DomainStartPoint::Resume => {
+                let state = self.state.current();
                 let missing_partition_timestamp = self
                     .runtime
                     .current_paced_domain_time(&self.domain)
@@ -81,7 +90,7 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
                     })?;
                 let mut positions = Vec::new();
                 for partition in partitions {
-                    if let Some(offset) = self.state.read().next_offset(&self.topic, *partition) {
+                    if let Some(offset) = state.read().next_offset(&self.topic, *partition) {
                         positions.push(KafkaOffsetPosition {
                             topic: self.topic.clone(),
                             partition: *partition,
@@ -114,15 +123,17 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
     }
 
     async fn reset(&self, positions: Vec<KafkaOffsetPosition>) -> KafkaDomainOffsetResult<()> {
+        let state = self.state.current();
         self.runtime
-            .reset_domain_kafka_offsets(&self.state, positions)
+            .reset_domain_kafka_offsets(&state, positions)
             .await
             .change_context(KafkaDomainOffsetError::Reset)
     }
 
     async fn commit(&self, position: KafkaOffsetPosition) -> KafkaDomainOffsetResult<()> {
+        let state = self.state.current();
         self.runtime
-            .commit_domain_kafka_offset(&self.state, position)
+            .commit_domain_kafka_offset(&state, position)
             .await
             .change_context(KafkaDomainOffsetError::Commit)
     }
@@ -146,6 +157,28 @@ impl Runtime {
             .replicated_kafka_offset_states
             .get(&ingestor.kafka_offset_state_placement())?;
         ReplicatedKafkaOffsetState::current_originator(state.value())
+    }
+
+    /// Hands a Kafka ingestor that keeps running here across a reassignment the originator its
+    /// offsets' new binding issued, since the rebind superseded the one the ingestor holds. While
+    /// the ingestor is not running there is nothing to hand it to: its next start takes the
+    /// binding in force.
+    pub(in crate::runtime) fn reissue_kafka_offset_originator(
+        &self,
+        domain: &DomainName,
+        ingestor: &NodeRef,
+        originator: KafkaOffsetStateOriginator,
+    ) {
+        let key = DomainNodeRef {
+            domain: domain.clone(),
+            node: ingestor.clone(),
+        };
+        let Some(running) = self.inner.ingestors.get(&key) else {
+            return;
+        };
+        if let Some(slot) = running.domain_offsets.as_ref() {
+            slot.replace(originator);
+        }
     }
 }
 
@@ -173,14 +206,14 @@ struct KafkaPartitionWatch {
     rebalance: watch::Sender<u64>,
 }
 
-impl SourceCompanion for KafkaPartitionWatch {
+impl IngestorCompanion for KafkaPartitionWatch {
     fn start(self: Box<Self>, shutdown: watch::Receiver<bool>) -> BoxFuture<'static, ()> {
         Box::pin(self.run(shutdown))
     }
 }
 
 impl KafkaPartitionWatch {
-    fn report_failure(&self, error: &Report<KafkaSourceError>) {
+    fn report_failure(&self, error: &Report<KafkaTopicIngestorError>) {
         self.events.report_error(format!(
             "failed to inspect Kafka partitions for ingestor '{}' in domain '{}': {error:#}",
             self.ingestor.as_str(),
@@ -188,17 +221,24 @@ impl KafkaPartitionWatch {
         ));
     }
 
-    async fn run(self: Box<Self>, mut shutdown: watch::Receiver<bool>) {
-        let mut observed = match self.inspector.partitions(self.topic.as_str()).await {
-            Ok(mut partitions) => {
-                partitions.sort_unstable();
-                partitions
-            }
+    /// The topic's partitions in order, or `None` once a failed inspection is reported. The source
+    /// reports a topic the broker does not have itself, so the watch observes it as a topic without
+    /// partitions, and the partitions of the topic once provisioned read as a topology change.
+    async fn observe(&self) -> Option<Vec<i32>> {
+        let mut partitions = match self.inspector.partitions(self.topic.as_str()).await {
+            Ok(partitions) => partitions,
+            Err(error) if error.current_context().is_missing_topic() => Vec::new(),
             Err(error) => {
                 self.report_failure(&error);
-                Vec::new()
+                return None;
             }
         };
+        partitions.sort_unstable();
+        Some(partitions)
+    }
+
+    async fn run(self: Box<Self>, mut shutdown: watch::Receiver<bool>) {
+        let mut observed = self.observe().await.unwrap_or_default();
         loop {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::select! {
@@ -209,14 +249,9 @@ impl KafkaPartitionWatch {
                 }
                 _ = sleep(DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL) => {}
             }
-            let mut current = match self.inspector.partitions(self.topic.as_str()).await {
-                Ok(partitions) => partitions,
-                Err(error) => {
-                    self.report_failure(&error);
-                    continue;
-                }
+            let Some(current) = self.observe().await else {
+                continue;
             };
-            current.sort_unstable();
             if current != observed {
                 observed = current.clone();
                 let epoch = self
@@ -238,15 +273,15 @@ impl KafkaPartitionWatch {
     }
 }
 
-impl KafkaIngestorStartPlan {
-    /// Composes the Kafka source, whose offset mode and partition watch shape its instances, so
+impl KafkaTopicIngestorStartPlan {
+    /// Composes the Kafka ingestor, whose offset mode and partition watch shape its instances, so
     /// it opens them itself rather than through the broker launcher.
     pub(super) async fn compose(
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
-        let KafkaIngestorStartPlan {
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
+        let KafkaTopicIngestorStartPlan {
             client,
             topic,
             offsets,
@@ -264,7 +299,7 @@ impl KafkaIngestorStartPlan {
             KafkaOffsetPlan::Domain(_) => Some(watch::channel(0_u64).0),
             KafkaOffsetPlan::ConsumerGroup(_) => None,
         };
-        let mut companions: Vec<Box<dyn SourceCompanion>> = Vec::new();
+        let mut companions: Vec<Box<dyn IngestorCompanion>> = Vec::new();
         if let Some(rebalance_tx) = rebalance_tx.as_ref() {
             let inspector = TopicPartitionInspector::new(
                 &resolved_client.entries,
@@ -273,6 +308,7 @@ impl KafkaIngestorStartPlan {
                     domain.as_str(),
                     ingestor.name.as_str(),
                 ),
+                runtime.executor().clone(),
             )
             .change_context_lazy(|| ingestor.initialize_failure())?;
             companions.push(Box::new(KafkaPartitionWatch {
@@ -285,17 +321,20 @@ impl KafkaIngestorStartPlan {
             }));
         }
 
+        let mut domain_offsets = None;
         let source_offset_mode = match offsets {
-            KafkaOffsetPlan::ConsumerGroup(group) => KafkaSourceOffsetMode::ConsumerGroup {
+            KafkaOffsetPlan::ConsumerGroup(group) => KafkaTopicIngestorOffsetMode::ConsumerGroup {
                 group_id: group.as_str().to_string(),
                 commit: KafkaGroupCommit::for_acknowledgement(acknowledgement),
             },
             KafkaOffsetPlan::Domain(placement) => {
-                let Some(state) = runtime.kafka_offset_originator(ingestor, &placement) else {
-                    return Err(ingestor.source_start_failure(
-                        SourceStartError::KafkaDomainOffsetsNotAuthoritative,
+                let Some(originator) = runtime.kafka_offset_originator(ingestor, &placement) else {
+                    return Err(ingestor.connector_start_failure(
+                        IngestorConnectorStartError::KafkaDomainOffsetsNotAuthoritative,
                     ));
                 };
+                let state = StdArc::new(KafkaOffsetOriginatorSlot::new(originator));
+                domain_offsets = Some(state.clone());
                 let offsets = KafkaDomainOffsetHost::new(RuntimeKafkaDomainOffsets {
                     lifecycle: runtime
                         .domain_clock_lifecycle(domain)
@@ -306,7 +345,7 @@ impl KafkaIngestorStartPlan {
                     topic: topic.as_str().to_string(),
                     state,
                 });
-                KafkaSourceOffsetMode::Domain {
+                KafkaTopicIngestorOffsetMode::Domain {
                     group_id: format!(
                         "nervix_domain_{}_{}",
                         domain.as_str(),
@@ -320,36 +359,37 @@ impl KafkaIngestorStartPlan {
                 }
             }
         };
-        let source_plan = SourcePlan {
-            connector: KafkaSourcePlan {
+        let source_plan = IngestorPlan {
+            connector: KafkaTopicIngestorPlan {
+                executor: runtime.executor().clone(),
                 config: resolved_client.entries,
                 topic,
                 offset_mode: source_offset_mode,
             },
-            capabilities: ingestor.source_capabilities(instances, acknowledgement.support()),
+            capabilities: ingestor.ingestor_capabilities(instances, acknowledgement.support()),
             acknowledgement,
         };
 
-        // An unacknowledged Kafka consumer reopens after the host's fixed source error delay
+        // An unacknowledged Kafka consumer reopens after the host's fixed ingestor error delay
         // rather than backing off, which the unacknowledged policy's zero retry expresses.
         let retry = acknowledgement.retry();
-        let mut opened: Vec<Box<dyn SourceInstance>> =
+        let mut opened: Vec<Box<dyn IngestorInstance>> =
             Vec::with_capacity(source_plan.capabilities.instances().get().arch_into());
         for instance_index in 0..source_plan.capabilities.instances().get() {
             nervix_primitives::task::consume_budget().await;
-            let source = KafkaSource::open(&source_plan.connector, instance_index)
+            let source = KafkaTopicIngestor::open(&source_plan.connector, instance_index)
                 .await
                 .change_context_lazy(|| ingestor.initialize_failure())?;
-            opened.push(Box::new(BrokerSourceInstance {
+            opened.push(Box::new(BrokerIngestorInstance {
                 source,
-                policy: BrokerSourcePolicy {
+                policy: BrokerIngestorPolicy {
                     acknowledgement,
                     retry,
                     position_class: source_plan.capabilities.position_class(),
                 },
             }));
         }
-        Ok(SourceStart {
+        Ok(IngestorStart {
             instances: opened,
             companions,
             buffered_intake: false,
@@ -359,7 +399,11 @@ impl KafkaIngestorStartPlan {
             // assigned through an ownership handoff.
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved_client.mounts.into_iter().collect(),
-            connector_label: "kafka",
+            connector_label: KafkaTopicIngestor::KIND
+                .connector()
+                .keyword()
+                .to_ascii_lowercase(),
+            domain_offsets,
         })
     }
 }
@@ -380,18 +424,22 @@ mod tests {
         let mut events = runtime.subscribe_events();
         let (rebalance, _changes) = watch::channel(0);
         let watch = KafkaPartitionWatch {
-            inspector: TopicPartitionInspector::new(&[], "report-chain-test".into())
-                .assured("an inspector without brokers can be initialized without a lookup"),
+            inspector: TopicPartitionInspector::new(
+                &[],
+                "report-chain-test".into(),
+                runtime.executor().clone(),
+            )
+            .assured("an inspector without brokers can be initialized without a lookup"),
             domain: domain("orders"),
             ingestor: named("source"),
             topic: named("orders"),
             events: runtime.events().clone(),
             rebalance,
         };
-        let report = Report::new(KafkaSourceError::MissingMetadata {
+        let report = Report::new(KafkaTopicIngestorError::MissingMetadata {
             topic: "orders".into(),
         })
-        .change_context(KafkaSourceError::InspectPartitions);
+        .change_context(KafkaTopicIngestorError::InspectPartitions);
         watch.report_failure(&report);
         let RuntimeEvent::Error(event) = timeout(Duration::from_secs(1), events.recv())
             .await

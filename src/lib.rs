@@ -40,6 +40,7 @@ compile_error!(
 pub mod application;
 #[cfg(test)]
 mod archive_allocation_tests;
+pub mod capacity;
 #[cfg(test)]
 mod captured_logs;
 pub mod cluster;
@@ -64,7 +65,8 @@ pub(crate) mod task_shutdown;
 
 #[cfg(feature = "testing")]
 pub use fault_injection::{
-    DomainResumeBoundary, FaultInjection, WasmCheckpointWindow, WasmStateResetRequestError,
+    BackupCutBoundary, DomainResumeBoundary, FaultInjection, ModelPublicationRefusalKind,
+    StandaloneTransactionBoundary, WasmCheckpointWindow, WasmStateResetRequestError,
 };
 #[cfg(feature = "testing")]
 pub use registry::SchedulerMode;

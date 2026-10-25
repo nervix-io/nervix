@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The SQS client Model, the queue source and sink Models with their delivery mode
+//! - **Owns.** The SQS client Model, the queue source and emitter Models with their delivery mode
 //!   and FIFO grouping, the queue name a source receives with and the rule SQS holds it to, the
 //!   message size SQS itself admits, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations, expressions and the names a body
+//! - **Depends on.** The shared source and emitter declarations, expressions and the names a body
 //!   references.
 //! - **Must not know.** The SQS driver, its configuration keys, or how a queue is received from or
 //!   sent to.
@@ -21,18 +21,20 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{DeadlineKey, DeclaredBounds, DeclaredWait, OmittedDeadline, WaitBound},
     configured_client::configured_client,
-    entity_union::{connector_sinks, connector_sources},
+    entity_union::{connector_emitters, connector_ingestors},
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
     AcknowledgementConfirmation, ByteSizeUnit, ClientName, ConnectorKind, DeclaredDelivery,
-    DeclaredQuiesce, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    EmitterPublishingModeKind, Expression, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, PayloadSizeLimit, PositionClass, RetryPolicy,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    DeclaredQuiesce, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
+    EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
+    EmitterReferenceKind, Expression, HeaderLayout, HeaderModel, IngestAcknowledgement,
+    IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataScope, IngestorReference, IngestorReferenceKind, LocatorDeclaration,
+    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PayloadSizeLimit, PositionClass, RetryPolicy,
 };
 
 configured_client!(Sqs: unpooled, config Nervix, CreateClientSqs => SqsConfigEntry);
@@ -69,7 +71,7 @@ fn sqs_queue_rule(text: &str) -> Result<(), ExternalNameError> {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct SqsQueueSource {
+pub struct SqsQueueIngestor {
     pub client: ClientName,
     pub queue: SqsQueueName,
     pub instances: NonZeroU64,
@@ -77,12 +79,54 @@ pub struct SqsQueueSource {
     pub quiesce: IngestQuiesceMode,
 }
 
-impl SourceEntity for SqsQueueSource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
-        metadata: SourceMetadataScope::Headers,
+/// What the connector of a SQS QUEUE ingestor holds and how long it waits.
+const SQS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, TCP and TLS",
+            bound: WaitBound::Driver("3.1 s"),
+        },
+        DeclaredWait {
+            wait: "the queue URL lookup, a receive and a delete",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &["A request that stalls below 1 byte a second for 5 s is cancelled."],
+};
+
+/// What the connector of a SQS QUEUE emitter holds and how long it waits.
+const SQS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, TCP and TLS",
+            bound: WaitBound::Driver("3.1 s"),
+        },
+        DeclaredWait {
+            wait: "the queue URL lookup at start",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "a send",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
+        },
+    ],
+    driver_limits: &[
+        "A batch request holds at most 10 entries and 256 KiB; a record above 256 KiB is rejected.",
+    ],
+};
+
+impl IngestorDeclaration for SqsQueueIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        // An SQS message's attributes: one value per name, in no order.
+        headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
+        metadata: IngestorMetadataScope::Headers,
         executes_on_every_cluster_node: false,
-        reference: SourceReferenceKind::Client(ConnectorKind::Sqs),
+        reference: IngestorReferenceKind::Client(ConnectorKind::Sqs),
         position_class: PositionClass::BrokerRedelivered,
         acknowledgement_confirmation: AcknowledgementConfirmation::Answered,
         delivery: &[DeclaredDelivery::ACK_SEQUENTIAL],
@@ -92,12 +136,13 @@ impl SourceEntity for SqsQueueSource {
             name: LocatorName::External(SqsQueueName::DECLARATION),
         }),
         options: &[OptionDeclaration::INSTANCES],
+        bounds: SQS_INGESTOR_BOUNDS,
     };
 }
 
-impl SourceBody for SqsQueueSource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Client(&self.client)
+impl IngestorEntityBody for SqsQueueIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Client(&self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -137,15 +182,15 @@ impl SqsIngestMode {
     }
 }
 
-connector_sources! {
+connector_ingestors! {
     connector Sqs = "SQS";
     /// What an SQS source reads.
-    pub enum SqsSource;
+    pub enum SqsIngestor;
     /// The alterations of the ingestors that read an SQS entity.
-    pub enum SqsIngestorAlteration;
+    pub enum SqsQueueIngestorAlteration;
     /// The entities an SQS source reads.
-    pub enum SqsSourceEntity {
-        Queue(SqsQueueSource) = "QUEUE", "SQS";
+    pub enum SqsIngestorEntity {
+        Queue(SqsQueueIngestor) = "QUEUE", "SQS";
     }
 }
 
@@ -161,9 +206,10 @@ const SQS_MESSAGE_SIZE_MAXIMUM: PayloadSizeLimit =
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct SqsQueueSink {
+pub struct SqsQueueEmitter {
+    pub mode: SqsQueuePublishingMode,
     pub client: ClientName,
-    pub queue: String,
+    pub queue: SqsQueueName,
     pub fifo_group: Option<SqsFifoGroup>,
 }
 
@@ -175,24 +221,20 @@ pub enum SqsFifoGroup {
     Expression(Expression),
 }
 
-impl SinkEntity for SqsQueueSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: true,
-        reference: SinkReferenceKind::Client(ConnectorKind::Sqs),
+impl EmitterDeclaration for SqsQueueEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        // An SQS message's attributes: one value per name, the last written, in no order.
+        headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
+        reference: EmitterReferenceKind::Client(ConnectorKind::Sqs),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional {
             maximum: Some(SQS_MESSAGE_SIZE_MAXIMUM),
         },
         requires_batch_transformation: false,
-        publishing_modes: &[
-            EmitterPublishingModeKind::SqsSingle,
-            EmitterPublishingModeKind::SqsBatch,
-        ],
+        publishing_modes: SqsQueuePublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
             keywords: "QUEUE",
-            name: LocatorName::Unquoted {
-                label: "queue_name",
-            },
+            name: LocatorName::External(SqsQueueName::DECLARATION),
         }),
         options: &[OptionDeclaration {
             keywords: "FIFO GROUP",
@@ -212,12 +254,13 @@ impl SinkEntity for SqsQueueSink {
         }],
         envelope: &[],
         properties: &[],
+        bounds: SQS_EMITTER_BOUNDS,
     };
 }
 
-impl SinkBody for SqsQueueSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for SqsQueueEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::Sqs,
         })
@@ -228,12 +271,28 @@ impl SinkBody for SqsQueueSink {
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector Sqs = "SQS";
-    /// What an SQS sink writes.
-    pub enum SqsSink;
-    /// The entities an SQS sink writes.
-    pub enum SqsSinkEntity {
-        Queue(SqsQueueSink) = "QUEUE";
+    /// What an SQS emitter writes.
+    pub enum SqsEmitter;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum SqsQueueEmitterMode;
+    /// The entities an SQS emitter writes.
+    pub enum SqsEmitterEntity {
+        Queue(SqsQueueEmitter, SqsQueuePublishingMode) = "QUEUE";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum SqsQueuePublishingMode {
+        Single { retry_policy: crate::RetryPolicy } => SqsSingle,
+        Batch { retry_policy: crate::RetryPolicy } => SqsBatch,
+    }
+}
+
+impl SqsQueueName {
+    /// Whether this name identifies a FIFO queue, whose publication states its group.
+    pub fn is_fifo(&self) -> bool {
+        self.as_str().ends_with(SQS_FIFO_SUFFIX)
     }
 }

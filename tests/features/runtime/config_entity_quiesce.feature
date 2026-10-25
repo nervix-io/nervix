@@ -18,8 +18,7 @@ Feature: Config entity quiesce classification
         TO SCHEMA config_event;
       CREATE RELAY config_events SCHEMA config_event UNBRANCHED;
 
-      CREATE CLIENT config_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT config_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
@@ -38,9 +37,9 @@ Feature: Config entity quiesce classification
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE EMITTER config_out
+      CREATE ZEROMQ PUSH EMITTER config_out
         FROM config_events
-        TO ZEROMQ config_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING config_event_codec
+        TO config_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING config_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -100,16 +99,15 @@ Feature: Config entity quiesce classification
       BEGIN;
       DROP EMITTER config_out;
       DROP CLIENT config_sink;
-      CREATE CLIENT config_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT config_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false',
           'send_timeout' = '5s'
         };
-      CREATE EMITTER config_out
+      CREATE ZEROMQ PUSH EMITTER config_out
         FROM config_events
-        TO ZEROMQ config_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING config_event_codec
+        TO config_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING config_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

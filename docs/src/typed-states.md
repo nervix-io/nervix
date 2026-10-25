@@ -16,6 +16,26 @@ semantics. The state rules here apply to those systems without replacing their d
 [Execution Plans](./execution-plans.md) follows the validated values into a complete installed
 revision.
 
+Opening a WebSockets ingest metadata builder validates the frame-label byte capacity derived from
+the group's row bound and the vocabulary's frame labels. An estimate that exceeds the address space
+is a typed error before allocation; the ingest group adds the opening operation's context and
+retains the cause for its general-error policy.
+
+The Pulsar emitter's running publishing choice keeps related state together: the `NO ACK` variant
+owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
+confirmation settings. An empty receipt collection means there are no outstanding receipts,
+and an absent failure means none has been observed. These are task-owned execution values,
+never persisted state or substitutes for a missing publishing mode. The
+[connector contract](./connector-contract.md#finishing-an-emitter) owns their completion semantics.
+
+The Kafka emitter installs its effective native queue byte capacity as `NonZeroU64` after librdkafka
+validates the client configuration. Its confirmation window's on-demand settlement returns
+`Some(EmitterRecordId)` for an answered record and `None` for an empty window. A refused enqueue
+keeps the same record until admission succeeds or its wait fails. The optional admission deadline
+is absent while outstanding confirmation answers can provide progress, and is established only
+when a full native queue has no current-window answer left to await. These values are private,
+volatile execution state; the [connector contract](./connector-contract.md) owns their bounds.
+
 A forced-recovery destination that has not installed its execution schedule yet retains that
 absence as an installation wait, rather than inferring that its checkpoints are missing. The
 installation publication and application sequence establish the execution before its fingerprint
@@ -24,6 +44,20 @@ context; an installed identity mismatch remains a validation failure. The detail
 outcomes stay in [Shutdown And Recovery](./shutdown.md#when-the-former-owner-is-gone).
 
 ## A State Has One Owner
+
+Settings use the same construction boundary. A `SettingDefinition` declares its sealed class,
+semantic value, name, one default, optional derivation and validation against typed context.
+`Setting<D>` validates explicit and default values before construction, retains the complete
+typed validation report on failure, and provides no mutable access around that boundary.
+`Prerequisites`, `ClusterParameters` and `NodeCapabilities` classify the fields; omitting the
+class is a compile-time error. [Node Settings](node-settings.md) owns their operational meaning,
+carriers, defaults, change procedures and source ratchet.
+
+Redis subscription plans carry a nonzero bounded message capacity and a validated idle deadline.
+The source's absent subscription means it needs a resume. An installed subscription owns its
+bounded receiver and exact reader task; close and suspend join that task before replacing it.
+Queued messages precede its terminal read failure. These handles, queued payloads and parsing
+state remain volatile and are never part of a persisted Model.
 
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,
 and planning produces an execution plan. Each stage passes forward a value whose type expresses
@@ -90,8 +124,23 @@ The outbound WebSocket source distinguishes a peer Close carrying its code and r
 without a status, an ended stream and a local close-handshake timeout as typed failure states.
 No fabricated close code stands for an absent status. The source removes the exact transport
 before its bounded closing wait, so cancellation leaves it needing a new resume. The
-[connector contract](./connector-contract.md#source-boundary) owns the retry and payload lifetime
+[connector contract](./connector-contract.md#ingestor-boundary) owns the retry and payload lifetime
 effects.
+
+WebSockets upgrade fields cross from literal semantic Models into `WebsocketsUpgradeHeaders`,
+whose private representation enforces HTTP bounds and WebSocket protocol-name restrictions before
+an execution plan receives it. `WebsocketDataFrame` carries either text or binary payload, so a
+text tag cannot accompany invalid UTF-8. Each message retains its connection's immutable response
+header snapshot; the quiesce buffer retains the same handle beside the typed frame kind.
+
+The validated WebSockets client configuration carries the handshake capacity as `NonZeroU16` and
+message/frame limits as `NonZeroU32`. Decimal CONFIG values cross this boundary once; zero,
+overflow and an unschedulable ping-derived idle deadline are typed configuration refusals. The
+effective idle duration is already established before planning. A handshake attempt owns its
+bounded queue until signaling succeeds; only the completed queue moves into ordinary source
+reads. Dropping or failing the negotiating future drops that exact queue, so its frames cannot
+become data for a replacement connection. After a completed queue drains, its absent channel is
+represented by `None`, and steady reads use only task-owned connection state.
 
 Zero work outstanding, an initial sequence value, an empty payload, and a genuinely empty result
 remain ordinary values. A documented scalar function may return zero for a particular input;
@@ -107,6 +156,15 @@ identifier access and verifies offsets and counts before constructing owned valu
 
 ## Absence And Distinct States
 
+**MQTT size admission.** A source packet is either an admitted publish with independently owned
+bytes or an oversized outcome with an optional prepared acknowledgement. Absence means that QoS
+requires none or the client acknowledges automatically. A discard is explicitly deferred for
+its ordinary prefix, unrequested with its deadline, or requested with its confirmation target.
+The following read starts its optional keep-alive deadline after the host acknowledges the
+ordinary prefix; that original deadline then survives cancellation. The connection retains at
+most one discard and clears it only when it returns the size outcome after confirmation. See
+[MQTT source connections](./connector-contract.md#mqtt-source-connections).
+
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input
 is unchanged creates no retirement. A connector session catalog has a private constructor that
@@ -116,6 +174,13 @@ Cleanup failure at a preceding endpoint is reported separately from failure to p
 replacement. A failed preceding configuration supplies no preservation proof: the explicit
 replacement must prepare all of its sessions. An absent `client_id` selects the domain-qualified
 default, with an instance suffix when needed.
+
+**Pulsar input retirement.** The same optional replacement plan distinguishes dropping an input
+from replacing it. A changed owned source requires a comparison of resolved broker address,
+qualified topic and subscription name; ownership and consumer policy are not subscription
+identity. A failed resolution or invalid service address leaves that comparison undecided, reports
+its typed failure and preserves the subscription. It never supplies a default identity or treats
+unknown state as permission to delete broker state.
 
 **Consensus append input.** `None` from the caller's request stream means that input has ended;
 the adapter returns an empty answer stream and opens no transport. `Some` carries the first typed
@@ -224,11 +289,11 @@ that opened it, and a forwarded producer's link key is never reused within its p
 has a reserved value meaning none. The client ingestor endpoint's published counts are genuine
 zero counts, never markers.
 
-**Sources and sinks.** A source or a sink is addressed by the connector that serves it and the
+**Sources and emitters.** A source or an emitter is addressed by the connector that serves it and the
 entity it consumes, and its Model states both in its shape: the union holds one variant per
 connector, that variant holds one variant per entity, and each entity has its own Model with only
 the fields its statement writes. A Kafka topic source therefore cannot hold a Pub/Sub channel, and
-an OpenTelemetry sink is a logs, a traces or a metrics sink, so only a metrics sink carries a
+an OpenTelemetry emitter is a logs, a traces or a metrics emitter, so only a metrics emitter carries a
 metric and no signal value sits beside mappings that might contradict it. The kind that names a
 pair is read from the Model and never stored beside it. An ingestor alteration is nested the same
 way: its head selects one connector and entity, and the operations of that entity set a source of
@@ -238,14 +303,42 @@ its payloads, so a client producer alteration cannot hold one. A stored ingestor
 refused by comparing the two kinds. The names an external system owns, such as a Kafka topic or a NATS subject, are distinct
 types from Nervix names: each is checked against its entity's own rule once, when it is parsed or
 decoded, and keeps its text exactly as written, case included, so a connector sends what the
-statement says. What every source or sink of a pair
+statement says. What every source or emitter of a pair
 declares, whatever its statement says, is declared once on that entity's Model in the vocabulary:
 whether its messages carry headers, the typed `metadata` namespace they expose, whether it runs on
-every node, what its body references, and for a sink whether it writes headers, needs a codec,
+every node, what its body references, and for an emitter whether it writes headers, needs a codec,
 requires batching and which publishing modes it accepts. A client Model names the connector it
-configures as a typed kind, so a source or a sink is matched with its client by comparing kinds
+configures as a typed kind, so a source or an emitter is matched with its client by comparing kinds
 rather than labels. A session producer's source is no transport, so the transport union holds no
 Model of it; the kind union still names it, because capability decisions ask about every source.
+
+Direct-value entities declare their mapped field types in the same vocabulary. Codec and native
+bodies have no direct-mapping contract; column mappings and named protocol fields have distinct
+contracts. The registry infers each mapping's type and checks it without coercion before accepting
+the candidate graph. It also establishes required batching and schedulable transport delivery
+durations there. Planning consumes those guarantees, including the presence of a required batch,
+and an invalid alteration leaves the accepted configuration intact.
+
+RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
+and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch
+timeout; both acknowledged variants own an ACK timeout and retry policy. Zero cannot accidentally
+request AMQP's unlimited prefetch. The
+composed Plexus parser rejects a count outside `1..=65535` instead of truncating it. Runtime
+composition passes either automatic consumption or that exact nonzero count to the engine plan.
+The engine does not recover the mode from a missing timeout or a numeric marker. The host's
+settlement contract separately distinguishes batch commit boundaries from independent per-delivery
+ACK/NACK boundaries.
+
+Each emitter destination also owns its closed publishing enum: a Kafka topic can hold its own
+`NO ACK` or acknowledged policy, while an HTTP request can hold only its request acknowledgement
+policy. Capability metadata comes from those enum declarations. Shared inspection borrows the
+policy; it stores no second mode. Plexus parses a complete `SET TO` body using its declared entity,
+and ALTER carries that declared kind. The vocabulary checks the stored kind and every replacement
+before atomically publishing an alteration, including manually constructed Models. Typed failures
+name both entities. External locators preserve case in entity-specific validated types, including
+one SQS queue-name type shared by sources and destinations. An Iceberg storage-client reference
+retains absence of a resolved backend until the decision layer resolves the actual configured
+client; no default backend fills that boundary.
 
 **Endpoint availability.** Gossip publication carries an optional typed interconnect endpoint.
 Parsing a present advertised endpoint checks its host and port syntax. Membership admission
@@ -304,7 +397,7 @@ Archive preparation reads the first physical tar header into the backup crate's 
 That type carries the regular manifest entry's validated identity and bounded encoded length.
 Restore uses its length to admit manifest decoding before allocating owned archive values. The
 full archive reader uses the same boundary and then verifies the manifest and every section; see
-[Backup And Restore](./backup-and-restore.md).
+[Restore Intake And Preparation](./backup-and-restore-architecture.md#restore-intake-and-preparation).
 
 ## Archived Counts
 
@@ -371,6 +464,13 @@ no eligible destination.
 
 ## External Encodings And Conversion Failure
 
+The emitter connector state owns its stop drain and returns one typed answer: finished with its
+publish report and finish outcome, failed with the typed connector/runtime cause, or elapsed
+without an answer within the host bound. A connector reporting its own finish-deadline failure
+remains a failed finish with that cause. It does not become an absent answer because a host timer
+used the same instant. [Connector Crates And The Connector Contract](connector-contract.md) owns
+the finish contract and [Shutdown And Recovery](shutdown.md) owns the deadline and response grace.
+
 The stopping-node drain action carries a required remaining `Duration` budget. Its sender deducts
 elapsed request time before each leader redirect; the receiving leader owns the typed budget for
 the handoffs it performs. Preparation and activation deadlines are derived from that one value,
@@ -395,12 +495,19 @@ Unix-nanosecond timestamps beside the payload. A kernel reads them as `i64` lane
 on its own, the interconnect wire, and a materialized-state snapshot receive typed timestamps,
 converted once where the row leaves the batch.
 
-A conversion failure never becomes another valid payload value. The MongoDB sink returns a typed
+A conversion failure never becomes another valid payload value. The MongoDB emitter returns a typed
 per-record failure if a value cannot be represented in BSON, including an unsigned value above
 BSON's signed range. It does not publish that record with a replacement BSON null or a changed
 conflict key. An actual null remains null, and other valid records in the batch can proceed under
 the connector's record outcome contract. See [Connector Crates And The Connector Contract](./connector-contract.md)
 for the host's publish and acknowledgement boundaries.
+
+The MongoDB sink also distinguishes each failed write's document answers: delivered, rejected with
+the server's definitive refusal code, or unresolved. An insert's implicit applied-document account
+and a verbose bulk write's explicit applied indexes are separate request variants. The unsatisfied
+write concern remains an optional failure beside those answers; it never replaces the documents'
+individual outcomes. Repeated refusals leave that document unresolved. The connector contract owns
+how these answers narrow the host's retry.
 
 VM integer count and position operands retain their signedness and full magnitude. A large
 unsigned input does not narrow to the largest signed integer; an unsupported result size reports
@@ -511,6 +618,12 @@ execution or recovery. Connectors and the session edge validate external represe
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
 
+The Iceberg emitter validates its configured location into a URL before creating its storage factory.
+The initialized operator belongs to that storage root: a later object path must match its scheme,
+host, port and container identity before its relative key reaches the operator. Table metadata
+refreshes retain the first table's initialized `FileIO`; they do not install a different storage
+owner alongside refreshed metadata. Invalid object references fail at this boundary.
+
 Generated compiler findings carry a required execution-context field. An explicit null means that
 analysis has not established a source contract; it is an unknown effect, not a cold classification.
 The report decoder requires that field even though its value is optional. Complete compiler,
@@ -590,6 +703,15 @@ teardown end the domain's lifetimes and replace all of its route definitions tog
 other domains. Unbind names the exact binding allocation so a preceding source's close cannot end
 its replacement.
 
+Endpoint request policy is either unacknowledged or a typed acknowledged plan carrying positive
+capacity, physical timeout and retry delay. The decision boundary validates these durations and
+the reject-only quiesce contract once. A WebSocket ACK declaration requires a signaling reference;
+composition verifies its prepared outbound encoder before binding intake. Request outcomes retain
+the distinction between local input refusal, temporary non-admission, downstream failure and an
+interrupted lifetime. Only the public response boundary projects those states onto the shared
+client outcome vocabulary. Exact lifetime ending is a cancellation event distinct from absent
+intake; held replies observe the event while later requests observe absence.
+
 A second in-memory decision, the domain's entrypoint plans, resolves every ingestor's source,
 client, codec and routes and every reingestor's inputs, node filter and routes. It records how a
 route's records get their branch key as one of three states: unbranched, keeping the incoming key,
@@ -601,6 +723,12 @@ beside it. A Kafka ingestor's offsets are either a consumer group or domain offs
 their placement. The planner lowers every filter, route and branch construction before a node binds
 them, so a bound route always carries its compiled program and a running task has no
 missing-program or undeclared-branch state to check.
+
+The Kafka source's assignment knowledge distinguishes unknown, cleared and installed partitions.
+Moving an assignment operation into an admitted job leaves its source's knowledge unknown until
+the job returns the confirmed state. Cancellation or failure cannot leave a cached assignment
+claiming that a native operation the caller did not observe completed successfully. The next
+operation therefore reinstalls or clears it rather than trusting an unconfirmed cache.
 
 The owner reports a semantic typed error; contextual propagation uses `error-stack`. A
 per-record conversion error is reported at the record boundary without formatting a fresh
@@ -652,7 +780,7 @@ domains capture stored checkpoints. An empty generation still has its descriptor
 zero group/row counts. RESTORE resets the stored ownership fence to zero explicitly.
 
 A restored domain has a replicated `Pending` installation from creation and an `Installing`
-authority once its state generation is admitted. Neither state permits `START`. Completion of the
+authority once its state generation is admitted. Neither state permits `START`, direct or transactional. Completion of the
 exact current generation removes the installation; terminal command failure does not. Authority
 carries leader identity and term, execution reference, mutation lease revision and generation.
 Checkpoint revision remains guest history and cannot grant installation authority. Validation at
@@ -667,9 +795,10 @@ Runtime storage has distinct initial and restored namespaces; restore installati
 separate from guest-state generation and checkpoint revision. A current checkpoint is either an
 inline checkpoint or a segmented checkpoint with required revision, length and digest. A read
 uses one database view for namespace selection and payload data. A queued checkpoint job retains
-its selected namespace and validates that it remains current before writing. The storage format
-marker is required for nonempty checkpoint storage; corruption or absence fails explicitly and
-requires recreation rather than inventing a namespace for the stored keys.
+its selected namespace and validates that it remains current before writing. A storage format
+marker other than the current one fails explicitly, and so does a missing marker beside nonempty
+checkpoint storage; either requires recreation rather than inventing a namespace for the stored
+keys.
 
 A branch-aggregate metric checkpoint revision identifies one exact encoded payload. Capture
 retains its elapsed fields once, so another descriptor, stream or persistence request cannot choose
@@ -731,8 +860,21 @@ The paced simulation applications represent endpoint-open intent as `CurrentGene
 later paced generation; initial and contract-change opens retain the stopped-domain refusal.
 The opened producer's generation and its paced clock still own permission to plan readings.
 
-Healthy connector status is absence of a failure; a failure contains its safe error and an optional
-retry in one publication. Domain-clock publication carries lifecycle pause, generation and start
+Healthy connector status is absence of a failure publication. TaskStatus represents task-only,
+connector-only and simultaneous failures as distinct states, each retaining its error and optional
+retry. The writer's identity is independent of the retry kind and diagnostic text. Each writer
+clears its own state in the current atomic publication. Selection retains an active task retry
+first, an active connector retry next, and a task error without a retry after that, so a pending
+retry remains visible to drains. Operator inspection reads both owners' errors and the selected
+retry from one immutable publication. Retained observations are immutable.
+
+A Syslog stream source separately represents its listener's existence and the listening socket's
+presence. An absent socket after accept failure requires rebind, while the same listener still
+owns established connection tasks and queued frames; source close ends that retained state.
+The testing capability shares one named listener-fault request between the connector and host:
+the selected bound address and its acknowledgement belong to that same armed request.
+
+Domain-clock publication carries lifecycle pause, generation and start
 point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;
 a present assignment contains its state identity, optional primary, executors and replicas
 together. An absent primary represents an assignment without one primary owner. Replication routes
@@ -743,3 +885,10 @@ assignment available for storage-backed synchronization. Force-flush
 readiness is privately encoded as idle=0, available=1 and closed=2. Only its owning type writes or
 decodes that byte; the coordinator remains the authority for generation and claim state. The hint
 has no cross-location data-publication contract.
+
+Connector execution identity is a nested connector/entity variant. An ingestor plan's Kafka topic
+leaf can only compose the Kafka topic ingestor, and OTEL logs, traces and metrics have distinct
+emitter plans, configurations and concrete types. `IngestorConnector::KIND` and
+`EmitterLifecycle::kind()` expose the vocabulary identity; composition asserts the declared kind
+at compile time. Shared private encoding or endpoint intake state does not add an entity selector
+to those public configurations. A new entity adds a typed variant and implementation.

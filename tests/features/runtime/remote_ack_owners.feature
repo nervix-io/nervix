@@ -21,7 +21,7 @@ Feature: Attached record outcomes across independent branch deliveries
       CREATE SCHEMA ack_owner_key ( branch_name STRING );
       CREATE BRANCH ack_owner_branch SCHEMA ack_owner_key TTL 5m;
       CREATE RELAY ack_owner_records SCHEMA ack_owner_event BRANCHED BY ack_owner_branch;
-      CREATE CLIENT ack_owner_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT ack_owner_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -34,9 +34,9 @@ Feature: Attached record outcomes across independent branch deliveries
           BRANCHED BY ack_owner_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER ack_owner_sink
+      CREATE ATTACHED KAFKA TOPIC EMITTER ack_owner_sink
         FROM ack_owner_records
-        TO KAFKA ack_owner_kafka TOPIC ack_owners_out_{{test_id}}
+        TO ack_owner_kafka TOPIC 'ack_owners_out_{{test_id}}'
           MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING ack_owner_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

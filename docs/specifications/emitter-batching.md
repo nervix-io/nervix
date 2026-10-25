@@ -42,7 +42,7 @@ sees as one message.
   None of them makes a receiver see fewer messages, which is why none of them satisfies this
   contract and why none of them is changed by it.
 
-One public form is replaced rather than extended: the database sinks' `WITH MAX BATCH <n>` is
+One public form is replaced rather than extended: the database emitters' `WITH MAX BATCH <n>` is
 deleted, and the batching clause takes over declaring how many records one write carries. Database
 emitters must be rewritten to the new clause; there is no second spelling and no defaulting of one
 from the other. An emitter Model persisted in the previous shape carries a form that no longer
@@ -55,7 +55,7 @@ exists, so it fails to load with an error naming it and is recreated rather than
   succeeded. Records rejected before that point are never members.
 - **Candidate.** The run of members the emitter offers to the encoder for one batch, taken in
   publication order and bounded by the declared maximum message count.
-- **Batch payload.** The bytes the encoder produced for a candidate, or — for a sink that writes
+- **Batch payload.** The bytes the encoder produced for a candidate, or — for an emitter that writes
   through a driver rather than a codec — the request that carries the candidate.
 - **Batch container.** The shape the batch payload has in the target's own format: a JSON array, a
   CBOR array, an Avro array datum, a protobuf batch message, an `INSERT` carrying many rows, an
@@ -75,13 +75,13 @@ exists, so it fails to load with an error naming it and is recreated rather than
 BATCH MAX MESSAGES <n> MAX SIZE <bytes>
 ```
 
-The clause sits between the complete `TO` sink clause and the `FLUSH` policy:
+The clause sits between the complete `TO` emitter clause and the `FLUSH` policy:
 
 ```nspl,ignore
 CREATE [IF NOT EXISTS] [ATTACHED | DETACHED] EMITTER <name>
   FROM <relay> [WHERE <expr>] [, ...] [COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]]
   [WITH MATERIALIZED STATE ...]
-  TO <sink clause, including MODE, ENCODE USING and construction>
+  TO <emitter clause, including MODE, ENCODE USING and construction>
   [BATCH MAX MESSAGES <n> MAX SIZE <bytes>]
   FLUSH EACH <duration> MAX BATCH SIZE <bytes> | FLUSH IMMEDIATE
   ON MESSAGE ERROR <policy>
@@ -91,20 +91,20 @@ CREATE [IF NOT EXISTS] [ATTACHED | DETACHED] EMITTER <name>
 `BATCH MAX MESSAGES` and `MAX SIZE` are composed keyword phrases. `<n>` is a positive integer
 literal and `<bytes>` is a byte-size literal in the form `MAX BATCH SIZE` already uses, such as
 `1MiB`. Completion offers `BATCH MAX MESSAGES` wherever the clause may begin, and offers it before
-`FLUSH EACH` and `FLUSH IMMEDIATE` for a sink that requires it.
+`FLUSH EACH` and `FLUSH IMMEDIATE` for an emitter that requires it.
 
 ### Where the clause is required
 
-| Emitter sinks | Clause | When it is absent |
+| Emitter emitters | Clause | When it is absent |
 | --- | --- | --- |
 | Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry, Syslog | Optional | One record per message, event or frame |
 | OTEL | Optional | One export request per buffered batch, with no membership bound |
 | Iceberg | Optional | Data files rolled at Iceberg's 512 MiB default target size |
 | ClickHouse, Postgres, MySQL, MongoDB | Required | The statement is rejected: a database write has no unbounded form |
 
-The four database sinks always write several rows in one statement or command, so the bound is not
-optional for them; it moves out of the sink clause, where `WITH MAX BATCH <n>` used to sit, into
-this clause, and gains the encoded-size bound every other sink gets.
+The four database emitters always write several rows in one statement or command, so the bound is not
+optional for them; it moves out of the emitter clause, where `WITH MAX BATCH <n>` used to sit, into
+this clause, and gains the encoded-size bound every other emitter gets.
 
 ### Validation
 
@@ -115,7 +115,7 @@ A statement is rejected, naming the emitter and the offending value, when:
 - `MAX SIZE` is zero.
 - `MAX SIZE` exceeds a maximum the destination protocol itself fixes. The one such maximum today is
   the SQS message limit Nervix enforces, 256 KiB.
-- The clause is absent on a ClickHouse, Postgres, MySQL or MongoDB sink.
+- The clause is absent on a ClickHouse, Postgres, MySQL or MongoDB emitter.
 - The clause is present on a Sentry emitter whose codec declares no `ON EMITTING BATCH`
   transformation. The Sentry envelope protocol admits at most one `event` item per envelope, so
   Nervix cannot derive a container for it and the codec must state one.
@@ -124,27 +124,27 @@ A statement is rejected, naming the emitter and the offending value, when:
 
 ### Altering
 
-`ALTER EMITTER` gains two operations:
+`ALTER <CONNECTOR> <ENTITY> EMITTER` gains two operations:
 
 ```nspl,ignore
-ALTER EMITTER <emitter>
+ALTER <CONNECTOR> <ENTITY> EMITTER <emitter>
     SET BATCH MAX MESSAGES <n> MAX SIZE <bytes>
   | DROP BATCH
   [, ...];
 ```
 
 `SET BATCH` adds or replaces the clause. `DROP BATCH` fails when the emitter has no clause and when
-the sink requires one. Both are `ENTITY_PAUSE` changes: the emitter's sources are gated, collected
-input and pending sink output are drained, the emitter task is replaced, and the gates are
-released. This is the classification sink, publishing-mode and codec changes already use, and it is
+the emitter requires one. Both are `ENTITY_PAUSE` changes: the emitter's sources are gated, collected
+input and pending emitter output are drained, the emitter task is replaced, and the gates are
+released. This is the classification emitter, publishing-mode and codec changes already use, and it is
 what keeps a payload that was prepared under the old limits from being retried under new ones.
-`SET TO <sink clause>` no longer carries a database maximum batch and therefore never changes
-batching; changing a sink to one that requires the clause fails when the clause is absent.
+`SET TO <emitter clause>` no longer carries a database maximum batch and therefore never changes
+batching; changing an emitter to one that requires the clause fails when the clause is absent.
 
 ### Rendering
 
-`SHOW CREATE EMITTER` renders the clause verbatim between the sink clause and `FLUSH`.
-`DESCRIBE EMITTER` gains one line after `sink:`, holding the declared clause:
+`SHOW CREATE EMITTER` renders the clause verbatim between the emitter clause and `FLUSH`.
+`DESCRIBE EMITTER` gains one line after `emitter:`, holding the declared clause:
 
 ```text
 batch: MAX MESSAGES 500 MAX SIZE 1MiB
@@ -171,10 +171,10 @@ another carrier's execution time for their error attribution.
 Within a flush, two records are batch-compatible when every attribute the container
 carries once is equal for both:
 
-- the message key, which is the record's concrete branch key where the sink exposes one
-- the complete ordered sequence of written headers, including repeated values on the sinks that
+- the message key, which is the record's concrete branch key where the emitter exposes one
+- the complete ordered sequence of written headers, including repeated values on the emitters that
   preserve them
-- the ordering group, where the sink delivers in order per group
+- the ordering group, where the emitter delivers in order per group
 - for a codec using the `SYSLOG` wire schema, every syslog header field the codec's schema declares
   except `timestamp`
 
@@ -229,7 +229,7 @@ the `MAX MESSAGES` limit all keep counting the source records that went in.
 ### Exact measurement
 
 `MAX SIZE` bounds the exact byte length of the batch payload: the bytes the codec produced, or the
-bytes of the request a row sink builds. Nervix does not compute a conservative estimate of encoded
+bytes of the request a row emitter builds. Nervix does not compute a conservative estimate of encoded
 size anywhere in this contract, so there is no bound that can be wrong in either direction.
 Escaping, separators, whitespace, field names, length prefixes, nesting, bytes encoding and the
 container's own brackets are all counted, because they are all present in the bytes being measured.
@@ -241,8 +241,8 @@ against either — is computed with checked arithmetic. A total that cannot be r
 typed failure of that batch, never a wrapped or saturated number that would make an oversize
 payload look admissible.
 
-The bound covers the payload, not the framing the sink adds around it. Each sink's row in the
-[sink matrix](#sink-matrix) names exactly what the payload is and what framing sits outside it.
+The bound covers the payload, not the framing the emitter adds around it. Each emitter's row in the
+[emitter matrix](#emitter-matrix) names exactly what the payload is and what framing sits outside it.
 
 ### Bounded encoding and subdivision
 
@@ -272,7 +272,7 @@ limit is rejected with every member it carries, through `ON MESSAGE ERROR` with 
 reference. Where the connector learns that limit, it measures the complete message, framing
 outside the bound included, and rejects it before writing anything, as the
 [native limits](#byte-boundary-and-native-limits) below list. Where it cannot, the destination's
-own answer decides the outcome exactly as it does for a single record. A database sink, which
+own answer decides the outcome exactly as it does for a single record. A database emitter, which
 divides mapped rows into its own requests, instead narrows that division by a limit of its
 destination it knows, as the same native limits describe.
 
@@ -364,7 +364,7 @@ this document. One batch is one RFC 5424 message:
 
 Nothing a member carries is dropped and nothing is merged. The frame's own header is true for every
 member it carries, because the compatibility rule made it so. The container is a property of the
-codec rather than of the sink, so an emitter that publishes `SYSLOG`-encoded payloads to a broker
+codec rather than of the emitter, so an emitter that publishes `SYSLOG`-encoded payloads to a broker
 batches them into the same message.
 
 ## Batch transformations
@@ -408,7 +408,7 @@ ON EMITTING BATCH '{count: length, records: .}'
 Single-record `ON EMITTING` keeps its current meaning exactly: it runs per record, produces one
 value per record, and is what an emitter without the batching clause publishes.
 
-## Sink matrix
+## Emitter matrix
 
 The matrix covers every emitter kind and every variant of it. Variants that change the batch
 contract are listed; variants that do not — a Postgres conflict policy, an Iceberg object-store
@@ -417,15 +417,15 @@ record rather than assumed.
 
 ### Container and receiver interpretation
 
-| Sink | Variants | Batch container | Receiver interpretation |
+| Emitter | Variants | Batch container | Receiver interpretation |
 | --- | --- | --- | --- |
-| Kafka | `NO_ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One Kafka record whose value is the batch payload, with the members' common key and headers | One record; the consumer decodes the container and sees the members |
-| Pulsar | `NO_ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One Pulsar message whose payload is the batch payload | One message carrying the members |
-| RabbitMQ | `NO_ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One AMQP message whose body is the batch payload | One message carrying the members |
-| Redis Pub/Sub | `NO_ACK` | One `PUBLISH` message whose payload is the batch payload | One channel message carrying the members |
+| Kafka | `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One Kafka record whose value is the batch payload, with the members' common key and headers | One record; the consumer decodes the container and sees the members |
+| Pulsar | `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One Pulsar message whose payload is the batch payload | One message carrying the members |
+| RabbitMQ | `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL` | One AMQP message whose body is the batch payload | One message carrying the members |
+| Redis Pub/Sub | `NO ACK` | One `PUBLISH` message whose payload is the batch payload | One channel message carrying the members |
 | MQTT | `QOS 0`, `QOS 1`, `QOS 2` | One PUBLISH packet whose payload is the batch payload | One message on the topic carrying the members |
-| NATS | `NO_ACK` (core), `JETSTREAM ACK SEQUENTIAL`, `JETSTREAM ACK PARALLEL` | One message on the subject whose payload is the batch payload | One core message or one stream message carrying the members |
-| ZeroMQ | `NO_ACK` | One single-frame PUSH message whose frame is the batch payload | One message; the puller reads the first frame and decodes the members |
+| NATS | `NO ACK` (core), `JETSTREAM ACK SEQUENTIAL`, `JETSTREAM ACK PARALLEL` | One message on the subject whose payload is the batch payload | One core message or one stream message carrying the members |
+| ZeroMQ | `NO ACK` | One single-frame PUSH message whose frame is the batch payload | One message; the puller reads the first frame and decodes the members |
 | SQS | `SINGLE`, `BATCH`; standard and FIFO queues | One SQS message whose body is the batch payload, with the members' common attributes and FIFO group | One queue message carrying the members; `MODE BATCH` still packs up to ten such messages per request, and each stays an independent message |
 | Sentry | `ACK` | One envelope with one `event` item, whose event is the single value the codec's batch transformation produced | One Sentry event carrying the members in the field the transformation placed them in, typically `extra` |
 | Syslog | `udp`, `tcp` octet-counting, `tcp` non-transparent, `tls` | One transport frame whose content is the batch payload | One syslog message; with a `SYSLOG` codec its `MSG` is the array of the members' own RFC 5424 messages |
@@ -436,14 +436,14 @@ record rather than assumed.
 | MongoDB | `ACK`; insert, `DO UPDATE`, `DO NOTHING` | One insert or bulk write carrying one document per member | One write of the members as documents |
 | Iceberg | `ACK`; `ON S3`, `ON GCS`, `ON AZURE_BLOB` | One appended Parquet data file whose rows are the members | One data file in the table's next snapshot; the commit appends every data file it wrote |
 
-For every row sink the relationship to the array is exact: the native repeated-record container
+For every row emitter the relationship to the array is exact: the native repeated-record container
 carries the same members, in the same order, counted the same way, confirmed by one response. The
-only difference from a record sink is the encoding the destination requires — a table takes rows,
+only difference from a record emitter is the encoding the destination requires — a table takes rows,
 not an array — and Nervix never changes a destination schema to make an array fit one.
 
 ### Byte boundary and native limits
 
-| Sink | `MAX SIZE` measures | Framing outside the bound | Native limits |
+| Emitter | `MAX SIZE` measures | Framing outside the bound | Native limits |
 | --- | --- | --- | --- |
 | Kafka | The encoded batch payload written as the record value | The record key, headers and the producer's own record framing | Broker `message.max.bytes` and producer `max.request.size`, both 1 MiB by default |
 | Pulsar | The encoded batch payload written as the message payload | Message metadata and properties | Broker `maxMessageSize`, 5 MiB by default, which the broker announces on every connection; a topic's own `maxMessageSize` policy may be smaller |
@@ -471,7 +471,7 @@ announced, with the message headers; the `maxMessageSize` the Pulsar broker anno
 producer's connection opened, with the message metadata and properties, as the Java client counts
 them; and the 256 KiB SQS message with its attributes and FIFO group. A Pulsar topic's own
 `maxMessageSize` policy is applied only by the broker, which answers a larger message with
-`NotAllowedError`; a confirming `MODE ACK` rejects the batch with that answer, while `NO_ACK` has
+`NotAllowedError`; a confirming `MODE ACK` rejects the batch with that answer, while `NO ACK` has
 already completed at producer acceptance. RabbitMQ's `max_message_size` is a broker setting a client
 cannot read, so a larger message reaches the broker, which closes the channel it arrived on with a
 refusal that names the limit and discards every message written on that channel after it. The
@@ -480,12 +480,12 @@ attempt the broker had not answered whose body exceeds the limit, so every membe
 follows `ON MESSAGE ERROR`, and it writes the discarded messages again on a new channel of the same
 connection. A message written ahead of the refused one that the broker had not confirmed may already
 be in its queue, so the attempt then fails as an infrastructure failure and its unresolved payloads
-are retried. In `NO_ACK` a RabbitMQ write completes with one round trip on its channel, which the
+are retried. In `NO ACK` a RabbitMQ write completes with one round trip on its channel, which the
 broker answers only after it has taken every message written before it, so a refused message is
 found before any member is acknowledged. Redis answers a value above `proto-max-bulk-len` with a
 rejection, and ZeroMQ fixes no limit of its own.
 
-A row sink divides its own writes, so the destination limits it knows bound that division rather
+A row emitter divides its own writes, so the destination limits it knows bound that division rather
 than reject a whole batch. A MySQL insert carries no more rows than fit the 65,535 placeholders one
 prepared statement binds, whatever `MAX MESSAGES` allows, and a Postgres write is kept within the
 largest protocol message the server reads, which bounds the message that carries its arrays. A
@@ -497,18 +497,18 @@ driver divides a write above the `maxMessageSizeBytes` the server reports into s
 whose documents it still answers for one by one. MySQL applies `max_allowed_packet` to every packet
 the client sends, so a `MAX SIZE` no larger than it keeps every insert within it.
 
-Iceberg is the one sink with two byte bounds, and they measure different things on purpose:
+Iceberg is the one emitter with two byte bounds, and they measure different things on purpose:
 `BATCH ... MAX SIZE` bounds one written data file, while `COMMIT EACH ... MAX SIZE` bounds the
 Arrow payload bytes staged before a commit becomes due. A declaration that sets the first above the
 second is valid and simply means every commit publishes one data file.
 
 ### Success and partial-failure boundary
 
-| Sink | One batch succeeds when | Partial outcomes |
+| Emitter | One batch succeeds when | Partial outcomes |
 | --- | --- | --- |
-| Kafka | The producer queue accepts the record (`NO_ACK`), or its delivery report arrives (`ACK`) | None: the record is the unit, so the batch is delivered or it is not |
-| Pulsar | The producer accepts the message (`NO_ACK`), or the broker receipt arrives (`ACK`) | None |
-| RabbitMQ | The channel answers the round trip that follows the write (`NO_ACK`), or the publisher confirm arrives (`ACK`) | None |
+| Kafka | The producer queue accepts the record (`NO ACK`), or its delivery report arrives (`ACK`) | None: the record is the unit, so the batch is delivered or it is not |
+| Pulsar | The producer accepts the message (`NO ACK`), or the broker receipt arrives (`ACK`) | None |
+| RabbitMQ | The channel answers the round trip that follows the write (`NO ACK`), or the publisher confirm arrives (`ACK`) | None |
 | Redis Pub/Sub | The server answers `PUBLISH` | None |
 | MQTT | The client accepts the packet (QoS 0), `PUBACK` arrives (QoS 1), or the QoS 2 handshake completes | None |
 | NATS | The connection flush completes (core), or the `PubAck` arrives (JetStream) | None |
@@ -526,7 +526,7 @@ second is valid and simply means every commit publishes one data file.
 One successful external confirmation acknowledges every member of the batch it confirms. Native
 per-member outcomes apply only where the external contract names the member, which is MongoDB's
 per-document write result. Everywhere else the batch is the smallest unit the destination can
-speak about, and record-specific isolation — where a sink already has it — is a failure path that
+speak about, and record-specific isolation — where an emitter already has it — is a failure path that
 runs after the batch failed, not a second way to publish.
 
 ## Interaction with existing policies
@@ -538,10 +538,10 @@ runs after the batch failed, not a second way to publish.
 | `COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]` | Unchanged. It changes the size of incoming Arrow carriers; compatible rows from successive carriers may share a payload within one emitter flush. Collection stays independent per source relay and concrete branch. |
 | `MODE` | Unchanged in form. A confirmation window counts publishes: without batching a publish is one record, with batching it is one batch. `ACK PARALLEL MAX 100` with `MAX MESSAGES 500` therefore exposes up to 50,000 records to one ambiguity window, which is the declaration's meaning, not a hidden multiplier. |
 | SQS `MODE BATCH` | Unchanged and orthogonal. `MODE` groups independent SQS messages into one service request; batching decides how many source records one SQS message carries. A request still holds at most ten messages and at most the service's request limit. |
-| Database `WITH MAX BATCH <n>` | Deleted. The batching clause declares the same bound for the four database sinks and adds the encoded-size bound. |
+| Database `WITH MAX BATCH <n>` | Deleted. The batching clause declares the same bound for the four database emitters and adds the encoded-size bound. |
 | Iceberg `COMMIT EACH <duration> MAX SIZE <bytes>` | Unchanged. It decides when staged rows are published; batching decides how the published rows are divided into data files. One commit may append several data files. |
 | `ATTACHED` / `DETACHED` | Unchanged. A detached emitter still acknowledges upstream at relay fan-out and still performs its declared confirmations and retries. |
-| `ON MESSAGE ERROR` | Applies per member, as described under [failure semantics](#failure-semantics). `SEND TO` error records travel to a relay, not to the sink, so they are never batched by this clause. |
+| `ON MESSAGE ERROR` | Applies per member, as described under [failure semantics](#failure-semantics). `SEND TO` error records travel to a relay, not to the emitter, so they are never batched by this clause. |
 | `ON GENERAL ERROR` | Unchanged. |
 | Materialized state | Unchanged. Dependencies are node-wide and resolved per record before construction. |
 | Branches | Unchanged, and reinforced: a batch never spans branches, and branch identity still collapses only at a successful external boundary. |
@@ -553,7 +553,7 @@ runs after the batch failed, not a second way to publish.
 The emitter host owns membership. It selects the members, builds the payload, and applies the
 outcome; a connector receives a payload and answers for it.
 
-- One successful external confirmation acknowledges every member of that batch, at the sink
+- One successful external confirmation acknowledges every member of that batch, at the emitter
   completion point `MODE` selects.
 - A definitive rejection of the batch rejects every member through `ON MESSAGE ERROR`, with one
   shared error reference so an operator can see that they failed together.
@@ -603,7 +603,7 @@ count and the measured or declared byte limit, and never a payload value.
 - A domain's execution snapshot is unchanged: a batch inherits the snapshot of the buffered batch
   it came from, and a retry does not re-evaluate expressions at a later domain time.
 - Clock ownership is unchanged. `FLUSH EACH` and Iceberg's commit cadence stay domain-logical,
-  while retry backoff, acknowledgement keepalive and sink acknowledgement timeouts stay on the
+  while retry backoff, acknowledgement keepalive and emitter acknowledgement timeouts stay on the
   physical clock. Batching declares no duration and therefore belongs to neither clock.
 
 ## Observability
@@ -641,9 +641,9 @@ or `trace` detail and carry no payload values.
 ### A broker emitter, with and without the clause
 
 ```nspl
-CREATE IF NOT EXISTS EMITTER kafka_notifications
+CREATE IF NOT EXISTS KAFKA TOPIC EMITTER kafka_notifications
   FROM notifications
-  TO KAFKA kafka_main TOPIC notifications_out
+  TO kafka_main TOPIC 'notifications_out'
     MODE ACK PARALLEL MAX 100 ACK TIMEOUT 30s
       RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING notification_codec
@@ -769,10 +769,11 @@ per record declares no batching clause, which is the default.
 ### A database emitter
 
 ```nspl,ignore
-  TO POSTGRES postgres_client INSERT TO TABLE my_table
+CREATE POSTGRES TABLE EMITTER to_pg FROM notifications
+  TO postgres_client TABLE 'my_table'
+  MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
   VALUES { "user_id" = input.user_id, "action" = LOWER(input.action) }
   ON CONFLICT ("user_id") DO UPDATE
-  MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
   BATCH MAX MESSAGES 500 MAX SIZE 8MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
 ```
@@ -810,7 +811,7 @@ existing emission scenarios already provision.
 
 | Area | Must be demonstrated | Observed through |
 | --- | --- | --- |
-| NSPL, Models and execution plans | The clause parses, completes, renders in `SHOW CREATE` and `DESCRIBE`, validates its limits, is required for the four database sinks, and reaches the runtime as a typed plan; `WITH MAX BATCH` no longer exists | NSPL statements and `DESCRIBE EMITTER` |
+| NSPL, Models and execution plans | The clause parses, completes, renders in `SHOW CREATE` and `DESCRIBE`, validates its limits, is required for the four database emitters, and reaches the runtime as a typed plan; `WITH MAX BATCH` no longer exists | NSPL statements and `DESCRIBE EMITTER` |
 | Wire-size upper bounds and bounded encoders | Encoding stops at `MAX SIZE`, the measured size is exact for every format, subdivision halves and re-measures without assuming monotonicity, and a singleton is rejected only after a bounded encoding of it alone | Consumed payload bytes and `ON MESSAGE ERROR` records |
 | Batch-aware jaq and format-native containers | Every container in the [container table](#containers-by-format), the protobuf batch message with and without a transformation, and the zero-output, multiple-output, evaluation-failure and unwritable-value failures | Kafka, and a protobuf consumer for the batch message |
 | Bounded payload assembly | Packing order across Arrow carriers, compatibility on source relay, exact branch, key, headers and ordering group, singleton shape, nothing for an empty carrier, partial batches, and no batch cadence of its own | Kafka and SQS, with interleaved records from at least two branches and source relays |
@@ -819,9 +820,9 @@ existing emission scenarios already provision.
 | Syslog, Sentry and OTEL | The syslog frame and its compatibility rule over UDP, TCP and TLS; a Sentry envelope accepted with the batch event; bounded OTLP export requests for logs, traces and metrics over both transports | A Nervix syslog ingestor, Bugsink, Quickwit and Jaeger |
 | SQL and MongoDB | Bounded inserts and bulk writes, the encoded-size bound, existing conflict policies, and record-specific isolation after a failed batch | ClickHouse, Postgres, MySQL, MongoDB |
 | Iceberg staging and commit | Data files bounded by rows and written bytes, several files in one commit, and the commit cadence unchanged | An Iceberg REST catalog over object storage |
-| ALTER, drain and shutdown | `SET BATCH` and `DROP BATCH` as entity-pause changes, pending output drained under the old limits, force flush and drain publishing partial batches, and branch eviction dropping a prepared payload | `ALTER EMITTER` with a live emitter, and node drain |
+| ALTER, drain and shutdown | `SET BATCH` and `DROP BATCH` as entity-pause changes, pending output drained under the old limits, force flush and drain publishing partial batches, and branch eviction dropping a prepared payload | `ALTER <CONNECTOR> <ENTITY> EMITTER` with a live emitter, and node drain |
 | Configuration, size bounds and metrics | The `batch:` line, the four payload metric families with and without the clause, and the subdivision counter rising when the two limits disagree | `DESCRIBE EMITTER` and the metrics endpoint |
-| Qualification | Every sink kind and variant in the [sink matrix](#sink-matrix) against its receiver, every limit in the [limits table](#limits), every failure in [failure semantics](#failure-semantics), and no throughput regression for an emitter without the clause | All of the above, plus the repository's benchmark comparison |
+| Qualification | Every emitter kind and variant in the [emitter matrix](#emitter-matrix) against its receiver, every limit in the [limits table](#limits), every failure in [failure semantics](#failure-semantics), and no throughput regression for an emitter without the clause | All of the above, plus the repository's benchmark comparison |
 
 ## Shared-contract ownership
 
@@ -830,7 +831,7 @@ records the boundaries that constrain the delivery tickets; none of them is rene
 
 | Shared contract | Owner | This epic's part |
 | --- | --- | --- |
-| Sink contracts, connector crate boundaries and emitter host lifecycle | The connector-crate epic | Batching behavior only; host integration follows that epic's qualification, and completed extractions are consumed rather than repeated |
+| Emitter contracts, connector crate boundaries and emitter host lifecycle | The connector-crate epic | Batching behavior only; host integration follows that epic's qualification, and completed extractions are consumed rather than repeated |
 | Branch identity, acknowledgement state and MongoDB value conversion | The typed-states epic | Reuse the current typed states and exact conversion errors; no sentinel, no duplicate branch identity, no null-on-conversion-failure |
 | Codec, connector, validation and diagnostic error types | The typed-errors epic | Extend the existing reported semantic errors for the new failures; do not repeat that epic's conversion sweep |
 | Emitter `ALTER` impact classification, gates, drain and transaction inspection | The transaction-quiesce epic | Contribute the batching clause's classification and its tests; reuse that epic's planner and report owners |

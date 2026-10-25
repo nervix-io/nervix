@@ -26,8 +26,7 @@ Feature: MySQL emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-mysql-{{test_id}}'
@@ -43,14 +42,12 @@ Feature: MySQL emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT mysql_client
-        TYPE MYSQL
+        CREATE MYSQL CLIENT mysql_client
         POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{mysql_addr}}'
         };
-        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_out_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+        CREATE MYSQL TABLE EMITTER to_mysql FROM notifications TO mysql_client TABLE 'notifications_mysql_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -108,8 +105,7 @@ Feature: MySQL emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-mysql-conflict-{{test_id}}'
@@ -124,14 +120,12 @@ Feature: MySQL emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT mysql_client
-        TYPE MYSQL
+        CREATE MYSQL CLIENT mysql_client
         POOL SIZE MIN 2 MAX 8
         CONFIG {
           'addr' = '{{mysql_addr}}'
         };
-        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_conflict_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } ON CONFLICT <conflict_action> MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+        CREATE MYSQL TABLE EMITTER to_mysql FROM notifications TO mysql_client TABLE 'notifications_mysql_conflict_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } ON CONFLICT <conflict_action> BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -203,7 +197,7 @@ Feature: MySQL emission
       FROM WIRE JSON SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_ingress TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_ingress CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-mysql-batch-{{test_id}}'
       };
@@ -216,15 +210,13 @@ Feature: MySQL emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT mysql_client TYPE MYSQL POOL SIZE MIN 2 MAX 8 CONFIG {
+      CREATE MYSQL CLIENT mysql_client POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = '{{mysql_addr}}'
       };
-      CREATE EMITTER to_mysql
+      CREATE MYSQL TABLE EMITTER to_mysql
       FROM notifications
-      TO MYSQL mysql_client INSERT TO TABLE batch_mysql_{{test_id}}
-      VALUES { "mysql_user_id" = input.user_id }
-      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-      BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      TO mysql_client TABLE 'batch_mysql_{{test_id}}'
+      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { "mysql_user_id" = input.user_id } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
@@ -290,17 +282,14 @@ Feature: MySQL emission
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO second_notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT mysql_shared
-        TYPE MYSQL
+      CREATE MYSQL CLIENT mysql_shared
         POOL SIZE MIN 1 MAX 1
         CONFIG {
           'addr' = '{{mysql_addr}}'
         };
-      CREATE EMITTER to_mysql FROM notifications
-        TO MYSQL mysql_shared INSERT TO TABLE poison_mysql_{{test_id}}
-        VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+      CREATE MYSQL TABLE EMITTER to_mysql FROM notifications
+        TO mysql_shared TABLE 'poison_mysql_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO emitter_errors
         SET error_code = error.code,
@@ -308,17 +297,13 @@ Feature: MySQL emission
             source_user_id = input.user_id,
             source_action = input.action
         ON GENERAL ERROR LOG;
-      CREATE EMITTER first_writer FROM first_notifications
-        TO MYSQL mysql_shared INSERT TO TABLE first_held_{{test_id}}
-        VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+      CREATE MYSQL TABLE EMITTER first_writer FROM first_notifications
+        TO mysql_shared TABLE 'first_held_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER second_writer FROM second_notifications
-        TO MYSQL mysql_shared INSERT TO TABLE second_held_{{test_id}}
-        VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+      CREATE MYSQL TABLE EMITTER second_writer FROM second_notifications
+        TO mysql_shared TABLE 'second_held_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION emitter_errors_subscription TO emitter_errors;
       START;

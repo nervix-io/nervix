@@ -10,14 +10,12 @@ CREATE WIRE JSON SCHEMA benchmark_wire MODE STRICT (
 CREATE CODEC benchmark_codec
   FROM WIRE JSON SCHEMA benchmark_wire
   TO SCHEMA benchmark_record;
-CREATE CLIENT kafka_input
-  TYPE KAFKA
+CREATE KAFKA CLIENT kafka_input
   CONFIG {
     'bootstrap.servers' = '{{ kafka_bootstrap_servers }}',
     'auto.offset.reset' = 'earliest'
   };
-CREATE CLIENT kafka_output
-  TYPE KAFKA
+CREATE KAFKA CLIENT kafka_output
   CONFIG {
     'bootstrap.servers' = '{{ kafka_bootstrap_servers }}',
     'enable.idempotence' = 'true',
@@ -48,10 +46,10 @@ CREATE JUNCTION benchmark_transform_{{ lane }}
         value = upper(input.value)
     FLUSH IMMEDIATE
     ON MESSAGE ERROR LOG;
-CREATE EMITTER kafka_out_{{ lane }}
+CREATE KAFKA TOPIC EMITTER kafka_out_{{ lane }}
   FROM benchmark_records_{{ lane }}
-  TO KAFKA kafka_output TOPIC {{ output_topic }}
-    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  TO kafka_output TOPIC '{{ output_topic }}'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING benchmark_codec
   INHERIT ALL
   FLUSH EACH {{ parameters.emitter_flush_each }} MAX BATCH SIZE {{ parameters.emitter_max_batch_size }}

@@ -21,13 +21,12 @@ Feature: Pulsar ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_pulsar_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_pulsar_notifications;
-        CREATE CLIENT pulsar_main
-        TYPE PULSAR
+        CREATE PULSAR CLIENT pulsar_main
         CONFIG {
           'addr' = '{{pulsar_addr}}'
         };
         CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-        FROM pulsar_main TOPIC 'notifications_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_{{test_id}}' INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM pulsar_main TOPIC 'notifications_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_{{test_id}}' OWNED BY INGESTOR INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -78,13 +77,12 @@ Feature: Pulsar ingestion
       FROM WIRE JSON SCHEMA notification_wire
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT pulsar_main
-      TYPE PULSAR
+      CREATE PULSAR CLIENT pulsar_main
       CONFIG {
         'addr' = '{{pulsar_addr}}'
       };
       CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-      FROM pulsar_main TOPIC 'notifications_modes_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_modes_{{test_id}}' MODE <mode>
+      FROM pulsar_main TOPIC 'notifications_modes_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_modes_{{test_id}}' OWNED BY INGESTOR MODE <mode>
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -144,13 +142,12 @@ Feature: Pulsar ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_pulsar_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_pulsar_notifications;
-        CREATE CLIENT pulsar_main
-        TYPE PULSAR
+        CREATE PULSAR CLIENT pulsar_main
         CONFIG {
           'addr' = '{{pulsar_addr}}'
         };
         CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-        FROM pulsar_main TOPIC 'notifications_reconnect_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_reconnect_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM pulsar_main TOPIC 'notifications_reconnect_{{test_id}}' SUBSCRIPTION 'nervix_cucumber_reconnect_{{test_id}}' OWNED BY INGESTOR MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -208,15 +205,15 @@ Feature: Pulsar ingestion
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT pulsar_ingress TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT pulsar_ingress CONFIG {
         'addr' = '{{pulsar_stallable_addr}}'
       };
-      CREATE CLIENT pulsar_egress TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT pulsar_egress CONFIG {
         'addr' = '{{pulsar_addr}}'
       };
       CREATE PULSAR TOPIC INGESTOR confirmed_notifications
         FROM pulsar_ingress TOPIC 'confirmed_acks_in_{{test_id}}'
-          SUBSCRIPTION 'nervix_confirmed_acks_{{test_id}}'
+          SUBSCRIPTION 'nervix_confirmed_acks_{{test_id}}' OWNED BY INGESTOR
           MODE ACK SEQUENTIAL ACK TIMEOUT 120s RETRY POLICY BACKOFF 200ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
@@ -225,8 +222,8 @@ Feature: Pulsar ingestion
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER forwarded_notifications FROM notifications
-        TO PULSAR pulsar_egress TOPIC confirmed_acks_out_{{test_id}}
+      CREATE PULSAR TOPIC EMITTER forwarded_notifications FROM notifications
+        TO pulsar_egress TOPIC 'confirmed_acks_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 120s RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL
@@ -297,15 +294,15 @@ Feature: Pulsar ingestion
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT pulsar_ingress TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT pulsar_ingress CONFIG {
         'addr' = '{{pulsar_stallable_addr}}'
       };
-      CREATE CLIENT pulsar_egress TYPE PULSAR CONFIG {
+      CREATE PULSAR CLIENT pulsar_egress CONFIG {
         'addr' = '{{pulsar_addr}}'
       };
       CREATE PULSAR TOPIC INGESTOR rejected_notifications
         FROM pulsar_ingress TOPIC 'unsent_redeliveries_in_{{test_id}}'
-          SUBSCRIPTION 'nervix_unsent_redeliveries_{{test_id}}'
+          SUBSCRIPTION 'nervix_unsent_redeliveries_{{test_id}}' OWNED BY INGESTOR
           MODE ACK SEQUENTIAL ACK TIMEOUT 120s RETRY POLICY BACKOFF 200ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
@@ -314,8 +311,8 @@ Feature: Pulsar ingestion
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER forwarded_notifications FROM notifications
-        TO PULSAR pulsar_egress TOPIC unsent_redeliveries_out_{{test_id}}
+      CREATE PULSAR TOPIC EMITTER forwarded_notifications FROM notifications
+        TO pulsar_egress TOPIC 'unsent_redeliveries_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 120s RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL

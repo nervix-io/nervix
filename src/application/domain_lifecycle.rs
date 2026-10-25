@@ -33,6 +33,7 @@ use nervix_primitives::time::interval;
 use thiserror::Error;
 
 use super::{
+    backup::cut_reach::CutReach,
     command_result::CommandResult,
     domain_clock::current_timestamp,
     entity_gate::DrainOutstanding,
@@ -111,6 +112,38 @@ pub(in crate::application) enum DomainDrainMode {
 pub(in crate::application) struct ResolvedDomainStart {
     pub(in crate::application) concrete_start: DomainStartPoint,
     pub(in crate::application) clock: DomainClockState,
+}
+
+/// The retained log cap, in bytes, a test build's saturated-log refusal reports.
+#[cfg(feature = "testing")]
+const REFUSED_WRITE_LOG_CAP_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The retained log a test build's saturated-log refusal reports: one byte past its cap.
+#[cfg(feature = "testing")]
+const REFUSED_WRITE_RETAINED_LOG_BYTES: u64 = REFUSED_WRITE_LOG_CAP_BYTES + 1;
+
+/// The wait for reclamation a test build's saturated-log refusal reports.
+#[cfg(feature = "testing")]
+const REFUSED_WRITE_RECLAMATION_WAIT: Duration = Duration::from_secs(5);
+
+/// The error a leader's consensus refuses a write with, before appending it, when a test build
+/// armed a model publication refusal of this kind.
+#[cfg(feature = "testing")]
+impl From<crate::fault_injection::ModelPublicationRefusalKind> for ConsensusError {
+    fn from(refusal: crate::fault_injection::ModelPublicationRefusalKind) -> Self {
+        match refusal {
+            crate::fault_injection::ModelPublicationRefusalKind::LapsedLease => {
+                Self::LeadershipLost { leader_id: None }
+            }
+            crate::fault_injection::ModelPublicationRefusalKind::SaturatedLog => {
+                Self::LogRetentionSaturated {
+                    retained: REFUSED_WRITE_RETAINED_LOG_BYTES,
+                    cap: REFUSED_WRITE_LOG_CAP_BYTES,
+                    waited: REFUSED_WRITE_RECLAMATION_WAIT,
+                }
+            }
+        }
+    }
 }
 
 impl SessionServiceImpl {
@@ -282,6 +315,21 @@ impl SessionServiceImpl {
         }
     }
 
+    /// Drains a pause this transaction engaged for its current step before the coordinator that
+    /// engaged it stopped. That coordinator may have stopped before its drain finished, and this
+    /// node, a new leader among them, may not have installed the paused state yet.
+    pub(in crate::application) async fn drain_adopted_domain_pause(
+        &self,
+        domain: &DomainName,
+    ) -> Result<(), Report<DomainAlterError>> {
+        self.apply_current_cluster_state()
+            .await
+            .change_context_lazy(|| DomainAlterError::StopIngestion {
+                domain: domain.clone(),
+            })?;
+        self.wait_for_paused_domain_drain(domain).await
+    }
+
     pub(in crate::application) async fn wait_for_paused_domain_drain(
         &self,
         domain: &DomainName,
@@ -343,12 +391,13 @@ impl SessionServiceImpl {
                     details: error.to_string(),
                 })
             })?;
-        let mut nodes = self.inner.cluster.live_node_ids().await;
-        if !nodes.contains(self.inner.consensus.local_node_id()) {
-            nodes.push(self.inner.consensus.local_node_id().clone());
-        }
-        nodes.sort();
-        nodes.dedup();
+        // Beside the live nodes, the drain observes every node the schedule assigns the domain's
+        // work to, so a scheduled node that stops answering holds the round open instead of
+        // leaving its admitted work unobserved.
+        let schedule = self.inner.consensus.current_schedule().await;
+        let reach = CutReach::of(schedule.domain(domain));
+        let mut nodes = self.cut_live_nodes().await;
+        nodes.extend(reach.executors().cloned());
         let deadline = nervix_primitives::time::Instant::now() + timeout;
         let mut polling = interval(Duration::from_millis(50));
         polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
@@ -565,6 +614,16 @@ impl SessionServiceImpl {
             crate::fault_injection::DomainResumeBoundary::Proposal,
         ))
         .await;
+        // A test build can make the leader refuse the release that follows a refused model step
+        // publication, the same way it refused that publication: before appending it.
+        #[cfg(feature = "testing")]
+        if let Some(refusal) = self.inner.runtime.take_model_pause_release_refusal(domain) {
+            return Err(Report::new(ConsensusError::from(refusal)).change_context(
+                DomainAlterError::ResumeDomain {
+                    domain: domain.clone(),
+                },
+            ));
+        }
         let resumed = self
             .inner
             .consensus

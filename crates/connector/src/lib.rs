@@ -2,23 +2,24 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The source and sink contracts, including the rule a row or row request sink divides
+//! - **Owns.** The ingestor and emitter contracts, including the rule a row or row request emitter divides
 //!   mapped rows into requests by, the host handles a connector may call, and the value types that
 //!   cross the boundary: a client's resolved configuration entries and the resource
-//!   mounts they read files from, the TLS material and HTTP client settings built from those
-//!   entries, service URL parsing, the parsed retry policy, physical deadlines and the actual-UTC
-//!   read a source stamps arrival with, the transport-header trait a source message implements,
-//!   the typed ingest metadata row with its Kafka, syslog and header scopes, and the confirmation
-//!   window a brokered sink awaits its broker's answers through.
+//!   mounts they read files from, the deadline keys read from them with the one meaning every
+//!   connector gives them, the TLS material and HTTP client settings built from those entries,
+//!   service URL parsing, the parsed retry policy, physical deadlines and the actual-UTC
+//!   read an ingestor stamps arrival with, the transport-header trait an ingestor message implements,
+//!   the typed ingest metadata row with its Kafka, syslog, WebSockets and header scopes, and the confirmation
+//!   window a brokered emitter awaits its broker's answers through.
 //! - **Depends on.** The vocabulary, Arrow, `error-stack` and Tokio, the node's bounded executor a
-//!   sink host hands a connector, and the TLS, HTTP client, URL and template libraries a client
+//!   emitter host hands a connector, and the TLS, HTTP client, URL and template libraries a client
 //!   configuration is built with.
 //! - **Must not know.** Relays, branches, schedules, Models, the registry or the runtime. A
 //!   connector receives a typed plan and host handles, and reaches nothing past them. It never
 //!   resolves a resource mount: the host resolves one and hands in the resolved paths.
 //!
 //! Every external integration belongs in its own crate under `crates/connectors/`, which implements
-//! the source contract, the sink contract, or both. A connector crate is an engine: the host drives
+//! the ingestor contract, the emitter contract, or both. A connector crate is an engine: the host drives
 //! it, and it decides nothing about the graph. It names this crate, the vocabulary, Arrow,
 //! `error-stack`, Tokio and its own driver, and never the server or another connector crate. The
 //! host keeps task lifecycle, branch routing, acknowledgement tracking, quiesce, retry and flush
@@ -42,16 +43,17 @@
 )]
 
 mod client_config;
+mod client_deadline;
 mod confirmation_window;
 mod http_client;
 mod ingest_metadata;
 // Reached through its own path rather than re-exported here, so the owner the clock-boundary check
 // declares stays the only file in this crate that names the capability constructor and UTC read.
+mod emitter;
+mod ingestor;
 pub mod physical_time;
 mod row_requests;
 mod service_url;
-mod sink;
-mod source;
 mod tls;
 
 pub use client_config::{
@@ -60,34 +62,37 @@ pub use client_config::{
     optional_bool_client_config_value, optional_client_config_value, read_tls_file,
     render_client_config_template,
 };
+pub use client_deadline::{ConfiguredDeadline, DeadlineElapsed};
 pub use confirmation_window::{
     BrokerAnswer, BrokerVerdict, ConfirmationWindow, ConfirmationWindowError,
+};
+pub use emitter::{
+    AckConfirmation, BrokerPublishingMode, EmitterBoundedExecution, EmitterCommitReport,
+    EmitterEventReporter, EmitterFinish, EmitterFinishError, EmitterFinishResult,
+    EmitterGeneralErrorHandler, EmitterHost, EmitterHostServices, EmitterHttpRequest,
+    EmitterLifecycle, EmitterOpenError, EmitterRecord, EmitterRecordAcknowledgementServices,
+    EmitterRecordAcknowledgements, EmitterRecordId, EmitterRecordPosition, EmitterRetryDelay,
+    EmitterRowRequest, EmitterStagedCommit, EmitterStagingDirectory, EmitterStartResult,
+    EmitterTransientErrorStatus, EmitterWriteError, EmitterWriteResult, HttpRequestEmitter,
+    MappedEmitterCarrier, MappedEmitterMember, MappedEmitterRows, PerRecordOutcome,
+    PerRecordOutcomeParts, PreparedRowRequest, RecordEmitter, RejectedEmitterMember, RowEmitter,
+    RowRequestEmitter, RowRequestPreparation,
 };
 pub use http_client::{HttpClientConfig, HttpClientConfigError};
 pub use ingest_metadata::{
     IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, RetainedIngestHeaders,
 };
+pub use ingestor::{
+    BrokerIngestorConnector, IngestorAckPolicy, IngestorAcknowledgementOutcome,
+    IngestorAcknowledgementSupport, IngestorBatch, IngestorBatchAcknowledgement,
+    IngestorBatchAcknowledgementServices, IngestorBatchRequest, IngestorCapabilities,
+    IngestorConnector, IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError,
+    IngestorIntakeMessage, IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll,
+    IngestorPollMessage, IngestorReadCancellation, IngestorResult, IngestorResume,
+    IngestorSettlement, PacedIngestorConnector,
+};
 pub use row_requests::{
     ExceededLimit, MeasuredRequest, RowOversize, RowRequest, RowRequestLimits, RowRequests,
 };
 pub use service_url::{ServiceUrl, ServiceUrlError};
-pub use sink::{
-    AckConfirmation, BrokerPublishingMode, HttpRequestSink, MappedSinkCarrier, MappedSinkMember,
-    MappedSinkRows, PerRecordOutcome, PerRecordOutcomeParts, PreparedRowRequest, RecordSink,
-    RejectedSinkRecord, RowRequestPreparation, RowRequestSink, RowSink,
-    SinkAcknowledgementServices, SinkAcknowledgements, SinkBoundedExecution, SinkCommitReport,
-    SinkEventReporter, SinkFinish, SinkFinishError, SinkFinishResult, SinkGeneralErrorHandler,
-    SinkHost, SinkHostServices, SinkHttpRequest, SinkLifecycle, SinkPublishError,
-    SinkPublishResult, SinkRecord, SinkRecordId, SinkRecordPosition, SinkRetryDelay,
-    SinkRowRequest, SinkStagedCommit, SinkStagingDirectory, SinkStartError, SinkStartResult,
-    SinkTransientErrorStatus,
-};
-pub use source::{
-    BrokerSourceConnector, PacedSourceConnector, SourceAckPolicy, SourceAcknowledgementOutcome,
-    SourceAcknowledgementSupport, SourceBatch, SourceBatchAcknowledgement,
-    SourceBatchAcknowledgementServices, SourceBatchRequest, SourceCapabilities, SourceConnector,
-    SourceError, SourceHost, SourceHostServices, SourceIntakeError, SourceIntakeMessage,
-    SourceIntakeResult, SourceMessage, SourcePlan, SourcePoll, SourcePollMessage,
-    SourceReadCancellation, SourceResult, SourceResume,
-};
-pub use tls::{RustlsClientConfigSource, TlsClientConfigError, install_rustls_crypto_provider};
+pub use tls::{RustlsClientConfigProvider, TlsClientConfigError, install_rustls_crypto_provider};

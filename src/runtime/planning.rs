@@ -581,7 +581,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
         parse_branch_flush_policy(kind, identifier, &route.relay, &route.flush_policy)?;
     let mut branch = BranchInstanceTemplate {
         revision: ProcessorPlanRevision::new(),
-        source_kind: kind,
+        entity_kind: kind,
         source: RelayName::from(identifier),
         root_relay: route.relay.clone(),
         branch: None,
@@ -630,7 +630,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
     processors.insert(spec.processor.clone(), template);
     Ok(BranchInstanceTemplate {
         revision: ProcessorPlanRevision::new(),
-        source_kind: spec.kind,
+        entity_kind: spec.kind,
         source: RelayName::from(&spec.processor),
         root_relay,
         branch: node.branch.clone(),

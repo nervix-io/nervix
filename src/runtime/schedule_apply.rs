@@ -349,6 +349,14 @@ impl Runtime {
                     Box::pin(self.swap_scheduled_nodes(&desired.domain, desired.clone(), change))
                         .await;
                 if let Err(error) = swap_result {
+                    // A failed emitter stop reinstalls its task with the emitter's held records.
+                    // Rebuilding here would tear that task down and hide its finish outcome.
+                    if matches!(
+                        error.downcast_ref::<ExecutionBuildError>(),
+                        Some(ExecutionBuildError::StopEmitter { .. })
+                    ) {
+                        return Err(error);
+                    }
                     let reason = format!("{error:#}");
                     warn!(
                         domain = desired.domain.as_str(),
@@ -615,6 +623,15 @@ impl Runtime {
                 )
                 .change_context_lazy(build)?;
             let tasks = placement.tasks;
+            // A node that keeps executing here keeps its task, while its placement has just
+            // rebound the replicated state it owns to a new assignment generation. A Kafka ingestor
+            // kept this way commits through the originator that generation issued.
+            if was_local
+                && executes_locally
+                && let Some(originator) = placement.kafka_offset_state
+            {
+                self.reissue_kafka_offset_originator(domain, entity, originator);
+            }
 
             if let Some(relay) = materialized_relay {
                 relay_states_moved = true;

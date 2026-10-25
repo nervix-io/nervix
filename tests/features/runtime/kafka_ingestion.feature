@@ -23,8 +23,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -84,8 +83,7 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA forwarding_event_wire
         TO SCHEMA forwarding_event;
       CREATE RELAY forwarding_events SCHEMA forwarding_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -101,10 +99,10 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER kafka_forward
+      CREATE ATTACHED KAFKA TOPIC EMITTER kafka_forward
         FROM forwarding_events
-        TO KAFKA kafka_main TOPIC forwarding_output_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        TO kafka_main TOPIC 'forwarding_output_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING forwarding_event_codec
         INHERIT ALL
         FLUSH EACH 500ms MAX BATCH SIZE 1MiB
@@ -121,7 +119,7 @@ Feature: Kafka ingestion
       | 3            |
 
   @ingestor_group_programs
-  Scenario Outline: Kafka NO_ACK executes ingestor programs once for a collected ingest group
+  Scenario Outline: Kafka NO ACK executes ingestor programs once for a collected ingest group
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -145,8 +143,7 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA grouped_event_wire
         TO SCHEMA grouped_event;
       CREATE RELAY grouped_events SCHEMA routed_grouped_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -178,7 +175,7 @@ Feature: Kafka ingestion
       | 1            |
       | 3            |
 
-  Scenario Outline: Kafka NO_ACK keeps the rest of a collected ingest group when one message fails to decode
+  Scenario Outline: Kafka NO ACK keeps the rest of a collected ingest group when one message fails to decode
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -200,8 +197,7 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA mixed_event_wire
         TO SCHEMA mixed_event;
       CREATE RELAY mixed_events SCHEMA mixed_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -243,7 +239,7 @@ Feature: Kafka ingestion
       | 1            |
       | 3            |
 
-  Scenario Outline: Kafka NO_ACK keeps the nested lists of a collected ingest group exact when a <wire_format> message is refused inside one
+  Scenario Outline: Kafka NO ACK keeps the nested lists of a collected ingest group exact when a <wire_format> message is refused inside one
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -267,8 +263,7 @@ Feature: Kafka ingestion
       CREATE SCHEMA nested_tenant ( tenant STRING );
       CREATE BRANCH by_nested_tenant SCHEMA nested_tenant TTL 5m;
       CREATE RELAY nested_events SCHEMA nested_event BRANCHED BY by_nested_tenant;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -336,8 +331,7 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA poison_event_wire
         TO SCHEMA poison_event;
       CREATE RELAY poison_events SCHEMA poison_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -416,8 +410,7 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA poison_event_wire
         TO SCHEMA poison_event;
       CREATE RELAY poison_events SCHEMA poison_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -479,8 +472,7 @@ Feature: Kafka ingestion
       CREATE CODEC unfolded_codec FROM JSON TO SCHEMA unfolded_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY unfolded_events SCHEMA unfolded_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -552,8 +544,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -610,7 +601,7 @@ Feature: Kafka ingestion
       CREATE CODEC refused_commit_codec
         FROM WIRE JSON SCHEMA refused_commit_wire TO SCHEMA refused_commit_event;
       CREATE RELAY refused_commit_records SCHEMA refused_commit_event UNBRANCHED;
-      CREATE CLIENT refused_commit_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT refused_commit_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -651,6 +642,89 @@ Feature: Kafka ingestion
       | 1            |
       | 3            |
 
+  # Each of the eight instances joined the group, so destroying its consumer waits for an answer to
+  # its LeaveGroup request, which librdkafka gives five seconds. The retirements hold the node's two
+  # connector workers for as long as the broker holds that answer.
+  @kafka_consumer_retirement
+  Scenario Outline: A Kafka ingestor dropped on <cluster_size> nodes retires its consumers on the connector workers while another ingestor delivers
+    Given a mock Kafka broker serves topic "retired_{{test_id}}"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA retired_event ( seq I64 );
+      CREATE WIRE JSON SCHEMA retired_event_wire MODE STRICT ( seq integer );
+      CREATE CODEC retired_event_codec
+        FROM WIRE JSON SCHEMA retired_event_wire TO SCHEMA retired_event;
+      CREATE RELAY retired_events SCHEMA retired_event UNBRANCHED;
+      CREATE KAFKA CLIENT retiring_kafka CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR retiring_source
+        FROM retiring_kafka TOPIC 'retired_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'retired_group_{{test_id}}' INSTANCES 8
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING retired_event_codec
+        TO retired_events INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE VHOST edge retire-{{test_id}}.example.com;
+      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR healthy_source
+        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retired_event_codec
+        TO retired_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION retirement_subscription TO retired_events;
+      START;
+      """
+    And mock Kafka message is published to topic "retired_{{test_id}}"
+      """
+      {"seq":1}
+      """
+    Then within "60s" the relay subscription receives a payload
+      """
+      "seq":1
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "retiring_source" is saved as placeholder "kafka_owner"
+    Given the mock Kafka broker holds every answer
+    When these Plexus statements are executed on the leader node
+      """
+      DROP INGESTOR retiring_source;
+      """
+    Then within "30s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_running" with labels eventually reaches at least 1
+      """
+      class="connector_storage"
+      """
+    When http payload is posted to host "retire-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":42}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "seq":42
+      """
+    When the mock Kafka broker releases its answers
+    Then within "60s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_pending" with labels eventually equals 0
+      """
+      class="connector_storage"
+      """
+    And within "60s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_running" with labels eventually equals 0
+      """
+      class="connector_storage"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Kafka ACK PARALLEL applies FILTER WHERE and route WHERE across a whole batch of interleaved branches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -682,8 +756,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant I64 );
         CREATE IF NOT EXISTS BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
         CREATE RELAY events SCHEMA routed_event BRANCHED BY by_tenant;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -777,8 +850,7 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA sourced_event_wire
         TO SCHEMA sourced_event;
       CREATE RELAY sourced_events SCHEMA routed_sourced_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -855,8 +927,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -871,7 +942,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -916,8 +987,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -932,7 +1002,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -978,8 +1048,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -994,7 +1063,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1040,8 +1109,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -1094,8 +1162,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -1110,7 +1177,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE DETACHED EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE DETACHED KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1155,8 +1222,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -1171,7 +1237,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1220,8 +1286,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -1244,7 +1309,7 @@ Feature: Kafka ingestion
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM forwarded_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM forwarded_notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1294,8 +1359,7 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -1318,7 +1382,7 @@ Feature: Kafka ingestion
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM forwarded_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM forwarded_notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1354,3 +1418,169 @@ Feature: Kafka ingestion
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+
+  @kafka_owned_broker_state
+  Scenario Outline: Kafka ingestor reports a missing topic by name, never creates it, and starts once it is provisioned
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+        CREATE KAFKA CLIENT kafka_main
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'unprovisioned_{{test_id}}' OFFSET BY <offsets> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
+        START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
+      """
+      transient error: KAFKA topic 'unprovisioned_{{test_id}}' does not exist
+      """
+    And Kafka topic "unprovisioned_{{test_id}}" does not exist
+    When the operator provisions Kafka topic "unprovisioned_{{test_id}}" with 1 partitions
+    And Kafka message is published to topic "unprovisioned_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+
+    Examples:
+      | cluster_size | offsets                                           |
+      | 1            | CONSUMER GROUP 'nervix_unprovisioned_{{test_id}}' |
+      | 1            | DOMAIN                                            |
+      | 3            | CONSUMER GROUP 'nervix_unprovisioned_{{test_id}}' |
+      | 3            | DOMAIN                                            |
+
+  @kafka_owned_broker_state
+  Scenario Outline: CREATE KAFKA CLIENT refuses a Kafka CONFIG that lets a consumer create topics
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements fail with "client 'kafka_main' in domain '{{domain}}' cannot set CONFIG key 'allow.auto.create.topics'"
+      """
+      CREATE KAFKA CLIENT kafka_main
+      CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'allow.auto.create.topics' = 'true'
+      };
+      """
+    And these Plexus statements are executed on the leader node
+      """
+      CREATE KAFKA CLIENT kafka_main
+      CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}'
+      };
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @kafka_owned_broker_state
+  Scenario Outline: A Kafka ingestor with domain-owned offsets keeps no consumer group on the broker, running or dropped
+    Given a <cluster_size> node nervix cluster is started
+    And Kafka topic "dropped_{{test_id}}" exists with 1 partitions
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+        CREATE KAFKA CLIENT kafka_main
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+        CREATE KAFKA TOPIC INGESTOR kafka_dropped
+        FROM kafka_main TOPIC 'dropped_{{test_id}}' OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE KAFKA TOPIC INGESTOR kafka_grouped
+        FROM kafka_main TOPIC 'dropped_{{test_id}}' OFFSET BY CONSUMER GROUP 'operator_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
+        START;
+      """
+    And Kafka message is published to topic "dropped_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+    And within "30s" Kafka lists these consumer groups
+      """
+      operator_{{test_id}}
+      """
+    And Kafka lists none of these consumer groups
+      """
+      nervix_domain_{{domain}}_kafka_dropped
+      nervix_domain_watch_{{domain}}_kafka_dropped
+      nervix_schedule_watch_{{domain}}_kafka_dropped
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      DROP INGESTOR kafka_dropped;
+      """
+    Then Kafka lists none of these consumer groups
+      """
+      nervix_domain_{{domain}}_kafka_dropped
+      nervix_domain_watch_{{domain}}_kafka_dropped
+      nervix_schedule_watch_{{domain}}_kafka_dropped
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

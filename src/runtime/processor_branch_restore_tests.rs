@@ -1,7 +1,7 @@
 //! A restarted processor resumes every branch and open window its checkpoints hold, or none of them
 //! until a later attempt can.
 
-use std::{collections::VecDeque, path::PathBuf, time::Duration};
+use std::{collections::VecDeque, time::Duration};
 
 use ahash::HashMap;
 use arrow_array::{ArrayRef, Int64Array, RecordBatch};
@@ -111,7 +111,7 @@ impl OpenWindowFixture {
         };
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            source_kind: ModelKind::WindowProcessor,
+            entity_kind: ModelKind::WindowProcessor,
             source: RelayName::from(&processor),
             root_relay: input_relay.clone(),
             branch: Some(named::<BranchName>("by_tenant")),
@@ -144,16 +144,14 @@ impl OpenWindowFixture {
         let database = fjall::Database::builder(directory.path())
             .open()
             .expect("the state database opens");
-        let runtime = Runtime::with_persistence_and_temp_dir(
-            executor,
-            None,
-            Some(database),
-            Duration::from_secs(60),
-            ConfiguredFaultInjection::default(),
-            PathBuf::from(DEFAULT_TEMP_DIR),
-            DEFAULT_RESTORE_STAGING_MAX_BYTES,
-        )
-        .expect("the runtime opens its state store");
+        let environment = RuntimeEnvironment {
+            db: Some(database),
+            ..RuntimeEnvironment::transient(executor)
+        };
+        let settings = RuntimeSettings::resolve(Some(Duration::from_secs(60)), None)
+            .expect("the runtime settings declare no validation");
+        let runtime = Runtime::with_environment(environment, settings)
+            .expect("the runtime opens its state store");
         let domain = domain("restarted");
         install_unpaced_test_domain(&runtime, &domain);
         publish_state_identity(
@@ -342,16 +340,27 @@ impl OpenWindowFixture {
 
 impl RunningProcessor {
     async fn checkpoint(&self) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
-        timeout(WAIT, ScheduledNodeTask::checkpoint_via(&self.commands))
-            .await
-            .expect("the processor answers its checkpoint")
+        timeout(
+            WAIT,
+            ScheduledNodeTask::checkpoint_via(
+                &self.commands,
+                ProcessorCheckpointPurpose::OwnershipHandoff,
+            ),
+        )
+        .await
+        .expect("the processor answers its checkpoint")
     }
 
     /// The lifecycle the processor checkpoints once its restore has installed its branches.
     async fn restored_lifecycle(&self) -> PersistedRuntimeStateEntry {
         timeout(WAIT, async {
             loop {
-                match ScheduledNodeTask::checkpoint_via(&self.commands).await {
+                match ScheduledNodeTask::checkpoint_via(
+                    &self.commands,
+                    ProcessorCheckpointPurpose::OwnershipHandoff,
+                )
+                .await
+                {
                     Ok(lifecycle) => return lifecycle,
                     Err(error) => {
                         assert!(

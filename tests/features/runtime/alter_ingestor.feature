@@ -143,7 +143,7 @@ Feature: Altering ingestors
       CREATE RELAY buffered_events SCHEMA buffered_event UNBRANCHED CAPACITY 2;
       CREATE VHOST buffered_edge http-{{test_id}}-buffered-alter.example.com;
       CREATE ENDPOINT buffered_ingress ON buffered_edge PATH '/buffered-alter' TYPE HTTP;
-      CREATE CLIENT buffered_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT buffered_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -152,8 +152,8 @@ Feature: Altering ingestors
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING buffered_event_codec
         TO buffered_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER buffered_out FROM buffered_events
-        TO ZEROMQ buffered_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      CREATE ZEROMQ PUSH EMITTER buffered_out FROM buffered_events
+        TO buffered_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING buffered_event_codec INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -259,8 +259,7 @@ Feature: Altering ingestors
         TO SCHEMA paced_event;
       CREATE RELAY paced_events SCHEMA paced_event UNBRANCHED;
 
-      CREATE CLIENT paced_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT paced_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
@@ -277,9 +276,9 @@ Feature: Altering ingestors
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE EMITTER paced_out
+      CREATE ZEROMQ PUSH EMITTER paced_out
         FROM paced_events
-        TO ZEROMQ paced_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING paced_event_codec
+        TO paced_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING paced_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

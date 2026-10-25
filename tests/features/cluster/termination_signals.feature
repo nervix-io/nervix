@@ -14,7 +14,7 @@ Feature: Process termination signals
       | SIGTERM |
 
   Scenario Outline: A repeated termination signal forces termination while graceful shutdown is stalled
-    Given a nervix-server process is started with drain timeout "10m"
+    Given a nervix-server process is started with drain timeout "45s"
     And the server process is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -38,12 +38,12 @@ Feature: Process termination signals
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT unreachable_sink TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT unreachable_sink CONFIG {
         'protocol' = 'tcp',
         'addr' = '{{syslog_emit_addr}}'
       };
-      CREATE EMITTER held_output FROM held_events
-        TO SYSLOG unreachable_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      CREATE SYSLOG COLLECTOR EMITTER held_output FROM held_events
+        TO unreachable_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING held_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE

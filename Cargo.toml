@@ -67,6 +67,7 @@ shuttle = [
   "nervix-connector-sentry/shuttle",
   "nervix-connector-sqs/shuttle",
   "nervix-connector-syslog/shuttle",
+  "nervix-connector-websockets/shuttle",
   "nervix-connector-zeromq/shuttle",
   "nervix-consensus/shuttle",
   "nervix-deadlock?/shuttle",
@@ -78,7 +79,11 @@ shuttle = [
 ]
 # Test-only feature used by the standard test recipes for fault injection, random multinode
 # scheduling, and lower intentionally expensive password hashing parameters.
-testing = ["nervix-connector-kafka/testing", "nervix-consensus/testing"]
+testing = [
+  "nervix-connector-kafka/testing",
+  "nervix-connector-syslog/testing",
+  "nervix-consensus/testing",
+]
 
 [dependencies]
 ahash = { workspace = true }
@@ -170,6 +175,7 @@ nervix-roto = { workspace = true }
 nervix-simd-kernels = { workspace = true }
 nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
+nix = { workspace = true, features = ["fs"] }
 nonzero_ext = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true, default-features = false, features = [
@@ -283,6 +289,7 @@ rstest = { workspace = true }
 rumqttc = { workspace = true }
 sqlx = { workspace = true }
 tempfile = { workspace = true }
+tokio-util = { workspace = true, features = ["codec"] }
 zeromq = { workspace = true }
 
 [[test]]
@@ -477,6 +484,7 @@ ciborium = "0.2"
 clap = "4.6.0"
 clap_complete = "4.6.0"
 clickhouse = { version = "0.15.0", default-features = true }
+combine = { version = "4.6.8", features = ["tokio"] }
 concurrent-queue = "2.5.0"
 console_error_panic_hook = "0.1"
 criterion = "0.5"
@@ -730,6 +738,7 @@ shuttle-tokio-util = { package = "shuttle-tokio-util", version = "0.7" }
 signal-hook = "0.4"
 simd-json = { version = "0.17.0", features = ["known-key"] }
 simdutf8 = "0.1.5"
+socket2 = "0.6"
 sorted-vec = "0.8"
 sqlx = { version = "0.9", default-features = false, features = [
   "postgres",

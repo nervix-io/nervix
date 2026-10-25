@@ -7,7 +7,7 @@ export RUSTUP_AUTO_INSTALL := "0"
 # CI builds do not need incremental compilation artifacts.
 export CARGO_INCREMENTAL := if env("CI", []) != [] { "0" } else { env("CARGO_INCREMENTAL", []) }
 
-rust_toolchain_version := shell("toml get -r rust-toolchain.toml toolchain.channel")
+rust_toolchain_version := shell("python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path(\"rust-toolchain.toml\").read_text())[\"toolchain\"][\"channel\"])'")
 rustflags := env('RUSTFLAGS', '')
 build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
@@ -263,7 +263,7 @@ test: tests-deps
 
 # Check capability examples with rustdoc, including runtime exports enabled only for tests.
 test-capability-docs: build-web-console
-    cargo test --package nervix-server --package nervix-roto --package nervix-vm \
+    cargo test --package nervix-server --package nervix-roto --package nervix-vm --package nervix-models \
         --package nervix-consensus --package nervix-dns --package nervix-recovery \
         --package nervix-simd-kernels --features nervix-server/testing --doc
 
@@ -306,6 +306,20 @@ test-native-metadata-restore-repeat: tests-deps
 # Replay a compiled scenario binary, including a saved pre-fix reproducer, without rebuilding it.
 test-scenarios-binary binary *args: download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ quote(args) }}
+
+# Replay a compiled ONNX inspection owner with an explicit runtime library.
+test-onnx-owner-binary binary library *args:
+    ORT_DYLIB_PATH={{ quote(library) }} {{ quote(binary) }} {{ quote(args) }}
+
+# Prepare diagnostic scenario executables for a supervised public replay.
+build-diagnostic-scenarios selection: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(selection) }} in
+        deloxide|deloxide-order|deloxide-stress) ;;
+        *) echo "expected deloxide, deloxide-order or deloxide-stress" >&2; exit 2 ;;
+    esac
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --no-run --package nervix-server --features {{ quote("testing," + selection) }} --lib --test scenarios
 
 # Reproduce a focused public scenario in one diagnostic selection, with the same prerequisites
 # as the complete lane. This does not replace the lane's inventory and evidence qualification.
@@ -355,6 +369,40 @@ test-diagnostic-harness selection *args: tests-deps
         echo "diagnostic harness selection completed no tests or ignored selected tests" >&2
         exit 1
     fi
+
+# Run focused library owners in a diagnostic selection and qualify their retained process evidence.
+test-diagnostic-lib selection test *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(selection) }} in
+        deloxide|deloxide-order|deloxide-stress) ;;
+        *) echo "expected deloxide, deloxide-order or deloxide-stress" >&2; exit 2 ;;
+    esac
+    library_attempts={{ quote(cargo_target_dir + "/deloxide/focused/" + selection) }}
+    mkdir -p "$library_attempts"
+    library_attempt="$(mktemp -d "$library_attempts/library.XXXXXX")"
+    export NERVIX_DEADLOCK_EVIDENCE="${NERVIX_DEADLOCK_EVIDENCE:-$library_attempt/evidence}"
+    if [[ -e "$NERVIX_DEADLOCK_EVIDENCE" ]] && { [[ ! -d "$NERVIX_DEADLOCK_EVIDENCE" ]] || [[ -n "$(ls -A -- "$NERVIX_DEADLOCK_EVIDENCE")" ]]; }; then
+        echo "diagnostic library evidence directory must be empty" >&2
+        exit 2
+    fi
+    mkdir -p "$NERVIX_DEADLOCK_EVIDENCE"
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    echo "diagnostic library attempt: $library_attempt"
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --package nervix-server --features {{ quote("testing," + selection) }} --lib -- --exact {{ quote(test) }} {{ quote(args) }} 2>&1 | tee "$library_attempt/library.log"
+    if ! rg --quiet '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$library_attempt/library.log"; then
+        echo "diagnostic library selection completed no tests or ignored selected tests" >&2
+        exit 1
+    fi
+    shopt -s nullglob
+    library_evidence=("$NERVIX_DEADLOCK_EVIDENCE"/deadlock-*.rkyv)
+    if [[ ${#library_evidence[@]} -eq 0 ]]; then
+        echo "diagnostic library selection retained no process evidence" >&2
+        exit 1
+    fi
+    for evidence_file in "${library_evidence[@]}"; do
+        {{ quote(cargo_target_dir + "/debug/nervix-deadlock-report") }} qualify "$evidence_file"
+    done
 
 # Focused kernel tests: every SIMD level the host supports and the forced scalar fallback,
 # beside the crate's doctests.
@@ -443,6 +491,11 @@ coverage-consensus output *args:
 coverage-client-core output *args:
     cargo llvm-cov --no-clean --package nervix-client-core --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
+# Measure one connector crate's unit tests, for a patch confined to it, through the configured
+# compiler cache.
+coverage-connector package output *args:
+    cargo llvm-cov --no-clean --package {{ package }} --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
 test-scenarios-reuse *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
@@ -507,6 +560,11 @@ check-package-lib package *args:
 # Run the unit tests of one workspace package whose tests need no server test dependencies.
 test-package-lib package *args:
     cargo test --package {{ package }} --lib -- {{ args }}
+
+# Run the vocabulary settings' compiling and class-rejection API examples.
+test-settings:
+    cargo test --package nervix-models --lib settings::
+    cargo test --package nervix-models --doc SettingDefinition
 
 # Run one integration test target of one workspace package whose tests need no server test
 # dependencies, such as the vocabulary's representation properties.
@@ -665,7 +723,7 @@ test-deadlock-probes features="deloxide" *args:
 # The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
 # and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
 # this list to the inventory.
-shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-consensus", "nervix-server", "nervix-deadlock"]
+shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-rabbitmq", "nervix-connector-sqs", "nervix-connector-syslog", "nervix-connector-websockets", "nervix-consensus", "nervix-server", "nervix-deadlock"]
 
 # Explore every registered Shuttle check of a production owner, each in its own process: under the
 # exploration it declares, then under the uncontrolled-nondeterminism detector. The inventory in
@@ -965,6 +1023,15 @@ test-dns *args:
 # nervix-connector-* integration crate rather than the server lib.
 test-connectors *args:
     cargo test --package 'nervix-connector*' --lib -- {{ args }}
+
+# Run the WebSockets transport and signaling owners without unrelated connector test roots.
+test-websockets *args:
+    cargo test --package nervix-connector-websockets --lib -- {{ args }}
+
+# Diagnose one WebSockets owner check with its replayable schedule. `test-shuttle` remains the
+# inventory, completion and nondeterminism gate for qualification.
+test-websockets-shuttle check:
+    SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-connector-websockets/" + check) }} cargo test --package nervix-connector-websockets --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
 
 # Run the session wire codec tests and the gRPC and WebSocket sessions that carry its frames.
 test-client-wire *args:
@@ -1807,6 +1874,14 @@ coverage-turmoil output:
 coverage-native-extras *producers:
     python3 -m scripts.native_coverage --target-dir {{ quote(cargo_target_dir) }} run {{ producers }}
 
+# CI calls these only after the owning phase succeeds. Exported coverage and compiler evidence
+# live outside these Cargo build outputs; failed phases keep their outputs for diagnosis.
+clean-ci-docs:
+    cargo clean --target-dir {{ quote(cargo_target_dir / "typed-ratchet/docs") }}
+
+clean-ci-benchmarks:
+    cargo clean --profile dev --target-dir {{ quote(cargo_target_dir / "native-coverage-build") }}
+
 # Exercise the native coverage collector: its producer inventory, source policy, selection and
 # failure handling, then instrumented runs of a fixture crate through the real toolchain.
 test-native-coverage:
@@ -2111,7 +2186,8 @@ autoinherit-check:
     git diff --exit-code
 
 # Each package/configuration is a separate parallel dependency. The one Cargo recipe below
-# hashes its arguments and toolchain into an isolated directory, and `just --jobs N` bounds it.
+# hashes its package, arguments and toolchain into one of four shared build directories, and
+# `just --jobs N` bounds it.
 clippy_all_features_packages := [
     "nervix-approx-into",
     "nervix-arbitrary",
@@ -2187,6 +2263,7 @@ clippy_shuttle_packages := [
     "nervix-execution",
     "nervix-interconnect",
     "nervix-wasm",
+    "nervix-connector-websockets",
 ]
 
 [private, parallel]
@@ -2218,7 +2295,7 @@ cargo-clippy-shuttle jobs=default_jobs: (run-with-jobs "shuttle-clippy-targets" 
 shuttle-clippy-targets: \
     *(clippy-target *clippy_shuttle_packages ["--lib", "--features", "shuttle"]) \
     *(clippy-target *["nervix-connector-kafka", "nervix-consensus", "nervix-server"] ["--lib", "--features", "shuttle testing"]) \
-    *(clippy-target *["nervix-connector-prometheus", "nervix-connector-websockets"] ["--lib", "--features", "nervix-connector/shuttle nervix-primitives/shuttle"]) \
+    *(clippy-target *["nervix-connector-prometheus"] ["--lib", "--features", "nervix-connector/shuttle nervix-primitives/shuttle"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "shuttle native"]) \
     *(clippy-target *shuttle_test_packages ["--lib", "--profile", "test", "--features", "shuttle"])
 
@@ -2261,14 +2338,20 @@ deloxide-clippy-targets: \
     (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide-stress"]) \
     (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide-stress testing"])
 
-# The shared Clippy command accepts one package and its Cargo arguments. Target, feature,
-# profile and toolchain differences identify separate build directories. Keep kache configured.
-# On CI nothing reads a build directory after its lint and the runner's disk cannot hold them all,
-# so a target that passed deletes its own.
+# Clippy configurations share four build directories, so a dependency one configuration compiled is
+# fresh for the others in its directory that compile it alike. Cargo keeps the artifacts of
+# different features, profiles, targets and flags, and of the stable and nightly compilers, apart
+# there. The SHA-256 of the package, Cargo arguments and toolchain, modulo four, selects the
+# directory, so a configuration returns to the one that holds its artifacts. Four divides 16, so the
+# hash's last hexadecimal digit decides the remainder.
+hexadecimal_modulo_four(hash) := if hash =~ '[048c]$' { "0" } else if hash =~ '[159d]$' { "1" } else if hash =~ '[26ae]$' { "2" } else { "3" }
+clippy_build_directory(package, args, toolchain) := cargo_target_dir / "clippy" / hexadecimal_modulo_four(sha256(show([package, args, toolchain])))
+
+# The shared Clippy command accepts one package and its Cargo arguments. Configurations that share
+# a build directory take turns on its lock. Keep kache configured.
 [private]
 clippy-target package args toolchain="":
-    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
-    @{{ if env("CI", "") == "true" { "rm -rf " + quote(cargo_target_dir + "/clippy/" + package + "/" + sha256(show([args, toolchain]))) } else { "true" } }}
+    CARGO_TARGET_DIR={{ quote(clippy_build_directory(package, args, toolchain)) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
 
 # Lint one package and all of its targets; extra arguments retain their boundaries.
 cargo-clippy-package package *args: (clippy-target package ["--all-targets", args])
@@ -2326,7 +2409,7 @@ lint-audit *args: typed-ratchet-build
 
 test-typed-ratchet-compiler:
     just typed-ratchet --fixture-mode ordinary --recompile --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-ordinary.json
-    python3 -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks.CompilerFixtureTests
+    python3 -m unittest scripts.tests.test_typed_ratchet scripts.tests.test_analysis_admission scripts.tests.compiler_fixture_checks.CompilerFixtureTests
 
 test-typed-ratchet-contracts +tests="scripts.tests.compiler_contract_checks scripts.tests.compiler_audit_checks": typed-ratchet-build
     python3 -m unittest {{ tests }}
@@ -2378,6 +2461,7 @@ test-typed-ratchet-docs:
 
 # Current API examples compile alongside their compile_fail counterparts on the product toolchain.
 test-typed-ratchet-product-docs:
+    cargo +1.99 test --package nervix-models --doc SettingDefinition
     cargo +1.99 test --package nervix-primitives --doc expect_lint
     cargo +1.99 test --package nervix-vm --doc FunctionInjector
     cargo +1.99 test --package nervix-dns --doc DnsLookupReport
@@ -2414,7 +2498,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap tes
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.cargo_crap,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_cargo_crap scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.analysis_admission,scripts.ratchet,scripts.cargo_crap,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.test_analysis_admission scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_cargo_crap scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 
@@ -2723,7 +2807,7 @@ coverage-connector-matrix: connector-declarations
 # Check the shared kache remote of CI jobs and image builds: its configuration, the start of a
 # job's daemon, and the bounded publication of what the job built.
 test-kache-ci:
-    uv run --locked python -m unittest scripts.tests.test_kache_ci
+    uv run --locked python -m unittest scripts.tests.test_kache_ci scripts.tests.test_runner_diagnostics scripts.tests.test_record_runner_load
 
 # Retain the kache remote contract's own measured line coverage beside the other Python tooling.
 coverage-kache-ci:
@@ -2731,7 +2815,7 @@ coverage-kache-ci:
     set -euo pipefail
     mkdir -p "{{ cargo_target_dir }}/kache-ci"
     coverage=(uvx --from coverage==7.11.0 coverage)
-    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" --branch --source=scripts.kache_remote,scripts.tests.test_kache_ci -m unittest scripts.tests.test_kache_ci
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" --branch --source=scripts.kache_remote,scripts.runner_diagnostics,scripts.record_runner_load,scripts.tests.test_kache_ci,scripts.tests.test_runner_diagnostics,scripts.tests.test_record_runner_load -m unittest scripts.tests.test_kache_ci scripts.tests.test_runner_diagnostics scripts.tests.test_record_runner_load
     "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/kache-ci/python.coverage" -o "{{ cargo_target_dir }}/kache-ci/python.lcov"
 
 # Exercise the pinned Go formatter bootstrap and its CI wiring without network access.
@@ -2750,8 +2834,9 @@ test-docs: typed-ratchet-source-build install-cargo-crap
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
     node --test cloudflare/docs-worker/src/index.test.js
 
-# Screenshots are recaptured from the current console and the nervix-cli reference chapter is
-# rendered from the current binary, so a published book can never describe an older build.
+# Screenshots are recaptured from the current console and the nervix-cli and nervix-server
+# reference chapters are rendered from the current binaries, so a published book can never describe
+# an older build.
 book version="0.1.0-dev": test-docs docs-screenshots
     python scripts/build_book.py --version {{ version }}
 
@@ -2890,9 +2975,14 @@ coverage-chaos-pause-delivery:
 test-chaos-degraded-evidence:
     exec bash scripts/chaos/tests/degraded-self-test.sh
 
-# Pin baseline preparation accounting and the production output-boundary observations.
+# Pin suite preparation and baseline execution accounting and the production output-boundary
+# observations.
 test-chaos-output-boundary selection="all":
     exec bash scripts/chaos/tests/output-boundary-self-test.sh {{ quote(selection) }}
+
+# Check when a run adopts the verifier self-check its suite executed instead of executing its own.
+test-chaos-verifier-self-check:
+    exec bash scripts/chaos/tests/verifier-self-check-self-test.sh
 
 # Preserve the package probe's native refusal and exact retained container lifetime.
 test-chaos-image-package:
@@ -2921,6 +3011,22 @@ coverage-chaos-backup-fault:
         ulimit -n 65536
     fi
     kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/backup-fault-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/backup-fault-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-backup-fault-coverage") }} scripts/chaos/tests/backup-fault-self-test.sh
+
+# Check the restore scenarios' options, the padded guest's bounds, the sampler's records, the
+# staging verdicts and every outcome the restore verdict assigns, as every verifier self-check does.
+test-chaos-restore:
+    exec bash scripts/chaos/tests/restore-self-test.sh
+
+# Measure the restore scenarios' option checks, staging verdicts and outcome verdict.
+coverage-chaos-restore:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v kcov >/dev/null 2>&1
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/restore-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/restore-fault-scenario.sh") }},{{ quote(invocation_directory() / "scripts/chaos/fixtures/wasm/padded-state-wat.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/restore-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-restore-coverage") }} scripts/chaos/tests/restore-self-test.sh
 
 # Check the deduplicator and window outputs the backup state verdict accepts and each lost or
 # doubled state it refuses, as every verifier self-check does.

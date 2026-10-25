@@ -21,7 +21,7 @@ Feature: Process shutdown deadline
       | sending chunks slowly         |
 
   Scenario Outline: The shutdown deadline ends a process whose drain cannot finish in a <pace> domain
-    Given a nervix-server process is started with drain timeout "10m" and shutdown timeout "5s"
+    Given a nervix-server process is started with drain timeout "5s" and shutdown timeout "5s"
     And the server process is configured with these NSPL commands
       """
       <domain>
@@ -46,12 +46,12 @@ Feature: Process shutdown deadline
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT unreachable_sink TYPE SYSLOG CONFIG {
+      CREATE SYSLOG CLIENT unreachable_sink CONFIG {
         'protocol' = 'tcp',
         'addr' = '{{syslog_emit_addr}}'
       };
-      CREATE EMITTER held_output FROM held_events
-        TO SYSLOG unreachable_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      CREATE SYSLOG COLLECTOR EMITTER held_output FROM held_events
+        TO unreachable_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING held_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE

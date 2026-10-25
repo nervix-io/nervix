@@ -29,20 +29,18 @@ Feature: Websocket client ingestion
       CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
 
-      CREATE CLIENT ws_main
-        TYPE WEBSOCKETS
+      CREATE WEBSOCKETS CLIENT ws_main
         CONFIG {
           'endpoint' = '{{mock_ws_dns_addr}}/ws/{{test_id}}'
         };
 
-      CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -97,8 +95,7 @@ Feature: Websocket client ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
-        CREATE CLIENT ws_main
-        TYPE WEBSOCKETS
+        CREATE WEBSOCKETS CLIENT ws_main
         CONFIG {
           'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
@@ -145,7 +142,7 @@ Feature: Websocket client ingestion
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT ws_main TYPE WEBSOCKETS CONFIG { 'endpoint' = '{{websocket_peer}}' };
+      CREATE WEBSOCKETS CLIENT ws_main CONFIG { 'endpoint' = '{{websocket_peer}}' };
       CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
         FROM ws_main MODE NO ACK ON QUIESCE DROP DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -179,7 +176,7 @@ Feature: Websocket client ingestion
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT ws_main TYPE WEBSOCKETS CONFIG { 'endpoint' = '{{websocket_peer}}' };
+      CREATE WEBSOCKETS CLIENT ws_main CONFIG { 'endpoint' = '{{websocket_peer}}' };
       CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
         FROM ws_main MODE NO ACK ON QUIESCE DROP DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -223,7 +220,7 @@ Feature: Websocket client ingestion
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT ws_main TYPE WEBSOCKETS CONFIG { 'endpoint' = '{{websocket_peer}}' };
+      CREATE WEBSOCKETS CLIENT ws_main CONFIG { 'endpoint' = '{{websocket_peer}}' };
       CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
         FROM ws_main MODE NO ACK ON QUIESCE DROP DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

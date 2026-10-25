@@ -48,8 +48,10 @@ names it. The contracts its scenarios verify stay with the chapters that own the
 - guest checkpoints: [WASM State And Recovery](./wasm-state.md)
 - scheduling, the voter observation grace and planned handoffs:
   [Control Plane](./control-plane.md#planned-ownership-handoffs-and-failover)
-- archives: [Backup And Restore](./backup-and-restore.md)
-- source and sink acknowledgement:
+- backup cuts, archives and restore installation:
+  [Backup And Restore Architecture](./backup-and-restore-architecture.md), and the statements and
+  their reports: [Backup And Restore](./backup-and-restore.md)
+- ingestor and emitter acknowledgement:
   [Connector Crates And The Connector Contract](./connector-contract.md)
 - the deadlock detector:
   [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection)
@@ -77,12 +79,13 @@ Bolero obligation, and none of those discharges a suite.
 | `scripts/chaos/run-baseline.sh` | The controller of every scenario. It owns the arguments and their bounds, preflight, image and tool identity, TLS, the Compose deployment, graph installation, traffic, the final ledger, findings, diagnostics and the exit trap |
 | `scripts/chaos/run-*.sh` | Scenario entry points that set each scenario's default fixture size and whole-run bound |
 | `scripts/chaos/*-scenario.sh` | Each scenario's faults, observations and verdicts |
-| `node-faults.sh`, `network-faults.sh`, `link-degradation.sh`, `link-ping-helper.sh`, `link-rate-helper.sh` | The fault primitives: process faults through Pumba and Docker; partition plans, rules, effect matrices, preflight and healing; link degradation and its ICMP and transfer probes |
+| `node-faults.sh`, `network-faults.sh`, `link-degradation.sh`, `link-ping-helper.sh`, `link-rate-helper.sh` | The fault primitives: process faults through Pumba and Docker, and one netem effect on a container's egress toward chosen addresses; partition plans, rules, effect matrices, preflight and healing; link degradation and its ICMP and transfer probes |
 | `mixed-plan.sh`, `mixed-plan.jq` | Seeded plan generation, plan validation and default coverage |
 | `verify-*.sh` | The external verifiers: ledgers, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed and diagnostic evidence |
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
 | `docker-event-recording.sh` | The run's live Docker event recording and its marker windows |
 | `output-boundary.sh`, `consumer-group.sh`, `startup-status.sh`, `image-package-check.sh`, `image-identity.sh`, `tool-images.sh`, `select-subnet.sh`, `require-jq.sh` | Kafka end-offset observations and the output boundary, the source consumer group's members and the nodes that run them, startup status publication, the image-package check, image identity rules, the tool image pins, network selection and the jq requirement |
+| `verifier-self-check.sh` | The verifier self-check's bound, the identity of the chaos scripts and the judgement of the record a suite hands its runs |
 | `cleanup.sh` | Removal of one run's labeled resources, with optional evidence capture |
 | `suite.sh`, `suites.json`, `suite-report.jq` | The suites: catalog, shard budgets, runs, verdict records, summaries and suite cleanup |
 | `compose.yaml`, `compose.diagnostic.yaml` | The deployment and its diagnostic overlay |
@@ -171,6 +174,8 @@ amd64 workers.
 | `fixtures/stateful.nspl`, `fixtures/generate-stateful.jq` | The stateful scenario's graph and its two interleaved branches |
 | `fixtures/paced.nspl`, `fixtures/generate-paced.jq` | The paced domain's graph and its two interleaved branches |
 | `fixtures/wasm/processors/branch-counter.wat` | The stateful scenario's prebuilt WASM guest, in WebAssembly text |
+| `fixtures/restore-state.nspl` | The restore scenarios' padded guest: a Kafka ingestor with domain-owned offsets and a detached, branched WASM processor |
+| `fixtures/wasm/padded-state-wat.sh` | Writes the padded guest in WebAssembly text for a save size: each branch saves exactly that many pseudo-random bytes, restores only a save of that size, and emits nothing |
 | `fixtures/mixed-burst-loss-leader-peer.json` | An explicit one-step mixed-instability plan the soak suite runs |
 
 The baseline graph has three parts:
@@ -215,18 +220,18 @@ A run needs a Linux Docker host with the following.
 - **Suite tools.** A suite also needs `setsid` from util-linux and a `tee` that takes `-p`, as GNU
   coreutils' does. Suite cleanup reads process state from `/proc` and `ps`.
 - **The local Docker socket.** `/var/run/docker.sock` must exist. Every scenario except
-  `baseline`, `backup`, `backup-cycles` and `restore-fresh-cluster` mounts it into Pumba's
-  container, after checking Pumba's version and its access with a dry run.
-- **Network fault support.** The partition, degraded-link, former-owner and backup-fault scenarios,
-  the `owner-partition` and `voter-partition` faults and mixed instability need a kernel that offers
-  the `prio`, `sfq` and `netem` queueing disciplines and `iptables` inside container network
-  namespaces. Each run proves this on the worker before it starts; see
+  `baseline`, `backup`, `backup-cycles`, `restore-fresh-cluster` and `restore-volume` mounts it into
+  Pumba's container, after checking Pumba's version and its access with a dry run.
+- **Network fault support.** The partition, degraded-link, former-owner, backup-fault and
+  restore-fault scenarios, the `owner-partition` and `voter-partition` faults and mixed instability
+  need a kernel that offers the `prio`, `sfq` and `netem` queueing disciplines and `iptables`
+  inside container network namespaces. Each run proves this on the worker before it starts; see
   [Network Preflight](#network-preflight).
   - GitHub-hosted `ubuntu-24.04` workers qualify once the job has loaded `sch_prio`, `sch_sfq` and
     `sch_netem`.
   - The repository's Blacksmith workers do not qualify. Their kernel offers none of those
-    disciplines, so every network run there stops in its preflight, and every other run stops in
-    the network-healing exercise of its verifier self-check.
+    disciplines, so every network run there stops in its preflight, and every other run, or a
+    suite before its first run, stops in the network-healing exercise of its verifier self-check.
 
 A host may run several runs and suites at once. Each run owns its Compose project, network, volumes
 and labels, and runs share nothing but the Docker daemon and the host's capacity. Concurrent runs
@@ -283,10 +288,11 @@ inspection where a verdict depends on them:
 
 | Setting | Default deployment | Changed for |
 | --- | --- | --- |
-| Raft heartbeat and election window | 250 ms; 1.5 to 3 seconds | 250 ms; 10 to 12 seconds for `pause-resume`, `--fault owner-pause` and `--fault voter-pause` |
+| Raft heartbeat, and the election window derived from it | 250 ms, so 1.5 to 3 seconds | 1.5 seconds, so 9 to 18 seconds, for `pause-resume`, `--fault owner-pause` and `--fault voter-pause` |
 | Node unavailability timeout | 10 seconds | 15 seconds for the same pause deployments |
 | Raft snapshot entry threshold, covered log entries retained | 10,000; 1,000 | 64; 16 for `stale-follower` |
-| State snapshot interval, replica count | 30 seconds; 0 | 1 second, and on three nodes one replica, for `stateful` |
+| State snapshot interval, replica count | 30 seconds; 0 | 1 second, and on three nodes one replica, for `stateful`; one replica for `restore-fault` and `restore-volume` |
+| Command retry validity | 15 minutes | 3 minutes for `restore-fault --fault reclamation-owner-crash` |
 
 ### Interconnect TLS
 
@@ -314,10 +320,10 @@ Every container, network and volume a run owns carries `io.nervix.chaos.run=<run
 | --- | --- |
 | `just chaos list` | Lists the scenarios with their topologies, cases, profiles and faults |
 | `just chaos run SCENARIO --image IMAGE [OPTIONS]` | Runs one scenario. `--help` after the scenario prints its options |
-| `just chaos replay RUN_DIRECTORY [--artifacts DIR] [--run-id ID] [--timeout SECONDS] [--keep]` | Replays a recorded mixed-instability run |
+| `just chaos replay RUN_DIRECTORY [--artifacts DIR] [--run-id ID] [--timeout SECONDS] [--verifier-self-check RECORD] [--keep]` | Replays a recorded mixed-instability run |
 | `just chaos suite list` | Lists the suites, their shards, and each entry's command and budget |
 | `just chaos suite smoke\|soak --image IMAGE [--image-kind KIND] [--image-revision REVISION] [--shard N] [--entry ID]... [--artifacts DIR] [--suite-id ID]` | Runs a suite, one shard of it, or named entries |
-| `just chaos suite shards SUITE` | Prints the suite's CI matrix as JSON: each shard's entries with its execution, step and job budgets |
+| `just chaos suite shards SUITE` | Prints the suite's CI matrix as JSON: each shard's entries with its execution, preparation, step and job budgets |
 | `just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY` | Ends what a suite left behind |
 | `just chaos suite report [--expect-shards N] SUITE_JSON...` | Renders one summary of several shards' records, and fails unless every one passed |
 | `just chaos cleanup --run-id RUN_ID [--evidence DIR]` | Removes one run's labeled resources, first capturing them into `DIR` |
@@ -335,11 +341,12 @@ take.
 | `--timeout SECONDS` | Every scenario | 120 to 3,600; mixed instability from its duration plus 600 through 21,600. Defaults are in the catalog |
 | `--artifacts DIR` | Every scenario | Default `target/chaos` |
 | `--run-id ID` | Every scenario | 1 to 96 letters, digits, dots, underscores or hyphens, starting with a letter or digit. Generated when omitted. A run ID whose directory already exists is refused |
+| `--verifier-self-check RECORD` | Every scenario | The record of the verifier self-check a suite executed, which the run adopts instead of executing `tests/self-test.sh`. A record that did not pass on this worker, during this boot, for exactly the run's chaos scripts is refused as a setup error before the run creates anything. A suite passes it to every run; a standalone run omits it |
 | `--keep` | Every scenario | Keeps the run's resources after diagnostics and prints their cleanup command |
-| `--outage-seconds N` | The crash scenarios, `cluster-restart`, `stateful`, `domain-time` and `backup-fault` | 5 to 120. Default 8; in `stateful`, 45 for `owner-pause` and `owner-partition`; 30 for `voter-pause` and `voter-partition`. The `owner-partition` fault of `backup-fault` holds a fixed 35-second isolation |
+| `--outage-seconds N` | The crash scenarios, `cluster-restart`, `stateful`, `domain-time`, `backup-fault` and the crash faults of `restore-fault` | 5 to 120. Default 8; in `stateful`, 45 for `owner-pause` and `owner-partition`; 30 for `voter-pause` and `voter-partition`. The `owner-partition` fault of `backup-fault` holds a fixed 35-second isolation. In `restore-fault --fault reclamation-owner-crash` the killed owner stays down at least until the other target reclaims its staging |
 | `--case CASE`, `--partition-seconds N` | `partition-recovery` | `all`, `follower`, `asymmetric`, `leader` or `quorum-loss`, default `all`; 20 to 600, default 45 |
 | `--isolation-seconds N` | `former-owner-restart` | 20 to 600, default 45 |
-| `--fault FAULT` | `stateful`, `domain-time`, `backup-fault` | See those scenarios. One node supports `none` and `cluster-restart`. Default `none`; `backup-fault` requires `owner-crash`, `leader-crash`, `owner-partition` or `rolling-restart` |
+| `--fault FAULT` | `stateful`, `domain-time`, `backup-fault`, `restore-fault` | See those scenarios. One node supports `none` and `cluster-restart`. Default `none`; `backup-fault` requires `owner-crash`, `leader-crash`, `owner-partition` or `rolling-restart`, and `restore-fault` requires `leader-crash`, `leader-partition`, `owner-crash` or `reclamation-owner-crash` |
 | `--profile NAME` | `degraded-links` | `all`, `delay`, `jitter`, `random-loss`, `burst-loss`, `rate-limit` or `combined`, default `all` |
 | `--load-interval-ms N` | `degraded-links` | 100 to 5,000, default 750 |
 | `--baseline-seconds N`, `--degrade-seconds N`, `--drain-seconds N` | `degraded-links` | 10 to 120, default 15; 10 to 120, default 20; 10 to 180, default 90 |
@@ -355,12 +362,14 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-rate-probe` | The production link transfer and ICMP probes, with delayed Docker launches and starts, stalled, partial, lost and refused transfers, failed log reads and cleanup, and invalid clocks |
 | `just test-chaos-degraded-evidence` | The degraded-link controller, parser and effect limits at 40 and 400 packets |
 | `just test-chaos-hold-quorum` | The mixed-instability hold check for a degraded link that leaves every voter in a quorum |
-| `just test-chaos-pause-delivery` | A failover-length pause's sink check on the retained leader and relay-owner pause timelines: the source consumer group's handoff from a paused ingestor owner, read before the relocated consumer joins and after the handoff deadline; a handoff that never comes or comes after the unpause; a stalled sink; the window that opens at placement when the consumer stayed in place; and sink progress sampled after the unpause |
-| `just test-chaos-output-boundary [SELECTION]` | The preparation budget and the Kafka end-offset observations, without Docker |
+| `just test-chaos-pause-delivery` | A failover-length pause's emitter check on the retained leader and relay-owner pause timelines: the source consumer group's handoff from a paused ingestor owner, read before the relocated consumer joins and after the handoff deadline; a handoff that never comes or comes after the unpause; a stalled emitter; the window that opens at placement when the consumer stayed in place; and emitter progress sampled after the unpause |
+| `just test-chaos-output-boundary [SELECTION]` | The suite preparation and baseline execution budgets and the Kafka end-offset observations, without Docker |
+| `just test-chaos-verifier-self-check` | The identity of the chaos scripts, every reason a verifier self-check record does not apply, and a run's refusal of such a record before it creates anything, without Docker |
 | `just test-chaos-image-package` | The image-package check and its refused or invalid observations |
 | `just test-chaos-startup-status` | Bounded startup status publication |
 | `just test-chaos-backup-fixture` | Derivation of the backup graph from the baseline fixture |
 | `just test-chaos-backup-fault` | The option rules of `backup-fault`, `restore-fresh-cluster` and `backup-cycles`. It also checks the [fault backup verdict](#backup-faults) against synthetic reports: a clean refusal; a refusal that left the destination or a `.nervix-backup-` staging file; a failure without a JSON report or without a backup failure reason; an uncertain failure that keeps its execution reference; a success without an archive; leader-crash archives whose cut was engaged before and after the crash; and an archive whose cut released while the acknowledgement gate held |
+| `just test-chaos-restore` | The option rules of `restore-fault` and `restore-volume`; the padded guest generator's bounds and layout; the node sampler's records, the staging verdicts read from them, including a pair of samples across a restart; and the [restore verdict](#restore-faults) against synthetic reports: a completed restore, one without every step applied, an incomplete one with and without its one failed step, a refusal before and after its target exists, an uncertain failure and an end without a JSON report |
 | `just test-chaos-backup-state` | The [deduplicator and window verdict](#backup-cycles) over an exact set of outputs and one with replayed copies. It also checks the outputs that a restore which lost deduplicator keys, lost or doubled a window's retained rows, changed a record or dropped an output would produce, and malformed and missing inputs |
 | `just test-chaos-stateful-verifiers` | The state, clock and window verdicts |
 | `just verify-chaos-clock ARGS` | The clock verifier over retained observer transcripts |
@@ -380,7 +389,7 @@ A run records each phase it enters in `phases.ndjson` and its final phase in `ma
 | --- | --- |
 | `action plan and fixtures` | Mixed instability only: it generates or copies the plan and validates it, then sizes and generates the fixture, before any container exists |
 | `preflight` | Arguments and host tools; the tool images; the Nervix image; the live Docker event recording; the image-package check; a diagnostic image's evidence directories; Pumba's version and Docker access; the [network preflight](#network-preflight) |
-| `verifier self-check` | `tests/self-test.sh`, bounded to 600 seconds, which proves the external verifiers on this worker before they judge the run |
+| `verifier self-check` | `tests/self-test.sh`, bounded to 600 seconds, which proves the external verifiers on this worker before they judge the run. A run of a suite instead adopts the record of the check its suite executed once before its first run: it copies the record into `results/verifier-self-check.json` and the check's output into `results/verifier-self-test.txt`, and its manifest names the record under `verifier_self_check` |
 | `TLS generation` | The run's certificate authority and node certificates |
 | `Compose validation` | `docker compose config`, rendered into `compose.rendered.yaml`. Mixed instability also records the node settings and load interval Compose renders |
 | `broker startup and provisioning` | The broker, within 90 seconds, and every topic the scenario uses |
@@ -462,8 +471,8 @@ itself. A producer's own report is never the ledger: an ambiguous producer outco
 the broker decides what was accepted. The runner then checks two things:
 
 - that the ingestor's consumer group has committed through the source boundary, within 120 seconds.
-  The four backup scenarios have no consumer group to check: their ingestor keeps domain-owned
-  offsets, which their archives record
+  The backup and restore scenarios have no consumer group to check: their ingestor keeps
+  domain-owned offsets, which their archives record
 - that the output topic holds at least the accepted input
 
 `verify-ledger.sh` compares the outputs with the accepted inputs by event ID, exact content and
@@ -474,7 +483,7 @@ still fails on any missing, unexpected, corrupt or wrong-branch record.
 
 When a fault scenario's output stays short of the accepted input past its bound, the runner still
 saves the available output and runs the exact verifier, so the ledger names the missing IDs. The
-run then exits with status 124. A recovery scenario gives the final source-boundary query, a
+run then exits with status 124. A recovery scenario gives the final ingestor-boundary query, a
 disposable Kafka administration command, 60 seconds of its own. That allows for JVM startup on a
 loaded worker. A failed query is a controller failure and cannot qualify delivery.
 
@@ -594,11 +603,16 @@ imply exactly the planned links. The plan takes one of three forms:
 - **Quorum loss.** Each node gets one netem configuration that covers both of its peers.
 
 A partition plan targets only node-to-node links. The broker, load, observer, CLI and probe
-containers keep their routes. The one exception is [Backup Faults](#backup-faults), which installs
-two netem rules of its own. Neither rule is a partition plan, and each sits on its own interface:
+containers keep their routes. Two scenarios install rules that are not a partition plan:
 
-- an acknowledgement gate on the broker's egress to one node
-- a rate limit on the leader's egress to the CLI's container
+- [Backup Faults](#backup-faults) installs two netem rules, each on its own interface: an
+  acknowledgement gate on the broker's egress to one node, and a rate limit on the leader's egress
+  to the CLI's container.
+- [Restore Faults](#restore-faults) delays the leader's egress toward both followers with one netem
+  rule. Its `leader-partition` fault then installs an ordinary isolation of the leader beside that
+  delay, and an INPUT rule on the leader that drops what the CLI's container sends it. That is the
+  one installation that keeps another fault on an interface, so the run checks the leader's
+  interface itself: exactly the delay and the client rule.
 
 Installation follows a fixed sequence:
 
@@ -629,10 +643,10 @@ sending node towards the fixed address of the receiver:
 | --- | --- | --- |
 | `delay` | 180 ms | Average ICMP latency at least 100 ms above the healthy baseline, with at least 87.5% replies |
 | `jitter` | 180 ms with 100 ms of normally distributed variation | Average latency at least 80 ms above the baseline and a spread of at least 70 ms, with at least 87.5% replies |
-| `random-loss` | 30% independent loss | At least 7.5% loss and 12.5% replies |
+| `random-loss` | 30% independent loss | At least 7.5% loss and 12.5% replies, over 400 packets at 10 ms intervals |
 | `burst-loss` | Pumba's four-state model, `p13=20`, `p31=15` | At least 7.5% loss, 12.5% replies, and at least two consecutive lost packets, over 400 packets at 10 ms intervals |
 | `rate-limit` | 256 kbit/s | At least 75% replies, and a transfer at least twice as slow as healthy |
-| `combined` | One `netem combine`: 180 ms delay, 60 ms jitter, 20% loss, 256 kbit/s | Average latency at least 80 ms above the baseline, at least 5% loss and 12.5% replies, and a transfer at least twice as slow as healthy |
+| `combined` | One `netem combine`: 180 ms delay, 60 ms jitter, 20% loss, 256 kbit/s | Average latency at least 80 ms above the baseline, at least 5% loss and 12.5% replies over 400 packets at 10 ms intervals, and a transfer at least twice as slow as healthy |
 
 Before any fault, a run records a healthy ICMP and transfer baseline. Under a fault, it requires
 the broker and every node's listeners to keep answering, but not their readiness. It also checks
@@ -641,8 +655,9 @@ and its peer filter. An installed qdisc alone cannot pass; the effect must be me
 
 **ICMP samples.**
 
-- Every profile, the healthy baseline and each healing check send 40 packets at 100 ms intervals.
-  Burst loss sends 400 at 10 ms. Both sample in about four seconds.
+- The loss profiles, random, burst and combined loss, send 400 packets at 10 ms intervals. Every
+  other profile, the healthy baseline and each healing check send 40 at 100 ms. Both send for about
+  four seconds, and a sample that misses a reply waits one second more for it.
 - The limits scale with the number sent. A large sample cannot turn four replies in forty into
   passing evidence, and a sample that is missing packets fails.
 - Each ICMP sample runs in its own detached helper. Docker's start of the helper has a 60-second
@@ -654,6 +669,23 @@ and its peer filter. An installed qdisc alone cannot pass; the effect must be me
 - `*.probe.json` keeps the launch, wait, ping, log and removal outcomes, with the launch and sample
   times. A failed observation names the stage that took the time and keeps the helper's raw
   streams and Docker's state and events for it.
+
+**Sample size.** A loss floor is a claim about a random sample, so even a working fault misses it
+with some probability. The larger sample keeps that probability negligible without lowering a
+floor:
+
+| Profile | Floor | Missed by a working fault, 40 packets | 400 packets |
+| --- | --- | --- | --- |
+| `combined` | 5% lost | 1.5 × 10⁻³, and 1.3 × 10⁻⁴ that it loses none | 1.1 × 10⁻¹⁸ |
+| `random-loss` | 7.5% lost | 1.0 × 10⁻⁴ | 3.3 × 10⁻²⁹ |
+| `burst-loss` | 7.5% lost | 9.6 × 10⁻⁴ | 4.8 × 10⁻²⁴ |
+| `burst-loss` | 12.5% replies | 2.7 × 10⁻² | 1.3 × 10⁻¹⁰ |
+
+Random and combined loss are independent per packet. Burst loss is Pumba's chain, which starts a
+burst with probability 20% and ends one with 15%; its figures are for the less favorable of its two
+states at the start of a sample. No other limit gives a working fault a comparable chance to fail:
+a profile without loss need keep only 75% or 87.5% of its replies, and each latency limit sits far
+below its rule's delay.
 
 **The transfer.**
 
@@ -774,6 +806,8 @@ trap ran exits on its own, 15 minutes after the run's bound.
 | `backup-cycles` | 1 or 3 | Eight quiesced backups under load, each verified offline, restored as a stopped domain and compared, with exact deduplicator and window verdicts | 500 ms | 1,000, 2,400 s |
 | `backup-fault` | 3 | One fault against a quiesced backup: a SIGKILL of the state owner or the leader, or an isolation of the state owner, while an acknowledgement gate holds the cut; or a rolling restart while the archive streams | 1 s | 1,000, 2,400 s |
 | `restore-fresh-cluster` | 3 | None; a quiesced backup restored with `RESUME` into a second three-node cluster | 1 s | 1,000, 2,400 s |
+| `restore-fault` | 3 | One fault against a restore that a delay on the leader's links holds in staging: a SIGKILL of the leader, an isolation of the leader from its peers and the client, a SIGKILL of a state owner, or a SIGKILL of a state owner while a failed restore awaits reclamation | 1 s | 1,000, 2,400 s |
+| `restore-volume` | 3 | None; three concurrent restores of an archive whose guest saves exceed the bulk budget, with every node's staging, storage and memory sampled | 1 s | 1,000, 2,400 s |
 | `rolling-restart` | 1 or 3 | A graceful stop and restart of every node, leader first | 500 ms | 1,000, 1,200 s |
 | `leader-crash` | 1 or 3 | SIGKILL of the leader | 500 ms | 1,000, 1,200 s |
 | `follower-crash`, `ingestor-owner-crash`, `emitter-owner-crash` | 3 | SIGKILL of the role | 500 ms | 1,000, 1,200 s |
@@ -818,11 +852,14 @@ public metrics to count every record along the path:
 `results/remote-path.json` records the owners and the metric evidence, and `results/baseline.json`
 the verdict.
 
-Before it deploys traffic, the baseline runs its verifier self-check, which can take minutes on a
-loaded worker. The suite budgets fund that preparation explicitly: the full self-check's 600-second
-cap, plus 180 seconds for the one-node baseline or 240 seconds for the three-node baseline. That
-gives the suite bounds of 13 and 14 minutes. These allowances change no product deadline, no
-output-stability window and no ledger assertion.
+Before it deploys traffic, a standalone baseline executes its verifier self-check, which takes
+minutes on a loaded worker. In a suite that check executes once, before the first run, within the
+shard's [preparation budget](#shard-budgets), so a baseline entry's budget funds only its
+execution: 180 seconds for the one-node baseline and 240 seconds for the three-node baseline, the
+suite budgets of 3 and 4 minutes. Everything the baseline did after its verifier self-check,
+teardown included, took 30 to 37 seconds on GitHub-hosted workers in the nightly soak of 22
+October. These allowances change no product deadline, no output-stability window and no ledger
+assertion.
 
 ### Backup Under Load
 
@@ -840,7 +877,7 @@ that breaks this run fails every scenario's self-check.
 
 The run proceeds in order:
 
-1. It observes healthy source and sink progress.
+1. It observes healthy ingestor and emitter progress.
 2. While the load continues, the packaged CLI creates a quiesced archive of the domain. The report
    must show a completed quiesced cut.
 3. The packaged CLI verifies the archive offline with `DESCRIBE BACKUP`. It must name the domain and
@@ -849,7 +886,7 @@ The run proceeds in order:
    `chaos_restored`, backs that domain up and describes its archive offline. The run compares the
    two archives' public checkpoint identities, revisions, branch counts and exact Kafka positions.
    The run never starts the restored domain, while the source traffic continues.
-5. After the cut, the runner requires renewed source and sink progress, stops the producer and
+5. After the cut, the runner requires renewed ingestor and emitter progress, stops the producer and
    checks the exact ledger, counting replay duplicates separately.
 
 `results/backup-progress.json` records the cut's engagement and release times and its freeze
@@ -967,7 +1004,7 @@ The fault backup must end in an outcome the backup contract allows:
 - **Interrupted download.** The failure must carry the backup's execution reference, and recovering
   by that reference must report that the restarted holder no longer retains the archive.
 
-Whatever the outcome, the cluster must settle, the source and the sink must move past the records
+Whatever the outcome, the cluster must settle, the source and the emitter must move past the records
 the fault found, and a fresh backup must verify offline, restore and compare. A product violation is
 a recovery finding: the run still reaches the final exact ledger, then fails with every finding.
 
@@ -1021,6 +1058,183 @@ verdicts follow:
 fresh nodes record and qualify their deadlock evidence like the original nodes. The exit trap
 captures the fresh project's Compose logs beside the original project's.
 
+### Restore Faults
+
+```bash
+just chaos run restore-fault --image nervix:debian --fault leader-crash
+just chaos run restore-fault --image nervix:debian --fault leader-partition
+just chaos run restore-fault --image nervix:debian --fault owner-crash
+just chaos run restore-fault --image nervix:debian --fault reclamation-owner-crash
+```
+
+This scenario injects one fault into a restore while the restore stages runtime state, and judges
+the outcome against the restore contract of
+[Backup And Restore Architecture](./backup-and-restore-architecture.md#failure-semantics-at-every-boundary).
+The domain
+carries the graph of [Backup Cycles](#backup-cycles) and `fixtures/restore-state.nspl`:
+
+- a Kafka ingestor with domain-owned offsets, which reads `chaos_padded_input`
+- the detached WASM processor `chaos_padded`, branched like the baseline relay, whose guest
+  `fixtures/wasm/padded-state-wat.sh` writes for the run. The guest saves exactly 2 MiB of
+  pseudo-random bytes for every branch and emits nothing
+
+The deployment keeps one state replica, so every guest save stages on an owner and a replica.
+
+The run prepares the restore in order:
+
+1. It starts the load, publishes one record for each of the three branches to
+   `chaos_padded_input`, and waits until `DESCRIBE WASM PROCESSOR` reports a committed checkpoint
+   of every branch that its replica confirmed.
+2. It takes a quiesced backup under the load and verifies it offline, as in
+   [Backup Under Load](#backup-under-load). The archive must also hold a 2 MiB guest save of every
+   branch.
+3. It starts the node sampler of [Restore Staging Volume](#restore-staging-volume) and reads the
+   settled leader and followers.
+4. It holds staging open with a delay. Pumba netem on the leader's egress toward both followers
+   delays every packet by 100 ms, and the runner reads the leader's qdisc until it shows exactly
+   that delay. The coordinator sends a checkpoint to a remote owner in ordered 64 KiB chunks, each
+   awaited, so a guest save takes more than ten seconds to stage on a follower.
+5. It starts the restore through the packaged CLI in the background, as the stopped domain
+   `chaos_restored`. It injects the fault only once a follower's `nervix_restore_staging_bytes`
+   reports staged bytes. A restore that ends first fails the run as an injection failure.
+
+The faults:
+
+- **`leader-crash`** restores through a follower and SIGKILLs the leader, the restore's coordinator,
+  while it stages. The hold lived in the killed container's network namespace, so its injector is
+  killed. The leader starts again after the outage. The CLI sends the archive again to the next
+  leader under the same execution reference, and the next leader resumes the restore from its first
+  step not recorded.
+- **`owner-crash`** restores through the leader and SIGKILLs a follower that holds the restore's
+  unpublished staging, then starts it again. The hold is lifted while the follower is down. The
+  coordinator does not stage again on a node it lost, so a loss that interrupts a staging request
+  fails the restore; when the follower's staging was already complete, the restore can publish once
+  the follower is back. The verdicts below accept either end.
+- **`reclamation-owner-crash`** reaches reclamation without a hook:
+  - It cordons the leader, so both targets of every checkpoint are followers, and the deployment
+    gives execution references a three-minute retry validity.
+  - Once the restore stages on both followers, the run kills the CLI's container and then
+    SIGKILLs the leader. No client sends the archive to the next leader, so the restore stays
+    applying, and its staging retained, until the retry validity of its execution reference ends.
+    The next leader then ends it as failed.
+  - Before then, the run SIGKILLs the follower that did not become leader. It starts that follower
+    again only once the new leader has reclaimed its own staging through a completed sweep. The
+    restarted follower therefore learns of the failure as it catches up, and reclaims its staging
+    after its restart.
+- **`leader-partition`** stops the source domain and waits for its output to settle, cordons the
+  leader and restores with `RESUME` through a follower. While the restore stages, the run isolates
+  the leader:
+  - The peers carry the rules of an ordinary [isolation](#network-faults).
+  - An INPUT rule on the leader drops what the CLI's container sends it. Without that cut, the CLI
+    would keep waiting on the isolated leader until the heal.
+  - The leader keeps the hold beside them, which a plain partition would refuse as an overlapping
+    fault, so the run checks this installation itself and then proves the effect matrix.
+
+  The isolation holds until the CLI ends, at most 360 seconds. The CLI's reply wait ends after two
+  minutes; it reconnects, is redirected to the next leader and sends the archive again under the
+  same execution reference. The run then heals every rule, the hold included, and verifies each
+  interface's default state and the open matrix.
+
+The restore must end in an outcome the restore contract allows:
+
+- **Completed.** The CLI exits 0 with a report that names the target and every step applied. After
+  a leader crash or an isolation, the report is the resumed restore's. That proves the CLI sent the
+  archive again under the same execution reference, since a new reference would be refused because
+  the target already exists.
+- **Failed.** The CLI reports `RESTORE_INCOMPLETE` with the one step that failed. `START` of the
+  target must then be refused because its restore state installation is incomplete, and a restore of
+  the same archive with the same options under a new name, `chaos_restored_2`, must complete.
+- **Lost.** In `reclamation-owner-crash` no client waits for the outcome. `START` of the target must
+  be refused in the same way, and a restore under a new name must complete.
+
+Any other end is a recovery finding: a report without every step applied, a failure without exactly
+one failed step, a refusal of a restore that created its target, or an end without a JSON report.
+The run then judges what the fault left:
+
+- **The restored domain equals the archive.** A completed, stopped restored domain is backed up
+  again and described offline. Its checkpoint identities, revisions, branch counts and Kafka
+  positions must equal the archive's, as in [Backup Cycles](#backup-cycles), and every guest save
+  must have the archived length and BLAKE3 digest.
+- **A resumed domain keeps running.** After `leader-partition` the restored domain runs, so its
+  traffic is the verdict instead of a second archive. After the heal it must emit, consume past
+  where the source domain stopped, and close two more windows of every branch. Its first record must
+  be the source record at the archived offset, and it must emit exactly the source records from that
+  offset onward. The stale coordinator's delayed staging or publication therefore neither replaced
+  the generation the next leader completed nor cleared its runtime handles. The image exposes no
+  publication generation and no count of refused requests, so the traffic is the only public
+  evidence of that refusal.
+- **Staging returns to zero.** On every node, two consecutive samples taken after the restores ended
+  must report zero staging bytes and keys, with the count of completed sweeps rising between them.
+  A restart restarts that count, so a pair across a restart does not qualify.
+- **The source domain is unaffected.** After a crash, the cluster must settle and the ingestor and emitter
+  must move past the boundaries recorded at the fault. Every fault ends with the exact ledger.
+- **Deduplicator and window outputs.** After `leader-partition`, which crashes no node, the
+  deduplicator and window verdict of [Backup Cycles](#backup-cycles) judges the outputs of both
+  domains together. The crash faults do not judge them. When a crash loses the source domain's
+  window owner, the replica's snapshot of the detached window can predate rows that relay fan-out
+  already acknowledged upstream, and those rows are not delivered again; see
+  [Shutdown And Recovery](./shutdown.md#when-the-former-owner-is-gone).
+
+A fault during publication itself is not reachable without a hook: publication is one short request
+to each node once staging completes. The Cucumber scenarios that pause a restore before state
+publication carry that boundary: `A stale restore coordinator cannot republish after a new leader
+resumes the archived lifecycle`, `A delayed coordinator cannot replace resumed deduplicator keys and
+windows` and `A delayed coordinator cannot replace a resumed materialized generation larger than the
+bulk budget`.
+
+`results/restore-fault-progress.json` records:
+
+- the placement, the fault's target and the hold
+- each restore's outcome, execution reference and command time
+- the restored domain and its comparison with the archive
+- the times of the restore's start, the observed staging, the fault, the heal, the other target's
+  reclamation and the settled staging
+
+`restore-fault/` keeps the restore reports, the CLI's standard error, the staging observed at the
+fault, the samples and the fault's own evidence.
+
+The run's own bounds: 180 seconds for a follower to report staging, 900 seconds for each restore's
+CLI to end, 300 seconds for staging to return to zero after the restores, and in
+`reclamation-owner-crash` 420 seconds from the restore's start for the new leader to reclaim its
+staging. None of them changes a product deadline.
+
+### Restore Staging Volume
+
+```bash
+just chaos run restore-volume --image nervix:debian
+```
+
+This measurement entry runs three restores of one archive at once and samples every node while they
+stage and publish. Its graph is the one of [Restore Faults](#restore-faults), with guest saves of
+40 MiB for every branch, above the node's 32 MiB bulk budget, and one state replica. After the
+quiesced backup, the archive holds three such saves. The run then:
+
+1. Starts the node sampler. One probe container reads every node's `/metrics` every two seconds and
+   records, stamped with its own clock:
+   - `nervix_restore_staging_bytes`, `_keys` and `_limit_bytes`
+   - `nervix_restore_staging_sweeps_total` and `nervix_restore_staging_reclaimed_bytes_total`
+   - `nervix_restore_keyspaces_disk_bytes`
+   - the `filesystem_storage` class of `nervix_execution_jobs_running` and
+     `nervix_execution_jobs_pending`
+   - the `bulk` and `restore_metadata` classes of `nervix_execution_memory_reserved_bytes`
+   - `nervix_jemalloc_resident_bytes`
+
+   A node that does not answer within the interval is recorded as unavailable for that sample.
+2. Waits for two answered samples of every node, then starts three restores at once through the
+   three nodes in turn, as the stopped domains `chaos_volume_1` to `chaos_volume_3`.
+3. Requires every restore to complete, records each command's time, and waits until staging returns
+   to zero on every node through completed sweeps, as in [Restore Faults](#restore-faults).
+4. Takes two more samples of every node, stops the sampler and compares every restored domain with
+   the archive.
+
+Restored domains cannot be dropped, so the run measures the return of staging after the restores
+complete, rather than after their targets are removed. `results/restore-volume-progress.json`
+records the image's reference, ID and digest; the archive's size, guest save size, branches and
+replicas; each restore's outcome, execution reference and command time; the time staging took to
+return to zero; and for each node the peak and last value of every series before, during and after
+the restores. `restore-volume/samples/samples.ndjson` keeps every sample. The values are
+measurements of the worker the run used, not product limits.
+
 ### Rolling Restart
 
 ```bash
@@ -1038,7 +1252,7 @@ While a node is stopped:
 
 - within 20 seconds, the observer must report the node unavailable and the source broker must
   advance
-- on three nodes, the survivors must agree on a caught-up leader within 90 seconds, and the sink
+- on three nodes, the survivors must agree on a caught-up leader within 90 seconds, and the emitter
   must then progress within 60 seconds
 
 After the explicit start, the node's listeners must answer within 120 seconds and the observer must
@@ -1079,7 +1293,7 @@ before:
 
 - a caught-up survivor leader, within 90 seconds
 - replacement owners for every graph node, within 120 seconds
-- sink progress, within 60 seconds
+- emitter progress, within 60 seconds
 
 A one-node run requires listener, cluster and delivery recovery after the restart. In both
 topologies, recovery proceeds in order after the explicit restart:
@@ -1105,9 +1319,9 @@ replay duplicates.
 just chaos run pause-resume --image nervix:debian
 ```
 
-The three-node pause deployment uses a 250 ms heartbeat, a 10 to 12 second election window and a
-15-second unavailability timeout. The run verifies these in each target's Docker inspection. It then
-runs four cases:
+The three-node pause deployment uses a 1.5-second heartbeat, from which consensus derives a 9 to 18
+second election window, and a 15-second unavailability timeout. The run verifies these in each
+target's Docker inspection. It then runs four cases:
 
 1. a one-second pause of the leader
 2. a one-second pause of an execution owner
@@ -1124,7 +1338,7 @@ target is still paused:
 - when the paused node ran the ingestor, the source consumer group to have members only on the
   relocated ingestor's node, one of which holds the partition, within 60 seconds of the pause
   request
-- sink progress, within 20 seconds of that handoff, or of the relocation when the paused node did not
+- emitter progress, within 20 seconds of that handoff, or of the relocation when the paused node did not
   run the ingestor
 - a control canary through a peer to finish before the unpause
 
@@ -1134,7 +1348,7 @@ group coordinator hands it the partition only after that expiry, `session.timeou
 member's last heartbeat ([Kafka ingestors](./ingestors.md#kafka)). The baseline graph keeps
 librdkafka's 45-second default. The 60-second bound adds 15 seconds for the rebalance and one read of
 the group through the broker's CLI. Placement usually completes 22 to 26 seconds into a leader pause,
-so a sink window opened at placement would close before the partition can move.
+so an emitter window opened at placement would close before the partition can move.
 
 After the long leader pause, the recovered leader must also differ from the paused one.
 
@@ -1161,7 +1375,7 @@ just chaos run partition-recovery --image nervix:debian --case quorum-loss --par
 - `quorum-loss` leaves no two nodes able to exchange a packet
 
 `--partition-seconds` sets the minimum verified isolation window. The deployment keeps the standard
-election and unavailability settings and records them.
+heartbeat and unavailability settings and records them.
 
 **During each fault.**
 
@@ -1430,7 +1644,7 @@ and output topic:
 
 The deployment uses a one-second state snapshot interval and, on three nodes, one state replica, so
 the loss of an owner promotes a replica of each processor's state instead of resetting it. A pause
-fault also deploys the pause scenario's election and unavailability settings. On three nodes, one
+fault also deploys the pause scenario's heartbeat and unavailability settings. On three nodes, one
 acknowledged `RELOCATE` moves the stateful entities onto the observed follower that the faults
 target, and both stateful ingestors onto another node. A fault on the state owner therefore leaves
 the Kafka consumers in place.
@@ -1562,8 +1776,17 @@ requirements:
   the first report's generation and mapping. No `START` follows the first, so the generation never
   changes.
 - **Ticks.** Every tick must lie on the mapping's period grid, with its boundary at
-  `logical origin + (id - 1) * period`, in that generation, and no later than the serving node's own
-  logical time. Tick IDs must increase within each attachment.
+  `logical origin + (id - 1) * period`, in that generation. The boundary must have been reached by
+  the mapping at the authority's UTC observation. The serving-node logical reading must not
+  precede the boundary and must lie between the mapping's projections at authority UTC and at the
+  independent observer's receipt timestamp, with a ten-logical-millisecond measurement tolerance.
+  The containers share the Docker host's UTC. Accepted progress and the serving reading are
+  sampled separately: a pause between those samples can pair an earlier boundary with a current
+  reading, and a delayed frame can carry an earlier reading. Every such tick is checked against
+  this observation interval; its age does not supply a freshness bound. The interval cannot
+  establish the exact snapshot time or distinguish projection errors that stay inside it. Tick
+  IDs must increase within each attachment; the stall and handover checks separately establish
+  progress and recovery.
 - **Stalls.** A tick stall longer than two physical seconds, on an observer whose node stayed up,
   must fall inside a fault and end within 60 physical seconds. That is the authority bound the
   result records beside the deployed `NERVIX_NODE_UNAVAILABILITY_TIMEOUT`.
@@ -1711,7 +1934,7 @@ container.
 
 - After the last heal of a step, every node must settle within 150 seconds and output must advance
   within 90 seconds.
-- Within 120 seconds, the source may run at most `--max-recovery-backlog` records ahead of the sink
+- Within 120 seconds, the source may run at most `--max-recovery-backlog` records ahead of the emitter
   (default 20).
 - A canary through every faulted node must be acknowledged.
 - The public metrics may report at most `--max-pending` pending interconnect operations (default
@@ -1727,13 +1950,13 @@ container.
 
 **Sampling.**
 
-- A background sampler records the source and sink end offsets and every node's Docker state, memory
+- A background sampler records the ingestor and emitter end offsets and every node's Docker state, memory
   and CPU every 10 seconds for the whole fault phase, in `mixed/samples.ndjson`.
 - A node whose memory exceeds `--max-memory-bytes` (default 1 GiB) is a product finding.
 - Two samples more than 120 seconds apart fail the run, because the continuous observation had a
   gap.
 - `results/mixed-resources.json` summarizes each node's first, last and peak memory, the peak
-  backlog, and the longest source and sink stalls.
+  backlog, and the longest ingestor and emitter stalls.
 - `results/mixed-instability-progress.json` records every step's nodes, timings and recovery, with
   the distribution of settle, delivery and drain times across the run.
 
@@ -1773,8 +1996,8 @@ for the samples it took.
   unless `--records` asks for more.
 - The run is bounded by its duration plus the larger of that duration and 20 minutes, at most six
   hours, unless `--timeout` sets a bound from the duration plus 10 minutes through six hours.
-- The deployment uses the standard heartbeat, election and unavailability settings, and the
-  manifest records them as Compose renders them.
+- The deployment uses the standard heartbeat and unavailability settings, and the manifest records
+  them as Compose renders them.
 
 ### Replay
 
@@ -1810,8 +2033,9 @@ The replay refuses in two ways:
   fixture that no longer matches, fails before the replay creates anything.
 - An unavailable image fails it in preflight with exit status 2, before it records a Docker event.
 
-`--artifacts`, `--run-id`, `--timeout` and `--keep` are the only options a replay accepts, and its
-manifest names the run it replays under `replay_of`.
+`--artifacts`, `--run-id`, `--timeout`, `--verifier-self-check` and `--keep` are the only options a
+replay accepts, because none of them changes the recorded experiment, and its manifest names the run
+it replays under `replay_of`.
 
 Once a run's manifest records its deployment, a failure prints the replay command and records it as
 the reproducer in `results/finding.json`. A run that fails earlier records the run command instead.
@@ -1889,14 +2113,16 @@ Two kinds of violation are handled differently:
 | 0 | Passed |
 | 1 | Failed, with the category above |
 | 2 | Setup error before any product verdict |
-| 124 | A bounded command or wait, or the whole-run bound, ran out before the verdict. Also used when sink output stayed short of the accepted input past its bound, after the exact ledger was written |
+| 124 | A bounded command or wait, or the whole-run bound, ran out before the verdict. Also used when emitter output stayed short of the accepted input past its bound, after the exact ledger was written |
 | 129, 130, 143 | Interrupted by HUP, INT or TERM. The exit trap still heals, captures and cleans up |
 
 ## Budgets And Timing
 
 Every run has a whole-run bound, `--timeout`, and every bounded command and wait is clipped to what
 remains of it. A suite passes each entry's budget as that entry's `--timeout`, so a run that
-overruns fails by its own bound, with its own diagnostics.
+overruns fails by its own bound, with its own diagnostics. An entry's budget funds only its
+execution: the suite executes the verifier self-check once, before its first run, within the
+preparation its shard's step budget funds, and every run of the suite adopts that check's record.
 
 After the bound, the teardown has a reserve of 15 minutes. Every teardown step is bounded on its own
 and together they fit the reserve, which the live event subscriber also outlives the bound by. The
@@ -1910,7 +2136,7 @@ The controller's own bounds:
 | Image-package predicate, its inspection | 30 s, 20 s |
 | Pumba version and Docker access dry run | 30 s each |
 | Network preflight; its rules inspection | 120 s; 30 s |
-| Verifier self-check | 600 s |
+| Verifier self-check, once for a suite or a standalone run | 600 s |
 | Broker readiness | 90 s |
 | Each node's readiness and listeners; every node in `SHOW CLUSTER STATUS` | 120 s; 120 s |
 | Startup status publication | 30 s |
@@ -1919,7 +2145,7 @@ The controller's own bounds:
 | Consumer offsets at the source boundary | 120 s |
 | Output containing the accepted input | 120 s; `--drain-seconds` for degraded links |
 | Output stability window | 30 s |
-| Final source-boundary query of a recovery scenario | 60 s |
+| Final ingestor-boundary query of a recovery scenario | 60 s |
 | Docker launch of an ICMP helper, transfer receiver, Pumba dry run or injector | 60 s |
 | ICMP sample; link transfer; helper log read and removal | 30 s; 90 s; 20 s each |
 | Deadlock evidence qualification | 300 s in all, at most 60 s per file |
@@ -1944,13 +2170,20 @@ A run that ends on the runner's own budget is never a product verdict. [Cluster 
 53](https://app.clickup.com/t/86bcdkckc) owns sizing those budgets for loaded workers.
 Measurements on a diagnostic image are not product performance evidence.
 
-Suite budgets are sized for one suite on a dedicated CI worker. On a shared or loaded host, the
-verifier self-check alone can use most of a short entry's budget, so the run reaches its bound
-before its fault and fails with exit status 124. Such a failure is a limit of the host, not a
-verdict. There are three remedies:
+When every run still executed its own verifier self-check, the check took 139 to 164 seconds of
+each run on GitHub-hosted workers in the nightly soak of 22 October. That is about two thirds of
+the four-minute `stale-follower` entry, which then reached its bound in its last phase on both
+images, although its recovery had already passed. A suite therefore proves the verifiers once
+and keeps that preparation out of every entry's budget.
+
+Suite budgets are sized for one suite on a dedicated CI worker. A standalone `just chaos run` still
+executes its own check within its whole-run bound. On a shared or loaded host the check and the
+run's own work both stretch, so a standalone run given a short `--timeout` can reach its bound and
+fail with exit status 124. Such a failure is a limit of the host, not a verdict. There are three
+remedies:
 
 - run one suite per host
-- run the entry alone with `just chaos run`, whose default bound is larger
+- run the entry through its suite, or alone with `just chaos run` under its larger default bound
 - pass a larger `--timeout` to the run
 
 ## Artifacts
@@ -1965,9 +2198,9 @@ Each run writes bounded evidence under `ARTIFACTS/RUN_ID/`, by default `target/c
 | `fixtures/` | The generated records and every graph and guest the run installed |
 | `public/` | Every packaged-CLI command and its output: domain and graph creation, placements, descriptions, cluster status and metrics |
 | `traffic/` | Accepted input, observed output, every Kafka end-offset read, the output-boundary polls, consumer groups, load timestamps and producer results |
-| `results/` | The verdicts: the scenario's result and progress, the ledger, the output boundary, load pacing, container images, a diagnostic run's evidence verdict, `finding.json` |
+| `results/` | The verdicts: the scenario's result and progress, the ledger, the output boundary, load pacing, container images, a diagnostic run's evidence verdict, `finding.json`. Also the verifier self-check's output, `verifier-self-test.txt`, and in a run of a suite the record it adopted, `verifier-self-check.json` |
 | `diagnostics/` | The live event recording and its bounds, container inspection, Compose logs (a fresh-cluster restore adds `fresh-compose-ps.json` and `fresh-compose.log` for its second project), the image-package and startup-status records, preflight and healing records, cleanup output |
-| `backup/`, `backup-cycles/`, `backup-fault/`, `restore-fresh/`, `restarts/`, `crash/`, `pauses/`, `partitions/`, `degraded/`, `stale/`, `former-owner/`, `restart/`, `stateful/`, `domain-time/`, `mixed/` | Each scenario's own evidence, in catalog order: `restarts/` belongs to rolling restarts and `restart/` to cluster restarts |
+| `backup/`, `backup-cycles/`, `backup-fault/`, `restore-fresh/`, `restore-fault/`, `restore-volume/`, `restarts/`, `crash/`, `pauses/`, `partitions/`, `degraded/`, `stale/`, `former-owner/`, `restart/`, `stateful/`, `domain-time/`, `mixed/` | Each scenario's own evidence, in catalog order: `restarts/` belongs to rolling restarts and `restart/` to cluster restarts |
 | `deadlock/` | A diagnostic run's per-node evidence files, their inspections and qualifications, in `node-N/` for the run's nodes and `fresh-N/` for a fresh-cluster restore's |
 | `tls/` | The run's certificates. The private keys are removed when the run ends |
 
@@ -2110,7 +2343,7 @@ The `smoke` suite is one shard:
 
 | Entry | Command | Budget (min) |
 | --- | --- | ---: |
-| `baseline-3` | `baseline --nodes 3` | 14 |
+| `baseline-3` | `baseline --nodes 3` | 4 |
 | `leader-crash-3` | `leader-crash --nodes 3` | 7 |
 | `partition-follower` | `partition-recovery --case follower` | 9 |
 
@@ -2118,7 +2351,7 @@ The `soak` suite runs every delivered scenario, topology, case, profile and faul
 
 | Shard | Entries, with budgets in minutes |
 | ---: | --- |
-| 1 | `mixed-seed-42` (seed 42, `preserve-quorum`, 30 minutes) 60; `baseline-1` 13; `baseline-3` 14; `cluster-restart-1` 6; `cluster-restart-3` 7 |
+| 1 | `mixed-seed-42` (seed 42, `preserve-quorum`, 30 minutes) 60; `baseline-1` 3; `baseline-3` 4; `cluster-restart-1` 6; `cluster-restart-3` 7 |
 | 2 | `mixed-seed-45` (seed 45, `temporary-quorum-loss`) 60; `leader-crash-1` 6; `leader-crash-3` 7; `follower-crash` 5 |
 | 3 | `mixed-seed-136` (seed 136, `temporary-quorum-loss`) 60; `ingestor-owner-crash` 6; `emitter-owner-crash` 5; `stale-follower` 4; `former-owner-restart` 10 |
 | 4 | `mixed-rotating-preserve` 60; `rolling-restart-1` 5; `rolling-restart-3` 7; `backup-1` 4; `backup-3` 4 |
@@ -2127,8 +2360,8 @@ The `soak` suite runs every delivered scenario, topology, case, profile and faul
 | 7 | `domain-time-1` 7; `domain-time-1-cluster-restart` 8; `domain-time-3` 7; `domain-time-3-cluster-restart` 10; `domain-time-3-voter-crash` 12; `domain-time-3-voter-pause` 20; `domain-time-3-voter-stop` 15 |
 | 8 | `stateful-1` 20; `stateful-1-cluster-restart` 22; `stateful-3` 20; `stateful-3-owner-crash` 20 |
 | 9 | `stateful-3-owner-pause` 20; `stateful-3-owner-partition` 25; `stateful-3-cluster-restart` 22; `domain-time-3-voter-partition` 25 |
-| 10 | `backup-cycles-1` 10; `backup-cycles-3` 12; `restore-into-fresh-cluster` 12; `backup-under-owner-crash` 14 |
-| 11 | `backup-under-leader-crash` 14; `backup-under-partition` 15; `rolling-restart-during-backup-stream` 20 |
+| 10 | `backup-cycles-1` 10; `backup-cycles-3` 12; `restore-into-fresh-cluster` 12; `backup-under-owner-crash` 14; `restore-under-leader-crash` 12; `restore-under-owner-crash` 11; `restore-staging-volume` 11 |
+| 11 | `backup-under-leader-crash` 14; `backup-under-partition` 15; `rolling-restart-during-backup-stream` 20; `restore-under-leader-partition` 20; `restore-reclamation-under-owner-crash` 19 |
 
 A few soak entries need explanation:
 
@@ -2147,7 +2380,18 @@ A few soak entries need explanation:
 - **Selection.** `--shard` selects one shard and `--entry` selects named entries. Together they
   select both.
 - **Before the first run.** The suite checks its own verdict logic with `tests/suite-self-test.sh`,
-  which `just chaos self-test` also runs.
+  which `just chaos self-test` also runs. After it has resolved the image, it executes the full
+  verifier self-check, `tests/self-test.sh`, once and within its 600-second bound. The check leads
+  a session of its own, as a run does. It passes only when it exits 0 and the chaos scripts were
+  the same when it ended as when it began. The suite then writes `verifier-self-check.json`: the
+  check's outcome and timing, the digest of its output, the identity of the chaos scripts it
+  checked and the boot identity of the worker. Every run receives that record with
+  `--verifier-self-check` and adopts it instead of executing its own check. A run refuses a record
+  that did not pass on its worker, during its boot, for exactly its scripts, as a setup error
+  before it creates anything.
+- **A failed verifier self-check.** A check that fails, or whose scripts change while it executes,
+  starts no run and leaves no record a run could adopt. The suite fails as a controller failure,
+  with exit status 1, and records every entry as not started.
 - **Image resolution.** The suite resolves the image once. A digest reference stays as given, and
   any other reference runs as the local image ID it resolves to, so every run of the suite uses one
   immutable image. It records the revision and diagnostic selection that the image's labels
@@ -2179,7 +2423,12 @@ A suite writes `ARTIFACTS/SUITE_ID/`, by default `target/chaos/<suite>-<time>-<p
   - a mixed run's peak memory, backlog and output stall
   - a diagnostic run's evidence verdict and counts
   - the result files
-- **`summary.md`.** The same verdicts rendered for a reader. The suite also prints it at the end.
+- **`verifier-self-test.txt`, `verifier-self-check.json` and `verifier-self-test/`.** The verifier
+  self-check's whole output, the record every run adopts, and the probe records a failed rate-probe
+  self-test keeps. `suite.json` records the check under `verifier_self_check`: its status, exit
+  status, start, end, duration, bound, process, output and record.
+- **`summary.md`.** The same verdicts rendered for a reader, with the verifier self-check's outcome.
+  The suite also prints it at the end.
 - **`suite.log`.** The suite's whole console, which it keeps writing after its caller stops reading.
 
 An entry passes only when its command exits 0 and its manifest records a passing run of the suite's
@@ -2203,39 +2452,47 @@ Each run executes in the background and leads a session of its own. An interrupt
 hangup therefore reaches the suite at once, and reaches the run only through the suite, even when a
 terminal signals the suite's whole process group. The suite passes one TERM to the run. The run's
 own exit trap then heals, captures and cleans up as on any exit, and records the run as interrupted.
-The suite starts no later entry. Its console reaches its caller through a tee that ignores a
-terminal's interrupts and hangups and keeps writing `suite.log` when the caller stops reading, so the
-suite outlives its console and still records every verdict.
+The suite starts no later entry. The verifier self-check executes the same way: a signal while it
+executes reaches it as the suite's one TERM, the suite records the check as interrupted, and no
+entry starts. Its console reaches its caller through a tee that ignores a terminal's interrupts and
+hangups and keeps writing `suite.log` when the caller stops reading, so the suite outlives its
+console and still records every verdict.
 
 `just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY` ends what a suite left behind. The suite
-records the process of its controller and of every run it starts, and cleanup works in this order:
+records the process of its controller, of its verifier self-check and of every run it starts, and
+cleanup works in this order:
 
-1. A controller that still executes receives one TERM, which it passes to its run as on any signal.
-   A run whose controller is gone receives one TERM itself.
+1. A controller that still executes receives one TERM, which it passes to its run or verifier
+   self-check as on any signal. A run or verifier self-check whose controller is gone receives one
+   TERM itself.
 2. Each has `--wait` seconds, 300 by default, to finish its exit work.
 3. Cleanup then kills the controller if it still executes, and every process left in each run's
-   session.
+   session and in the session of a verifier self-check that still executed.
 4. For every run the suite started, cleanup runs `just chaos cleanup --evidence` into
    `cleanup/<run-id>/`, and removes the private keys of any run whose exit trap never ran.
 5. It keeps the verdict of a run that finished before its controller ended. It records entries that
    never reported an exit status as interrupted, and entries never started as not-started.
-6. It records how the controller ended and which runs it signalled or killed, and renders the
-   summary again.
+6. It records how the controller ended, which runs it signalled or killed, and under
+   `cleanup.verifier_self_check` whether it signalled a verifier self-check that still executed and
+   how many of its processes it killed. A check that still executed is recorded as interrupted.
+   Cleanup then renders the summary again.
 
 ### Shard Budgets
 
 `just chaos suite shards SUITE` prints the budgets CI applies to each shard:
 
 - **Execution budget.** The sum of the shard's entry budgets.
-- **Step budget.** The execution budget plus one 15-minute run teardown reserve, within which a run
-  that reached its own bound finishes its teardown.
+- **Preparation budget.** 10 minutes, the verifier self-check's 600-second bound in whole minutes.
+  The suite executes that check once, before its first run, so no entry's budget funds it.
+- **Step budget.** The execution budget plus the preparation budget plus one 15-minute run teardown
+  reserve, within which a run that reached its own bound finishes its teardown.
 - **Job budget.** The step budget plus the suite's 21-minute CI reserve. The reserve funds the
   separate network-control qualification, with its 600-second cap and 10-second termination grace,
   and the steps after the suite: cleanup, which has its own 8-minute bound holding its five-minute
   wait, plus the summary and the uploads.
 
-The smoke shard therefore runs 30 minutes of entries in a 45-minute step and a 66-minute job. The
-soak's eleven shards hold 873 minutes of entries.
+The smoke shard therefore runs 20 minutes of entries in a 45-minute step and a 66-minute job. The
+soak's eleven shards hold 926 minutes of entries.
 
 `just chaos suite report [--expect-shards N] SUITE_JSON...` renders one summary of several shards.
 It fails unless each shard passed and `N` of them are present.
@@ -2254,6 +2511,12 @@ The `Docker Build` workflow builds the images a suite needs and calls the `Chaos
 
 Both calls pass the revision the build checked out. The diagnostic image is pushed under that tag
 only and never enters a published manifest, and its build runs only when a chaos suite needs it.
+
+Both image build jobs record the shared short CPU, memory-access and filesystem calibrations.
+The builder also probes its mounted Cargo target filesystem before compilation, retaining raw
+results in the plain BuildKit log. These are host/build diagnostics, not chaos execution evidence
+or a sustained SSD benchmark; [Integration Test Lifecycle](integration-test-lifecycle.md) owns
+their bounds and interpretation. They do not alter image identity, suite budgets or verdicts.
 The triggers are:
 
 | Trigger | Suite |
@@ -2282,8 +2545,8 @@ order:
 
 1. It loads the `sch_prio`, `sch_sfq` and `sch_netem` modules, and fails when the kernel cannot
    provide one.
-2. It installs `just` and `toml`, and installs jq 1.8.1 from its release, checked against the
-   release's SHA-256, because the worker's own jq is Ubuntu's 1.7.
+2. It installs `just`, and jq 1.8.1 from its release, checked against the release's SHA-256,
+   because the worker's own jq is Ubuntu's 1.7.
 3. It removes every Rust toolchain directory from the `PATH` the suite runs with, and fails if
    `cargo`, `rustc` or `rustup` is still reachable.
 4. It pulls the image and logs out of the registry.
@@ -2297,8 +2560,9 @@ order:
        --image-revision <revision> --artifacts <dir> --suite-id ci-<run>-<attempt>-<suite>-<n>
    ```
 
-   For a diagnostic image, the suite ID adds `-diagnostic` before the shard. The suite step ends at
-   the shard's step budget, and the job ends at its job budget.
+   For a diagnostic image, the suite ID adds `-diagnostic` before the shard. The suite executes
+   the verifier self-check once, inside the step's preparation budget, before its first run. The
+   suite step ends at the shard's step budget, and the job ends at its job budget.
 7. It always runs `just chaos suite cleanup` next. Cleanup waits up to five minutes for a
    controller that is still finishing its run's exit work, kills whatever still executes, and, as a
    second witness after the runs' own traps, captures and removes what any run left behind.
@@ -2400,6 +2664,13 @@ Its limits:
   or partitioned. [Backup Faults](#backup-faults) adds two rules off those links: an
   acknowledgement gate on the broker's egress, and a rate limit on the leader's egress to the CLI.
   Each only holds a cut or a download open; no verdict judges the broker or the CLI under them.
+  [Restore Faults](#restore-faults) cuts the CLI off the isolated leader only so the CLI reaches the
+  next leader before the heal.
+- **Restore faults.** The faults land while a restore stages, which a delay makes last. A fault
+  during state publication needs a hook, so the Cucumber scenarios that pause a restore before
+  publication carry that boundary. The release image exposes no publication generation and no count
+  of refused stale requests, so the refusal of a stale coordinator is judged only by the resumed
+  domain's traffic.
 - **Pause.** A pause is Docker's freeze of a container's processes; it is not a signal the process
   observes.
 - **State publication.** A stateful run's durability verdicts for the deduplicator, window and
@@ -2456,6 +2727,7 @@ from the fixed source tree onto the same official image, and then requalified on
 | [Cluster Chaos 09](https://app.clickup.com/t/86bc85vzz) | Seeded mixed-instability experiments and their replay |
 | [Cluster Chaos 10](https://app.clickup.com/t/86bc85w01) | The smoke and soak suites in CI, against both images |
 | [Backup 07](https://app.clickup.com/t/86bc8dbxv) | Backup cycles with exact deduplicator and window verdicts; quiesced backups under an owner crash, a leader crash, an owner partition and a rolling restart of the download; a restore into a fresh three-node cluster; and soak shards 10 and 11, which run them |
+| [Backup: Qualify restores through a leader crash, a partitioned coordinator, an owner restart and concurrent staging volume](https://app.clickup.com/t/86bckvq84) | Restores held in staging through a leader crash, an isolation of the coordinating leader from its peers and the client, a state owner's crash, and a state owner's crash while a failed restore awaits reclamation; the measured staging volume of three concurrent restores; and their entries in soak shards 10 and 11 |
 
 **Product defects.** The suite found these product defects. Each was fixed through its own task
 and requalified with the scenario that found it:
@@ -2480,6 +2752,7 @@ and requalified with the scenario that found it:
 | [Cluster Chaos 52](https://app.clickup.com/t/86bcdkcf1) and [60](https://app.clickup.com/t/86bcdwr9y) | A stopping node's drain was abandoned, through its one-second cordon release and through a Kafka ingestor held quiesced until the drain timeout |
 | [Cluster Chaos 56](https://app.clickup.com/t/86bcdk4tn) | A restarting voter required a bootstrap host that no longer resolved, instead of using its recovered Raft members |
 | [Cluster Chaos 67](https://app.clickup.com/t/86bcghajy) | The destination of a forced failover held its graph installation, and every later revision, for the deliveries in flight to a paused former owner, up to the 60-second entity gate deadline |
+| [Backup: Qualify restores through a leader crash, a partitioned coordinator, an owner restart and concurrent staging volume](https://app.clickup.com/t/86bckvq84) | When forced recovery moved the replica of a Kafka ingestor's domain offsets while the ingestor kept running, the schedule rebound the offsets but left the ingestor committing through the originator of the superseded binding. Every commit was refused, and the source replayed from its last commit for as long as it ran. A reassignment now hands the kept ingestor the originator its offsets' new binding issued |
 
 **Harness corrections.** These tasks corrected the suite itself:
 
@@ -2492,6 +2765,8 @@ and requalified with the scenario that found it:
 | [Cluster Chaos 61](https://app.clickup.com/t/86bcdxk5q) | The rate probe no longer abandons a transfer that loss stalls for over a second |
 | [Keep a caught-up leader during directed burst loss](https://app.clickup.com/t/86bcjn14h) | A hold no longer requires the lagging end of a randomly or burst-lossy link to join a connected quorum's leader agreement. `mixed-burst-loss-leader-peer` replays the step that found it |
 | [Restore backup soak setup](https://app.clickup.com/t/86bcjn14f) | The backup graph derived again after the Kafka ingestor statement gained its connector and entity kind |
+| [A combined degradation's sample that lost nothing](https://app.clickup.com/t/86bcm0fq2) | Random and combined loss judge their floors over 400 packets, as burst loss already did. Forty packets of a working 20% loss missed the combined floor about once in 700 samples |
+| [Finish stale-follower inside its controller budget](https://app.clickup.com/t/86bcpkw1q) | Every run executed the full verifier self-check, 139 to 164 seconds on CI workers, inside its own entry budget, so the four-minute `stale-follower` entry reached its bound in its last phase on both images. A suite now executes the check once, before its first run, within its shard's preparation budget, and every run adopts the record. The baseline entries no longer fund the check, so their budgets are their 3- and 4-minute execution allowances |
 
 The suite also corrected defects of its own that surfaced in its qualification runs:
 
@@ -2523,14 +2798,36 @@ GitHub-hosted worker. They ran against the release and diagnostic images of test
 On the diagnostic image, every process start left qualifying evidence with no active, potential or
 lost finding. The task records each entry's ledger, outcome and timings.
 
+**The restore entries.** [Backup: Qualify restores through a leader crash, a partitioned
+coordinator, an owner restart and concurrent staging
+volume](https://app.clickup.com/t/86bckvq84) ran the five restore entries, one per GitHub-hosted
+worker, against the release and diagnostic images of tested merge `4a37b26e`, in runs
+[39388139905](https://github.com/nervix-io/nervix/actions/runs/39388139905) and
+[39387247054](https://github.com/nervix-io/nervix/actions/runs/39387247054). All 10 runs passed with
+no missing record, in 4.3 to 7.9 minutes each, and the soak budgets are about two and a half times
+those durations. The owner crash ended the restore it interrupted as incomplete on one image and
+completed it on the other, so both ends the contract allows were judged. Before that campaign, the
+owner crash found the defect in which a Kafka ingestor kept through a replica move stopped
+committing its domain offsets. The task records each entry's ledger, outcome and timings, and the
+staging volume's samples.
+
 **The current suites.** The current suites run nightly against both images of `main`:
 
 - In Docker Build run [38861733263](https://github.com/nervix-io/nervix/actions/runs/38861733263),
   of revision `8bc67c9a`, every shard of the soak suite passed on both the release and the
   diagnostic image.
 - In run [39009603191](https://github.com/nervix-io/nervix/actions/runs/39009603191), of revision
-  `ac67de6d`, which runs the runner this chapter documents, 17 of 18 shards passed. The 18th failed
-  in seed 42 because a combined degradation's 40-packet ICMP sample lost no packet under an
-  installed 20% loss.
+  `ac67de6d`, 17 of 18 shards passed. The 18th failed in seed 42 because a combined degradation's
+  40-packet ICMP sample lost no packet under an installed 20% loss.
   [Cluster Chaos: Find why a combined link degradation's 40-packet ICMP sample lost nothing under an
-  installed 20% netem loss](https://app.clickup.com/t/86bcm0fq2) owns that failure.
+  installed 20% netem loss](https://app.clickup.com/t/86bcm0fq2) found the fault working. The 103
+  combined samples of the 13 nightly soaks from 7 to 19 October, on both images, lost 18.7% of
+  4,120 packets with the variance of independent loss, and their 134 random-loss samples lost
+  29.1% of 5,360. The seeded netem generator of the failed qdisc, replayed from the seed the kernel
+  reported, draws 20.0% losses. Forty packets of a working 20% loss miss the 5% floor about once in
+  700 samples, so the loss profiles now sample 400 packets. Chaos run
+  [39330398655](https://github.com/nervix-io/nervix/actions/runs/39330398655) qualified the larger
+  samples on GitHub-hosted workers, with Linux 6.17 and 7.0, against the release image of
+  `e69c0801`. Twelve combined runs lost 20.2% of 4,800 packets, at least 64 of 400 against the
+  floor of 20, and four random-loss runs lost 30.3% of 1,600, at least 99 against 30. All 16 runs
+  passed, and each sample took 5.0 seconds, against 4.9 for 40 lossy packets.

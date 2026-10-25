@@ -52,17 +52,16 @@ Feature: OTEL emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_main
-      TYPE OTEL
+      CREATE OTEL CLIENT otel_main
       CONFIG {
         'endpoint' = '{{otel_collector_grpc_dns_addr}}',
         'protocol' = 'grpc',
         'timeout_ms' = 5000
       };
-      CREATE EMITTER audit_to_otel
+      CREATE OTEL LOGS EMITTER audit_to_otel
       FROM audit_events
-      TO OTEL otel_main LOGS
-      VALUES {
+      TO otel_main
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s VALUES {
         'time' = input.event_ts,
         'severity_text' = input.level,
         'severity_number' = input.level_num,
@@ -81,15 +80,13 @@ Feature: OTEL emission
         'service.name' = 'nervix-cucumber',
         'deployment.environment.name' = '{{test_id}}'
       }
-      SCOPE 'nervix/audit' VERSION '1.0'
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      SCOPE 'nervix/audit' VERSION '1.0' FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE EMITTER audit_trace_to_otel
+      CREATE OTEL TRACES EMITTER audit_trace_to_otel
       FROM audit_events
-      TO OTEL otel_main TRACES
-      VALUES {
+      TO otel_main
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s VALUES {
         'trace_id' = input.trace_id,
         'span_id' = input.span_id,
         'name' = CASE
@@ -109,15 +106,13 @@ Feature: OTEL emission
         'service.name' = 'nervix-cucumber',
         'deployment.environment.name' = '{{test_id}}'
       }
-      SCOPE 'nervix/audit' VERSION '1.0'
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      SCOPE 'nervix/audit' VERSION '1.0' FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     When the DNS fixture answers "otel-grpc.nervix.test" with "name not found"
-    And sink client for emitter "audit_to_otel" enters unavailable fault mode
+    And emitter client for emitter "audit_to_otel" enters unavailable fault mode
     And http payload is posted to host "otel-{{test_id}}.example.com" path "/audit"
       """
       {
@@ -133,13 +128,13 @@ Feature: OTEL emission
       """
     Then within "5s" DESCRIBE EMITTER "audit_to_otel" on the leader node contains
       """
-      transient error: sink fault injector returned an unavailable client
+      transient error: emitter fault injector returned an unavailable client
       """
     And the last command output contains
       """
       reconnect backoff:
       """
-    When sink client for emitter "audit_to_otel" leaves fault mode
+    When emitter client for emitter "audit_to_otel" leaves fault mode
     Then within "10s" DESCRIBE EMITTER "audit_to_otel" on the leader node contains
       """
       transient error: OTEL gRPC export ended without an answer from the receiver
@@ -201,53 +196,47 @@ Feature: OTEL emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_http
-      TYPE OTEL
+      CREATE OTEL CLIENT otel_http
       CONFIG {
         'endpoint' = '{{otel_collector_dns_addr}}',
         'protocol' = 'http/protobuf',
         'compression' = 'gzip',
         'timeout_ms' = 5000
       };
-      CREATE CLIENT otel_grpc
-      TYPE OTEL
+      CREATE OTEL CLIENT otel_grpc
       CONFIG {
         'endpoint' = '{{otel_collector_grpc_dns_addr}}',
         'protocol' = 'grpc',
         'timeout_ms' = 5000
       };
-      CREATE EMITTER request_count_to_otel
+      CREATE OTEL METRICS EMITTER request_count_to_otel
       FROM request_counts
-      TO OTEL otel_http
+      TO otel_http
       METRIC 'nervix.test.request.count' UNIT '1' DESCRIPTION 'Cucumber request count'
       SUM MONOTONIC DELTA
-      VALUES {
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
         'time' = input.window_end,
         'start_time' = input.window_start,
         'value' = input.value
       }
       ATTRIBUTES { 'http.route' = input.route }
       RESOURCE { 'service.name' = 'nervix-cucumber' }
-      SCOPE 'nervix/metrics' VERSION '1.0'
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      SCOPE 'nervix/metrics' VERSION '1.0' FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE EMITTER request_count_to_otel_grpc
+      CREATE OTEL METRICS EMITTER request_count_to_otel_grpc
       FROM request_counts
-      TO OTEL otel_grpc
+      TO otel_grpc
       METRIC 'nervix.test.request.count.grpc' UNIT '1' DESCRIPTION 'Cucumber request count over gRPC'
       SUM MONOTONIC DELTA
-      VALUES {
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
         'time' = input.window_end,
         'start_time' = input.window_start,
         'value' = input.value
       }
       ATTRIBUTES { 'http.route' = input.route }
       RESOURCE { 'service.name' = 'nervix-cucumber' }
-      SCOPE 'nervix/metrics' VERSION '1.0'
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      SCOPE 'nervix/metrics' VERSION '1.0' FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       START;
@@ -334,41 +323,36 @@ Feature: OTEL emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_main
-      TYPE OTEL
+      CREATE OTEL CLIENT otel_main
       CONFIG {
         'endpoint' = '{{otel_collector_http_addr}}',
         'protocol' = 'http/protobuf',
         'timeout_ms' = 5000
       };
-      CREATE EMITTER temperature_to_otel
+      CREATE OTEL METRICS EMITTER temperature_to_otel
       FROM latency_points
-      TO OTEL otel_main
+      TO otel_main
       METRIC 'nervix.test.gauge.{{test_id}}' UNIT 'Cel' DESCRIPTION 'Cucumber gauge'
       GAUGE
-      VALUES {
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
         'time' = input.observed_at,
         'value' = input.temperature
       }
-      RESOURCE { 'service.name' = 'nervix-cucumber' }
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      RESOURCE { 'service.name' = 'nervix-cucumber' } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE EMITTER latency_to_otel
+      CREATE OTEL METRICS EMITTER latency_to_otel
       FROM latency_points
-      TO OTEL otel_main
+      TO otel_main
       METRIC 'nervix.test.histogram.{{test_id}}' UNIT 'ms' DESCRIPTION 'Cucumber histogram'
       HISTOGRAM CUMULATIVE
-      VALUES {
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
         'time' = input.observed_at,
         'count' = input.count,
         'bucket_counts' = input.bucket_counts,
         'explicit_bounds' = input.explicit_bounds
       }
-      RESOURCE { 'service.name' = 'nervix-cucumber' }
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      RESOURCE { 'service.name' = 'nervix-cucumber' } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       START;

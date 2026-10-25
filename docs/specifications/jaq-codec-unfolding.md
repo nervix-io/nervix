@@ -16,7 +16,7 @@ Before this contract, the program had to produce exactly one JSON object per pay
 had to parse to exactly one value; anything else was rejected. This contract removes both
 requirements for ingestion and defines what a source, the graph, and an operator observe when a
 payload becomes zero, one, or many messages. The ordering, acknowledgement, failure, and limit rules
-below are the complete contract; no part of unfolding is left to an individual source connector.
+below are the complete contract; no part of unfolding is left to an individual ingestor connector.
 
 The contract applies to every JAQ-backed codec: the JAQ-native formats `JSON`, `YAML`, `TOML`,
 `XML`, and `CBOR`, and `PROTOBUF`. Schemaful codecs declared over `WIRE JSON|CBOR|AVRO SCHEMA` and the
@@ -167,7 +167,7 @@ Acknowledgement stays at payload granularity, because the payload is what the ex
 
 A rejected payload is handled exactly as any payload that fails to decode in that source and delivery
 mode. The failure is reported as a runtime error event to attached sessions and logged. It is not a
-route message error, and no error record is produced for it. `NO_ACK` modes continue with the next
+route message error, and no error record is produced for it. `NO ACK` modes continue with the next
 payload, and acknowledged modes apply their retry and redelivery behavior. An HTTP endpoint still
 answers `202`, which means that the body was accepted, not that it decoded or how many messages it
 produced. A source that hands several payloads over as one unit, such as one Prometheus evaluation,
@@ -197,7 +197,7 @@ duplicate lines. `DESCRIBE HASH MAP` reports the number of entries, which counts
 
 - **Emission.** `ON EMITTING` keeps its contract: it runs once per record and must yield exactly one
   value, which becomes one payload. An emitted record is the unit of emitter acknowledgement,
-  batching, and retry, and wire batching belongs to the sink connectors. One record becoming several
+  batching, and retry, and wire batching belongs to the emitter connectors. One record becoming several
   payloads is a different feature and is not part of this contract.
 - **Signaling protocols.** `SEND JAQ` programs must still produce exactly one value, `WAIT JAQ` and
   `FAIL JAQ` matchers are satisfied by any output, and a handshake frame is read as exactly one value

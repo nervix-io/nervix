@@ -56,17 +56,16 @@ Feature: Runtime startup admission
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
 
-      CREATE EMITTER admission_emitter
+      CREATE KAFKA TOPIC EMITTER admission_emitter
         FROM admission_output
-        TO KAFKA kafka_main TOPIC runtime_admission_out_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        TO kafka_main TOPIC 'runtime_admission_out_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING admission_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE

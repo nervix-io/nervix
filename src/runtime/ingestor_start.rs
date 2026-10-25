@@ -79,6 +79,9 @@ pub(super) struct IngestorRuntime {
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) branched: Vec<Arc<IngestorRouteRuntime>>,
     pub(super) tasks: Vec<JoinHandle<()>>,
+    /// The originator a domain-offset Kafka ingestor commits through, which schedule application
+    /// replaces while this instance runs; absent for every other ingestor.
+    pub(super) domain_offsets: Option<StdArc<KafkaOffsetOriginatorSlot>>,
 }
 
 /// A locally owned input that the committed revision replaces or removes. Both sides are typed
@@ -126,7 +129,7 @@ impl Runtime {
                     .cloned(),
                 None => None,
             };
-            if previous.requires_source_retirement(replacement.as_deref()) {
+            if previous.requires_entity_retirement(replacement.as_deref()) {
                 retiring.insert(
                     previous.ingestor.name.clone(),
                     RetiringIngestorInput {
@@ -259,10 +262,12 @@ impl Runtime {
             }));
         };
 
+        // The stopped instance's originator ends with it, so no reassignment reaches it again.
         let IngestorRuntime {
             shutdown,
             branched,
             tasks,
+            domain_offsets: _,
         } = runtime;
         if shutdown.send(true).is_err() {
             warn!(
@@ -525,8 +530,8 @@ mod tests {
         ClientConfigEntry, ClientName, ClusterNodeName, ClusterSchedule, CodecName,
         CodecWireFormat, CreateClientMqtt, CreateCodec, CreateIngestor, CreateJsonWireSchema,
         CreateRelay, CreateSchema, DomainConfig, DomainPace, DomainSchedule, DomainState,
-        DomainStatus, GeneralErrorPolicy, IngestSource, IngestorName, JsonType, ModelKind,
-        MqttIngestMode, MqttQos, MqttSession, MqttSource, MqttTopicSource, OutputBranch,
+        DomainStatus, GeneralErrorPolicy, IngestorEntity, IngestorName, JsonType, ModelKind,
+        MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor, OutputBranch,
         ParseAsType, ProcessorOutputs, RelayBranching, RelayName, RetryPolicy, SchemaField,
         SchemaName, WireSchemaField, WireSchemaName,
     };
@@ -539,16 +544,12 @@ mod tests {
         let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system())
             .await
             .expect("the host's resolver configuration should load");
-        Runtime::with_persistence_and_temp_dir(
-            nervix_execution::Executor::default(),
-            Some(dns),
-            None,
-            DEFAULT_STATE_SNAPSHOT_INTERVAL,
-            ConfiguredFaultInjection::default(),
-            PathBuf::from(DEFAULT_TEMP_DIR),
-            DEFAULT_RESTORE_STAGING_MAX_BYTES,
-        )
-        .expect("a runtime without persistence builds")
+        let environment = RuntimeEnvironment {
+            dns: Some(dns),
+            ..RuntimeEnvironment::transient(nervix_execution::Executor::default())
+        };
+        Runtime::with_environment(environment, RuntimeSettings::default())
+            .expect("a runtime without persistence builds")
     }
 
     #[nervix_primitives::test]
@@ -643,8 +644,8 @@ mod tests {
                             .with_branch(OutputBranch::Unbranched),
                             input: nervix_models::IngestorInput::Transport(
                                 nervix_models::TransportIngestorInput {
-                                    source: IngestSource::Mqtt(MqttSource::Topic(
-                                        MqttTopicSource {
+                                    source: IngestorEntity::Mqtt(MqttIngestor::Topic(
+                                        MqttTopicIngestor {
                                             client,
                                             topic: nervix_models::MqttTopicFilter::parse(
                                                 "notifications",
@@ -776,7 +777,7 @@ mod tests {
                         .with_branch(OutputBranch::Unbranched),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
+                            source: IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
                                 client,
                                 topic: nervix_models::MqttTopicFilter::parse("notifications")
                                     .expect("valid topic filter"),

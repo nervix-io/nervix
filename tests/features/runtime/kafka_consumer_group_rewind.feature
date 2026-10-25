@@ -20,7 +20,7 @@ Feature: Kafka consumer-group rewinds across a rebalance
       CREATE WIRE JSON SCHEMA rewind_wire MODE STRICT ( event_id string );
       CREATE CODEC rewind_codec FROM WIRE JSON SCHEMA rewind_wire TO SCHEMA rewind_event;
       CREATE RELAY rewind_records SCHEMA rewind_event UNBRANCHED;
-      CREATE CLIENT rewind_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT rewind_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -32,9 +32,9 @@ Feature: Kafka consumer-group rewinds across a rebalance
           ON QUIESCE SUSPEND DECODE USING rewind_codec
         TO rewind_records INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER rewind_sink
+      CREATE ATTACHED KAFKA TOPIC EMITTER rewind_sink
         FROM rewind_records
-        TO KAFKA rewind_kafka TOPIC rewind_out_{{test_id}}
+        TO rewind_kafka TOPIC 'rewind_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING rewind_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

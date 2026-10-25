@@ -5,8 +5,13 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
 env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # Kache sizes its local store from the cache volume (5%, rounded and bounded).
+  # Keep the default so a runner disk change also changes its cache budget.
   KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
+  # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
+  KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "68719476736"
   TINYGO_VERSION: "0.41.1"
 
 permissions:
@@ -86,8 +91,10 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
+          components: clippy
           targets: wasm32-unknown-unknown
 
       - name: Setup Rust nightly
@@ -98,7 +105,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just@latest,cargo-autoinherit,toml-cli,trunk,wild-linker
+          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just@latest,cargo-autoinherit,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -163,7 +170,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -175,6 +181,11 @@ jobs:
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
+
+      - name: Runner diagnostics before Validate
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: validate
 
       - name: Validate
         run: |
@@ -236,14 +247,15 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           components: llvm-tools
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,wild-linker
+          tool: just@latest,cargo-llvm-cov,wild-linker
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -270,7 +282,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -287,6 +298,11 @@ jobs:
         uses: ./.github/actions/runner-load
         with:
           phase: start
+
+      - name: Runner diagnostics before Check diagnostic evidence and report tool coverage
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: check-diagnostic-evidence-and-report-tool-coverage
 
       - name: Check diagnostic evidence and report tool coverage
         run: just coverage-deadlock
@@ -354,14 +370,15 @@ jobs:
       SELECTION: ${{ matrix.selection }}
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -417,7 +434,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -438,10 +454,20 @@ jobs:
         with:
           phase: start
 
+      - name: Runner diagnostics before Diagnostic lane
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: diagnostic-lane
+
       - name: Diagnostic lane
         run: |
           just toolchains-install
           timeout --signal=TERM --kill-after=60 175m just coverage-native-extras "test-${SELECTION}"
+
+      - name: Runner diagnostics before Supervision qualification
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: supervision-qualification
 
       - name: Supervision qualification
         run: timeout --signal=TERM --kill-after=60 10m just test-deloxide-qualification "${SELECTION}"
@@ -513,14 +539,15 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -578,7 +605,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -595,6 +621,11 @@ jobs:
         run: |
           python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
+
+      - name: Runner diagnostics before Tests coverage
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: tests-coverage
 
       - name: Tests coverage
         run: |
@@ -686,17 +717,17 @@ jobs:
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # The harness watchdog derives its budget from this limit and leaves time for logs and reports.
-    timeout-minutes: 60
+    # The harness derives 75 minutes of scenarios from this limit, with 30 for setup/builds and
+    # 15 for cleanup/export/uploads. Keep tests/common/suite_watchdog.rs in step.
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      # The retained loaded run consumed 78,433 slot-seconds before 115 attempts finished.
-      # 32 slots supply only 78,720 in 41 minutes; 48 leave capacity for that demand and retries.
-      # Its suite CPU use averaged 67% and memory 9.0 GiB on this 16-CPU/64-GiB runner.
+      # Keep the qualified 48-slot load. Recent slow runs need more time at this concurrency:
+      # 39656928785 used 117,587 slot-seconds with 833 attempts still active after 41 minutes.
       NERVIX_TEST_CONCURRENCY_FACTOR: "3"
     steps:
       - name: Checkout
@@ -705,14 +736,15 @@ jobs:
           fetch-depth: 2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -770,7 +802,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -790,6 +821,11 @@ jobs:
 
       - name: Setup uv for Python driver coverage
         uses: astral-sh/setup-uv@v6
+
+      - name: Runner diagnostics before Scenario coverage
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: scenario-coverage
 
       - name: Scenario coverage
         run: |
@@ -903,12 +939,14 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
 
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli
+          tool: just
 
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
@@ -916,7 +954,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -930,6 +967,11 @@ jobs:
         run: python3 scripts/kache_remote.py start
 
       # The CRAP report runs the cargo-crap version scripts/cargo_crap.py pins, built through kache.
+      - name: Runner diagnostics before Install the pinned complexity analyzer
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: install-the-pinned-complexity-analyzer
+
       - name: Install the pinned complexity analyzer
         run: just install-cargo-crap
 
@@ -1040,11 +1082,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The justfile reads the repository toolchain with toml-cli whenever it loads.
+      # The justfile reads the repository toolchain with Python's TOML parser when it loads.
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli
+          tool: just
 
       - name: Record the event, labels and producer results
         env:
@@ -1154,14 +1196,15 @@ jobs:
       NERVIX_TEST_SUITE_BUDGET: "15m"
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -1237,7 +1280,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -1254,6 +1296,11 @@ jobs:
         uses: ./.github/actions/runner-load
         with:
           phase: start
+
+      - name: Runner diagnostics before Client conformance
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: client-conformance
 
       - name: Client conformance
         run: |
@@ -1321,8 +1368,9 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Setup Rust nightly
@@ -1333,7 +1381,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov,cargo-mutants,just@latest,toml-cli,trunk,wild-linker
+          tool: cargo-llvm-cov,cargo-mutants,just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -1391,7 +1439,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -1411,13 +1458,28 @@ jobs:
         with:
           phase: start
 
+      - name: Runner diagnostics before Capability doctests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: capability-doctests
+
       - name: Capability doctests
         run: |
           just toolchains-install
           just test-capability-docs
 
+      - name: Runner diagnostics before Expiry map Miri
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: expiry-map-miri
+
       - name: Expiry map Miri
         run: just test-expiry-map-miri
+
+      - name: Runner diagnostics before Expiry map mutation tests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: expiry-map-mutation-tests
 
       - name: Expiry map mutation tests
         run: just test-expiry-map-mutants
@@ -1456,8 +1518,18 @@ jobs:
       - name: Native coverage collector
         run: just coverage-model-runner
 
+      - name: Runner diagnostics before Source contracts, compiler diagnostics and paired API doctests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: source-contracts-compiler-diagnostics-and-paired-api-doctests
+
       - name: Source contracts, compiler diagnostics and paired API doctests
         run: just coverage-native-extras test-typed-ratchet
+
+      - name: Runner diagnostics before Compiler cache changes, interruption and runner qualification
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: compiler-cache-changes-interruption-and-runner-qualification
 
       - name: Compiler cache changes, interruption and runner qualification
         run: |
@@ -1467,23 +1539,58 @@ jobs:
       - name: Primitive source and thread owner validation coverage
         run: just coverage-primitive-boundary
 
+      # The completed doctests no longer need their compiled outputs. Keep their evidence while
+      # making room for the separately instrumented benchmark build.
+      - name: Reclaim completed documentation builds
+        run: just clean-ci-docs
+
       # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
       # without treating noisy shared-runner timings as a performance regression signal. The run is
       # instrumented for source coverage, so its timings are not a measurement either.
+      - name: Runner diagnostics before Benchmark smoke tests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: benchmark-smoke-tests
+
       - name: Benchmark smoke tests
         run: just coverage-native-extras bench-smoke
 
+      # The collector has exported its report and recorded completion before this runs. Release
+      # the benchmark's dev-profile build outputs while retaining every coverage record.
+      - name: Reclaim completed benchmark builds
+        run: just clean-ci-benchmarks
+
       # The primitive boundary's native conformance collected separately in every execution mode.
+      - name: Runner diagnostics before Primitive boundary conformance
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: primitive-boundary-conformance
+
       - name: Primitive boundary conformance
         run: just coverage-native-extras test-primitives
+
+      - name: Runner diagnostics before Primitive boundary compile and browser checks
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: primitive-boundary-compile-and-browser-checks
 
       - name: Primitive boundary compile and browser checks
         run: just test-primitives-compile
 
       # The walk saturates every core, and its failures are about completion reachability rather
       # than about any one test.
+      - name: Runner diagnostics before Plexus completion walk
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: plexus-completion-walk
+
       - name: NSPL completion walk
         run: just coverage-native-extras nspl-completion-walk
+
+      - name: Runner diagnostics before Plexus connector declaration export
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: plexus-connector-declaration-export
 
       - name: Plexus connector declaration export
         run: just coverage-native-extras validate-connector-matrix
@@ -1563,14 +1670,15 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker,cargo-llvm-cov
+          tool: just@latest,trunk,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -1626,7 +1734,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -1646,10 +1753,20 @@ jobs:
         with:
           phase: start
 
+      - name: Runner diagnostics before Shuttle concurrency checks
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: shuttle-concurrency-checks
+
       - name: Shuttle concurrency checks
         run: |
           just toolchains-install
           just coverage-native-extras test-shuttle
+
+      - name: Runner diagnostics before Shuttle schedule replay
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: shuttle-schedule-replay
 
       - name: Shuttle schedule replay
         run: just test-shuttle-replay-check
@@ -1733,14 +1850,15 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker,cargo-llvm-cov
+          tool: just@latest,trunk,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -1779,7 +1897,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -1799,6 +1916,11 @@ jobs:
         uses: ./.github/actions/runner-load
         with:
           phase: start
+
+      - name: Runner diagnostics before Loom memory-ordering models
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: loom-memory-ordering-models
 
       - name: Loom memory-ordering models
         run: |
@@ -1881,14 +2003,15 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -1944,7 +2067,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -1961,6 +2083,11 @@ jobs:
         uses: ./.github/actions/runner-load
         with:
           phase: start
+
+      - name: Runner diagnostics before Loom ordering qualification
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: loom-ordering-qualification
 
       - name: Loom ordering qualification
         run: |
@@ -2033,14 +2160,15 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,wild-linker,cargo-llvm-cov
+          tool: just@latest,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -2076,7 +2204,6 @@ jobs:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
           cache-executables: "true"
-          max-size: "1TiB"
           pr-comment: "false"
 
       - name: Start kache remote
@@ -2094,10 +2221,20 @@ jobs:
         with:
           phase: start
 
+      - name: Runner diagnostics before Turmoil simulations
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: turmoil-simulations
+
       - name: Turmoil simulations
         run: |
           just toolchains-install
           just coverage-native-extras test-turmoil --output target/turmoil.lcov
+
+      - name: Runner diagnostics before Turmoil failure replay
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: turmoil-failure-replay
 
       - name: Turmoil failure replay
         run: just test-turmoil-replay-check

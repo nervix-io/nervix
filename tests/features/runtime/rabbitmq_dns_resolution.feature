@@ -1,11 +1,11 @@
 Feature: RabbitMQ name resolution
 
-  A RabbitMQ source or sink resolves the host of its client's `addr` through the node's resolver
+  A RabbitMQ source or emitter resolves the host of its client's `addr` through the node's resolver
   each time it opens a connection, dials the answers in order, and verifies an `amqps` broker's
   certificate against that host. These scenarios point every node at a DNS fixture the scenario
   controls, and provision every queue explicitly.
 
-  Scenario Outline: RabbitMQ sources and sinks reach a broker named by the node DNS fixture over <scheme>
+  Scenario Outline: RabbitMQ sources and emitters reach a broker named by the node DNS fixture over <scheme>
     Given RabbitMQ is running
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
@@ -31,7 +31,7 @@ Feature: RabbitMQ name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
@@ -44,8 +44,8 @@ Feature: RabbitMQ name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER rabbit_out FROM notifications
-      TO RABBITMQ rabbit_main QUEUE dns_out_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE ATTACHED RABBITMQ QUEUE EMITTER rabbit_out FROM notifications
+      TO rabbit_main QUEUE 'dns_out_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -96,7 +96,7 @@ Feature: RabbitMQ name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{rabbitmq_tls_dns_addr}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
@@ -122,7 +122,7 @@ Feature: RabbitMQ name resolution
       | 1            |
       | 3            |
 
-  Scenario Outline: RabbitMQ sources and sinks reconnect once their broker name resolves again after <answer>
+  Scenario Outline: RabbitMQ sources and emitters reconnect once their broker name resolves again after <answer>
     Given RabbitMQ is running
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
@@ -140,7 +140,7 @@ Feature: RabbitMQ name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = '{{rabbitmq_forwarded_addr}}'
       };
       CREATE RABBITMQ QUEUE INGESTOR rabbit_in
@@ -152,8 +152,8 @@ Feature: RabbitMQ name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER rabbit_out FROM notifications
-      TO RABBITMQ rabbit_main QUEUE dns_out_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE ATTACHED RABBITMQ QUEUE EMITTER rabbit_out FROM notifications
+      TO rabbit_main QUEUE 'dns_out_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -209,7 +209,7 @@ Feature: RabbitMQ name resolution
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -225,11 +225,11 @@ Feature: RabbitMQ name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT rabbitmq_sink TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbitmq_sink CONFIG {
         'addr' = '{{rabbitmq_forwarded_addr}}'
       };
-      CREATE ATTACHED EMITTER rabbitmq_boundary FROM notifications
-        TO RABBITMQ rabbitmq_sink QUEUE rabbitmq_dns_boundary_out_{{test_id}}
+      CREATE ATTACHED RABBITMQ QUEUE EMITTER rabbitmq_boundary FROM notifications
+        TO rabbitmq_sink QUEUE 'rabbitmq_dns_boundary_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 300ms
             RETRY POLICY BACKOFF 100ms MAX 200ms
           ENCODE USING notification_codec
@@ -282,7 +282,7 @@ Feature: RabbitMQ name resolution
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT rabbit_main TYPE RABBITMQ CONFIG {
+      CREATE RABBITMQ CLIENT rabbit_main CONFIG {
         'addr' = '{{rabbitmq_forwarded_addr}}'
       };
       CREATE RABBITMQ QUEUE INGESTOR rabbit_in
@@ -294,8 +294,8 @@ Feature: RabbitMQ name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER rabbit_out FROM notifications
-      TO RABBITMQ rabbit_main QUEUE dns_out_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE ATTACHED RABBITMQ QUEUE EMITTER rabbit_out FROM notifications
+      TO rabbit_main QUEUE 'dns_out_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE

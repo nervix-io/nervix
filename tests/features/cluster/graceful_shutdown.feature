@@ -40,6 +40,85 @@ Feature: Graceful shutdown
       kind=junction name=drain_route owner={{drain_route_destination}} replicas=- transition_from=node-2 state_recovery=complete
       """
 
+  @shutdown_handoff_bystander
+  Scenario: A stopping owner hands its work over while the leader cannot reach a node that runs none of it
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When leadership is transferred to node "node-1"
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA bystander_event ( id I64 );
+      CREATE RELAY bystander_input SCHEMA bystander_event UNBRANCHED;
+      CREATE RELAY bystander_output SCHEMA bystander_event UNBRANCHED;
+      CREATE JUNCTION bystander_route FROM bystander_input UNBRANCHED
+        TO bystander_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      RELOCATE RELAY bystander_input ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY bystander_output ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE JUNCTION bystander_route ONTO NODE node-3 IGNORE PREFERENCES;
+      CORDON NODE node-2;
+      """
+    Then node "node-1" eventually reports status containing "kind=junction name=bystander_route owner=node-3"
+    Given the ownership handoff gate engagement requests node "node-1" sends to node "node-2" are lost
+    When node "node-3" is gracefully stopped
+    Then the last shutdown of node "node-3" reports its drain-support phase "Completed"
+    And the link from node "node-1" to node "node-2" lost no ownership handoff gate engagement request
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      kind=junction name=bystander_route owner=node-1 replicas=- transition_from=node-3 state_recovery=complete
+      """
+
+  @shutdown_handoff_bystander_preparation
+  Scenario: A stopping owner hands its work over within its drain budget while a bystander's runtime preparation is held
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When leadership is transferred to node "node-1"
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA bystander_event ( id I64 );
+      CREATE RELAY bystander_input SCHEMA bystander_event UNBRANCHED;
+      CREATE RELAY bystander_output SCHEMA bystander_event UNBRANCHED;
+      CREATE JUNCTION bystander_route FROM bystander_input UNBRANCHED
+        TO bystander_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE JUNCTION bystander_echo FROM bystander_input UNBRANCHED
+        TO bystander_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      RELOCATE RELAY bystander_input ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY bystander_output ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE JUNCTION bystander_route ONTO NODE node-3 IGNORE PREFERENCES;
+      RELOCATE JUNCTION bystander_echo ONTO NODE node-3 IGNORE PREFERENCES;
+      CORDON NODE node-2;
+      """
+    Then node "node-1" eventually reports status containing "kind=junction name=bystander_route owner=node-3"
+    And node "node-1" eventually reports status containing "kind=junction name=bystander_echo owner=node-3"
+    When runtime preparation on node "node-2" is paused
+    And node "node-3" is gracefully stopped
+    Then the last shutdown of node "node-3" reports its drain-support phase "Completed"
+    And node "node-2" reaches its runtime preparation pause
+    When runtime preparation on node "node-2" is released
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      kind=junction name=bystander_route owner=node-1 replicas=- transition_from=node-3 state_recovery=complete
+      """
+    And the last command output contains
+      """
+      kind=junction name=bystander_echo owner=node-1 replicas=- transition_from=node-3 state_recovery=complete
+      """
+
   Scenario: Graceful shutdown preserves an operator cordon across restart
     Given graceful shutdown drain is enabled
     And the production sticky scheduler is configured
@@ -79,7 +158,7 @@ Feature: Graceful shutdown
       CREATE CODEC handoff_codec
         FROM WIRE JSON SCHEMA handoff_wire TO SCHEMA handoff_event;
       CREATE RELAY handoff_records SCHEMA handoff_event UNBRANCHED CAPACITY 1;
-      CREATE CLIENT handoff_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT handoff_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -92,8 +171,8 @@ Feature: Graceful shutdown
         TO handoff_records INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER handoff_output FROM handoff_records
-        TO KAFKA handoff_kafka TOPIC shutdown_handoff_out_{{test_id}}
+      CREATE ATTACHED KAFKA TOPIC EMITTER handoff_output FROM handoff_records
+        TO handoff_kafka TOPIC 'shutdown_handoff_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING handoff_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -163,7 +242,7 @@ Feature: Graceful shutdown
       CREATE CODEC flush_codec
         FROM WIRE JSON SCHEMA flush_wire TO SCHEMA flush_event;
       CREATE RELAY flush_records SCHEMA flush_event UNBRANCHED CAPACITY 1;
-      CREATE CLIENT flush_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT flush_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -176,8 +255,8 @@ Feature: Graceful shutdown
         TO flush_records INHERIT ALL UNBRANCHED
           FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER flush_output FROM flush_records
-        TO KAFKA flush_kafka TOPIC shutdown_flush_out_{{test_id}}
+      CREATE ATTACHED KAFKA TOPIC EMITTER flush_output FROM flush_records
+        TO flush_kafka TOPIC 'shutdown_flush_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING flush_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -415,12 +494,12 @@ Feature: Graceful shutdown
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION shutdown_ack_route FROM shutdown_ack_input UNBRANCHED
         TO shutdown_ack_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT shutdown_ack_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT shutdown_ack_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER shutdown_ack_output_sink FROM shutdown_ack_output
-        TO ZEROMQ shutdown_ack_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER shutdown_ack_output_sink FROM shutdown_ack_output
+        TO shutdown_ack_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING shutdown_ack_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE PLACEMENT keep_shutdown_ack_downstream_local
@@ -491,12 +570,12 @@ Feature: Graceful shutdown
         ON GENERAL ERROR LOG;
       CREATE JUNCTION held_route FROM held_ingested UNBRANCHED
         TO held_routed INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-      CREATE CLIENT held_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT held_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER held_output FROM held_routed
-        TO ZEROMQ held_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER held_output FROM held_routed
+        TO held_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING held_event_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -552,12 +631,12 @@ Feature: Graceful shutdown
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT lingering_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT lingering_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'linger.ms' = '120000'
       };
-      CREATE EMITTER held_output FROM held_events
-        TO KAFKA lingering_kafka TOPIC held_shutdown_out_{{test_id}} MODE NO_ACK
+      CREATE KAFKA TOPIC EMITTER held_output FROM held_events
+        TO lingering_kafka TOPIC 'held_shutdown_out_{{test_id}}' MODE NO ACK
           RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING held_event_codec
         INHERIT ALL
@@ -618,7 +697,7 @@ Feature: Graceful shutdown
       CREATE BRANCH by_shutdown_tenant SCHEMA shutdown_tenant TTL 5m;
       CREATE RELAY shutdown_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
       CREATE RELAY shutdown_unique_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
-      CREATE CLIENT shutdown_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT shutdown_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -643,12 +722,12 @@ Feature: Graceful shutdown
           INHERIT ALL
           FLUSH EACH 1h MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT shutdown_order_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT shutdown_order_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER shutdown_order_output FROM shutdown_unique_orders
-        TO ZEROMQ shutdown_order_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER shutdown_order_output FROM shutdown_unique_orders
+        TO shutdown_order_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING shutdown_order_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -707,7 +786,7 @@ Feature: Graceful shutdown
       CREATE CODEC confirm_codec
         FROM WIRE JSON SCHEMA confirm_wire TO SCHEMA confirm_event;
       CREATE RELAY confirm_records SCHEMA confirm_event UNBRANCHED;
-      CREATE CLIENT confirm_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT confirm_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -720,8 +799,8 @@ Feature: Graceful shutdown
         TO confirm_records INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER confirm_output FROM confirm_records
-        TO KAFKA confirm_kafka TOPIC shutdown_confirm_out_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER confirm_output FROM confirm_records
+        TO confirm_kafka TOPIC 'shutdown_confirm_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING confirm_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -759,7 +838,7 @@ Feature: Graceful shutdown
       CREATE CODEC handoff_confirm_codec
         FROM WIRE JSON SCHEMA handoff_confirm_wire TO SCHEMA handoff_confirm_event;
       CREATE RELAY handoff_confirm_records SCHEMA handoff_confirm_event UNBRANCHED;
-      CREATE CLIENT handoff_confirm_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT handoff_confirm_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -772,8 +851,8 @@ Feature: Graceful shutdown
         TO handoff_confirm_records INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER handoff_confirm_output FROM handoff_confirm_records
-        TO KAFKA handoff_confirm_kafka TOPIC shutdown_confirm_handoff_out_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER handoff_confirm_output FROM handoff_confirm_records
+        TO handoff_confirm_kafka TOPIC 'shutdown_confirm_handoff_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING handoff_confirm_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -815,7 +894,7 @@ Feature: Graceful shutdown
       CREATE CODEC refused_stop_codec
         FROM WIRE JSON SCHEMA refused_stop_wire TO SCHEMA refused_stop_event;
       CREATE RELAY refused_stop_records SCHEMA refused_stop_event UNBRANCHED;
-      CREATE CLIENT refused_stop_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT refused_stop_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
         'auto.offset.reset' = 'earliest',
         'session.timeout.ms' = '10000'
@@ -829,8 +908,8 @@ Feature: Graceful shutdown
         TO refused_stop_records INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER refused_stop_output FROM refused_stop_records
-        TO KAFKA refused_stop_kafka TOPIC refused_stop_out_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER refused_stop_output FROM refused_stop_records
+        TO refused_stop_kafka TOPIC 'refused_stop_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING refused_stop_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -902,12 +981,12 @@ Feature: Graceful shutdown
         TO eligible_routed INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       CREATE JUNCTION handoff_route FROM handoff_input UNBRANCHED
         TO handoff_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT eligible_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT eligible_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER eligible_output FROM eligible_routed
-        TO ZEROMQ eligible_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER eligible_output FROM eligible_routed
+        TO eligible_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING eligible_event_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -960,7 +1039,7 @@ Feature: Graceful shutdown
         TO SCHEMA everyone_event;
       CREATE RELAY everyone_ingested SCHEMA everyone_event UNBRANCHED;
       CREATE RELAY everyone_routed SCHEMA everyone_event UNBRANCHED;
-      CREATE CLIENT everyone_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT everyone_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -978,12 +1057,12 @@ Feature: Graceful shutdown
         ON GENERAL ERROR LOG;
       CREATE JUNCTION everyone_route FROM everyone_ingested UNBRANCHED
         TO everyone_routed INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-      CREATE CLIENT everyone_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT everyone_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER everyone_output FROM everyone_routed
-        TO ZEROMQ everyone_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER everyone_output FROM everyone_routed
+        TO everyone_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING everyone_event_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -1018,10 +1097,174 @@ Feature: Graceful shutdown
       """
     And within "10s" Kafka consumer group "nervix_cucumber_shutdown_everyone_{{test_id}}" next offset for topic "shutdown_everyone_{{test_id}}" partition 0 is "at least 2"
 
+  @shutdown_terminating_destination @deloxide_stress
+  Scenario: A leader stopping with peers it has not seen terminate keeps its ingestor when the chosen peer refuses it
+    Given Kafka is running
+    And graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And node "node-1" eventually reports leader "node-1"
+    And Kafka topic "terminating_peer_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA peer_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA peer_wire MODE STRICT ( event_id integer );
+      CREATE CODEC peer_codec FROM WIRE JSON SCHEMA peer_wire TO SCHEMA peer_event;
+      CREATE RELAY peer_records SCHEMA peer_event UNBRANCHED;
+      CREATE KAFKA CLIENT peer_kafka CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR peer_source
+        FROM peer_kafka TOPIC 'terminating_peer_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'terminating_peer_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING peer_codec
+        TO peer_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION peer_seen TO peer_records;
+      """
+    And Kafka message is published to topic "terminating_peer_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      {"event_id":1}
+      """
+    Given the graceful drain of node "node-2" pauses before it moves its work
+    And the graceful drain of node "node-3" pauses before it moves its work
+    When gossip exchanges involving node "node-2" are blocked with a "0s" send delay
+    And consensus connectivity for node "node-3" is blocked
+    And node "node-2" begins stopping
+    And node "node-3" begins stopping
+    Then node "node-2" reaches its graceful drain pause
+    And node "node-3" reaches its graceful drain pause
+    When node "node-1" is stopped
+    And the graceful drain pause of node "node-2" is released
+    And the graceful drain pause of node "node-3" is released
+    And node "node-2" is stopped
+    And node "node-3" is stopped
+    And gossip exchanges involving node "node-2" are restored
+    And consensus connectivity for node "node-3" is restored
+    And the cluster is restarted
+    And these NSPL commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=ingestor name=peer_source owner=node-1
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION restarted_peer_seen TO peer_records;
+      """
+    And Kafka message is published to topic "terminating_peer_{{test_id}}"
+      """
+      {"event_id":2}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      {"event_id":2}
+      """
+
+  @shutdown_unactivated_handoff @deloxide_stress
+  Scenario: A node whose relocated ingestor never activated on its restarted destination releases its storage when it stops
+    Given Kafka is running
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And node "node-1" eventually reports leader "node-1"
+    And Kafka topic "unactivated_handoff_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA unactivated_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA unactivated_wire MODE STRICT ( event_id integer );
+      CREATE CODEC unactivated_codec
+        FROM WIRE JSON SCHEMA unactivated_wire TO SCHEMA unactivated_event;
+      CREATE RELAY unactivated_records SCHEMA unactivated_event UNBRANCHED;
+      CREATE KAFKA CLIENT unactivated_kafka CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR unactivated_source
+        FROM unactivated_kafka TOPIC 'unactivated_handoff_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'unactivated_handoff_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING unactivated_codec
+        TO unactivated_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION unactivated_seen TO unactivated_records;
+      """
+    And Kafka message is published to topic "unactivated_handoff_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      {"event_id":1}
+      """
+    Given ownership handoff for domain "{{domain}}" pauses before activation
+    When these NSPL commands begin executing in the background
+      """
+      RELOCATE INGESTOR unactivated_source ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then the ownership handoff activation pause for domain "{{domain}}" is reached
+    When node "node-2" is stopped
+    And node "node-2" is started
+    Then node "node-1" eventually reports interconnect to "node-2" as "connected"
+    And node "node-2" eventually reports interconnect to "node-1" as "connected"
+    When the ownership handoff activation pause for domain "{{domain}}" is released
+    Then the background NSPL execution fails with "ownership state activation did not complete"
+    When node "node-1" is stopped
+    And node "node-1" is started
+    And these NSPL commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=ingestor name=unactivated_source owner=node-2
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION restarted_unactivated_seen TO unactivated_records;
+      """
+    And Kafka message is published to topic "unactivated_handoff_{{test_id}}"
+      """
+      {"event_id":2}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      {"event_id":2}
+      """
+
   @long_running
   Scenario Outline: Every node stopping at once ends its generators together on a cluster of <cluster_size>
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And shutdown timeout is configured as "20s"
+    And drain timeout is configured as "20s"
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     When a materialized restore workload with 40 relays is created
@@ -1083,12 +1326,12 @@ Feature: Graceful shutdown
               total = relay_state.tenant_amounts.amount
           FLUSH EACH 1h MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT generated_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT generated_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER generated_output FROM generated_totals
-        TO ZEROMQ generated_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER generated_output FROM generated_totals
+        TO generated_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING tenant_total_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -1135,7 +1378,7 @@ Feature: Graceful shutdown
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
-      CREATE CLIENT wait_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT wait_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -1169,12 +1412,12 @@ Feature: Graceful shutdown
           SET source = relay_state.wait_state.source
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT wait_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT wait_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER wait_output FROM waiting_output
-        TO ZEROMQ wait_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER wait_output FROM waiting_output
+        TO wait_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING wait_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -1224,7 +1467,7 @@ Feature: Graceful shutdown
         FROM WIRE JSON SCHEMA stalled_event_wire
         TO SCHEMA stalled_event;
       CREATE RELAY stalled_events SCHEMA stalled_event UNBRANCHED;
-      CREATE CLIENT stalled_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT stalled_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -1240,12 +1483,12 @@ Feature: Graceful shutdown
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT stalled_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT stalled_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER stalled_output FROM stalled_events
-        TO ZEROMQ stalled_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      CREATE ZEROMQ PUSH EMITTER stalled_output FROM stalled_events
+        TO stalled_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING stalled_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -1340,6 +1583,7 @@ Feature: Graceful shutdown
   Scenario: A transaction commit stuck at its shutdown deadline is cancelled and completed after restart
     Given graceful shutdown drain is enabled
     And shutdown timeout is configured as "5s"
+    And drain timeout is configured as "5s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands
@@ -1370,6 +1614,7 @@ Feature: Graceful shutdown
   Scenario: A command still waiting for admission is cancelled without an effect when its node stops
     Given graceful shutdown drain is enabled
     And shutdown timeout is configured as "5s"
+    And drain timeout is configured as "5s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands

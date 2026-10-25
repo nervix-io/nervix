@@ -5,7 +5,7 @@ Nervix separates the syslog message format from syslog network transport:
 - the predefined singleton `SYSLOG` wire schema represents the fixed syslog message format
 - a codec that uses that wire schema decodes RFC 3164 and RFC 5424 messages and encodes RFC 5424
   messages
-- a `TYPE SYSLOG` client declares a UDP, TCP, or TLS socket endpoint
+- a `SYSLOG CLIENT` declares a UDP, TCP, or TLS socket endpoint
 - a `SYSLOG LISTENER` ingestor receives transport frames and passes each frame to its declared codec
 - a `TO SYSLOG` emitter sends codec output with the selected syslog transport framing
 
@@ -111,8 +111,8 @@ Record-specific encoding failures follow the emitter's `ON MESSAGE ERROR` policy
 A syslog client describes one direction-dependent socket endpoint:
 
 ```nspl,ignore
-CREATE CLIENT <name>
-  TYPE SYSLOG [MOUNT <resource> VERSION <n>|LATEST]
+CREATE SYSLOG CLIENT <name>
+  [MOUNT <resource> VERSION <n>|LATEST]
   CONFIG {
     'protocol' = 'udp'|'tcp'|'tls',
     'addr' = '<host:port>',
@@ -127,11 +127,12 @@ An emitter resolves the host in `addr` through the node's asynchronous resolver 
 opens a sender. Literal IPv4 and IPv6 addresses are used directly; hosts-file names and DNS
 answers follow the node's configured resolver and TTL policy. UDP tries answers in order, binding
 each socket to the answer's IP family, and sends to the first address whose setup succeeds. TCP
-and TLS try the answers in order, giving each an equal share of the time left in one 30-second
-connection budget. DNS, address attempts and the TLS
-handshake all spend that same budget. TLS verifies the original host from `addr`, whichever address
-accepted the connection. A new sender after a failure resolves again, so an expired answer can be
-replaced without restarting the node.
+and TLS try the answers in order, giving each an equal share of the time left in one connection
+budget, the client's `connect_timeout_ms`, 30 seconds when it is left out. DNS, address attempts and
+the TLS handshake all spend that same budget, and a connection that runs out of it is the emitter's
+transient status, naming the key and its bound. TLS verifies the original host from `addr`,
+whichever address accepted the connection. A new sender after a failure resolves again, so an
+expired answer can be replaced without restarting the node.
 
 | Config key | Required | Meaning |
 | --- | --- | --- |
@@ -139,6 +140,9 @@ replaced without restarting the node.
 | `addr` | Yes | `host:port`; bind address for ingestion and destination for emission |
 | `max_message_size` | No | Ingested-message byte cap; defaults to `131072` |
 | `framing` | No | TCP emitter framing: `octet-counting` by default or `non-transparent` |
+| `connect_timeout_ms` | No | For an emitter, positive whole milliseconds a new connection may take, name resolution, address attempts and TLS included; for a TLS listener, how long each accepted connection's TLS handshake may take. Defaults to 30 seconds |
+| `timeout_ms` | No | Emitter only: positive whole milliseconds writing and flushing one frame may take; unbounded when omitted |
+| `idle_timeout_ms` | No | TCP or TLS listener only: positive whole milliseconds an accepted connection may send nothing while the listener reads it before the listener closes it; unbounded when omitted |
 | `tls_cert_file` | Directional | TLS ingestor server certificate; optional emitter client certificate |
 | `tls_key_file` | Directional | Private key paired with `tls_cert_file` |
 | `tls_ca_file` | No | Ingestor client-certificate CA, or emitter server trust root |
@@ -146,8 +150,8 @@ replaced without restarting the node.
 TLS file paths use normal client resource mounts. For example:
 
 ```nspl
-CREATE CLIENT syslog_tls
-  TYPE SYSLOG MOUNT syslog_identity VERSION 1
+CREATE SYSLOG CLIENT syslog_tls
+  MOUNT syslog_identity VERSION 1
   CONFIG {
     'protocol' = 'tls',
     'addr' = '0.0.0.0:6514',
@@ -166,8 +170,13 @@ client authentication. `tls_ca_file` adds a server trust root; platform roots ar
 absent. TLS verifies the server name derived from `addr`.
 
 Configuration fails with a key-specific error for an unknown protocol, malformed address,
-`framing` on UDP, non-transparent framing on TLS, a missing TLS server identity, or only one half
-of an emitter client identity. TLS keys are invalid with UDP or plain TCP.
+`framing` on UDP, non-transparent framing on TLS, a missing TLS server identity, only one half
+of an emitter client identity, or a deadline key that is not a positive whole number of
+milliseconds. It also fails for a deadline key on a client whose direction and protocol perform no
+wait that key bounds: `connect_timeout_ms` on a UDP or TCP listener's client, which neither opens
+connections nor performs a handshake, `timeout_ms` on a listener's client, which writes nothing,
+and `idle_timeout_ms` on an emitter's client or a UDP listener's, neither of which reads a
+connection. TLS keys are invalid with UDP or plain TCP.
 Startup diagnostics retain the failed TLS file, certificate, or key cause beneath the Syslog
 configuration error, with the setting or path that failed. They do not include TLS file contents.
 
@@ -177,7 +186,7 @@ The generated [SYSLOG LISTENER ingest table](connector-capabilities.md#syslog-li
 and [SYSLOG COLLECTOR emit table](connector-capabilities.md#syslog-collector-emit) record the
 Plexus declarations, including peer metadata, header availability, quiesce and batching.
 
-A `SYSLOG LISTENER` ingestor reads through a `TYPE SYSLOG` client. It has one delivery mode,
+A `SYSLOG LISTENER` ingestor reads through a `SYSLOG CLIENT`. It has one delivery mode,
 `NO ACK`, and no `INSTANCES` clause:
 
 ```nspl,ignore
@@ -214,7 +223,8 @@ TO received_syslog
 ### UDP
 
 UDP follows RFC 5426. One datagram is one frame. A datagram larger than `max_message_size` is
-dropped and logged at debug level.
+dropped and counted in `nervix_ingestor_oversized_payloads_total`, which `DESCRIBE INGESTOR`
+renders for the node that received it; the listener goes on reading the next datagram.
 
 ### TCP
 
@@ -235,11 +245,19 @@ A frame may arrive split across any number of reads, including inside its octet 
 its CR and LF. The listener keeps the part it has and completes the frame from the following
 reads; the frame, and any framing failure, is the same as when one read carries it whole.
 
+With `idle_timeout_ms`, a connection that sends nothing for that long while the listener waits to
+read from it is closed; the other connections and the listener continue. The wait restarts with
+every read. Time the listener spends not reading a connection, because `SUSPEND` stopped it or the
+intake queue is full, does not count, so a sender is never closed for the listener's own
+backpressure. Without the key, an idle connection stays open until its sender closes it.
+
 ### TLS
 
 TLS follows RFC 5425: the TCP listener behavior runs over a TLS session and frames use octet
-counting. A failed handshake closes only that connection. The client-authentication behavior is
-controlled by `tls_ca_file` as described above.
+counting. A failed handshake closes only that connection, and so does a handshake that does not
+complete within the client's `connect_timeout_ms`, 30 seconds when it is left out, so a client that
+opens a connection and never completes its handshake holds nothing past that bound. The
+client-authentication behavior is controlled by `tls_ca_file` as described above.
 
 ### Quiesce and failures
 
@@ -259,11 +277,11 @@ cause without quoting the frame's payload.
 
 ## Emitter
 
-The syslog sink requires a codec and supports only `NO_ACK`:
+The syslog emitter requires a codec and supports only `NO ACK`:
 
 ```nspl,ignore
 TO SYSLOG <client>
-  MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
+  MODE NO ACK RETRY POLICY BACKOFF <duration> MAX <duration>
   ENCODE USING <codec>
 ```
 
@@ -297,6 +315,12 @@ infrastructure errors: the current batch is retained, the connection is rebuilt,
 retried on the declared backoff. Records accepted before a later failure in the same batch may be
 delivered more than once.
 
+With `timeout_ms`, writing and flushing one frame that does not finish within that bound is a write
+failure: a server that stops reading fills the connection's buffers, and the write that waits on
+them fails naming the key and its bound, which `DESCRIBE EMITTER` shows as the transient error. The
+connection the frame was partly written to is abandoned and rebuilt. Without the key, such a write
+waits until the server reads again or the connection fails.
+
 A missing name, silent DNS server, or unreachable answer is a connection failure. Resolving an
 address does not report record delivery. Shutdown or cancelled startup drops pending DNS and
 connection work; the physical connection budget also bounds an attempt if no cancellation occurs.
@@ -312,7 +336,10 @@ details are debug or trace and do not include payload values.
 | Limit | Value |
 | --- | --- |
 | Ingested message | `max_message_size`, default 131,072 bytes |
-| UDP datagram intake | 65,535 bytes, further limited by `max_message_size` |
+| UDP datagram intake | 65,535 bytes, further limited by `max_message_size`; a datagram above it is dropped and counted |
 | UDP payload emission | 65,507 bytes |
 | Octet-counting prefix | At most 10 digits |
 | Concurrent TCP/TLS connections | Unbounded count; bounded per-connection frame memory and bounded intake queue |
+| TLS handshake of an accepted connection | `connect_timeout_ms`, default 30 seconds |
+| Accepted connection sending nothing | `idle_timeout_ms`; unbounded when omitted |
+| Emitter frame write | `timeout_ms`; unbounded when omitted |

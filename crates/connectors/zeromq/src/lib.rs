@@ -1,9 +1,10 @@
-//! ZeroMQ source and sink connector.
+//! ZeroMqPullIngestor, ZeroMqPushEmitter connector entities.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** ZeroMQ push- and pull-socket configuration, whether a socket binds or
-//!   connects, reading the first frame of each received message, and per-record
+//!   connects, a PUSH socket's connection within its client's `connect_timeout_ms` and each send
+//!   within its `timeout_ms`, reading the first frame of each received message, and per-record
 //!   publication.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio, and
 //!   `zeromq`.
@@ -22,108 +23,9 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
-mod source;
-
-use async_trait::async_trait;
-use error_stack::Report;
-use nervix_connector::{
-    PerRecordOutcome, RecordSink, SinkFinish, SinkFinishResult, SinkHost, SinkLifecycle,
-    SinkPublishError, SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
-    client_config_value, optional_client_config_value,
+pub mod pull;
+pub mod push;
+pub use pull::{
+    ZeroMqPullIngestor, ZeroMqPullIngestorError, ZeroMqPullIngestorMessage, ZeroMqPullIngestorPlan,
 };
-use nervix_models::ClientConfigEntry;
-use nervix_primitives::time::Instant;
-pub use source::{ZeroMqSource, ZeroMqSourceError, ZeroMqSourceMessage, ZeroMqSourcePlan};
-use zeromq::{PushSocket, Socket, SocketSend};
-
-const ZEROMQ: &str = "zeromq";
-
-/// What one ZeroMQ sink publishes through: the entries its client configures its socket with.
-pub struct ZeroMqSinkConfig {
-    pub config: Vec<ClientConfigEntry>,
-}
-
-pub struct ZeroMqSink {
-    socket: PushSocket,
-}
-
-impl ZeroMqSink {
-    pub async fn new(config: ZeroMqSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
-        let socket = Self::push_socket_from_config(&config.config).await?;
-        Ok(Self { socket })
-    }
-
-    async fn push_socket_from_config(config: &[ClientConfigEntry]) -> SinkStartResult<PushSocket> {
-        let addr = Self::addr_from_config(config)?;
-        let bind = Self::bind_from_config(config);
-        let mut socket = PushSocket::new();
-        if bind {
-            socket.bind(&addr).await.map_err(Self::start_error)?;
-        } else {
-            socket.connect(&addr).await.map_err(Self::start_error)?;
-        }
-        Ok(socket)
-    }
-
-    fn addr_from_config(config: &[ClientConfigEntry]) -> SinkStartResult<String> {
-        {
-            let mapping_input = client_config_value(config, "addr", "ZeroMQ");
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let message = error.current_context().to_string();
-                    error
-                        .change_context(SinkStartError::InvalidConfiguration { sink: ZEROMQ })
-                        .attach_printable(message)
-                }),
-            }
-        }
-    }
-
-    fn bind_from_config(config: &[ClientConfigEntry]) -> bool {
-        match optional_client_config_value(config, "bind") {
-            Some(value) => value.eq_ignore_ascii_case("true"),
-            None => false,
-        }
-    }
-
-    fn start_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
-        Report::new(SinkStartError::Initialize { sink: ZEROMQ }).attach_printable(error.to_string())
-    }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::dispatch(reason = "formats the typed external ZeroMQ driver failure; no \
-                                   internal runtime ownership is inferred")
-    )]
-    fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
-        Report::new(SinkPublishError::Publish { sink: ZEROMQ }).attach_printable(error.to_string())
-    }
-}
-
-#[async_trait]
-impl SinkLifecycle for ZeroMqSink {
-    /// Each send writes and flushes its frame to a peer's socket before it returns, so the
-    /// socket holds nothing.
-    async fn finish(&mut self, _deadline: Instant) -> SinkFinishResult {
-        Ok(SinkFinish::NothingHeld)
-    }
-}
-
-#[async_trait]
-impl RecordSink for ZeroMqSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
-        let mut outcome = PerRecordOutcome::with_capacity(records.len());
-        for record in records {
-            nervix_primitives::task::consume_budget().await;
-            match self.socket.send(record.payload.into()).await {
-                Ok(()) => outcome.deliver(record.id),
-                Err(error) => {
-                    outcome.fail(Self::publish_error(error));
-                    break;
-                }
-            }
-        }
-        outcome
-    }
-}
+pub use push::{ZeroMqPushEmitter, ZeroMqPushEmitterConfig};

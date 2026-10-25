@@ -64,8 +64,8 @@ pub enum NameError {
 /// Whether a dot belongs to a name's alphabet.
 ///
 /// A domain is one segment and never contains a dot, which is what lets a qualified name be split
-/// on its first dot without ambiguity. Every other name may carry one, because external systems
-/// name topics, tables, and subjects that way.
+/// on its first dot without ambiguity. Other Nervix name kinds may carry dots. External entity
+/// names use their own case-preserving rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DotPolicy {
     Allowed,
@@ -296,7 +296,7 @@ declare_names! {
     WireSchemaName => Allowed,
     /// A codec declared with `CREATE CODEC`.
     CodecName => Allowed,
-    /// A connector client declared with `CREATE CLIENT`.
+    /// A connector client declared with a Plexus `<CONNECTOR> CLIENT` head.
     ClientName => Allowed,
     /// A virtual host declared with `CREATE VHOST`.
     VhostName => Allowed,
@@ -330,7 +330,7 @@ declare_names! {
     ReordererName => Allowed,
     /// A window processor declared with `CREATE WINDOW PROCESSOR`.
     WindowProcessorName => Allowed,
-    /// An emitter declared with `CREATE EMITTER`.
+    /// An emitter declared with a connector and entity in its Plexus statement head.
     EmitterName => Allowed,
     /// A placement declared with `CREATE PLACEMENT`.
     PlacementName => Allowed,
@@ -356,18 +356,7 @@ declare_names! {
     #[cfg_attr(nervix_lint, nervix::identity(node, reason = "validated cluster-node identity shared by all owners"))]
     ClusterNodeName => Allowed,
 
-    /// A topic of an external broker.
-    TopicName => Allowed,
-    /// A queue of an external broker.
-    QueueName => Allowed,
-    /// A channel of an external broker.
-    ChannelName => Allowed,
-    /// A NATS subject.
-    SubjectName => Allowed,
-    /// A table of an external database or catalog.
-    TableName => Allowed,
-    /// A collection of an external document database.
-    CollectionName => Allowed,
+
 }
 
 /// Generate the widening of an entity's own name into the kind-erased [`ModelName`].

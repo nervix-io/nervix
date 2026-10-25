@@ -60,7 +60,7 @@ pub(super) struct BranchRuntime {
     pub(super) routing: Option<DomainRoutingCache>,
     pub(super) routing_snapshot: Option<StdArc<DomainRoutingSnapshot>>,
     pub(super) domain_clock: DomainClock,
-    pub(super) source_kind: ModelKind,
+    pub(super) entity_kind: ModelKind,
     pub(super) source: RelayName,
     pub(super) root_relay: RelayName,
     pub(super) error_policies: ErrorPolicies,
@@ -500,11 +500,14 @@ impl BranchRuntime {
         &mut self,
         processor_id: &ModelName,
         execution_now: Timestamp,
+        purpose: ProcessorCheckpointPurpose,
     ) -> OwnershipHandoffResult<()> {
         let Some(mut processor) = self.processors.remove(processor_id) else {
             return Ok(());
         };
-        let result = processor.checkpoint_live_state(self, execution_now).await;
+        let result = processor
+            .checkpoint_live_state(self, execution_now, purpose)
+            .await;
         self.processors.insert(processor_id.clone(), processor);
         result
     }
@@ -584,10 +587,10 @@ impl BranchRuntime {
         self.metrics.source_dirty.mark();
         if self.dispatch_stream(&root_relay, &batch).await.is_err() {
             let error = Report::new(RouteOutputError::Forward { relay: root_relay });
-            if self.source_kind == ModelKind::Ingestor {
+            if self.entity_kind == ModelKind::Ingestor {
                 self.runtime.handle_general_error_for_acks(
                     &self.domain,
-                    self.source_kind,
+                    self.entity_kind,
                     &self.source,
                     &self.error_policies,
                     batch.acks.iter(),
@@ -596,7 +599,7 @@ impl BranchRuntime {
             } else {
                 self.runtime.handle_internal_processor_error_for_acks(
                     &self.domain,
-                    self.source_kind,
+                    self.entity_kind,
                     &self.source,
                     &self.error_policies,
                     batch.acks.iter(),
@@ -790,10 +793,10 @@ impl IngestorRouteTask {
         acks: &[AckSet],
         error: &Report<C>,
     ) {
-        if self.template.branch.source_kind == ModelKind::Ingestor {
+        if self.template.branch.entity_kind == ModelKind::Ingestor {
             self.runtime_handle.handle_general_error_for_acks(
                 &self.domain,
-                self.template.branch.source_kind,
+                self.template.branch.entity_kind,
                 &self.ingestor,
                 &self.template.branch.error_policies,
                 acks.iter(),
@@ -803,7 +806,7 @@ impl IngestorRouteTask {
             self.runtime_handle
                 .handle_internal_processor_error_for_acks(
                     &self.domain,
-                    self.template.branch.source_kind,
+                    self.template.branch.entity_kind,
                     &self.ingestor,
                     &self.template.branch.error_policies,
                     acks.iter(),
@@ -1040,7 +1043,7 @@ impl IngestorRouteTask {
             Err(error) => {
                 self.runtime_handle.events().report_error(format!(
                     "{} '{}' in domain '{}' could not bind its route flush clock: {error:#}",
-                    self.template.branch.source_kind.as_str(),
+                    self.template.branch.entity_kind.as_str(),
                     self.ingestor.as_str(),
                     self.domain.as_str(),
                 ));
@@ -1049,7 +1052,7 @@ impl IngestorRouteTask {
         };
         let ownership_entity = DomainNodeRef::node_in(
             self.domain.clone(),
-            self.template.branch.source_kind,
+            self.template.branch.entity_kind,
             ModelName::from(&self.template.branch.source),
         );
         let ownership_freeze =
@@ -1061,7 +1064,7 @@ impl IngestorRouteTask {
                 .fault_injection
                 .pause_ingestor_route_poll_if_armed(
                     &self.domain,
-                    self.template.branch.source_kind,
+                    self.template.branch.entity_kind,
                     &self.template.branch.source,
                 )
                 .await;
@@ -1155,7 +1158,7 @@ impl IngestorRouteRuntime {
         let quiesce = OutputBufferQuiesceGauge::new(runtime_handle.node_quiesce_counters(
             &domain,
             NodeRef::new(
-                template.branch.source_kind,
+                template.branch.entity_kind,
                 ModelName::from(&template.branch.source),
             ),
         ));
@@ -1393,10 +1396,10 @@ impl BranchExecutionRuntime {
         acks: impl IntoIterator<Item = &'a AckSet>,
         error: &Report<C>,
     ) {
-        if template.source_kind == ModelKind::Ingestor {
+        if template.entity_kind == ModelKind::Ingestor {
             runtime_handle.handle_general_error_for_acks(
                 domain,
-                template.source_kind,
+                template.entity_kind,
                 ingestor,
                 &template.error_policies,
                 acks,
@@ -1405,7 +1408,7 @@ impl BranchExecutionRuntime {
         } else {
             runtime_handle.handle_internal_processor_error_for_acks(
                 domain,
-                template.source_kind,
+                template.entity_kind,
                 ingestor,
                 &template.error_policies,
                 acks,
@@ -1429,7 +1432,7 @@ impl BranchExecutionRuntime {
             Err(error) => {
                 runtime_handle.handle_internal_processor_error_for_acks(
                     domain,
-                    template.source_kind,
+                    template.entity_kind,
                     ingestor,
                     &template.error_policies,
                     completion.acks.iter(),
@@ -1598,7 +1601,7 @@ impl BranchExecutionRuntime {
                 tick_due_branch_instance_branches(&restored_snapshot, &instances).await;
             let ownership_entity = DomainNodeRef::node_in(
                 domain.clone(),
-                template.source_kind,
+                template.entity_kind,
                 ModelName::from(&template.source),
             );
             let mut checkpoint_requests_open = true;
@@ -2075,7 +2078,7 @@ pub(super) fn branch_lru_placement(
     runtime.state_placement(
         domain,
         RuntimeStateKind::BranchLru,
-        template.source_kind,
+        template.entity_kind,
         &template.source,
         None,
     )
@@ -2155,7 +2158,7 @@ fn checkpoint_branch_instance_lru_snapshot<V>(
 ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
     let placement = branch_lru_placement(runtime, domain, template).change_context_lazy(|| {
         OwnershipHandoffError::StatePlacement {
-            kind: template.source_kind,
+            kind: template.entity_kind,
             identifier: ModelName::from(&template.source),
         }
     })?;
@@ -2298,7 +2301,7 @@ pub(super) async fn flush_branch_junction(
         ProcessorOutputDispatchContext {
             branch,
             node_kind,
-            source_kind: ModelKind::Junction,
+            entity_kind: ModelKind::Junction,
             processor,
             error_policies,
             materialized_state: ProcessorMaterializedState::Admitted(materialized_values),
@@ -2610,7 +2613,7 @@ mod tests {
             template: IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
                     revision: ProcessorPlanRevision::new(),
-                    source_kind: ModelKind::Ingestor,
+                    entity_kind: ModelKind::Ingestor,
                     source: named("orders_source"),
                     root_relay: relay.clone(),
                     branch: None,
@@ -2752,7 +2755,7 @@ mod tests {
             template: IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
                     revision: ProcessorPlanRevision::new(),
-                    source_kind: ModelKind::Ingestor,
+                    entity_kind: ModelKind::Ingestor,
                     source: named("orders_source"),
                     root_relay: relay.clone(),
                     branch: None,

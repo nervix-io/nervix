@@ -1,4 +1,4 @@
-//! Validation of the source and sink contracts.
+//! Validation of the source and emitter contracts.
 //!
 //! Layer: test harness.
 //!
@@ -16,16 +16,20 @@ use std::fs;
 
 use nervix_models::{
     AckMode, AckWindow, AlterEmitter, AlterEmitterOperation, ClientConfigEntry, ClientName,
-    CodecName, CodecWireFormat, CreateClientHttp, CreateClientS3, CreateClientSqs,
-    CreateWireSchema, EmitterPublishingMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
-    HttpEndpointSource, HttpSource, IcebergCatalog, IcebergStorageBackend, IcebergTableSink,
-    IngestSource, IngestorName, JsonType, KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode,
-    KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource, MaterializedRelayState,
-    MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, MqttSource, MqttTopicSource,
-    OtelLogsSink, OtelMetric, OtelValueMapping, OutputBranch, PostgresSink, PostgresTableSink,
-    ProcessorInputs, ProcessorOutputs, RetryPolicy, SentryEventSink, SentrySink,
-    SignalingProtobufConfig, SyslogCollectorSink, SyslogListenerSource, SyslogSink,
-    WireSchemaField, WireSchemaName, ZeroMqPushSink, ZeroMqSink,
+    CodecName, CodecWireFormat, CreateClientHttp, CreateClientKafka, CreateClientPrometheus,
+    CreateClientS3, CreateClientSqs, CreateWireSchema, EmitterEntityKind, ErrorPolicies,
+    FlushPolicy, GeneralErrorPolicy, HttpEmitterEntity, HttpEndpointIngestor, HttpIngestor,
+    IcebergCatalog, IcebergTableEmitter, IngestorEntity, IngestorName, JsonType,
+    KafkaConsumerGroupName, KafkaEmitter, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode,
+    KafkaTopicEmitter, KafkaTopicIngestor, MaterializedRelayState, MessageErrorPolicy,
+    MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor, NatsEmitter,
+    NatsSubjectEmitter, OtelLogsEmitter, OtelMetric, OtelValueMapping, OutputBranch,
+    PostgresEmitter, PostgresTableEmitter, ProcessorInputs, ProcessorOutputs,
+    PrometheusApiRootError, PrometheusClientConfigError, PrometheusClientKey, PulsarEmitter,
+    PulsarEmitterEntity, PulsarTopicEmitter, RabbitMqEmitter, RabbitMqEmitterEntity,
+    RabbitMqQueueEmitter, RetryPolicy, SentryEmitter, SentryEventEmitter, SignalingProtobufConfig,
+    SqsEmitterEntity, SyslogCollectorEmitter, SyslogEmitter, SyslogListenerIngestor,
+    WireSchemaField, WireSchemaName, ZeroMqEmitter, ZeroMqPushEmitter,
 };
 use nonzero_ext::nonzero;
 
@@ -41,6 +45,87 @@ use crate::registry::{
         unbranched_transforming_outputs, vhost, wire_schema,
     },
 };
+
+#[test]
+fn transport_policy_errors_keep_the_node_and_duration_reader_cause() {
+    let domain: DomainName = named("validation");
+    let identifier: ModelName = named("incoming");
+    let retry = RetryPolicy {
+        backoff: "10ms".to_string(),
+        max_backoff: "1s".to_string(),
+    };
+    let Err(error) = validate_transport_delivery(
+        &domain,
+        &identifier,
+        nervix_models::IngestAcknowledgement::Sequential {
+            timeout: "nonsense",
+            retry: &retry,
+        },
+    ) else {
+        panic!("an unreadable ACK TIMEOUT must be refused before execution");
+    };
+    let RegistryError::InvalidConnectorDeclaration {
+        domain: actual_domain,
+        node,
+        issue,
+    } = error.current_context()
+    else {
+        panic!("the policy reader must identify its owning node: {error:#}");
+    };
+    assert_eq!(actual_domain, &domain);
+    assert_eq!(
+        node,
+        &nervix_models::NodeRef::new(nervix_models::ModelKind::Ingestor, identifier)
+    );
+    assert_eq!(
+        issue,
+        &ConnectorDeclarationIssue::InvalidDuration {
+            setting: ConnectorDurationSetting::AckTimeout,
+            value: "nonsense".to_string(),
+        }
+    );
+    assert!(error.contains::<nervix_models::DurationTextError>());
+    assert!(format!("{error:#}").contains("expected number at 0"));
+}
+
+#[test]
+fn transport_policy_deadlines_obey_the_shared_schedulable_bound() {
+    let domain: DomainName = named("validation");
+    let node = nervix_models::NodeRef::new(
+        nervix_models::ModelKind::Ingestor,
+        named::<ModelName>("incoming"),
+    );
+    let maximum = format!("{}ns", ClientDeadline::LONGEST.as_nanos());
+    let beyond = ClientDeadline::LONGEST
+        .as_nanos()
+        .checked_add(1)
+        .assured("half a u64 nanosecond count plus one is below u128::MAX");
+    for setting in [
+        ConnectorDurationSetting::AckTimeout,
+        ConnectorDurationSetting::BatchTimeout,
+        ConnectorDurationSetting::RetryBackoff,
+        ConnectorDurationSetting::RetryMaximum,
+    ] {
+        let result = setting.parse(&maximum, &domain, &node);
+        assert!(
+            matches!(result, Ok(duration) if duration == ClientDeadline::LONGEST),
+            "the declared maximum fits: {result:?}",
+        );
+        let Err(error) = setting.parse(&format!("{beyond}ns"), &domain, &node) else {
+            panic!("a policy above the shared deadline bound cannot be scheduled");
+        };
+        assert!(
+            matches!(error.current_context(), RegistryError::InvalidConnectorDeclaration {
+            issue: ConnectorDeclarationIssue::UnschedulableDuration { setting: refused }, ..
+        } if *refused == setting)
+        );
+    }
+    let result = ConnectorDurationSetting::BatchTimeout.parse("0s", &domain, &node);
+    assert!(
+        matches!(result, Ok(duration) if duration.is_zero()),
+        "zero batch timeout gathers without waiting: {result:?}",
+    );
+}
 
 fn validate_signaling_protocol(
     protocol: &CreateSignalingProtocol,
@@ -158,7 +243,7 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     };
     let models = ModelIndex::new();
 
-    emitter.publishing_mode = EmitterPublishingMode::NoAck {
+    *kafka_publication(&mut emitter) = nervix_models::KafkaTopicPublishingMode::NoAck {
         retry_policy: RetryPolicy {
             backoff: "0s".to_string(),
             max_backoff: "1s".to_string(),
@@ -173,7 +258,7 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     .expect_err("zero retry backoff must be rejected");
     assert!(format!("{error:#}").contains("BACKOFF must be greater than zero"));
 
-    emitter.publishing_mode = EmitterPublishingMode::BrokerAck {
+    *kafka_publication(&mut emitter) = nervix_models::KafkaTopicPublishingMode::Ack {
         window: AckWindow::Sequential,
         ack_timeout: "0s".to_string(),
         retry_policy: RetryPolicy {
@@ -190,29 +275,20 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     .expect_err("zero confirmation timeout must be rejected");
     assert!(format!("{error:#}").contains("ACK TIMEOUT must be greater than zero"));
 
-    emitter.publishing_mode = EmitterPublishingMode::MqttQos0 {
-        retry_policy: RetryPolicy {
-            backoff: "10ms".to_string(),
-            max_backoff: "1s".to_string(),
+    *emitter.connector = EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
+        mode: nervix_models::SqsQueuePublishingMode::Single {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
         },
-    };
-    let error = validate_emitter_publishing_contract(
-        &domain,
-        &ModelName::from(&emitter.name),
-        &models,
-        &emitter,
-    )
-    .expect_err("foreign publishing modes must be rejected");
-    assert!(format!("{error:#}").contains("KAFKA emitter does not support MODE QOS 0"));
-
-    *emitter.sink = EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
         client: named("sqs_main"),
-        queue: "events".to_string(),
+        queue: nervix_models::SqsQueueName::parse("events").expect("valid queue"),
         fifo_group: Some(SqsFifoGroup::Expression(Expression::Literal(
             nervix_models::Literal::String("group".to_string()),
         ))),
     }));
-    emitter.publishing_mode = EmitterPublishingMode::SqsSingle {
+    *sqs_publication(&mut emitter) = nervix_models::SqsQueuePublishingMode::Single {
         retry_policy: RetryPolicy {
             backoff: "1s".to_string(),
             max_backoff: "100ms".to_string(),
@@ -227,7 +303,9 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     .expect_err("retry maxima below their initial backoff must be rejected");
     assert!(format!("{error:#}").contains("must be at least BACKOFF"));
 
-    if let EmitterPublishingMode::SqsSingle { retry_policy } = &mut emitter.publishing_mode {
+    if let nervix_models::SqsQueuePublishingMode::Single { retry_policy } =
+        sqs_publication(&mut emitter)
+    {
         retry_policy.max_backoff = "1s".to_string();
     }
     let error = validate_emitter_publishing_contract(
@@ -251,7 +329,7 @@ fn batch_policy(max_messages: u32, max_size: &str) -> nervix_models::EmitterBatc
 }
 
 #[test]
-fn publishing_contract_checks_the_batch_clause_against_its_sink() {
+fn publishing_contract_checks_the_batch_clause_against_its_emitter() {
     let domain = DomainName::parse("default").expect("valid domain");
     let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out") else {
         unreachable!("emitter helper must build an emitter model")
@@ -259,23 +337,24 @@ fn publishing_contract_checks_the_batch_clause_against_its_sink() {
     let identifier = ModelName::from(&emitter.name);
     let models = ModelIndex::new();
     emitter.body = nervix_models::EmitterBody::Values;
-    emitter.publishing_mode = EmitterPublishingMode::RequestAck {
-        retry_policy: RetryPolicy {
-            backoff: "10ms".to_string(),
-            max_backoff: "1s".to_string(),
+
+    *emitter.connector = EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
+        mode: nervix_models::PostgresTablePublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
         },
-    };
-    *emitter.sink = EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
         client: named("postgres_main"),
         table: named("events"),
-        values: Vec::new(),
+        values: vec![otel_mapping("seq")],
         conflict_action: nervix_models::PostgresConflictAction::None,
     }));
 
     let error = validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
         .expect_err("a Postgres emitter without BATCH must be rejected");
     assert!(
-        format!("{error:#}").contains("POSTGRES emitters require BATCH MAX MESSAGES"),
+        format!("{error:#}").contains("POSTGRES TABLE emitters require BATCH MAX MESSAGES"),
         "unexpected error: {error:#}"
     );
 
@@ -283,15 +362,21 @@ fn publishing_contract_checks_the_batch_clause_against_its_sink() {
     validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
         .expect("a Postgres emitter with BATCH is valid");
 
-    *emitter.sink = EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+    *emitter.connector = EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
+        mode: nervix_models::SqsQueuePublishingMode::Single {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("sqs_main"),
-        queue: "events".to_string(),
+        queue: nervix_models::SqsQueueName::parse("events").expect("valid queue"),
         fifo_group: None,
     }));
     emitter.body = nervix_models::EmitterBody::Codec {
         codec: named("event_codec"),
     };
-    emitter.publishing_mode = EmitterPublishingMode::SqsBatch {
+    *sqs_publication(&mut emitter) = nervix_models::SqsQueuePublishingMode::Batch {
         retry_policy: RetryPolicy {
             backoff: "10ms".to_string(),
             max_backoff: "1s".to_string(),
@@ -306,7 +391,7 @@ fn publishing_contract_checks_the_batch_clause_against_its_sink() {
 }
 
 #[test]
-fn batching_emitters_require_a_codec_container_their_sink_can_publish() {
+fn batching_emitters_require_a_codec_container_their_emitter_can_publish() {
     let domain = DomainName::parse("default").expect("valid domain");
     let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out") else {
         unreachable!("emitter helper must build an emitter model")
@@ -333,7 +418,13 @@ fn batching_emitters_require_a_codec_container_their_sink_can_publish() {
     validate_emitter_batch_container(&domain, &identifier, &emitter, &protobuf)
         .expect("a protobuf codec with BATCH MESSAGE has a batch container");
 
-    *emitter.sink = EmitSink::Sentry(SentrySink::Event(SentryEventSink {
+    *emitter.connector = EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
+        mode: nervix_models::SentryEventPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("sentry_main"),
     }));
     let Model::Codec(mut json) = jaq_native_codec("event_codec", "event_schema", None, Some("."))
@@ -344,7 +435,7 @@ fn batching_emitters_require_a_codec_container_their_sink_can_publish() {
         .expect_err("a batching Sentry emitter needs ON EMITTING BATCH");
     assert!(
         format!("{error:#}").contains(
-            "SENTRY emitter requires codec 'event_codec' to declare an ON EMITTING BATCH"
+            "SENTRY EVENT emitter requires codec 'event_codec' to declare an ON EMITTING BATCH"
         ),
         "unexpected error: {error:#}"
     );
@@ -386,7 +477,13 @@ fn direct_values_sensitivity_reports_the_typed_external_target() {
         expression: nervix_nspl::parse_expression("input.secret")
             .assured("input.secret is a valid expression"),
     };
-    *emitter.sink = EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
+    *emitter.connector = EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
+        mode: nervix_models::PostgresTablePublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("database"),
         table: named("events"),
         values: vec![mapping],
@@ -394,28 +491,28 @@ fn direct_values_sensitivity_reports_the_typed_external_target() {
     }));
     let models = ModelIndex::new();
     let error =
-        validate_direct_values_sensitivity(&domain, &identifier, &models, &emitter, &input_schema)
+        validate_direct_value_mappings(&domain, &identifier, &models, &emitter, &input_schema)
             .expect_err("a sensitive VALUES expression must be rejected");
     assert!(matches!(
         error.current_context(),
         RegistryError::SensitiveEmitterValue {
             domain: error_domain,
             emitter: error_emitter,
-            sink: "POSTGRES",
+            connector: "POSTGRES TABLE",
             target,
         } if error_domain == &domain
             && error_emitter == &identifier
             && target == "external_secret"
     ));
 
-    let EmitSink::Postgres(PostgresSink::Table(PostgresTableSink { values, .. })) =
-        emitter.sink.as_mut()
+    let EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter { values, .. })) =
+        emitter.connector.as_mut()
     else {
         panic!("the test emitter uses Postgres VALUES");
     };
     values[0].expression = nervix_nspl::parse_expression("leak_sensitive(input.secret)")
         .assured("leak_sensitive(input.secret) is a valid expression");
-    validate_direct_values_sensitivity(&domain, &identifier, &models, &emitter, &input_schema)
+    validate_direct_value_mappings(&domain, &identifier, &models, &emitter, &input_schema)
         .assured("explicit leakage permits the direct VALUES mapping");
 }
 
@@ -440,13 +537,19 @@ fn direct_values_type_failure_keeps_the_vm_compile_cause() {
         expression: nervix_nspl::parse_expression("input.missing")
             .expect("a missing field is still a valid expression"),
     };
-    *emitter.sink = EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
+    *emitter.connector = EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
+        mode: nervix_models::PostgresTablePublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("database"),
         table: named("events"),
         values: vec![mapping],
         conflict_action: nervix_models::PostgresConflictAction::None,
     }));
-    let error = validate_direct_values_sensitivity(
+    let error = validate_direct_value_mappings(
         &domain,
         &identifier,
         &ModelIndex::new(),
@@ -472,7 +575,13 @@ fn http_request_type_failure_keeps_the_vm_compile_cause() {
     };
     let identifier = ModelName::from(&emitter.name);
     emitter.body = nervix_models::EmitterBody::WithoutBody;
-    *emitter.sink = EmitSink::Http(HttpSink::Request(HttpRequestSink {
+    *emitter.connector = EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
+        mode: nervix_models::HttpRequestPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("api"),
         method: nervix_nspl::parse_expression("input.value")
             .expect("a field reference is a valid expression"),
@@ -515,15 +624,16 @@ fn otel_mapping_contract_validates_signal_keys_before_runtime() {
     };
     let identifier = ModelName::from(&emitter.name);
     emitter.body = nervix_models::EmitterBody::Values;
-    emitter.publishing_mode = EmitterPublishingMode::RequestAck {
-        retry_policy: RetryPolicy {
-            backoff: "10ms".to_string(),
-            max_backoff: "1s".to_string(),
-        },
-    };
+
     let models = ModelIndex::new();
 
-    *emitter.sink = EmitSink::from(OtelLogsSink {
+    *emitter.connector = EmitterEntity::from(OtelLogsEmitter {
+        mode: nervix_models::OtelLogsPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("otel_main"),
         mappings: OtelMappings {
             values: vec![otel_mapping("time"), otel_mapping("body")],
@@ -535,7 +645,8 @@ fn otel_mapping_contract_validates_signal_keys_before_runtime() {
     validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
         .expect("complete OTEL LOGS mappings must be accepted");
 
-    let EmitSink::Otel(OtelSink::Logs(OtelLogsSink { mappings, .. })) = emitter.sink.as_mut()
+    let EmitterEntity::Otel(OtelEmitter::Logs(OtelLogsEmitter { mappings, .. })) =
+        emitter.connector.as_mut()
     else {
         unreachable!("test emitter must remain OTEL logs")
     };
@@ -559,7 +670,13 @@ fn otel_mapping_contract_validates_signal_keys_before_runtime() {
          'body'"
     );
 
-    *emitter.sink = EmitSink::from(OtelMetricsSink {
+    *emitter.connector = EmitterEntity::from(OtelMetricsEmitter {
+        mode: nervix_models::OtelMetricsPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("otel_main"),
         metric: OtelMetric {
             name: "requests".to_string(),
@@ -632,26 +749,28 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
     else {
         unreachable!("emitter helper must build an emitter model")
     };
-    valid.sink = Box::new(EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+    valid.connector = Box::new(EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
+        mode: nervix_models::SqsQueuePublishingMode::Single {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("sqs_main"),
-        queue: "events.fifo".to_string(),
+        queue: nervix_models::SqsQueueName::parse("events.fifo").expect("valid queue"),
         fifo_group: Some(SqsFifoGroup::Expression(
             nervix_nspl::parse_expression("input.value").expect("valid FIFO group expression"),
         )),
     })));
-    valid.publishing_mode = EmitterPublishingMode::SqsSingle {
-        retry_policy: RetryPolicy {
-            backoff: "10ms".to_string(),
-            max_backoff: "1s".to_string(),
-        },
-    };
+
     registry
         .apply_batch(&domain, vec![Model::Emitter(valid.clone())])
         .expect("non-sensitive STRING FIFO expressions should be accepted");
 
     let mut wrong_type = valid.clone();
     wrong_type.name = named("wrong_fifo_type");
-    if let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink { fifo_group, .. })) = wrong_type.sink.as_mut()
+    if let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter { fifo_group, .. })) =
+        wrong_type.connector.as_mut()
     {
         *fifo_group = Some(SqsFifoGroup::Expression(Expression::Literal(
             nervix_models::Literal::I64(42),
@@ -665,8 +784,8 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
     let mut branch_fifo = valid.clone();
     branch_fifo.name = named("branch_fifo");
     branch_fifo.from = ProcessorInputs::single(named("tenant_events"));
-    if let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink { fifo_group, .. })) =
-        branch_fifo.sink.as_mut()
+    if let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter { fifo_group, .. })) =
+        branch_fifo.connector.as_mut()
     {
         *fifo_group = Some(SqsFifoGroup::FromBranch);
     }
@@ -677,8 +796,8 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
     let mut mixed_inputs = valid.clone();
     mixed_inputs.name = named("mixed_fifo_inputs");
     mixed_inputs.from.from = vec![named("tenant_events"), named("events")];
-    if let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink { fifo_group, .. })) =
-        mixed_inputs.sink.as_mut()
+    if let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter { fifo_group, .. })) =
+        mixed_inputs.connector.as_mut()
     {
         *fifo_group = Some(SqsFifoGroup::FromBranch);
     }
@@ -691,6 +810,7 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
         .apply_mutation_batch(
             &domain,
             vec![RegistryMutation::AlterEmitter(AlterEmitter {
+                kind: EmitterEntityKind::Sqs(nervix_models::SqsEmitterEntity::Queue),
                 emitter: named("branch_fifo"),
                 operations: vec![AlterEmitterOperation::AddFrom {
                     relay: named("events"),
@@ -703,8 +823,8 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
 
     let mut from_branch = valid;
     from_branch.name = named("unbranched_fifo");
-    if let EmitSink::Sqs(SqsSink::Queue(SqsQueueSink { fifo_group, .. })) =
-        from_branch.sink.as_mut()
+    if let EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter { fifo_group, .. })) =
+        from_branch.connector.as_mut()
     {
         *fifo_group = Some(SqsFifoGroup::FromBranch);
     }
@@ -717,7 +837,7 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
 }
 
 #[test]
-fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
+fn emitter_header_invocations_are_rejected_for_unsupported_emitters() {
     let domain = DomainName::parse("default").expect("valid domain");
     let schema = CreateSchema {
         name: named("event_schema"),
@@ -734,15 +854,17 @@ fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
         body: nervix_models::EmitterBody::Codec {
             codec: named("events_codec"),
         },
-        sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-            client: named("zeromq_main"),
-        }))),
-        publishing_mode: EmitterPublishingMode::NoAck {
-            retry_policy: RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+        connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+            ZeroMqPushEmitter {
+                mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                client: named("zeromq_main"),
             },
-        },
+        ))),
         batch: None,
         flush_policy: FlushPolicy::Each {
             interval: "100ms".to_string(),
@@ -766,9 +888,15 @@ fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
         &schema,
     )
     .expect_err("ZeroMQ emitters must reject write_header");
-    assert!(format!("{error:#}").contains("ZEROMQ emitters do not support write_header"));
+    assert!(format!("{error:#}").contains("ZEROMQ PUSH emitters do not support write_header"));
 
-    *emitter.sink = EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink {
+    *emitter.connector = EmitterEntity::Syslog(SyslogEmitter::Collector(SyslogCollectorEmitter {
+        mode: nervix_models::SyslogCollectorPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("syslog_main"),
     }));
     let error = super::effective_emitter_filter_map_schema(
@@ -780,9 +908,15 @@ fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
         &schema,
     )
     .expect_err("Syslog emitters must reject write_header");
-    assert!(format!("{error:#}").contains("SYSLOG emitters do not support write_header"));
+    assert!(format!("{error:#}").contains("SYSLOG COLLECTOR emitters do not support write_header"));
 
-    *emitter.sink = EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
+    *emitter.connector = EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
+        mode: nervix_models::KafkaTopicPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("kafka_main"),
         topic: named("events_out"),
     }));
@@ -795,6 +929,210 @@ fn emitter_header_invocations_are_rejected_for_unsupported_sinks() {
         &schema,
     )
     .expect("Kafka emitters must accept write_header");
+}
+
+/// A emitter that keeps one value per header name refuses an `INVOKE` clause that writes one literal
+/// name twice, naming the header as the emitter records it and both calls, because the later write
+/// would replace the earlier one on every record. Names compare as the emitter's header model records
+/// them, an emitter that keeps every value accepts the repeat, and a name an expression computes is
+/// left to the emitter at run time.
+#[test]
+fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_per_name() {
+    let domain = DomainName::parse("default").expect("valid domain");
+    let schema = CreateSchema {
+        name: named("event_schema"),
+        fields: vec![SchemaField {
+            name: named("tenant"),
+            ty: ParseAsType::String,
+            optional: false,
+            sensitive: false,
+        }],
+    };
+    let mut emitter = CreateEmitter {
+        name: named("emit"),
+        from: ProcessorInputs::single(named("events")),
+        body: nervix_models::EmitterBody::Codec {
+            codec: named("events_codec"),
+        },
+        connector: Box::new(EmitterEntity::Pulsar(PulsarEmitter::Topic(
+            PulsarTopicEmitter {
+                mode: nervix_models::PulsarTopicPublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                client: named("pulsar_main"),
+                topic: named("events_out"),
+            },
+        ))),
+        batch: None,
+        flush_policy: FlushPolicy::Each {
+            interval: "100ms".to_string(),
+            max_batch_size: "1MiB".to_string(),
+        },
+        mode: AckMode::Attached,
+        error_policies: ErrorPolicies::handled_by_log(),
+        construction: nervix_nspl::parse_route_construction(
+            "INHERIT ALL INVOKE write_header('route', 'a'), write_header('tenant', input.tenant), \
+             write_header('route', 'b')",
+        )
+        .expect("valid construction"),
+        materialized_state: Vec::new(),
+    };
+    let validate = |emitter: &CreateEmitter| {
+        super::effective_emitter_filter_map_schema(
+            &domain,
+            &ModelName::from(&emitter.name),
+            &ModelIndex::new(),
+            emitter,
+            &schema,
+            &schema,
+        )
+    };
+    let refused = |emitter: &CreateEmitter, connector: EmitterEntityKind, header: &str| {
+        let error = validate(emitter).expect_err("a repeated literal header name is refused");
+        assert_eq!(
+            error.current_context(),
+            &RegistryError::ReplacedHeaderWrite {
+                domain: domain.clone(),
+                emitter: named("emit"),
+                connector,
+                header: header.to_string(),
+                earlier: 1,
+                later: 3,
+            }
+        );
+        format!("{error:#}")
+    };
+
+    let rendered = refused(
+        &emitter,
+        EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic),
+        "route",
+    );
+    assert!(
+        rendered.contains(
+            "emitter 'emit' in domain 'default' writes header 'route' at INVOKE #1 and again at \
+             #3, but PULSAR TOPIC emitters keep one value per header name, so the later write \
+             would replace the earlier one on every record"
+        ),
+        "{rendered}"
+    );
+
+    *emitter.connector = EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
+        mode: nervix_models::SqsQueuePublishingMode::Single {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+        client: named("sqs_main"),
+        queue: nervix_models::SqsQueueName::parse("events").expect("valid queue"),
+        fifo_group: None,
+    }));
+    refused(
+        &emitter,
+        EmitterEntityKind::Sqs(SqsEmitterEntity::Queue),
+        "route",
+    );
+
+    *emitter.connector = EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(RabbitMqQueueEmitter {
+        mode: nervix_models::RabbitMqQueuePublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+        client: named("rabbitmq_main"),
+        queue: named("events_out"),
+    }));
+    refused(
+        &emitter,
+        EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Queue),
+        "route",
+    );
+
+    // HTTP records field names in lowercase, so two spellings of one name are one name.
+    *emitter.connector = EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
+        mode: nervix_models::HttpRequestPublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+        client: named("api"),
+        method: Expression::Literal(nervix_models::Literal::String("POST".to_string())),
+        path: Expression::Literal(nervix_models::Literal::String("/events".to_string())),
+    }));
+    emitter.construction = nervix_nspl::parse_route_construction(
+        "INHERIT ALL INVOKE write_header('X-Route', 'a'), write_header('Tenant', input.tenant), \
+         write_header('x-route', 'b')",
+    )
+    .expect("valid construction");
+    refused(
+        &emitter,
+        EmitterEntityKind::Http(HttpEmitterEntity::Request),
+        "x-route",
+    );
+
+    // Names that differ in letter case are two names where an emitter keeps them exactly.
+    *emitter.connector = EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
+        mode: nervix_models::PulsarTopicPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+        client: named("pulsar_main"),
+        topic: named("events_out"),
+    }));
+    validate(&emitter).expect("X-Route and x-route are two Pulsar property names");
+
+    // A emitter that keeps every value of a name publishes both writes.
+    emitter.construction = nervix_nspl::parse_route_construction(
+        "INHERIT ALL INVOKE write_header('route', 'a'), write_header('route', 'b')",
+    )
+    .expect("valid construction");
+    *emitter.connector = EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
+        mode: nervix_models::KafkaTopicPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+        client: named("kafka_main"),
+        topic: named("events_out"),
+    }));
+    validate(&emitter).expect("a Kafka record keeps both headers");
+    *emitter.connector = EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
+        mode: nervix_models::NatsSubjectPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+        client: named("nats_main"),
+        subject: named("events_out"),
+    }));
+    validate(&emitter).expect("a NATS message keeps both values of the name");
+
+    // A name an expression computes is the emitter's to settle at run time.
+    emitter.construction = nervix_nspl::parse_route_construction(
+        "INHERIT ALL INVOKE write_header(input.tenant, 'a'), write_header(input.tenant, 'b')",
+    )
+    .expect("valid construction");
+    *emitter.connector = EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
+        mode: nervix_models::PulsarTopicPublishingMode::NoAck {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
+        client: named("pulsar_main"),
+        topic: named("events_out"),
+    }));
+    validate(&emitter).expect("computed names are not compared when the statement is validated");
 }
 
 #[test]
@@ -823,7 +1161,7 @@ fn mqtt_instances_greater_than_one_are_valid() {
                 output_routes: unbranched_transforming_outputs("notifications"),
                 input: nervix_models::IngestorInput::Transport(
                     nervix_models::TransportIngestorInput {
-                        source: IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
+                        source: IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
                             client: ClientName::parse("mqtt_main").expect("valid identifier"),
                             topic: nervix_models::MqttTopicFilter::parse("notifications")
                                 .expect("valid topic filter"),
@@ -899,7 +1237,7 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
                 output_routes: unbranched_transforming_outputs("notifications"),
                 input: nervix_models::IngestorInput::Transport(
                     nervix_models::TransportIngestorInput {
-                        source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+                        source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                             client: ClientName::parse("broker").expect("valid identifier"),
                             topic: nervix_models::KafkaTopicName::parse("notifications")
                                 .expect("valid topic"),
@@ -937,7 +1275,7 @@ fn client_ingestor(mode: nervix_models::ClientIngestMode) -> Model {
     Model::Ingestor(CreateIngestor {
         name: IngestorName::parse("app_in").expect("valid identifier"),
         output_routes: unbranched_transforming_outputs("notifications"),
-        input: nervix_models::IngestorInput::Client(nervix_models::ClientProducerSource {
+        input: nervix_models::IngestorInput::Client(nervix_models::ClientProducerIngestor {
             schema: SchemaName::parse("event_schema").expect("valid identifier"),
             mode,
         }),
@@ -1064,7 +1402,8 @@ fn an_emitter_publishing_contract_says_why_a_duration_names_no_duration() {
             },
         ];
         for (retry_policy, clause) in retry_policies.into_iter().zip(["BACKOFF", "MAX"]) {
-            emitter.publishing_mode = EmitterPublishingMode::NoAck { retry_policy };
+            *kafka_publication(&mut emitter) =
+                nervix_models::KafkaTopicPublishingMode::NoAck { retry_policy };
             let error = validate_emitter_publishing_contract(
                 &domain,
                 &ModelName::from(&emitter.name),
@@ -1078,7 +1417,7 @@ fn an_emitter_publishing_contract_says_why_a_duration_names_no_duration() {
             );
         }
 
-        emitter.publishing_mode = EmitterPublishingMode::BrokerAck {
+        *kafka_publication(&mut emitter) = nervix_models::KafkaTopicPublishingMode::Ack {
             window: AckWindow::Sequential,
             ack_timeout: value.to_string(),
             retry_policy: RetryPolicy {
@@ -1109,7 +1448,7 @@ fn an_ingestor_source_says_why_its_reject_retry_delay_names_no_duration() {
         let nervix_models::IngestorInput::Transport(input) = &mut ingestor.input else {
             unreachable!("the fixture builds a transport ingestor")
         };
-        input.source = IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+        input.source = IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
             endpoint: named("ingress"),
             mode: nervix_models::EndpointIngestMode::NoAck,
             quiesce: nervix_models::IngestQuiesceMode::Reject {
@@ -1267,18 +1606,20 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                     }),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
-                                client: ClientName::parse("broker").expect("valid identifier"),
-                                topic: nervix_models::KafkaTopicName::parse("notifications")
-                                    .expect("valid topic"),
-                                offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                    KafkaConsumerGroupName::parse("cg")
-                                        .expect("valid consumer group"),
-                                ),
-                                instances: nonzero!(1u64),
-                                mode: KafkaIngestMode::NoAck,
-                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                            })),
+                            source: IngestorEntity::Kafka(KafkaIngestor::Topic(
+                                KafkaTopicIngestor {
+                                    client: ClientName::parse("broker").expect("valid identifier"),
+                                    topic: nervix_models::KafkaTopicName::parse("notifications")
+                                        .expect("valid topic"),
+                                    offset_mode: KafkaOffsetMode::ConsumerGroup(
+                                        KafkaConsumerGroupName::parse("cg")
+                                            .expect("valid consumer group"),
+                                    ),
+                                    instances: nonzero!(1u64),
+                                    mode: KafkaIngestMode::NoAck,
+                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                                },
+                            )),
                             codec: CodecName::parse("event_codec").expect("valid identifier"),
                         },
                     ),
@@ -1350,7 +1691,7 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
                 }),
                 input: nervix_models::IngestorInput::Transport(
                     nervix_models::TransportIngestorInput {
-                        source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+                        source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                             client: ClientName::parse("broker").expect("valid identifier"),
                             topic: nervix_models::KafkaTopicName::parse("notifications")
                                 .expect("valid topic"),
@@ -1442,7 +1783,7 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
                 }),
                 input: nervix_models::IngestorInput::Transport(
                     nervix_models::TransportIngestorInput {
-                        source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+                        source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                             client: ClientName::parse("broker").expect("valid identifier"),
                             topic: nervix_models::KafkaTopicName::parse("notifications")
                                 .expect("valid topic"),
@@ -1527,16 +1868,16 @@ fn emitter_accepts_same_schema_inputs_from_different_named_branches() {
         .collect::<std::collections::BTreeSet<_>>();
     assert!(edges.contains(&("relay:source_a", "emitter:emit")));
     assert!(edges.contains(&("relay:source_b", "emitter:emit")));
-    let sink_edge = dataflow
+    let emitter_edge = dataflow
         .edges
         .iter()
-        .find(|edge| edge.target == "client_sink:broker_out")
-        .expect("emitter sink edge must exist");
+        .find(|edge| edge.target == "client_emitter:broker_out")
+        .expect("emitter emitter edge must exist");
     assert_eq!(
-        sink_edge
+        emitter_edge
             .metric
             .as_ref()
-            .expect("emitter sink edge must carry a metric")
+            .expect("emitter emitter edge must carry a metric")
             .relay,
         None,
         "multi-input sent metrics must aggregate without a misleading relay label"
@@ -1643,15 +1984,17 @@ fn sentry_emitter_rejects_http_client() {
     else {
         unreachable!("emitter helper must build an emitter model")
     };
-    sentry_emitter.sink = Box::new(EmitSink::Sentry(SentrySink::Event(SentryEventSink {
-        client: named("sentry_main"),
-    })));
-    sentry_emitter.publishing_mode = EmitterPublishingMode::RequestAck {
-        retry_policy: RetryPolicy {
-            backoff: "250ms".to_string(),
-            max_backoff: "30s".to_string(),
+    sentry_emitter.connector = Box::new(EmitterEntity::Sentry(SentryEmitter::Event(
+        SentryEventEmitter {
+            mode: nervix_models::SentryEventPublishingMode::Ack {
+                retry_policy: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
+            client: named("sentry_main"),
         },
-    };
+    )));
 
     let error = registry
         .apply_batch(
@@ -1675,8 +2018,9 @@ fn sentry_emitter_rejects_http_client() {
         .expect_err("Sentry emitter must reject an HTTP client");
 
     assert!(
-        format!("{error:#}")
-            .contains("SENTRY emitter requires a SENTRY client, found HTTP client 'sentry_main'"),
+        format!("{error:#}").contains(
+            "SENTRY EVENT emitter requires a SENTRY client, found HTTP client 'sentry_main'"
+        ),
         "unexpected error: {error:#}"
     );
 
@@ -1703,7 +2047,7 @@ fn a_syslog_ingestor_rejects_a_client_of_another_connector() {
                     output_routes: unbranched_transforming_outputs("notifications"),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::from(SyslogListenerSource {
+                            source: IngestorEntity::from(SyslogListenerIngestor {
                                 client: named("collector"),
                                 mode: nervix_models::SyslogIngestMode::NoAck,
                                 quiesce: nervix_models::IngestQuiesceMode::Drop,
@@ -1724,8 +2068,8 @@ fn a_syslog_ingestor_rejects_a_client_of_another_connector() {
         &RegistryError::IngestorClientConnectorMismatch {
             domain: domain.clone(),
             ingestor: named("syslog_ing"),
-            kind: nervix_models::IngestSourceKind::Syslog(
-                nervix_models::SyslogSourceEntity::Listener
+            kind: nervix_models::IngestorEntityKind::Syslog(
+                nervix_models::SyslogIngestorEntity::Listener
             ),
             client: named("collector"),
             required: nervix_models::ConnectorKind::Syslog,
@@ -1767,13 +2111,15 @@ fn an_endpoint_ingestor_rejects_an_endpoint_of_the_other_type() {
                     output_routes: unbranched_transforming_outputs("notifications"),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
-                                endpoint: named("stream"),
-                                mode: nervix_models::EndpointIngestMode::NoAck,
-                                quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                                    max_size: "1MiB".to_string(),
+                            source: IngestorEntity::Http(HttpIngestor::Endpoint(
+                                HttpEndpointIngestor {
+                                    endpoint: named("stream"),
+                                    mode: nervix_models::EndpointIngestMode::NoAck,
+                                    quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                        max_size: "1MiB".to_string(),
+                                    },
                                 },
-                            })),
+                            )),
                             codec: named("event_codec"),
                         },
                     ),
@@ -1790,7 +2136,9 @@ fn an_endpoint_ingestor_rejects_an_endpoint_of_the_other_type() {
         &RegistryError::IngestorEndpointTypeMismatch {
             domain: domain.clone(),
             ingestor: named("web_in"),
-            kind: nervix_models::IngestSourceKind::Http(nervix_models::HttpSourceEntity::Endpoint),
+            kind: nervix_models::IngestorEntityKind::Http(
+                nervix_models::HttpIngestorEntity::Endpoint
+            ),
             endpoint: named("stream"),
             required: nervix_models::EndpointType::Http,
             found: nervix_models::EndpointType::Websockets,
@@ -1817,8 +2165,13 @@ fn an_iceberg_emitter_rejects_a_catalog_client_of_another_connector() {
     };
     iceberg_emitter.body = nervix_models::EmitterBody::Values;
     iceberg_emitter.construction = nervix_models::RouteConstruction::default();
-    iceberg_emitter.sink = Box::new(EmitSink::from(IcebergTableSink {
-        backend: IcebergStorageBackend::S3,
+    iceberg_emitter.connector = Box::new(EmitterEntity::from(IcebergTableEmitter {
+        mode: nervix_models::IcebergTablePublishingMode::Ack {
+            retry_policy: nervix_models::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("lake"),
         table: named("events"),
         values: vec![nervix_models::IcebergValueMapping {
@@ -1833,12 +2186,6 @@ fn an_iceberg_emitter_rejects_a_catalog_client_of_another_connector() {
         commit_each: "100ms".to_string(),
         max_commit_size: "1MiB".to_string(),
     }));
-    iceberg_emitter.publishing_mode = EmitterPublishingMode::RequestAck {
-        retry_policy: RetryPolicy {
-            backoff: "250ms".to_string(),
-            max_backoff: "30s".to_string(),
-        },
-    };
 
     let error = registry
         .apply_batch(
@@ -1855,11 +2202,12 @@ fn an_iceberg_emitter_rejects_a_catalog_client_of_another_connector() {
                 Model::Emitter(iceberg_emitter),
             ],
         )
-        .expect_err("an ICEBERG emitter must reject a KAFKA catalog client");
+        .expect_err("an ICEBERG TABLE emitter must reject a KAFKA catalog client");
 
     assert_invalid_model_reason(
         &error,
-        "ICEBERG emitter requires an ICEBERG_REST catalog client, found KAFKA client 'catalog'",
+        "ICEBERG TABLE emitter requires an ICEBERG_REST catalog client, found KAFKA client \
+         'catalog'",
     );
 
     let _ = fs::remove_dir_all(path);
@@ -1891,4 +2239,153 @@ fn apply_batch_rejects_duplicate_vhost_hostnames() {
     );
 
     let _ = fs::remove_dir_all(path);
+}
+
+#[test]
+fn a_kafka_client_may_not_set_a_key_nervix_decides_in_any_spelling() {
+    let domain = DomainName::parse("default").expect("valid domain");
+    let identifier: ModelName = named("kafka_main");
+    let bootstrap = ClientConfigEntry {
+        key: "bootstrap.servers".to_string(),
+        value: "localhost:9092".to_string(),
+    };
+    for spelling in ["allow.auto.create.topics", "Allow.Auto.Create.Topics"] {
+        let client = CreateClientKafka {
+            name: named("kafka_main"),
+            mount: None,
+            config: vec![
+                bootstrap.clone(),
+                ClientConfigEntry {
+                    key: spelling.to_string(),
+                    value: "false".to_string(),
+                },
+            ],
+        };
+
+        let error = validate_kafka_client(&domain, &identifier, &client)
+            .expect_err("a Kafka client may not decide whether a consumer creates topics");
+
+        assert_eq!(
+            error.current_context(),
+            &RegistryError::NervixOwnedClientConfigKey {
+                domain: domain.clone(),
+                client: identifier.clone(),
+                key: NervixOwnedConfigKey::KafkaAllowAutoCreateTopics,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "client 'kafka_main' in domain 'default' cannot set CONFIG key \
+             'allow.auto.create.topics': Nervix never lets a Kafka consumer create the topic it \
+             reads"
+        );
+    }
+
+    let client = CreateClientKafka {
+        name: named("kafka_main"),
+        mount: None,
+        config: vec![
+            bootstrap,
+            ClientConfigEntry {
+                key: "auto.offset.reset".to_string(),
+                value: "earliest".to_string(),
+            },
+        ],
+    };
+    validate_kafka_client(&domain, &identifier, &client)
+        .expect("a Kafka client that leaves the keys Nervix decides alone is valid");
+}
+
+#[test]
+fn a_prometheus_client_is_created_only_with_a_config_its_source_can_use() {
+    let path = temp_db_path();
+    let registry = Registry::open(&path).expect("registry should open");
+    let domain = DomainName::parse("default").expect("valid domain");
+    let prometheus_client = |config: &[(&str, &str)]| {
+        Model::ClientPrometheus(CreateClientPrometheus {
+            name: named("prom_main"),
+            mount: None,
+            config: config
+                .iter()
+                .map(|(key, value)| ClientConfigEntry {
+                    key: (*key).to_string(),
+                    value: (*value).to_string(),
+                })
+                .collect(),
+        })
+    };
+
+    let error = registry
+        .apply_batch(
+            &domain,
+            vec![prometheus_client(&[("addr", "http://prometheus:9090")])],
+        )
+        .expect_err("a Prometheus client without timeout_ms must be refused");
+    assert_eq!(
+        error.current_context(),
+        &RegistryError::InvalidPrometheusClientConfig {
+            domain: domain.clone(),
+            client: named("prom_main"),
+            issue: PrometheusClientConfigError::MissingKey {
+                key: PrometheusClientKey::TimeoutMs,
+            },
+        }
+    );
+    assert_eq!(
+        error.downcast_ref::<PrometheusClientConfigError>(),
+        Some(&PrometheusClientConfigError::MissingKey {
+            key: PrometheusClientKey::TimeoutMs,
+        })
+    );
+    assert_eq!(
+        error.to_string(),
+        "PROMETHEUS client 'prom_main' in domain 'default' cannot use its CONFIG: 'timeout_ms' is \
+         required"
+    );
+
+    let error = registry
+        .apply_batch(
+            &domain,
+            vec![prometheus_client(&[
+                ("addr", "http://prometheus:9090/?stale=true"),
+                ("timeout_ms", "5000"),
+            ])],
+        )
+        .expect_err("a Prometheus address with a query string must be refused");
+    assert_eq!(
+        error.downcast_ref::<PrometheusApiRootError>(),
+        Some(&PrometheusApiRootError::Query)
+    );
+
+    registry
+        .apply_batch(
+            &domain,
+            vec![prometheus_client(&[
+                ("addr", "https://prometheus.example.com/monitoring"),
+                ("timeout_ms", "5000"),
+                ("tls_ca_file", "/etc/nervix/tls/ca.pem"),
+            ])],
+        )
+        .expect("a Prometheus client with an API root and a timeout must be created");
+
+    let _ = fs::remove_dir_all(path);
+}
+
+fn kafka_publication(
+    emitter: &mut nervix_models::CreateEmitter,
+) -> &mut nervix_models::KafkaTopicPublishingMode {
+    let EmitterEntity::Kafka(nervix_models::KafkaEmitter::Topic(destination)) =
+        emitter.connector.as_mut()
+    else {
+        panic!("Kafka fixture");
+    };
+    &mut destination.mode
+}
+fn sqs_publication(
+    emitter: &mut nervix_models::CreateEmitter,
+) -> &mut nervix_models::SqsQueuePublishingMode {
+    let EmitterEntity::Sqs(SqsEmitter::Queue(destination)) = emitter.connector.as_mut() else {
+        panic!("SQS fixture");
+    };
+    &mut destination.mode
 }

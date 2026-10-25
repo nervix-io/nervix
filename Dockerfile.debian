@@ -61,6 +61,7 @@ RUN apt-get update \
         ca-certificates \
         cmake \
         curl \
+        fio \
         g++ \
         g++-aarch64-linux-gnu \
         gcc \
@@ -76,6 +77,8 @@ RUN apt-get update \
         pkg-config \
         protobuf-compiler \
         python3 \
+        sysbench \
+        util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -L --proto '=https' --tlsv1.2 -sSf \
@@ -157,11 +160,14 @@ COPY tests/scenarios.rs ./tests/scenarios.rs
 COPY scripts/kache_remote.py ./scripts/kache_remote.py
 COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py
 COPY scripts/wasm_bindgen.py ./scripts/wasm_bindgen.py
+COPY scripts/runner_diagnostics.py scripts/record_runner_load.py ./scripts/
 
 ENV CARGO_PROFILE_RELEASE_LTO=fat
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 ENV RUSTC_WRAPPER=kache
-ENV KACHE_MAX_SIZE=1TiB
+# Keep kache's disk-share default: the builder cache scales with its own volume.
+# BuildKit does not inherit the workflow's environment; opt into the same 64 GiB recovery floor.
+ENV KACHE_AUTO_RECOVER_MIN_FREE_BYTES=68719476736
 ENV KACHE_CACHE_EXECUTABLES=true
 ENV KACHE_REMOTE_KEY_LISTING=false
 
@@ -216,6 +222,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && echo "building on ${BUILDPLATFORM} for ${TARGETPLATFORM} (${RUST_TARGET})" \
     && echo "using LIBCLANG_PATH=${LIBCLANG_PATH}" \
     && echo "using cargo-sonic target CPUs: ${SONIC_TARGET_CPUS}" \
+    && python3 -m scripts.runner_diagnostics --label "docker-${TARGETARCH}${NERVIX_DIAGNOSTIC_SELECTION:+-${NERVIX_DIAGNOSTIC_SELECTION}}" --output /tmp/runner-diagnostics --storage-path /app/target \
     && rustup target add "${RUST_TARGET}" wasm32-unknown-unknown \
     && wasm_bindgen_bin="$(python3 scripts/wasm_bindgen.py install)" \
     && cd crates/web-console \

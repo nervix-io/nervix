@@ -1,141 +1,70 @@
 //! Public WebSocket source lifecycle regressions.
 //!
 //! Layer: test harness.
-//! - **Owns.** A scenario-local peer, its bounded event channel, graceful-close observations and
-//!   measured reconnect delays.
+//! - **Owns.** A scenario-local peer, its bounded event channel, opening cancellations,
+//!   graceful-close observations and measured reconnect delays.
 //! - **Depends on.** The scenario world, execution primitives and the WebSocket protocol.
 //! - **Must not know.** Connector internals, host retry state or runtime ownership handles.
 
-use std::{io, net::Ipv4Addr, time::Duration};
+use std::{net::Ipv4Addr, time::Duration};
 
 use cucumber::{given, then, when};
-use futures_util::{SinkExt as _, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_primitives::{
-    net::TcpListener,
-    sync::{mpsc, oneshot},
-    task::AbortOnDropHandle,
-    time::{Instant, timeout},
-};
-use tokio_tungstenite::tungstenite::{
-    Message,
-    protocol::{CloseFrame, frame::coding::CloseCode},
-};
+use nervix_primitives::net::{TcpListener, TcpStream};
+use peer::PeerEvent;
+pub(super) use peer::WebsocketPeer;
 
 use super::{ScenarioWorld, draw_scenario_port, initialize_scenario_identity};
+use crate::common::websocket_close::reply_to_close;
 
-const PEER_WAIT: Duration = Duration::from_secs(60);
+mod bounds;
+mod peer;
 
-pub(super) struct WebsocketPeer {
-    events: mpsc::Receiver<PeerEvent>,
-    payload: Option<oneshot::Sender<()>>,
-    task: AbortOnDropHandle<io::Result<()>>,
+#[given("a WebSocket declaration peer verifies upgrade headers and sends text and binary frames")]
+async fn declaration_peer(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    let port = draw_scenario_port(world, "WebSocket declaration peer");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+        .await
+        .assured("the scenario's reserved WebSocket port is available");
+    world.placeholders.insert(
+        "websocket_peer".to_string(),
+        format!("ws://127.0.0.1:{port}"),
+    );
+    world.websocket_peer = Some(WebsocketPeer::declaration(listener));
 }
 
-enum PeerEvent {
-    Connected(Instant),
-    SentClose(Instant),
-    ReceivedClose,
-    TransportFailure(tokio_tungstenite::tungstenite::Error),
-    Ended,
-}
+#[given("the WebSocket declaration peer observes a cancelled opening handshake")]
+async fn declaration_opening_cancelled(world: &mut ScenarioWorld) {
+    use tokio::io::AsyncWriteExt as _;
 
-impl WebsocketPeer {
-    fn start(listener: TcpListener, mut closes: usize) -> Self {
-        let (events_tx, events) = mpsc::channel(64);
-        let (payload_tx, payload_rx) = oneshot::channel();
-        let mut payload_release = if closes > 0 { Some(payload_rx) } else { None };
-        let task = nervix_primitives::task::spawn(async move {
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                let (stream, _) = listener.accept().await?;
-                let mut socket = tokio_tungstenite::accept_async(stream)
-                    .await
-                    .map_err(io::Error::other)?;
-                if events_tx
-                    .send(PeerEvent::Connected(Instant::now()))
-                    .await
-                    .is_err()
-                {
-                    return Ok(());
-                }
-                if closes > 0 {
-                    closes -= 1;
-                    let at = Instant::now();
-                    socket
-                        .close(Some(CloseFrame {
-                            code: CloseCode::Again,
-                            reason: "fixture restart".into(),
-                        }))
-                        .await
-                        .map_err(io::Error::other)?;
-                    if events_tx.send(PeerEvent::SentClose(at)).await.is_err() {
-                        return Ok(());
-                    }
-                    // The client can acknowledge the Close or end TCP. Neither observation is
-                    // used as a timing gate: the next connection is timed from the Close sent.
-                    match timeout(PEER_WAIT, socket.next()).await {
-                        Ok(_) => {}
-                        Err(error) => return Err(io::Error::other(error)),
-                    }
-                    continue;
-                }
-                if let Some(release) = payload_release.take()
-                    && release.await.is_err()
-                {
-                    return Ok(());
-                }
-                socket
-                    .send(Message::Text("{\"user_id\":42}".into()))
-                    .await
-                    .map_err(io::Error::other)?;
-                loop {
-                    nervix_primitives::task::consume_budget().await;
-                    let event = match socket.next().await {
-                        Some(Ok(Message::Close(_))) => {
-                            match socket.flush().await {
-                                Ok(())
-                                | Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed) => {}
-                                Err(error) => return Err(io::Error::other(error)),
-                            }
-                            PeerEvent::ReceivedClose
-                        }
-                        Some(Ok(_)) => continue,
-                        Some(Err(error)) => PeerEvent::TransportFailure(error),
-                        None => PeerEvent::Ended,
-                    };
-                    if events_tx.send(event).await.is_err() {
-                        return Ok(());
-                    }
-                    break;
-                }
-            }
-        });
-        Self {
-            events,
-            payload: Some(payload_tx),
-            task: AbortOnDropHandle::new(task),
-        }
-    }
-
-    pub(super) async fn stop(self) {
-        self.task.abort();
-        match timeout(PEER_WAIT, self.task)
-            .await
-            .assured("the peer task observes cancellation")
-        {
-            Err(error) if error.is_cancelled() => {}
-            Ok(Ok(())) => {}
-            outcome => panic!("the WebSocket fixture failed: {outcome:?}"),
-        }
-    }
-
-    async fn next(&mut self) -> PeerEvent {
-        timeout(PEER_WAIT, self.events.recv())
-            .await
-            .assured("the WebSocket lifecycle peer makes progress within its fixture budget")
-            .assured("the WebSocket lifecycle peer task remains alive")
-    }
+    let endpoint = url::Url::parse(
+        world
+            .placeholders
+            .get("websocket_peer")
+            .assured("the declaration peer has a public endpoint"),
+    )
+    .assured("the declaration peer publishes a valid endpoint");
+    let port = endpoint
+        .port()
+        .assured("the declaration peer publishes its reserved port");
+    let mut opening = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .assured("the abandoned opening reaches the declaration peer");
+    opening
+        .write_all(b"GET /events HTTP/1.1\r\n")
+        .await
+        .assured("the peer receives an incomplete upgrade request");
+    opening
+        .shutdown()
+        .await
+        .assured("the opening client ends before completing its upgrade");
+    drop(opening);
+    let peer = world
+        .websocket_peer
+        .as_mut()
+        .assured("the scenario started its declaration peer");
+    assert!(matches!(peer.next().await, PeerEvent::OpeningCancelled));
 }
 
 #[when("the WebSocket lifecycle peer sends its payload")]
@@ -144,11 +73,7 @@ fn peer_sends_payload(world: &mut ScenarioWorld) {
         .websocket_peer
         .as_mut()
         .assured("the scenario started its peer")
-        .payload
-        .take()
-        .assured("the scenario releases its payload once")
-        .send(())
-        .assured("the peer waits for its payload to be released");
+        .send_payload();
 }
 
 #[given(expr = "a WebSocket lifecycle peer closes its first {int} connections")]
@@ -181,6 +106,9 @@ async fn peer_receives_close(world: &mut ScenarioWorld) {
             }
             PeerEvent::Ended => panic!("TCP ended without a Close frame"),
             PeerEvent::SentClose(_) => panic!("this peer never initiates a close"),
+            PeerEvent::OpeningCancelled => {
+                panic!("the lifecycle peer did not complete its upgrade")
+            }
         }
     }
 }

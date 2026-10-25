@@ -789,7 +789,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO corridor_stage_two INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE JUNCTION corridor_bypass FROM corridor_stage_one UNBRANCHED
         TO corridor_stage_two INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM corridor_stage_two UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM corridor_stage_two UNBRANCHED
         TO corridor_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
@@ -797,7 +797,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
-      RELOCATE FROM JUNCTION corridor_source TO JUNCTION corridor_sink
+      RELOCATE FROM JUNCTION corridor_source TO JUNCTION corridor_emitter
         ONTO NODE node-2 IGNORE PREFERENCES;
       """
     Then the last command output contains
@@ -807,7 +807,7 @@ Feature: Relocating runtime nodes onto a named cluster node
     And the last command output contains
       """
       coverage:
-      - junction corridor_source -> junction corridor_sink connected=yes covered=6
+      - junction corridor_source -> junction corridor_emitter connected=yes covered=6
       """
     And the last command output contains
       """
@@ -835,19 +835,19 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     When these NSPL commands fail with "relocation covers no runtime node: no FROM/TO pair is connected"
       """
-      RELOCATE FROM JUNCTION corridor_sink TO JUNCTION corridor_source
+      RELOCATE FROM JUNCTION corridor_emitter TO JUNCTION corridor_source
         ONTO NODE node-3 IGNORE PREFERENCES;
       """
     And these NSPL commands are executed on the leader node
       """
-      DESCRIBE RELOCATION FROM JUNCTION corridor_source, JUNCTION corridor_sink
-        TO JUNCTION corridor_sink
+      DESCRIBE RELOCATION FROM JUNCTION corridor_source, JUNCTION corridor_emitter
+        TO JUNCTION corridor_emitter
         ONTO NODE node-3 IGNORE PREFERENCES;
       """
     Then the last command output contains
       """
-      - junction corridor_source -> junction corridor_sink connected=yes covered=6
-      - junction corridor_sink -> junction corridor_sink connected=no covered=0
+      - junction corridor_source -> junction corridor_emitter connected=yes covered=6
+      - junction corridor_emitter -> junction corridor_emitter connected=no covered=0
       """
 
   Scenario: A hard colocation group moves whole under either preference strategy
@@ -1363,7 +1363,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE SCHEMA promote_tenant ( tenant STRING );
       CREATE BRANCH promote_by_tenant SCHEMA promote_tenant TTL 5m;
       CREATE RELAY promote_output SCHEMA promote_event BRANCHED BY promote_by_tenant;
-      CREATE CLIENT promote_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT promote_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -1472,6 +1472,52 @@ Feature: Relocating runtime nodes onto a named cluster node
       relocated 1 of 1 runtime node(s) onto node 'node-2'
       """
 
+  Scenario: A relocation whose commit a leader with a lapsed lease refuses completes under its execution reference
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then node "node-1" eventually observes a stable leader
+    When these Plexus statements are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    And these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA lease_event ( id I64 );
+      CREATE RELAY lease_input SCHEMA lease_event UNBRANCHED;
+      CREATE RELAY lease_output SCHEMA lease_event UNBRANCHED;
+      CREATE JUNCTION lease_route FROM lease_input UNBRANCHED
+        TO lease_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    And these Plexus statements are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    Given the leader refuses the next relocation commit in domain "{{domain}}" as a leader whose lease lapsed
+    When these Plexus statements are executed on the leader node
+      """
+      RELOCATE JUNCTION lease_route ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then the refusal of the relocation commit in domain "{{domain}}" was delivered
+    And the last command output contains
+      """
+      relocated 1 of 1 runtime node(s) onto node 'node-2'
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=junction name=lease_route owner=node-2
+      """
+
   @planned-handoff-timeout
   Scenario: A unit that cannot drain aborts whole and succeeds after the stall clears
     Given the production sticky scheduler is configured
@@ -1505,12 +1551,12 @@ Feature: Relocating runtime nodes onto a named cluster node
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION abort_route FROM abort_input UNBRANCHED
         TO abort_staged INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT abort_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT abort_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER stalled_emitter FROM abort_staged
-        TO ZEROMQ abort_sink MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+      CREATE ZEROMQ PUSH EMITTER stalled_emitter FROM abort_staged
+        TO abort_sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING abort_event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -1603,7 +1649,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY untouched_output SCHEMA wait_event UNBRANCHED;
       CREATE RELAY moved_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY moved_output SCHEMA wait_event UNBRANCHED;
-      CREATE CLIENT wait_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT wait_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -1750,7 +1796,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY reader_input SCHEMA state_event BRANCHED BY state_by_tenant;
       CREATE RELAY reader_output SCHEMA state_event BRANCHED BY state_by_tenant;
-      CREATE CLIENT state_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT state_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };

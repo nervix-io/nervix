@@ -28,29 +28,22 @@ Feature: Shared database client pools
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_shared
-        TYPE POSTGRES
+      CREATE POSTGRES CLIENT postgres_shared
         POOL SIZE MIN 1 MAX 2
         CONFIG {
           'addr' = '{{postgres_addr}}&application_name=nervix_shared_{{test_id}}'
         };
-      CREATE EMITTER writer_one FROM notifications
-        TO POSTGRES postgres_shared INSERT TO TABLE shared_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_one FROM notifications
+        TO postgres_shared TABLE 'shared_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER writer_two FROM notifications
-        TO POSTGRES postgres_shared INSERT TO TABLE shared_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_two FROM notifications
+        TO postgres_shared TABLE 'shared_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER writer_three FROM notifications
-        TO POSTGRES postgres_shared INSERT TO TABLE shared_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_three FROM notifications
+        TO postgres_shared TABLE 'shared_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -85,23 +78,18 @@ Feature: Shared database client pools
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_contended
-        TYPE POSTGRES
+      CREATE POSTGRES CLIENT postgres_contended
         POOL SIZE MIN 1 MAX 1
         CONFIG {
           'addr' = '{{postgres_addr}}&application_name=nervix_contended_{{test_id}}'
         };
-      CREATE EMITTER writer_one FROM notifications
-        TO POSTGRES postgres_contended INSERT TO TABLE contended_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_one FROM notifications
+        TO postgres_contended TABLE 'contended_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER writer_two FROM notifications
-        TO POSTGRES postgres_contended INSERT TO TABLE contended_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_two FROM notifications
+        TO postgres_contended TABLE 'contended_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -142,23 +130,18 @@ Feature: Shared database client pools
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_retired
-        TYPE POSTGRES
+      CREATE POSTGRES CLIENT postgres_retired
         POOL SIZE MIN 1 MAX 2
         CONFIG {
           'addr' = '{{postgres_addr}}&application_name=nervix_retired_{{test_id}}'
         };
-      CREATE EMITTER writer_one FROM notifications
-        TO POSTGRES postgres_retired INSERT TO TABLE retired_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_one FROM notifications
+        TO postgres_retired TABLE 'retired_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER writer_two FROM notifications
-        TO POSTGRES postgres_retired INSERT TO TABLE retired_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_two FROM notifications
+        TO postgres_retired TABLE 'retired_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """

@@ -2,10 +2,10 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The NATS client Model, the subject source and sink Models with their delivery
+//! - **Owns.** The NATS client Model, the subject source and emitter Models with their delivery
 //!   mode, the subject and queue group names a source subscribes with and the rules NATS holds
 //!   them to, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations and the names a body references.
+//! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The NATS driver, its configuration keys, or how a subject is subscribed or
 //!   published to.
 
@@ -20,17 +20,22 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeadlineKey, DeclaredBounds, DeclaredBuffer,
+        DeclaredWait, OmittedDeadline, WaitBound,
+    },
     configured_client::configured_client,
-    entity_union::{connector_sinks, connector_sources},
+    entity_union::{connector_emitters, connector_ingestors},
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities, LocatorDeclaration,
-    LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass,
-    SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind, SourceBody,
-    SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind, SubjectName,
+    EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
+    EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
+    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionDeclaration, OptionForm,
+    OptionPresence, OptionValue, PositionClass,
 };
 
 configured_client!(Nats: unpooled, config NervixWithAddressQuery, CreateClientNats => NatsConfigEntry);
@@ -92,7 +97,7 @@ fn nats_queue_group_rule(text: &str) -> Result<(), ExternalNameError> {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct NatsSubjectSource {
+pub struct NatsSubjectIngestor {
     pub client: ClientName,
     pub subject: NatsSubjectName,
     pub queue_group: NatsQueueGroupName,
@@ -101,12 +106,79 @@ pub struct NatsSubjectSource {
     pub quiesce: IngestQuiesceMode,
 }
 
-impl SourceEntity for NatsSubjectSource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
-        metadata: SourceMetadataScope::Headers,
+/// What the connector of a NATS SUBJECT ingestor holds and how long it waits.
+const NATS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "messages the subscription holds ahead of the host",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Driver("65,536 messages"),
+            overflow: BufferOverflow::DropUncounted,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "name resolution",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "connection",
+            bound: WaitBound::Driver("5 s per address"),
+        },
+        DeclaredWait {
+            wait: "the subscription's flush",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "a silent connection",
+            bound: WaitBound::Driver(
+                "a ping every 60 s; the connection ends after 2 go unanswered",
+            ),
+        },
+    ],
+    driver_limits: &[],
+};
+
+/// What the connector of a NATS SUBJECT emitter holds and how long it waits.
+const NATS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "commands queued for the connection",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Driver("2048 commands"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "name resolution",
+            bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "connection",
+            bound: WaitBound::Driver("5 s per address"),
+        },
+        DeclaredWait {
+            wait: "a core publish and its flush to the client's socket, not a server round trip",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
+        },
+        DeclaredWait {
+            wait: "a JetStream acknowledgement",
+            bound: WaitBound::Clause("ACK TIMEOUT"),
+        },
+    ],
+    driver_limits: &["Messages above the server's max_payload are rejected."],
+};
+
+impl IngestorDeclaration for NatsSubjectIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        // A NATS message's header map keeps every value of a name together under it, and its names
+        // in no order.
+        headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
+        metadata: IngestorMetadataScope::Headers,
         executes_on_every_cluster_node: false,
-        reference: SourceReferenceKind::Client(ConnectorKind::Nats),
+        reference: IngestorReferenceKind::Client(ConnectorKind::Nats),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK],
@@ -126,12 +198,13 @@ impl SourceEntity for NatsSubjectSource {
             },
             OptionDeclaration::INSTANCES.required(),
         ],
+        bounds: NATS_INGESTOR_BOUNDS,
     };
 }
 
-impl SourceBody for NatsSubjectSource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Client(&self.client)
+impl IngestorEntityBody for NatsSubjectIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Client(&self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -162,15 +235,15 @@ impl NatsIngestMode {
     }
 }
 
-connector_sources! {
+connector_ingestors! {
     connector Nats = "NATS";
     /// What a NATS source reads.
-    pub enum NatsSource;
+    pub enum NatsIngestor;
     /// The alterations of the ingestors that read a NATS entity.
-    pub enum NatsIngestorAlteration;
+    pub enum NatsSubjectIngestorAlteration;
     /// The entities a NATS source reads.
-    pub enum NatsSourceEntity {
-        Subject(NatsSubjectSource) = "SUBJECT", "NATS";
+    pub enum NatsIngestorEntity {
+        Subject(NatsSubjectIngestor) = "SUBJECT", "NATS";
     }
 }
 
@@ -178,37 +251,36 @@ connector_sources! {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct NatsSubjectSink {
+pub struct NatsSubjectEmitter {
+    pub mode: NatsSubjectPublishingMode,
     pub client: ClientName,
-    pub subject: SubjectName,
+    pub subject: NatsPublishSubjectName,
 }
 
-impl SinkEntity for NatsSubjectSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: true,
-        reference: SinkReferenceKind::Client(ConnectorKind::Nats),
+impl EmitterDeclaration for NatsSubjectEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        // A NATS message's header map keeps every value of a name together under it, and its names
+        // in no order.
+        headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
+        reference: EmitterReferenceKind::Client(ConnectorKind::Nats),
         body: EmitterBodyForm::Codec,
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[
-            EmitterPublishingModeKind::NoAck,
-            EmitterPublishingModeKind::NatsJetStream,
-        ],
+        publishing_modes: NatsSubjectPublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
             keywords: "SUBJECT",
-            name: LocatorName::Unquoted {
-                label: "subject_name",
-            },
+            name: LocatorName::External(NatsPublishSubjectName::DECLARATION),
         }),
         options: &[],
         envelope: &[],
         properties: &[],
+        bounds: NATS_EMITTER_BOUNDS,
     };
 }
 
-impl SinkBody for NatsSubjectSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for NatsSubjectEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::Nats,
         })
@@ -219,12 +291,35 @@ impl SinkBody for NatsSubjectSink {
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector Nats = "NATS";
-    /// What a NATS sink writes.
-    pub enum NatsSink;
-    /// The entities a NATS sink writes.
-    pub enum NatsSinkEntity {
-        Subject(NatsSubjectSink) = "SUBJECT";
+    /// What a NATS emitter writes.
+    pub enum NatsEmitter;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum NatsSubjectEmitterMode;
+    /// The entities a NATS emitter writes.
+    pub enum NatsEmitterEntity {
+        Subject(NatsSubjectEmitter, NatsSubjectPublishingMode) = "SUBJECT";
     }
+}
+
+super::publishing::emitter_modes! {
+    pub enum NatsSubjectPublishingMode {
+        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
+        JetStream { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => NatsJetStream,
+    }
+}
+
+super::external_name::external_names! {
+    /// A NATS publication subject, without subscription wildcards.
+    pub struct NatsPublishSubjectName => nats_publication_subject,
+        label "nats_publish_subject", example "orders.Created";
+}
+
+fn nats_publication_subject(text: &str) -> Result<(), ExternalNameError> {
+    nats_subject_rule(text)?;
+    if let Some(ch) = text.chars().find(|ch| matches!(ch, '*' | '>')) {
+        return Err(ExternalNameError::InvalidChar { ch });
+    }
+    Ok(())
 }

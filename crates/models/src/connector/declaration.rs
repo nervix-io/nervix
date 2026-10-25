@@ -24,7 +24,10 @@ use std::fmt::{Display, Formatter};
 
 use strum::EnumIter;
 
-use crate::{ConnectorKind, EmitterPublishingModeKind, IngestDeliveryKind, ParseAsType};
+use crate::{
+    ConnectorKind, DeadlineKey, DeclaredBounds, EmitterPublishingModeKind, IngestDeliveryKind,
+    ParseAsType,
+};
 
 /// What completion and documentation say about the external names of one kind, which a
 /// statement writes as string literals.
@@ -100,6 +103,8 @@ pub enum OptionValue {
     Client(ConnectorKind),
     /// A clause of several parts, as the option's example writes them.
     Clause,
+    /// A byte size: a whole number greater than zero followed by its unit, such as `16MiB`.
+    Size,
 }
 
 /// One choice an option offers.
@@ -108,7 +113,8 @@ pub struct OptionChoice {
     /// What names the choice: its keywords, the literal it writes, or the kind of value it takes
     /// in angle brackets. A requirement and a capability name the choice by it.
     pub name: &'static str,
-    /// The value a statement writes after the choice's own words, where it takes one.
+    /// The value a statement writes with the choice, where it takes one: after the choice's own
+    /// words, or before them where the example writes it there.
     pub value: Option<OptionValue>,
     /// The option written in full with this choice, its keywords included.
     pub example: &'static str,
@@ -284,6 +290,10 @@ pub enum RuntimeCapability {
     Batch,
     /// An emitter setting one envelope clause.
     Envelope(EnvelopeClauseKind),
+    /// A peer that stops answering during a wait the deadline key bounds surfacing as the
+    /// entity's transient status within that key's bound, or, for a listener, which serves many
+    /// peers, closing that peer's connection no sooner than the bound.
+    StalledPeer(DeadlineKey),
     /// An emitter setting one property.
     Property { name: &'static str },
 }
@@ -309,6 +319,16 @@ impl RuntimeCapability {
         }
         capabilities
     }
+
+    /// The capabilities an entity's bounds give it: a stalled-peer check for each deadline key its
+    /// waits name.
+    pub(crate) fn of_bounds(bounds: DeclaredBounds) -> Vec<Self> {
+        let mut capabilities = Vec::new();
+        for key in bounds.deadline_keys() {
+            capabilities.push(Self::StalledPeer(key));
+        }
+        capabilities
+    }
 }
 
 /// A capability is named the way its statement writes it, so an inventory of the scenarios that
@@ -324,6 +344,7 @@ impl Display for RuntimeCapability {
             Self::Metadata { field } => write!(f, "metadata.{field}"),
             Self::Batch => f.write_str("BATCH"),
             Self::Envelope(kind) => f.write_str(kind.keywords()),
+            Self::StalledPeer(key) => write!(f, "STALLED PEER {}", key.key()),
             Self::Property { name } => write!(f, "PROPERTIES {name}"),
         }
     }

@@ -29,7 +29,7 @@ use meticulous::ResultExt as _;
 use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use strum::{AsRefStr, EnumCount, EnumIter, FromRepr};
 
-use crate::{PoolClass, RequestSubquota, TransportError};
+use crate::{PoolClass, RelayGrantRefusal, RequestSubquota, TransportError};
 
 /// Why a physical connection never established, or why an established one ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, EnumCount, EnumIter, FromRepr)]
@@ -37,7 +37,7 @@ use crate::{PoolClass, RequestSubquota, TransportError};
 pub enum ConnectionFailureReason {
     /// The TCP connect, the TLS handshake, or the HTTP/2 preface did not complete in time.
     Setup,
-    /// The peer's identity, the wire contract fingerprint, or a certificate was rejected.
+    /// The peer's identity or a certificate was rejected.
     Handshake,
     /// This node or its peer had no capacity for another connection of this class.
     Capacity,
@@ -45,6 +45,9 @@ pub enum ConnectionFailureReason {
     Closed,
     /// Resolving the peer's advertised host failed, whichever lookup failure ended it.
     Resolution,
+    /// One of the two nodes cannot run beside the other: a prerequisite they must share differs,
+    /// or a timing is outside the bound two nodes may hold apart.
+    Prerequisite,
 }
 
 /// Why one HTTP/2 stream ended without delivering its result.
@@ -127,6 +130,7 @@ impl ConnectionFailureReason {
             Self::Capacity => 2,
             Self::Closed => 3,
             Self::Resolution => 4,
+            Self::Prerequisite => 5,
         }
     }
 
@@ -146,16 +150,23 @@ impl ConnectionFailureReason {
             TransportError::InvalidHandshake(_)
             | TransportError::InvalidServerName(_)
             | TransportError::InvalidOptions { .. }
+            | TransportError::BulkReceiveWindowUnbacked { .. }
             | TransportError::Encode(_)
             | TransportError::Decode(_)
             | TransportError::RemoteRejected { .. }
             | TransportError::PayloadTooLarge { .. }
             | TransportError::RelayGrant(_)
+            | TransportError::RelayGrantRefused(_)
             | TransportError::RelayCancelled
             | TransportError::RelayIndeterminate
             | TransportError::RelayRejected(_) => Self::Handshake,
-            TransportError::PoolExhausted | TransportError::IncomingQueueFull => Self::Capacity,
+            TransportError::PoolExhausted
+            | TransportError::IncomingQueueFull
+            | TransportError::BulkReceiveWindowRefused { .. } => Self::Capacity,
             TransportError::ShuttingDown => Self::Closed,
+            TransportError::RefusedByPeer { .. } | TransportError::IncompatiblePeer { .. } => {
+                Self::Prerequisite
+            }
         }
     }
 }
@@ -180,12 +191,21 @@ impl StreamResetReason {
             TransportError::PoolExhausted
             | TransportError::IncomingQueueFull
             | TransportError::PayloadTooLarge { .. }
+            | TransportError::BulkReceiveWindowRefused { .. }
             | TransportError::RelayGrant(_) => Self::Capacity,
+            TransportError::RelayGrantRefused(refusal) => {
+                if refusal.is_capacity() {
+                    Self::Capacity
+                } else {
+                    Self::Peer
+                }
+            }
             TransportError::ShuttingDown => Self::Shutdown,
             TransportError::Encode(_)
             | TransportError::Decode(_)
             | TransportError::Http(_)
             | TransportError::InvalidOptions { .. }
+            | TransportError::BulkReceiveWindowUnbacked { .. }
             | TransportError::InvalidServerName(_)
             | TransportError::InvalidHandshake(_) => Self::Malformed,
             TransportError::Io(_)
@@ -196,7 +216,9 @@ impl StreamResetReason {
             | TransportError::RemoteRejected { .. }
             | TransportError::RelayCancelled
             | TransportError::RelayIndeterminate
-            | TransportError::RelayRejected(_) => Self::Peer,
+            | TransportError::RelayRejected(_)
+            | TransportError::RefusedByPeer { .. }
+            | TransportError::IncompatiblePeer { .. } => Self::Peer,
         }
     }
 }
@@ -230,6 +252,7 @@ pub(crate) struct TransportObservations {
     relay_outcomes: [AtomicU64; RelayAdmissionOutcome::COUNT],
     relay_admission_wait_nanos: AtomicU64,
     relay_channel_watermarks_evicted: AtomicU64,
+    relay_grant_refusals: [[AtomicU64; RelayGrantRefusal::COUNT]; ConnectionDirection::COUNT],
     bulk_bytes: [[AtomicU64; TransferDirection::COUNT]; PoolClass::COUNT],
 }
 
@@ -295,6 +318,17 @@ impl TransportObservations {
             .fetch_add(1, Ordering::AcqRel);
     }
 
+    /// Count one relay grant refused: one this node refused a peer, `Inbound`, or one a peer
+    /// refused this node, `Outbound`.
+    pub(crate) fn relay_grant_refused(
+        &self,
+        direction: ConnectionDirection,
+        refusal: RelayGrantRefusal,
+    ) {
+        self.relay_grant_refusals[direction.index()][refusal.index()]
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
     pub(crate) fn bulk_transferred(
         &self,
         class: PoolClass,
@@ -333,6 +367,11 @@ impl TransportObservations {
             relay_channel_watermarks_evicted: self
                 .relay_channel_watermarks_evicted
                 .load(Ordering::Acquire),
+            relay_grant_refusals: std::array::from_fn(|direction| {
+                std::array::from_fn(|refusal| {
+                    self.relay_grant_refusals[direction][refusal].load(Ordering::Acquire)
+                })
+            }),
             bulk_bytes: std::array::from_fn(|class| {
                 std::array::from_fn(|direction| {
                     self.bulk_bytes[class][direction].load(Ordering::Acquire)
@@ -366,6 +405,9 @@ pub struct TransportCounters {
     /// Relay channel watermarks forgotten before their retention ended, because their peer's
     /// budget needed the position for another channel.
     pub relay_channel_watermarks_evicted: u64,
+    /// Relay grants refused, by direction and reason: `Inbound` counts the grants this node refused
+    /// its peers, and `Outbound` the refusals its peers answered this node's deliveries with.
+    pub relay_grant_refusals: [[u64; RelayGrantRefusal::COUNT]; ConnectionDirection::COUNT],
     pub bulk_bytes: [[u64; TransferDirection::COUNT]; PoolClass::COUNT],
 }
 

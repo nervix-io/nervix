@@ -38,13 +38,12 @@ Feature: Domain-paced emitter cadence
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE EMITTER kafka_cadence FROM notifications TO KAFKA kafka_main TOPIC emitter_cadence_out_{{test_id}} MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_codec
+      CREATE KAFKA TOPIC EMITTER kafka_cadence FROM notifications TO kafka_main TOPIC 'emitter_cadence_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 20s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -119,13 +118,12 @@ Feature: Domain-paced emitter cadence
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE EMITTER kafka_hold FROM notifications TO KAFKA kafka_main TOPIC emitter_hold_out_{{test_id}} MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE KAFKA TOPIC EMITTER kafka_hold FROM notifications TO kafka_main TOPIC 'emitter_hold_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -190,13 +188,12 @@ Feature: Domain-paced emitter cadence
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE EMITTER kafka_immediate FROM notifications TO KAFKA kafka_main TOPIC emitter_immediate_out_{{test_id}} MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE KAFKA TOPIC EMITTER kafka_immediate FROM notifications TO kafka_main TOPIC 'emitter_immediate_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -260,8 +257,7 @@ Feature: Domain-paced emitter cadence
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT s3_main
-        TYPE S3
+      CREATE S3 CLIENT s3_main
         CONFIG {
           'endpoint' = '{{rustfs_addr}}',
           'region' = 'us-east-1',
@@ -269,14 +265,12 @@ Feature: Domain-paced emitter cadence
           'secret_access_key' = 'rustfsadmin',
           'path_style_access' = true
         };
-      CREATE CLIENT iceberg_catalog
-        TYPE ICEBERG_REST
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
         CONFIG {
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-      CREATE EMITTER iceberg_cadence FROM notifications TO ICEBERG ON S3 s3_main TABLE cadence_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/cadence_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 40s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 40s MAX BATCH SIZE 1MiB
+      CREATE ICEBERG TABLE EMITTER iceberg_cadence FROM notifications TO s3_main TABLE 'cadence_notifications_{{test_id}}' LOCATION 's3://nervix-iceberg/tables/cadence_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 40s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 40s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 20.0;
@@ -321,8 +315,7 @@ Feature: Domain-paced emitter cadence
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -337,7 +330,7 @@ Feature: Domain-paced emitter cadence
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC ack_keepalive_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'ack_keepalive_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

@@ -14,12 +14,12 @@ owners of their respective rules:
 | Contract | Authoritative documentation |
 | --- | --- |
 | Source syntax, admission and source outcomes | [Ingestors](./ingestors.md#client-ingestors) |
-| Sink syntax, construction, batching and graph ACK boundary | [Emitters](./emitters.md#client-emitters) |
+| Emitter syntax, construction, batching and graph ACK boundary | [Emitters](./emitters.md#client-emitters) |
 | Public attachments, subscriptions and clock observation | [Sessions](./sessions.md) |
 | Rust handles and shared binding | [Rust Client Library](./client-library.md#producers) and the [Client Implementation Manual](./client-implementation-manual.md#using-the-shared-binding) |
 | FlatBuffers, transport, correlation, cancellation and restoration | [Client Session Protocol](./client-session-protocol.md#producers) and the [Client Implementation Manual](./client-implementation-manual.md#producers) |
 | Model validation, typed revision construction and installation | [Execution Plans](./execution-plans.md) |
-| Native source/sink composition and the common emitter host | [Connector Contract](./connector-contract.md#source-boundary) |
+| Native source/emitter composition and the common emitter host | [Connector Contract](./connector-contract.md#ingestor-boundary) |
 | Authenticated forwarding and cross-node failures | [Cluster Interconnect](./interconnect.md#client-producer-links) |
 | Failure classification and safe diagnostic content | [Errors And Diagnostics](./errors-and-diagnostics.md) |
 | Generation, execution snapshots, timestamp admission and deadlines | [Domain Clock](./domain-clock.md) |
@@ -32,21 +32,21 @@ owners of their respective rules:
 ## Ownership And Routing
 
 The ingestor or emitter name is the attachment target. An application open neither creates a graph
-node nor adds a graph edge. `CREATE CLIENT ... TYPE ...` describes an external connector connection;
+node nor adds a graph edge. `CREATE <CONNECTOR> CLIENT` describes an external connector connection;
 native endpoints instead name an internal schema directly and use the existing session listeners.
 Starting a domain needs no connected application. With no consumer, an emitter retains bounded
 pending work and applies graph backpressure.
 
 The language parses NSPL once into structured Models. The registry validates domain references,
 exact schemas, sensitivity, branch declarations, construction, policies and capabilities. Pure
-decisions lower those validated inputs into native source and sink plans in one execution revision.
+decisions lower those validated inputs into native ingestor and emitter plans in one execution revision.
 The data plane executes plans without reading Models or reparsing executable NSPL.
 
 | Layer | Responsibility on this path |
 | --- | --- |
 | Vocabulary | Schemas, domain generations, endpoint contracts, typed attachment/delivery identities, limits and outcomes |
 | Language | `CLIENT PRODUCER INGESTOR` and `TO CLIENT` grammar, semantic Models, canonical rendering and composed completion |
-| Decisions | Validate the candidate graph and produce typed source, route, sink and message-error plans |
+| Decisions | Validate the candidate graph and produce typed source, route, emitter and message-error plans |
 | Data plane | One ingestor endpoint/admission owner; concrete branch route tasks; relay ownership; emitter host and competing-consumer attempt owner |
 | Control plane | Commit configuration, install revisions, establish generations, coordinate scoped holds and ownership handoff |
 | Edges | Authenticate sessions, reserve attachment capacity, correlate requests, route control/data and forward to the scheduled owner |
@@ -103,6 +103,11 @@ writes proceed beside response reads. Both forwarding forms use two-second idle 
 ten-second peer-silence limit. The [Interconnect](./interconnect.md#client-consumer-streams) owns
 setup budgets, peer identity, quotas and link-ending semantics.
 
+HTTP and WebSocket endpoint ingestors also project these shared submission outcome labels. Their
+`MODE ACK MAX <n> ACK TIMEOUT <duration>` window and request transport are separate from native
+client producer credit and session recovery. See [endpoint ingestion](ingestors.md#http-endpoint-and-websockets-endpoint)
+for HTTP statuses, signaling frames, sender retry and intake-ending behavior.
+
 ## Configure A Native Graph
 
 This complete graph accepts application events, constructs a branch per tenant and exports the
@@ -145,9 +150,9 @@ CREATE CLIENT PRODUCER INGESTOR submit_events
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE ATTACHED EMITTER receive_events
+CREATE ATTACHED CLIENT CONSUMER EMITTER receive_events
   FROM application_events
-  TO CLIENT SCHEMA application_output
+  TO SCHEMA application_output
     MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s
       RETRY POLICY BACKOFF 100ms MAX 2s
   INHERIT event_id, tenant, value
@@ -200,11 +205,11 @@ sequenceDiagram
 
 ### Construction, State And Error Policies
 
-The source schema describes input before construction; the sink schema describes output after
+The source schema describes input before construction; the emitter schema describes output after
 construction. Transforming routes start empty, use permitted `INHERIT` and ordered `SET`, and
 initialize every required output. Optional fields finalize as typed nulls. Filters and route
 predicates retain their ordinary scopes. Client sources have no header or connector-metadata
-scope; client sinks have no codec, header invocation or direct `VALUES` mode.
+scope; client emitters have no codec, header invocation or direct `VALUES` mode.
 
 Sensitivity is part of the public schema contract. Exporting a sensitive value requires explicit
 `leak_sensitive(...)` or permitted inheritance with `LEAK SENSITIVE`, even if the declared output
@@ -225,10 +230,10 @@ CREATE SCHEMA tenant_limit (maximum I64);
 CREATE RELAY tenant_limits
   SCHEMA tenant_limit BRANCHED BY by_tenant
   WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-CREATE ATTACHED EMITTER receive_bounded_events
+CREATE ATTACHED CLIENT CONSUMER EMITTER receive_bounded_events
   FROM application_events
   USING MATERIALIZED STATE tenant_limits DEFAULT { maximum = 1000 }
-  TO CLIENT SCHEMA application_output
+  TO SCHEMA application_output
     MODE ACK SEQUENTIAL ACK TIMEOUT 30s
       RETRY POLICY BACKOFF 100ms MAX 2s
   INHERIT event_id, tenant, value
@@ -520,7 +525,7 @@ For an alteration that pauses an ingestor and gates a shared downstream relay, t
 
 1. Engages an ingestor-only admission hold across the live nodes and stops new admission.
 2. Force-flushes existing route work and drains admitted source ACK roots while relay gates stay
-   open. Partial batches from every concrete branch can reach their acknowledging sinks.
+   open. Partial batches from every concrete branch can reach their acknowledging emitters.
 3. Engages the full subgraph hold before releasing the intake hold. Both holds own suspension, so
    releasing intake cannot briefly reopen admission.
 4. Publishes the validated replacement only after its required drain and engagement succeed, then

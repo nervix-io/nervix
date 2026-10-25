@@ -5,7 +5,7 @@
 //!   binding before a task starts.
 //! - **Depends on.** Typed emitter plans, relay fan-in, resolved resource mounts, and runtime
 //!   services.
-//! - **Must not know.** Semantic emitter or client Models, connector-specific sink construction,
+//! - **Must not know.** Semantic emitter or client Models, connector-specific emitter construction,
 //!   or placement decisions.
 
 #![cfg_attr(
@@ -16,7 +16,7 @@
     nervix_lint,
     nervix::context(
         lifecycle,
-        reason = "sink supervision replaces and retires concrete sink task lifetimes"
+        reason = "emitter supervision replaces and retires concrete emitter task lifetimes"
     )
 )]
 
@@ -39,7 +39,7 @@ pub(super) enum EmitterReconfigureError {
 }
 
 /// What an emitter is retrying: the publish path itself, or the commit that publishes what its
-/// sink staged.
+/// emitter staged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EmitterRetryKind {
     Infrastructure,
@@ -96,7 +96,7 @@ impl RelayInteractionCommand for EmitterTaskCommand {
 pub(super) struct ScheduledEmitterTask {
     pub(super) commands: mpsc::Sender<EmitterTaskCommand>,
     /// The deadline of the stop this task is performing, which bounds its attempts and the finish
-    /// of its sink. A stop command publishes it, and so does a stopping domain execution before its
+    /// of its emitter. A stop command publishes it, and so does a stopping domain execution before its
     /// teardown ends the task.
     pub(super) stop_signal: watch::Sender<Option<Instant>>,
     pub(super) task: JoinHandle<()>,
@@ -155,7 +155,7 @@ pub(crate) enum EmitterStartError {
     OrderingGroup,
     #[error("the FROM WHERE of input relay '{relay}' did not compile")]
     SourceFilter { relay: RelayName },
-    #[error("the sink's client configuration is invalid")]
+    #[error("the emitter's client configuration is invalid")]
     ClientConfig,
     #[error("the input collection policy is invalid")]
     CollectPolicy,
@@ -194,7 +194,7 @@ impl ScheduledEmitterStopFailure {
 }
 
 impl ScheduledEmitterTask {
-    /// Gives the task the deadline by which it finishes its sink once terminal teardown ends it.
+    /// Gives the task the deadline by which it finishes its emitter once terminal teardown ends it.
     /// The stopping domain execution calls this before it signals the shutdown, so the task already
     /// holds the deadline when the shutdown ends its loop.
     pub(super) fn finish_by(&self, deadline: Instant) {
@@ -424,7 +424,7 @@ impl Runtime {
             domain: domain.clone(),
             emitter: emitter.name.clone(),
         };
-        let resolved = emitter.sink.clone().resolve_clients(|client| {
+        let resolved = emitter.connector.clone().resolve_clients(|client| {
             self.resolve_client_config(domain, client.config.mount.as_ref(), &client.config.entries)
                 .change_context_lazy(|| EmitterStartError::ResolveClient {
                     client: client.name.clone(),
@@ -447,7 +447,7 @@ pub(super) struct EmitterTaskRegistration {
 }
 
 impl EmitterTaskRegistration {
-    pub(super) fn new(context: &EmitterSinkContext) -> Self {
+    pub(super) fn new(context: &EmitterConnectorContext) -> Self {
         Self {
             runtime: context.runtime.clone(),
             key: DomainNodeRef::node_in(
@@ -485,8 +485,8 @@ mod tests {
     use std::time::Duration;
 
     use nervix_models::{
-        AckMode, CreateEmitter, CreateRelay, DomainSchedule, EmitSink, EmitterPublishingMode,
-        ErrorPolicies, ProcessorInputs, RelayBranching, RetryPolicy, ZeroMqPushSink, ZeroMqSink,
+        AckMode, CreateEmitter, CreateRelay, DomainSchedule, EmitterEntity, ErrorPolicies,
+        ProcessorInputs, RelayBranching, RetryPolicy, ZeroMqEmitter, ZeroMqPushEmitter,
     };
     use nervix_primitives::{
         sync::{atomic::AtomicBool, mpsc, oneshot, watch},
@@ -506,18 +506,20 @@ mod tests {
             body: nervix_models::EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-                client: named("sink"),
-            }))),
+            connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+                ZeroMqPushEmitter {
+                    mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                        retry_policy: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
+                    client: named("emitter"),
+                },
+            ))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: nervix_models::RouteConstruction::default(),
             materialized_state: Vec::new(),
@@ -542,7 +544,7 @@ mod tests {
                 })),
                 scheduled_model(nervix_models::Model::ClientZeroMq(
                     nervix_models::CreateClientZeroMq {
-                        name: named("sink"),
+                        name: named("emitter"),
                         mount: None,
                         config: Vec::new(),
                     },
