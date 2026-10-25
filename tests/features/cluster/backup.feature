@@ -776,6 +776,7 @@ Feature: Configuration backup into a public archive
       """
       ready: true
       """
+    And within "30s" node "{{leader}}" commands memory has room for 176 bytes
     And the relay subscription does not receive a payload within "2s"
     When Kafka message is published to topic "backup_wasm_in_{{test_id}}"
       """

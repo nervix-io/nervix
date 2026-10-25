@@ -23846,6 +23846,22 @@ async fn then_within_duration_node_observability_metric_with_labels_eventually_r
         .await;
 }
 
+#[then(expr = "within {string} node {string} commands memory has room for {int} bytes")]
+async fn then_node_commands_memory_has_room(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    bytes: u64,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let wait = parse_duration_text(&duration).assured("the scenario gives a valid wait duration");
+    world
+        .cluster()
+        .wait_for_commands_memory_headroom(&node_id, bytes, wait)
+        .await
+        .assured("the node has command memory for the source control call");
+}
+
 #[then(expr = "node {string} interconnection metrics use only bounded dimensions")]
 async fn then_node_interconnection_metrics_use_bounded_dimensions(
     world: &mut ScenarioWorld,

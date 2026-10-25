@@ -258,6 +258,7 @@ name = "nervix-server"
 checks = [
   "restore::tests::shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers",
   "restore::tests::shuttle_restore_reclamation_holds_the_revision_through_queued_installation",
+  "storage::chunk_shuttle_tests::shuttle_a_consumed_log_chunk_releases_its_charge_before_the_consumer_parks",
 ]
 name = "nervix-consensus"
 
