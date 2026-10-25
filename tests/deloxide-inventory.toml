@@ -2521,6 +2521,7 @@ workloads = [
 ]
 
 [[owner]]
+gap = "The listed workloads reach the peer protocol guard through grants, registrations, cancellations and outcome retirements. They retire an attempt through its channel's next grant or cancellation only when that request overtakes the return of the attempt's terminal outcome delivery, which they leave to scheduling, so that retirement is driven directly only by the interconnect's owner and real-transport tests and the Shuttle check shuttle_the_next_grant_racing_the_outcome_return_before_it_takes_the_next_position, outside the lane."
 path = "crates/interconnect/src/connection/relay_owner.rs"
 workloads = [
   "scenario.remote-ack-branches",

@@ -2306,10 +2306,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/connection/__fuzz__/connection__relay_owner__tests__bolero_relay_channel_turnover_never_admits_an_identity_twice/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "relay-channel-watermark-turnover"
-invariant = "Channel openings, resolutions, continuations, delayed repeats and idle sweeps through a peer owner whose three watermarks are fewer than its turnover never admit one delivery identity twice, always admit a channel opened after every forgotten one, and keep the retained watermarks within the budget."
+invariant = "Channel openings, decided outcomes whose deliveries return at once or later, continuations asked for in the receiver's grant order, delayed repeats, idle sweeps and late outcome returns through a peer owner whose three watermarks are fewer than its turnover never admit one delivery identity twice, always admit a channel opened after every forgotten one, give a channel whose latest outcome is decided its next position before that outcome's delivery returns, and keep the retained watermarks within the budget."
 manifest = "Cargo.toml"
 max_input_bytes = 96
 package = "nervix-interconnect"

@@ -1632,6 +1632,193 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
     .expect("redeemed grant expiry work should not delay transport shutdown");
 }
 
+/// A receiver retires an admitted relay once the delivery of its terminal outcome returns, while
+/// its sender continues the relay's channel as soon as that outcome reaches the sender's
+/// application. The channel's next relay can therefore ask for its grant before the receiver sees
+/// that delivery return, as a loaded receiver does. It takes the channel's next position, with the
+/// only queue item and terminal capacity the admitted relay held, and the channel keeps its order.
+#[nervix_primitives::test]
+async fn the_next_relay_on_a_channel_is_granted_before_the_outcome_of_the_one_before_returns() {
+    let options = TransportOptions {
+        incoming_queue_capacity: 1,
+        ..TransportOptions::default()
+    };
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_a,
+        node_b,
+        _incoming_a: mut incoming_a,
+        mut incoming_b,
+        ..
+    } = connected_transports_with_options(options).await;
+    transport_b
+        .register_outbound_target(
+            node_a.clone(),
+            NodeEndpoint::new("localhost", transport_a.local_addr().port()),
+        )
+        .expect("the outcome target should register");
+    let payload = |ack_id, sequence| RelayPayload {
+        delivery: RelayDelivery {
+            channel_incarnation: [24; 16],
+            sequence,
+        },
+        kind: RelayPayloadKind::Routed,
+        domain: DomainName::parse("test").expect("test domain should be valid"),
+        relay: RelayName::parse("relay").expect("test relay should be valid"),
+        key: None,
+        batch_ipc: Executor::default()
+            .try_charge_owned(MemoryClass::Relay, vec![1])
+            .expect("the test relay body should fit its budget"),
+        metadata: Vec::new(),
+        acks: Vec::new(),
+        admission: Some(registration(ack_id, &node_a)),
+    };
+
+    transport_a
+        .send(&node_b, Envelope::RelayPayload(payload(61, 0)))
+        .await
+        .expect("the first relay should reach the receiver");
+    let first = timeout(Duration::from_secs(2), incoming_b.recv())
+        .await
+        .expect("the first relay should enter the receiver application queue")
+        .expect("the receiver application queue should remain open");
+    assert_eq!(
+        first
+            .relay_admission
+            .as_ref()
+            .expect("a relay body carries its reserved admission")
+            .admit(),
+        RelayAdmissionDecision::Admitted
+    );
+
+    // The receiver delivers the first relay's terminal outcome, and that delivery is polled only
+    // until the sender's application holds the outcome, so the receiver has not seen it return.
+    let first_outcome = registration(61, &node_a).resolution(RemoteAckOutcome::Ack);
+    let mut first_delivery =
+        std::pin::pin!(transport_b.send(&node_a, Envelope::Ack(first_outcome.clone())));
+    let delivered = nervix_primitives::select! {
+        biased;
+        envelope = next_non_progress_envelope(&mut incoming_a) => envelope,
+        returned = first_delivery.as_mut() => panic!(
+            "an outcome's delivery returns only after the sender's application queue holds it: \
+             {returned:?}"
+        ),
+    };
+    assert_eq!(delivered, Envelope::Ack(first_outcome));
+
+    transport_a
+        .send(&node_b, Envelope::RelayPayload(payload(62, 1)))
+        .await
+        .expect("the channel's next relay should take its position");
+    let second = timeout(Duration::from_secs(2), incoming_b.recv())
+        .await
+        .expect("the next relay should enter the receiver application queue")
+        .expect("the receiver application queue should remain open");
+    let Envelope::RelayPayload(received) = &second.envelope else {
+        panic!("the receiver application takes the next relay's payload");
+    };
+    assert_eq!(
+        received.delivery,
+        RelayDelivery {
+            channel_incarnation: [24; 16],
+            sequence: 1,
+        }
+    );
+    assert_eq!(
+        second
+            .relay_admission
+            .as_ref()
+            .expect("a relay body carries its reserved admission")
+            .admit(),
+        RelayAdmissionDecision::Admitted
+    );
+
+    first_delivery
+        .await
+        .expect("the first relay's terminal outcome should be delivered");
+    let second_outcome = registration(62, &node_a).resolution(RemoteAckOutcome::Ack);
+    let (sent, delivered) = futures_util::future::join(
+        transport_b.send(&node_a, Envelope::Ack(second_outcome.clone())),
+        next_non_progress_envelope(&mut incoming_a),
+    )
+    .await;
+    sent.expect("the next relay's terminal outcome should be delivered");
+    assert_eq!(delivered, Envelope::Ack(second_outcome));
+    transport_a
+        .send(&node_b, Envelope::RelayPayload(payload(63, 2)))
+        .await
+        .expect("the channel continues after the next relay retires");
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+/// A relay grant for a position its channel has not reached is refused out of order, a permanent
+/// refusal, and leaves the channel's next position to be granted.
+#[nervix_primitives::test]
+async fn a_relay_grant_that_skips_its_channels_next_position_is_refused_out_of_order() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_a,
+        node_b,
+        mut incoming_b,
+        ..
+    } = connected_transports().await;
+    let payload = |ack_id, sequence| RelayPayload {
+        delivery: RelayDelivery {
+            channel_incarnation: [25; 16],
+            sequence,
+        },
+        kind: RelayPayloadKind::Routed,
+        domain: DomainName::parse("test").expect("test domain should be valid"),
+        relay: RelayName::parse("relay").expect("test relay should be valid"),
+        key: None,
+        batch_ipc: Executor::default()
+            .try_charge_owned(MemoryClass::Relay, vec![1])
+            .expect("the test relay body should fit its budget"),
+        metadata: Vec::new(),
+        acks: Vec::new(),
+        admission: Some(registration(ack_id, &node_a)),
+    };
+
+    transport_a
+        .send(&node_b, Envelope::RelayPayload(payload(71, 0)))
+        .await
+        .expect("the channel's first relay should reach the receiver");
+    let first = timeout(Duration::from_secs(2), incoming_b.recv())
+        .await
+        .expect("the first relay should enter the receiver application queue")
+        .expect("the receiver application queue should remain open");
+    assert_eq!(
+        first
+            .relay_admission
+            .as_ref()
+            .expect("a relay body carries its reserved admission")
+            .admit(),
+        RelayAdmissionDecision::Admitted
+    );
+
+    let error = transport_a
+        .send(&node_b, Envelope::RelayPayload(payload(72, 2)))
+        .await
+        .expect_err("a grant that skips its channel's next position is refused");
+    let TransportError::RelayGrantRefused(refusal) = error.current_context() else {
+        panic!("the receiver answers a skipped position with a typed refusal: {error:?}");
+    };
+    assert_eq!(*refusal, RelayGrantRefusal::OutOfOrder);
+    assert!(!refusal.is_capacity());
+
+    transport_a
+        .send(&node_b, Envelope::RelayPayload(payload(73, 1)))
+        .await
+        .expect("the channel's next position is still granted");
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
 /// A grant the receiver's relay budget has no room for is answered with a typed capacity refusal
 /// both ends count, and the same delivery is granted and received once the room returns.
 #[nervix_primitives::test]

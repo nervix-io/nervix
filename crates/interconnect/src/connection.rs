@@ -109,7 +109,7 @@ pub use duplex::{
     ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress,
     DuplexSender, EncodedMessage,
 };
-use relay_owner::{RelayOwnersPublication, RelayPeerOwner};
+use relay_owner::{RelayGrantPosition, RelayOwnersPublication, RelayPeerOwner};
 pub use stream::IncomingByteStream;
 pub(crate) use stream::OutboundByteStreamRequest;
 use stream_slots::{StreamSlotQuotas, configure_client_builder, configure_server_builder};
