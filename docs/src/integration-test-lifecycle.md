@@ -2310,7 +2310,7 @@ and their nested execution guards; a missing completion is reported as incomplet
 | Extra checks | 56m32s complete in 39656928785 | Retain 120 minutes, beyond 1.5 times that duration plus exports |
 | Ordinary tests | 22 minutes in 39649567371 | Retain 60 minutes |
 | Loom and qualification shards | 20m43s and at most 49m37s in 39649567371 | Retain 60 and 120 minutes |
-| Shuttle | Interrupted after 58m34s in 39649567371 | Retain 120 minutes; no completed duration is inferred from cancellation |
+| Shuttle | Run 40014913908 reached the 120-minute job guard after 389 check/mode executions completed; two exhaustive ACK explorations took about 64 minutes | 240-minute outer job guard covers preparation, full exploration, nondeterminism rechecks, replay and coverage export; model schedule counts and exploration bounds retain their declared values |
 | Turmoil and client conformance | 14m49s and 18m42s in 39649567371 | Retain 30 and 60 minutes, including the runners' own post-build bounds |
 | Book build | 24m30s in Docker Build 39534273321 | Retain 60 minutes |
 | Ordinary and diagnostic Chaos smoke | 15m15s and 15m22s in Docker Build 39531575177 | Retain the inventory-derived 45-minute step and 66-minute job; soak bounds remain derived from their declared timelines, teardown and CI reserves |
