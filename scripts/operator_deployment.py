@@ -18,15 +18,29 @@ import time
 import uuid
 
 
-def server_identity(images: list[dict], revision: str, architecture: str) -> str:
+def image_reference(metadata: dict, requested: str, pull_output: str) -> str:
+    # Cached tags can leave several registry digests on one image. The pull identifies which
+    # digest the requested reference selected; its position in RepoDigests has no meaning.
+    digests = re.findall(r"^Digest: (sha256:[0-9a-f]{64})$", pull_output, re.M)
+    if len(digests) != 1:
+        raise ValueError("image pull must report exactly one registry digest")
+    repository, marker, specified = requested.partition("@")
+    if marker and specified != digests[0]:
+        raise ValueError("pulled registry digest does not match the requested image digest")
+    if ":" in repository.rsplit("/", 1)[-1]:
+        repository = repository.rsplit(":", 1)[0]
+    reference = f"{repository}@{digests[0]}"
+    if reference not in metadata["RepoDigests"]:
+        raise ValueError("pulled registry digest is missing from the inspected image")
+    return reference
+
+
+def server_identity(images: list[dict], revision: str, architecture: str, requested: str, pull_output: str) -> str:
     image, = images
     actual = image["Config"]["Labels"].get("org.opencontainers.image.revision")
     if actual != revision or image["Architecture"] != architecture:
         raise ValueError(f"server image is {actual}/{image['Architecture']}, expected {revision}/{architecture}")
-    digests = image["RepoDigests"]
-    if len(digests) != 1 or not re.fullmatch(r".+@sha256:[0-9a-f]{64}", digests[0]):
-        raise ValueError("server image must resolve to exactly one registry digest")
-    return digests[0]
+    return image_reference(image, requested, pull_output)
 
 
 def with_server_image(documents: str, image: str) -> dict:
@@ -135,13 +149,13 @@ class DeploymentCheck:
         return status.returncode == 0 and cluster_ready(status.stdout)
 
     def deploy(self) -> None:
-        self.command("docker", "pull", self.image, timeout=600)
+        server_pull = self.command("docker", "pull", self.image, timeout=600)
         server = json.loads(self.command("docker", "image", "inspect", self.image).stdout)
-        image = server_identity(server, self.revision, self.architecture)
+        image = server_identity(server, self.revision, self.architecture, self.image, server_pull.stdout)
         operator = "ghcr.io/nervix-io/nervix-k8s-operator:latest"
-        self.command("docker", "pull", operator, timeout=600)
+        operator_pull = self.command("docker", "pull", operator, timeout=600)
         operator_metadata = json.loads(self.command("docker", "image", "inspect", operator).stdout)
-        operator_digest, = operator_metadata[0]["RepoDigests"]
+        operator_digest = image_reference(operator_metadata[0], operator, operator_pull.stdout)
         repository, digest = operator_digest.split("@")
         source_revision = self.command("git", "-C", str(self.source), "rev-parse", "HEAD").stdout.strip()
         self.save("images.json", {

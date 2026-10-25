@@ -17,22 +17,39 @@ from scripts.tests.test_release_evidence import workflow_job
 ROOT = Path(__file__).resolve().parents[2]
 REVISION = "0123456789abcdef0123456789abcdef01234567"
 IMAGE = "ghcr.io/nervix-io/nervix@sha256:" + "a" * 64
+SERVER_TAG = "ghcr.io/nervix-io/nervix:build"
+OPERATOR_IMAGE = "ghcr.io/nervix-io/nervix-k8s-operator@sha256:" + "b" * 64
 
 
 class ObservationTests(unittest.TestCase):
     def test_image_identity_requires_the_tested_revision_and_native_architecture(self) -> None:
         image = {
-            "Architecture": "amd64", "RepoDigests": [IMAGE],
+            "Architecture": "amd64", "RepoDigests": ["ghcr.io/nervix-io/nervix@sha256:" + "c" * 64, IMAGE],
             "Config": {"Labels": {"org.opencontainers.image.revision": REVISION}},
         }
-        self.assertEqual(deployment.server_identity([image], REVISION, "amd64"), IMAGE)
+        pull_output = "Digest: " + IMAGE.partition("@")[2] + "\n"
+        self.assertEqual(deployment.server_identity([image], REVISION, "amd64", SERVER_TAG, pull_output), IMAGE)
         for revision, architecture in (("b" * 40, "amd64"), (REVISION, "arm64")):
             with self.subTest(revision=revision, architecture=architecture):
                 with self.assertRaises(ValueError):
-                    deployment.server_identity([image], revision, architecture)
+                    deployment.server_identity([image], revision, architecture, SERVER_TAG, pull_output)
         image["RepoDigests"] = []
         with self.assertRaisesRegex(ValueError, "digest"):
-            deployment.server_identity([image], REVISION, "amd64")
+            deployment.server_identity([image], REVISION, "amd64", SERVER_TAG, pull_output)
+
+    def test_the_pull_selects_its_registry_digest_among_cached_references(self) -> None:
+        metadata = {"RepoDigests": ["ghcr.io/nervix-io/nervix@sha256:" + "c" * 64, IMAGE]}
+        pull_output = "Digest: " + IMAGE.partition("@")[2] + "\n"
+        for requested in (SERVER_TAG, IMAGE):
+            self.assertEqual(deployment.image_reference(metadata, requested, pull_output), IMAGE)
+        reference = "registry.example:5443/nervix@sha256:" + "a" * 64
+        self.assertEqual(deployment.image_reference({"RepoDigests": [reference]},
+                                                   "registry.example:5443/nervix:build", pull_output), reference)
+        for output in ("pull incomplete", pull_output * 2, "Digest: sha256:" + "b" * 64 + "\n"):
+            with self.subTest(output=output), self.assertRaisesRegex(ValueError, "digest"):
+                deployment.image_reference(metadata, SERVER_TAG, output)
+        with self.assertRaisesRegex(ValueError, "requested image digest"):
+            deployment.image_reference(metadata, "ghcr.io/nervix-io/nervix@sha256:" + "b" * 64, pull_output)
 
     def test_the_shipped_example_keeps_every_field_except_the_tested_image(self) -> None:
         manifest = {"kind": "List", "items": [
@@ -122,17 +139,24 @@ class WorkflowTests(unittest.TestCase):
 class ControllerTests(unittest.TestCase):
     def test_the_controller_deploys_the_resolved_image_and_observes_public_membership(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            check = deployment.DeploymentCheck("server:build", REVISION, "amd64", Path(directory), Path(directory) / "report")
+            check = deployment.DeploymentCheck(SERVER_TAG, REVISION, "amd64", Path(directory), Path(directory) / "report")
             calls = []
 
             def command(*args, **_kwargs):
                 calls.append(args)
                 output = ""
-                if args[:3] == ("docker", "image", "inspect"):
+                if args[:2] == ("docker", "pull"):
+                    selected = IMAGE if args[2] == SERVER_TAG else OPERATOR_IMAGE
+                    output = "Digest: " + selected.partition("@")[2] + "\n"
+                elif args[:3] == ("docker", "image", "inspect"):
                     metadata = {"RepoDigests": [IMAGE], "Architecture": "amd64",
                                 "Config": {"Labels": {"org.opencontainers.image.revision": REVISION}}}
-                    if args[3] != "server:build":
-                        metadata["RepoDigests"] = ["operator@sha256:" + "b" * 64]
+                    if args[3] != SERVER_TAG:
+                        metadata["RepoDigests"] = [
+                            "ghcr.io/nervix-io/nervix-k8s-operator@sha256:" + "c" * 64,
+                            "ghcr.io/nervix-io/nervix-k8s-operator@sha256:" + "d" * 64,
+                            OPERATOR_IMAGE,
+                        ]
                     output = json.dumps([metadata])
                 elif args[0] == "git":
                     output = "c" * 40
@@ -166,6 +190,7 @@ class ControllerTests(unittest.TestCase):
             identity = json.loads((check.output / "images.json").read_text())
             self.assertEqual(identity["operator_source_revision"], "c" * 40)
             self.assertEqual(identity["server"], IMAGE)
+            self.assertEqual(identity["operator"], OPERATOR_IMAGE)
             cli, = [args for args in calls if args[:2] == ("docker", "run")]
             self.assertIn(IMAGE, cli)
             self.assertIn("/usr/local/bin/nervix-cli", cli)
